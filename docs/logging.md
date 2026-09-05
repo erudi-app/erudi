@@ -8,7 +8,7 @@ from the click in the UI down to the backend work it triggered.
 | File | Written by | Contents |
 |------|------------|----------|
 | `backend.log` | Backend (FastAPI process) | Every HTTP request (method, path, status, duration), model generation lifecycle, knowledge-base ingestion phases, RAG searches |
-| `erudi-backend.log` | Electron main process | Backend stdout/stderr (launcher lifecycle events) and every UI interaction from the renderer — clicks, drops, pastes, committed input values — persisted via IPC |
+| `erudi-backend.log` | Electron main process | Backend stdout/stderr (launcher lifecycle events), every UI interaction from the renderer — clicks, drops, pastes, committed input values — and every uncaught renderer error, persisted via IPC |
 
 ### Where to find them
 
