@@ -1,7 +1,7 @@
 name: llama.cpp build
 
-# Compile the inference binary when, and only when, a pull request touches the
-# code that produces it.
+# Compile the inference binary -- and start it -- when, and only when, a pull
+# request touches the code that produces it.
 #
 # Why this exists: nothing else in CI compiles llama.cpp. `release.yml` is
 # triggered by a tag, and `app-build-smoke` deliberately skips the inference
@@ -107,15 +107,81 @@ jobs:
         if: runner.os == 'Linux'
         run: ${{ matrix.script }}
 
-      # The scripts check this themselves, but assert it here too: this job
-      # exists to prove the binary comes out, so say so explicitly rather than
-      # trusting the script's own exit code.
-      - name: Assert the binary exists and reports a version
+      # The scripts check the file lands, but a filename is a weak claim: it
+      # holds for a truncated file, a zero-byte file, one built for the wrong
+      # architecture, or one whose shared libraries cannot be resolved. So this
+      # job goes past existence, as far as each runner physically allows.
+      #
+      # A CPU binary is started. `--version` prints the build header from
+      # llama.cpp's common/arg.cpp and calls exit(0) inside the argument parser,
+      # which runs before llama_backend_init() and loads no model, so it costs
+      # nothing and needs no accelerator. Reaching that print means the file is
+      # a loadable executable for this architecture and every library it links
+      # resolved.
+      #
+      # A CUDA binary cannot be started here, and no choice of argument changes
+      # that. ggml compiles its VMM path in by default (GGML_CUDA_NO_VMM is OFF,
+      # so common.cuh defines GGML_USE_VMM), ggml-cuda therefore calls the CUDA
+      # driver API, and the link records a dependency on libcuda.so.1 on Linux
+      # and nvcuda.dll on Windows. Both ship with the NVIDIA driver, not with
+      # the toolkit, and these runners have no driver -- so the loader fails
+      # before main() ever reads argv. Linux takes the next-strongest claim
+      # instead: resolve every dependency without running the binary, and
+      # require all of them except that one driver library. Windows has no
+      # equivalent tool on this runner, so its CUDA binary is proven to exist
+      # and no more; the first thing that runs it is release QA on real hardware.
+      - name: Assert the binary exists and starts
         env:
           BINARY: ${{ matrix.binary }}
+          IS_CUDA: ${{ matrix.cuda }}
         run: |
           set -euo pipefail
-          test -f "$BINARY" || { echo "::error::$BINARY was not produced"; exit 1; }
+          if [ ! -f "$BINARY" ]; then
+            echo "::error::$BINARY was not produced by the compile step."
+            exit 1
+          fi
           ls -la "$BINARY"
-          # --version exits non-zero on some builds; the point is that it loads.
-          "$BINARY" --version 2>&1 | head -20 || true
+
+          if [ "$IS_CUDA" != "true" ]; then
+            # Not `if ! out=$("$BINARY" --version)`: inside that `if`, $? is the
+            # status of the negation, not of the binary. Capture it on the ||
+            # branch, which `set -e` also leaves alone.
+            status=0
+            out=$("$BINARY" --version 2>&1) || status=$?
+            echo "$out"
+            if [ "$status" -ne 0 ]; then
+              echo "::error::$BINARY does not start: --version exited $status. See the output above."
+              exit 1
+            fi
+            # Exit 0 alone is not enough. An empty file with the executable bit
+            # set is run by the shell as an empty script and exits 0, so require
+            # the build header llama.cpp actually prints ("version: <build>
+            # (<commit>)", on stderr) before calling this a working binary.
+            if ! echo "$out" | grep -q "^version: "; then
+              echo "::error::$BINARY exited 0 but printed no llama.cpp build header, so it is not a working llama-server."
+              exit 1
+            fi
+            echo "The compiled inference binary starts."
+            exit 0
+          fi
+
+          if [ "${RUNNER_OS}" = "Linux" ]; then
+            status=0
+            deps=$(ldd "$BINARY" 2>&1) || status=$?
+            echo "$deps"
+            if [ "$status" -ne 0 ]; then
+              echo "::error::ldd could not read $BINARY (exit $status): it is not a usable dynamic executable for this architecture."
+              exit 1
+            fi
+            # grep exits 1 when it matches nothing, which is the passing case.
+            missing=$(echo "$deps" | grep "not found" | grep -v "libcuda\.so\.1") || missing=""
+            if [ -n "$missing" ]; then
+              echo "::error::$BINARY has unresolved dependencies beyond the NVIDIA driver library:"
+              echo "$missing"
+              exit 1
+            fi
+            echo "Every dependency resolves except libcuda.so.1, which comes from the NVIDIA driver."
+            exit 0
+          fi
+
+          echo "CUDA build on ${RUNNER_OS}: it links nvcuda.dll from the NVIDIA driver, so a driverless runner cannot load it. Existence is all this leg proves."

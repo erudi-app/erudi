@@ -183,8 +183,19 @@ resolved by the backend itself in `src/launcher/runtime_paths.py`.
 
 Each leg: checks out with submodules, sets up Python 3.12 and Node 20, compiles
 `llama-server` from the submodule (Windows/Linux only), runs
-`pyinstaller backend/<spec> --distpath backend/dist`, then `npm ci`,
-`npm version <tag>` and `npm run release:<platform>`.
+`pyinstaller backend/<spec> --distpath backend/dist`, verifies the frozen tree,
+then `npm ci`, `npm version <tag>` and `npm run release:<platform>`.
+
+The verification step locates `llama-server` inside `backend/dist` and, on the CPU
+legs, starts it with `--version` — which prints llama.cpp's build header and exits
+0 from the argument parser, without loading a model. A filename alone would match
+a truncated file or a wrong-architecture build; starting it proves the copy
+PyInstaller made is a loadable executable whose libraries resolve. The CUDA legs
+are not started: ggml links the NVIDIA driver library (`libcuda.so.1` /
+`nvcuda.dll`, shipped with the driver rather than the toolkit), so the loader
+fails before `main()` on a driverless runner. They are checked for the bundled
+CUDA runtime DLLs instead, and real hardware in the QA pass is the first thing
+that runs them.
 
 The CUDA legs inject `-c.publish.channel=cuda` (plus a distinct artifact name)
 so the GPU builds feed a separate `cuda` auto-update channel while the CPU
