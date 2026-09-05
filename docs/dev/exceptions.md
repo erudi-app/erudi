@@ -30,7 +30,7 @@ class AppBaseException(Exception):
 
 | Parameter | Meaning |
 |---|---|
-| `message` | Human-readable description. Automatically extended with a support sentence pointing at the in-app bug report section and the support address, so callers must not append their own. |
+| `message` | Human-readable description, exactly as the raiser wrote it. Nothing is appended: telling the user where to report a bug belongs to the interface (Settings -> Diagnostics), not to a payload that is also logged, matched on and shown in four languages. |
 | `status_code` | HTTP status of the response. Defaults to 500. |
 | `erudi_code` | Machine-readable code surfaced as `error.type`. Defaults to `INTERNAL_SERVER_ERROR`. |
 | `trace` | Extra debugging context. **Logged only** — never returned to the client. |
@@ -140,7 +140,7 @@ app.add_exception_handler(Exception, unhandled_exception_handler)
   "success": false,
   "error": {
     "type": "MODEL_NOT_FOUND",
-    "message": "Model 'qwen2.5-7b' not found\nPlease report the bug…",
+    "message": "Model 'qwen2.5-7b' not found",
     "detail": { "…": "present only when the exception carries one" }
   }
 }

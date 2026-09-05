@@ -308,7 +308,7 @@ for bare `Exception`. Both return the same shape:
   "success": false,
   "error": {
     "type": "MODEL_NOT_FOUND",
-    "message": "Model 'qwen2.5-7b' not found\nPlease report the bug…",
+    "message": "Model 'qwen2.5-7b' not found",
     "detail": { "…": "present only when the exception carries one" }
   }
 }

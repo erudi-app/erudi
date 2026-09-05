@@ -123,7 +123,7 @@ class AppBaseException(Exception):
     this class to ensure consistent error reporting.
 
     Attributes:
-        message: Human-readable error description with support information.
+        message: Human-readable error description, verbatim as raised.
         status_code: HTTP status code for the error response.
         erudi_code: Custom error code for client-side diagnostics.
         detail: Optional structured payload surfaced verbatim in the JSON
@@ -151,16 +151,18 @@ class AppBaseException(Exception):
                 body (under error.detail) for the client to act on.
 
         Note:
-            The message is automatically extended with support contact information.
+            The message is exactly what the raiser wrote. Telling the user
+            where to report a bug is the interface's job -- the Diagnostics
+            panel in Settings owns that path -- so no support address or
+            reporting instruction is appended to a payload that domain code
+            also logs, matches on and shows in three other languages.
+
             All errors are logged via the structured logger. Severity follows
             the HTTP class: WARNING for client errors (< 500), ERROR for
             server errors (>= 500).
 
         """
-        self.message = (
-            message
-            + "\nPlease report the bug on the dedicted section. You are welcome to contact erudipro@gmail.com for further support."
-        )
+        self.message = message
         self.status_code = status_code
         self.erudi_code = erudi_code or "INTERNAL_SERVER_ERROR"
         self.detail = detail
