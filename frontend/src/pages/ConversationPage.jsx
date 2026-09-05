@@ -6,6 +6,7 @@ import ChatCollapsibleSection from "../components/ChatCollapsibleSection";
 import QuestionInput from "../components/QuestionInput";
 import HeaderBar from "../components/HeaderBar";
 import CustomizePromptModal from "../components/modals/CustomizePromptModal";
+import EngineFailureModal from "../components/modals/EngineFailureModal";
 import { Copy, Check, Star } from "lucide-react";
 import TypingIndicator from "../components/TypingIndicator";
 import MarkdownRenderer from "../components/MarkdownRenderer";
@@ -78,6 +79,11 @@ export default function ConversationPage() {
   const [, setCurrentTitle] = useState("");
 
   const [showPromptModal, setShowPromptModal] = useState(false);
+  // A turn that died because the graphics card could not run the model carries
+  // an engine code on its error event. The red bubble stays as it is; the code
+  // additionally opens the decision dialog, which is the only place the user
+  // can act on it.
+  const [engineFailure, setEngineFailure] = useState(null);
   const [customPrompt, setCustomPrompt] = useState("");
   const [initialHandled, setInitialHandled] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -426,6 +432,13 @@ export default function ConversationPage() {
                 // The backend error text is already sentinel-prefixed.
                 sawError = true;
                 answerText = evt.text || `${ERROR_SENTINEL} ${t("chat:errors.generationFailed")}`;
+                // The engine identified WHY it failed (a card the bundled CUDA
+                // build cannot drive, a driver too old, VRAM exhaustion): raise
+                // the dialog that offers the matching remedy. Untyped failures
+                // stay a red bubble and nothing else, as they always have.
+                if (evt.code) {
+                  setEngineFailure({ code: evt.code, raw: evt.raw });
+                }
                 break;
               case "done":
                 sawDone = true;
@@ -1013,6 +1026,9 @@ export default function ConversationPage() {
         }}
         title={t("chat:prompt.title")}
       />
+
+      {/* The turn failed for a reason the app can act on. */}
+      <EngineFailureModal notice={engineFailure} onDismiss={() => setEngineFailure(null)} />
     </div>
   );
 }

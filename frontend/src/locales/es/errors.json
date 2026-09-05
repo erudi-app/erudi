@@ -124,5 +124,51 @@
   "api": {
     "timeout": "Tiempo de espera de la solicitud agotado",
     "httpStatus": "Error de API: {{status}}"
+  },
+  "engine": {
+    "codes": {
+      "computeCapabilityTooLow": {
+        "title": "Esta tarjeta gráfica es demasiado antigua para el modo GPU",
+        "detail": "La tarjeta gráfica NVIDIA de este equipo es más antigua que la más antigua que admite el modo GPU de Erudi, así que no puede ejecutar modelos en la GPU.",
+        "detailWithCapability": "{{gpu}} es una tarjeta de capacidad de cálculo {{capability}}. El modo GPU de Erudi necesita 5.0 o posterior, y ninguna actualización del controlador lo cambia.",
+        "hint": "Ejecuta Erudi en el procesador. Es más lento, pero todas las funciones funcionan."
+      },
+      "driverTooOld": {
+        "title": "El controlador NVIDIA es demasiado antiguo para el modo GPU",
+        "detail": "El modo GPU de Erudi necesita un controlador NVIDIA más reciente que el instalado en este equipo.",
+        "detailWithVersions": "{{gpu}} necesita un controlador NVIDIA que ofrezca CUDA {{required}} o posterior. Este equipo indica CUDA {{driver}}.",
+        "hint": "Actualizar el controlador NVIDIA es la solución. Ejecutar en el procesador es la alternativa mientras tanto."
+      },
+      "outOfMemory": {
+        "title": "La tarjeta gráfica se quedó sin memoria",
+        "detail": "No hay suficiente memoria de vídeo libre para cargar este modelo en la GPU.",
+        "hint": "Elige un modelo más pequeño, cierra las demás aplicaciones que usan la tarjeta gráfica, o ejecuta Erudi en el procesador."
+      },
+      "cudaError": {
+        "title": "El modo GPU dejó de funcionar",
+        "detail": "El modo GPU de Erudi se detuvo antes de poder responder. Los detalles técnicos de abajo indican lo que informó el controlador gráfico.",
+        "hint": "Informa del problema para que pueda corregirse, y ejecuta Erudi en el procesador mientras tanto."
+      }
+    },
+    "modal": {
+      "yourGpu": "La tarjeta gráfica de este equipo",
+      "facts": "Lo que Erudi ha detectado",
+      "gpuLabel": "Tarjeta gráfica",
+      "computeCapabilityLabel": "Capacidad de cálculo",
+      "driverCudaLabel": "Versión de CUDA del controlador",
+      "requiredCudaLabel": "Versión de CUDA necesaria",
+      "traceLabel": "Detalles técnicos",
+      "copyTrace": "Copiar los detalles técnicos",
+      "reportIntro": "Contárnoslo ayuda. Incluye los detalles técnicos de arriba.",
+      "reportGithub": "Informar en GitHub",
+      "reportWebsite": "Sitio web de Erudi",
+      "switchToCpu": "Cambiar al modo procesador",
+      "switching": "Cambiando...",
+      "switchNote": "Erudi reinicia su motor para aplicar el cambio. Puedes volver atrás cuando quieras en Ajustes.",
+      "switchFailed": "El cambio no se aplicó. Inténtalo de nuevo o cámbialo en Ajustes.",
+      "notNow": "Ahora no",
+      "cpuInstaller": "Descargar la versión para procesador",
+      "cpuInstallerNote": "Reinstalar Erudi con la versión para procesador también evita la GPU por completo."
+    }
   }
 }

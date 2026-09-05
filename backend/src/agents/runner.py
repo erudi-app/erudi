@@ -124,6 +124,32 @@ def _construction_error_message(exc: Exception) -> str:
     return ERROR_MESSAGE
 
 
+def _construction_error_event(exc: Exception) -> dict:
+    """The answer event a failed agent construction becomes.
+
+    Beyond the curated text, an ``EngineException`` that identified its cause
+    carries it: ``code`` (one of
+    ``src.engines.cuda_compatibility.CUDA_FAILURE_CODES``) and ``raw`` (the
+    child's captured output). The conversation service copies both onto the
+    wire ``error`` event, which is where the renderer picks them up to offer
+    the matching remedy -- switching to the CPU engine, updating the driver --
+    instead of a generic apology.
+
+    Riding on the existing answer event rather than a new event type keeps the
+    persistence path untouched: the text still accumulates into the assistant
+    message exactly as before, and a client that ignores the extra keys sees
+    the stream it has always seen.
+    """
+    event: dict = {"t": "answer", "text": _construction_error_message(exc)}
+    code = getattr(exc, "engine_code", None)
+    if code:
+        event["code"] = code
+        raw = getattr(exc, "engine_trace", None)
+        if raw:
+            event["raw"] = raw
+    return event
+
+
 # ===================== Tool-call accumulation (#90) =====================
 # Tool-call args stream as JSON fragments across ``AIMessageChunk.tool_call_chunks``
 # (keyed by call index). Fragments are NEVER emitted raw: they accumulate here and
@@ -362,7 +388,7 @@ class AgentRunner:
                 logger.exception("Agent construction failed")
                 # #252: construction failed (model load / spawn). Emit the curated
                 # sentinel as an answer event; callers map it to an error turn.
-                yield {"t": "answer", "text": _construction_error_message(exc)}
+                yield _construction_error_event(exc)
                 return
 
             # Aggregate-only stream accounting (never log per token): start,

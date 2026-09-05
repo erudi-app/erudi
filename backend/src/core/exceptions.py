@@ -713,7 +713,10 @@ class EngineException(AppBaseException):
     """Exception raised for LLM engine failures during inference.
 
     Covers model loading errors, inference failures, out-of-memory conditions,
-    and other runtime issues during model execution.
+    and other runtime issues during model execution. A failure whose cause is
+    identifiable carries an ``engine_code`` the UI acts on (a GPU the bundled
+    CUDA build cannot drive, a driver too old to JIT its PTX, VRAM exhaustion);
+    everything else leaves it unset and keeps the generic error turn.
 
     Examples:
         from src.core.exceptions import EngineException
@@ -724,13 +727,30 @@ class EngineException(AppBaseException):
 
     """
 
-    def __init__(self, message: str, trace: Optional[str] = None):
+    def __init__(
+        self,
+        message: str,
+        trace: Optional[str] = None,
+        engine_code: Optional[str] = None,
+    ):
         """Initialize engine exception with error details.
 
         Args:
             message: Description of the engine failure.
             trace: Optional stack trace or additional context.
+            engine_code: Optional machine-readable cause, from
+                ``src.engines.cuda_compatibility.CUDA_FAILURE_CODES``. It is a
+                SECOND axis, orthogonal to ``erudi_code`` (which stays
+                ``LLM_ENGINE_FAILURE`` for the HTTP layer): it says WHY the
+                engine failed, so the renderer can offer the matching remedy
+                instead of a generic apology. ``None`` -- the default -- is the
+                generic path every other engine failure keeps taking.
 
+        Attributes:
+            engine_code: As above.
+            engine_trace: The ``trace`` argument, kept on the instance so the
+                caller can surface it verbatim (the child's captured output).
+                ``AppBaseException`` only logs it.
         """
         super().__init__(
             message=message,
@@ -738,6 +758,8 @@ class EngineException(AppBaseException):
             erudi_code="LLM_ENGINE_FAILURE",
             trace=trace,
         )
+        self.engine_code = engine_code
+        self.engine_trace = trace
 
 
 class HardwareException(AppBaseException):

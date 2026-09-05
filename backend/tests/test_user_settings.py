@@ -59,6 +59,18 @@ class TestUserSettingsEntity:
         test_db_session.refresh(settings)
         assert settings.auto_update_enabled is True
 
+    def test_default_inference_backend_is_auto(self, test_db_session):
+        settings = UserSettings()
+        test_db_session.add(settings)
+        test_db_session.commit()
+        test_db_session.refresh(settings)
+        assert settings.inference_backend == "auto"
+
+    def test_inference_backend_validator_rejects_unknown_value(self):
+        settings = UserSettings()
+        with pytest.raises(ValueError):
+            settings.inference_backend = "gpu"
+
     def test_auto_update_validator_rejects_non_boolean(self):
         settings = UserSettings()
         with pytest.raises(ValueError):
@@ -111,6 +123,13 @@ class TestUserSettingsRepository:
         test_db_session.commit()
         assert repo.get_or_create().auto_update_enabled is False
 
+    def test_set_inference_backend(self, test_db_session):
+        repo = User_Settings_Repository(test_db_session)
+        settings = repo.get_or_create()
+        repo.set_inference_backend(settings, "cpu")
+        test_db_session.commit()
+        assert repo.get_or_create().inference_backend == "cpu"
+
 
 # ============ Endpoints ============
 
@@ -123,6 +142,7 @@ class TestUserSettingsEndpoints:
             "web_search_enabled": False,
             "language": "en",
             "auto_update_enabled": True,
+            "inference_backend": "auto",
         }
 
     def test_put_updates_and_persists(self, client):
@@ -132,11 +152,13 @@ class TestUserSettingsEndpoints:
             "web_search_enabled": True,
             "language": "en",
             "auto_update_enabled": True,
+            "inference_backend": "auto",
         }
         assert client.get("/erudi/user_settings/").json() == {
             "web_search_enabled": True,
             "language": "en",
             "auto_update_enabled": True,
+            "inference_backend": "auto",
         }
 
     def test_put_back_to_false(self, client):
@@ -162,6 +184,7 @@ class TestUserSettingsEndpoints:
             "web_search_enabled": True,
             "language": "es",
             "auto_update_enabled": True,
+            "inference_backend": "auto",
         }
 
     def test_put_web_search_leaves_language_untouched(self, client):
@@ -171,6 +194,7 @@ class TestUserSettingsEndpoints:
             "web_search_enabled": True,
             "language": "zh",
             "auto_update_enabled": True,
+            "inference_backend": "auto",
         }
 
     @pytest.mark.parametrize("code", ["de", "EN", "fr-FR", "", 42])
@@ -200,12 +224,45 @@ class TestUserSettingsEndpoints:
             "web_search_enabled": True,
             "language": "fr",
             "auto_update_enabled": False,
+            "inference_backend": "auto",
         }
 
     def test_put_auto_update_back_on(self, client):
         client.put("/erudi/user_settings/", json={"auto_update_enabled": False})
         response = client.put("/erudi/user_settings/", json={"auto_update_enabled": True})
         assert response.json()["auto_update_enabled"] is True
+
+    def test_put_pins_the_cpu_backend_and_it_survives(self, client):
+        # The whole point of the setting: a user whose GPU the bundled CUDA
+        # build cannot drive opts into CPU once and the app honours it on every
+        # later boot.
+        response = client.put("/erudi/user_settings/", json={"inference_backend": "cpu"})
+        assert response.status_code == 200
+        assert response.json()["inference_backend"] == "cpu"
+        assert client.get("/erudi/user_settings/").json()["inference_backend"] == "cpu"
+
+    def test_put_inference_backend_back_to_auto(self, client):
+        # The choice is reversible -- a driver update makes the GPU usable again.
+        client.put("/erudi/user_settings/", json={"inference_backend": "cpu"})
+        response = client.put("/erudi/user_settings/", json={"inference_backend": "auto"})
+        assert response.json()["inference_backend"] == "auto"
+
+    def test_put_inference_backend_leaves_the_other_settings_untouched(self, client):
+        client.put("/erudi/user_settings/", json={"web_search_enabled": True})
+        client.put("/erudi/user_settings/", json={"language": "fr"})
+        response = client.put("/erudi/user_settings/", json={"inference_backend": "cpu"})
+        assert response.json() == {
+            "web_search_enabled": True,
+            "language": "fr",
+            "auto_update_enabled": True,
+            "inference_backend": "cpu",
+        }
+
+    @pytest.mark.parametrize("value", ["gpu", "cuda", "CPU", "", 1])
+    def test_put_rejects_an_unknown_inference_backend(self, client, value):
+        response = client.put("/erudi/user_settings/", json={"inference_backend": value})
+        assert response.status_code == 422
+        assert client.get("/erudi/user_settings/").json()["inference_backend"] == "auto"
 
     def test_put_rejects_a_value_that_is_not_a_boolean(self, client):
         # A payload the schema cannot read must leave the preference alone

@@ -124,5 +124,51 @@
   "api": {
     "timeout": "请求超时",
     "httpStatus": "API 错误：{{status}}"
+  },
+  "engine": {
+    "codes": {
+      "computeCapabilityTooLow": {
+        "title": "此显卡太旧，无法使用 GPU 模式",
+        "detail": "这台电脑的 NVIDIA 显卡比 Erudi GPU 模式支持的最早型号还要旧，因此无法在 GPU 上运行模型。",
+        "detailWithCapability": "{{gpu}} 的计算能力为 {{capability}}。Erudi 的 GPU 模式需要 5.0 或更高，任何驱动更新都无法改变这一点。",
+        "hint": "改用处理器运行 Erudi。速度较慢，但所有功能都可用。"
+      },
+      "driverTooOld": {
+        "title": "NVIDIA 驱动太旧，无法使用 GPU 模式",
+        "detail": "Erudi 的 GPU 模式需要比这台电脑上安装的更新的 NVIDIA 驱动。",
+        "detailWithVersions": "{{gpu}} 需要提供 CUDA {{required}} 或更高版本的 NVIDIA 驱动。这台电脑报告的是 CUDA {{driver}}。",
+        "hint": "更新 NVIDIA 驱动才是根本解决办法。在此之前，改用处理器运行是权宜之计。"
+      },
+      "outOfMemory": {
+        "title": "显卡显存不足",
+        "detail": "可用显存不足，无法在 GPU 上加载此模型。",
+        "hint": "换一个更小的模型、关闭其他占用显卡的程序，或改用处理器运行 Erudi。"
+      },
+      "cudaError": {
+        "title": "GPU 模式已停止工作",
+        "detail": "Erudi 的 GPU 模式在给出回答前就停止了。下方的技术细节说明了显卡驱动报告的内容。",
+        "hint": "请报告该问题以便修复，同时改用处理器运行 Erudi。"
+      }
+    },
+    "modal": {
+      "yourGpu": "这台电脑的显卡",
+      "facts": "Erudi 检测到的信息",
+      "gpuLabel": "显卡",
+      "computeCapabilityLabel": "计算能力",
+      "driverCudaLabel": "驱动的 CUDA 版本",
+      "requiredCudaLabel": "所需的 CUDA 版本",
+      "traceLabel": "技术细节",
+      "copyTrace": "复制技术细节",
+      "reportIntro": "告诉我们会很有帮助。请附上上面的技术细节。",
+      "reportGithub": "在 GitHub 上报告",
+      "reportWebsite": "Erudi 网站",
+      "switchToCpu": "切换到处理器模式",
+      "switching": "正在切换…",
+      "switchNote": "Erudi 会重启推理引擎以应用此设置。你随时可以在设置中改回来。",
+      "switchFailed": "切换未生效。请重试，或在设置中修改。",
+      "notNow": "暂不",
+      "cpuInstaller": "下载处理器版本",
+      "cpuInstallerNote": "重新安装 Erudi 的处理器版本同样可以完全避开 GPU。"
+    }
   }
 }

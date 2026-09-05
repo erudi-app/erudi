@@ -6,7 +6,11 @@ mutations flushed (not committed) so the caller controls the transaction.
 
 from sqlalchemy.orm import Session
 
-from src.entities.UserSettings import DEFAULT_LANGUAGE, UserSettings
+from src.entities.UserSettings import (
+    DEFAULT_INFERENCE_BACKEND,
+    DEFAULT_LANGUAGE,
+    UserSettings,
+)
 from src.core.logging import logger
 
 
@@ -28,7 +32,7 @@ class User_Settings_Repository:
         Returns:
             UserSettings: The singleton settings entity (defaults applied on
             first creation: web_search_enabled=False, language="en",
-            auto_update_enabled=True).
+            auto_update_enabled=True, inference_backend="auto").
         """
         settings = self.db.query(UserSettings).first()
         if not settings:
@@ -80,6 +84,26 @@ class User_Settings_Repository:
         self.db.refresh(settings)
         return settings
 
+    def set_inference_backend(self, settings: UserSettings, value: str) -> UserSettings:
+        """Update the inference-backend preference (flushed, not committed).
+
+        Args:
+            settings: The singleton entity to update.
+            value: One of INFERENCE_BACKENDS (validated by the entity).
+
+        Returns:
+            UserSettings: Updated entity.
+
+        Note:
+            The engine is a process-level singleton read once per boot, so a
+            change here only takes effect on the next backend start.
+        """
+        logger.info(f"Updating UserSettings.inference_backend = {value}")
+        settings.inference_backend = value
+        self.db.flush()
+        self.db.refresh(settings)
+        return settings
+
     def set_language(self, settings: UserSettings, value: str) -> UserSettings:
         """Update the interface language (flushed, not committed).
 
@@ -95,3 +119,26 @@ class User_Settings_Repository:
         self.db.flush()
         self.db.refresh(settings)
         return settings
+
+
+def read_inference_backend() -> str:
+    """The persisted inference-backend preference, on a session of its own.
+
+    Used by the FastAPI lifespan, which has no request-scoped session and runs
+    BEFORE the app serves anything. A missing row, an unreadable value or a
+    database that is not ready all mean "auto": the preference exists to let
+    someone REFUSE the GPU, so anything short of an explicit refusal must keep
+    the hardware detection intact.
+    """
+    from src.database.core import SessionLocal
+
+    db = SessionLocal()
+    try:
+        settings = db.query(UserSettings).first()
+        value = settings.inference_backend if settings else None
+        return value or DEFAULT_INFERENCE_BACKEND
+    except Exception as e:
+        logger.warning(f"Could not read the inference backend preference: {e}")
+        return DEFAULT_INFERENCE_BACKEND
+    finally:
+        db.close()

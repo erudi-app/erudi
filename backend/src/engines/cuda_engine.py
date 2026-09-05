@@ -76,6 +76,7 @@ from pathlib import Path
 
 from src.engines.base_llama_cpp_engine import BaseLlamaCppEngine
 from src.engines.cpu_brand import get_cpu_brand
+from src.engines.cuda_compatibility import format_cuda_version
 from src.core.logging import logger
 from src.core.exceptions import HardwareException
 
@@ -373,18 +374,30 @@ class CUDA_Engine(BaseLlamaCppEngine):
             return 0
 
     @classmethod
-    def _get_cuda_driver_version(cls) -> str:
-        """Return CUDA driver version string via NVML."""
+    def _get_cuda_driver_version_int(cls) -> int:
+        """Return the driver's CUDA version as NVML reports it (e.g. 12080).
+
+        This is the raw comparable form the startup pre-flight needs
+        (``src/engines/cuda_compatibility.py``): the driver must reach a given
+        CUDA version for the bundled binary to run, and "12.1" as a string
+        does not compare. 0 means the reading failed.
+        """
         try:
             import pynvml as nv
 
-            # nvmlSystemGetCudaDriverVersion returns an int like 12010 → "12.1"
-            v = nv.nvmlSystemGetCudaDriverVersion()
-            major, minor = divmod(v, 1000)
-            return f"{major}.{minor // 10}"
+            return int(nv.nvmlSystemGetCudaDriverVersion())
         except Exception as e:
             logger.warning(f"Could not get CUDA driver version: {e}")
+            return 0
+
+    @classmethod
+    def _get_cuda_driver_version(cls) -> str:
+        """Return CUDA driver version string via NVML."""
+        # nvmlSystemGetCudaDriverVersion returns an int like 12010 -> "12.1"
+        v = cls._get_cuda_driver_version_int()
+        if not v:
             return "Unknown"
+        return format_cuda_version(v)
 
     @classmethod
     def _init_nvml(cls) -> bool:
