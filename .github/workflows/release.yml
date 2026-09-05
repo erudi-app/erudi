@@ -8,9 +8,10 @@ name: Release
 # `latest` (the CPU build, universal — runs on every machine) and `cuda` (the GPU
 # build). Each installed app follows the channel baked into its app-update.yml at
 # build time, so a user picks cpu-vs-cuda once at download and then auto-updates
-# within that channel. The binary can't be CI-run-tested (no GPU runner), so a tag
-# publishes a DRAFT that is QA'd on real hardware before promotion (release.yml only
-# builds + publishes the draft — see docs/dev/release-qa-checklist.md).
+# within that channel. CI starts the bundled CPU inference binary but can run no
+# inference (no GPU runner, and the CUDA binaries need an NVIDIA driver to load at
+# all), so a tag publishes a DRAFT that is QA'd on real hardware before promotion
+# (release.yml only builds + publishes the draft — see docs/dev/release-qa-checklist.md).
 on:
   push:
     tags:
@@ -162,6 +163,11 @@ jobs:
       # is packaged, so a release can never publish an app that loads a model
       # and then fails at the first message. mac is MLX and has no such binary,
       # hence the llama_build guard.
+      #
+      # This checks the copy in backend/dist, which is a different claim from
+      # the one llamacpp-build.yml makes about the compiled artifact: the freeze
+      # copies the file into a new tree and can pick up the wrong flavour, drop
+      # a sibling runtime library, or lose the executable bit.
       - name: Verify the bundled inference binary
         if: matrix.llama_build != ''
         env:
@@ -195,6 +201,45 @@ jobs:
               fi
             done
             echo "CUDA runtime DLLs present next to the server."
+          fi
+          # Presence is not startability: `find` matches a filename, and would
+          # be just as happy with a truncated file, a wrong-architecture build,
+          # or one whose libraries do not resolve. So start the bundled copy.
+          # `--version` prints the build header from llama.cpp's common/arg.cpp
+          # and calls exit(0) inside the argument parser, before
+          # llama_backend_init() -- it loads no model and needs no accelerator.
+          #
+          # Only the CPU flavours can be started here. ggml compiles its VMM
+          # path in by default (GGML_CUDA_NO_VMM is OFF), so a CUDA build links
+          # the CUDA driver library -- libcuda.so.1 on Linux, nvcuda.dll on
+          # Windows -- which ships with the NVIDIA driver rather than the
+          # toolkit. These runners have no driver, so the loader would fail
+          # before main() reads argv, and no choice of argument avoids that.
+          # The CUDA binaries are first run by release QA on real hardware
+          # (docs/dev/release-qa-checklist.md).
+          if [ "$LLAMA_FLAVOUR" = "cpu" ]; then
+            # Same trap as the exe name above, from the other direction: not
+            # `if ! out=$("$found" --version)`, because inside that `if` $? is
+            # the status of the negation rather than of the binary. Capture it
+            # on the || branch, which `set -e` also leaves alone.
+            status=0
+            out=$("$found" --version 2>&1) || status=$?
+            echo "$out"
+            if [ "$status" -ne 0 ]; then
+              echo "::error::$found is bundled but does not start: --version exited $status. Packaging it would ship an app that loads a model and then fails at the first message."
+              exit 1
+            fi
+            # Exit 0 alone is not enough. An empty file with the executable bit
+            # set is run by the shell as an empty script and exits 0, so require
+            # the build header llama.cpp actually prints ("version: <build>
+            # (<commit>)", on stderr) before calling this a working binary.
+            if ! echo "$out" | grep -q "^version: "; then
+              echo "::error::$found exited 0 but printed no llama.cpp build header, so the bundled file is not a working llama-server."
+              exit 1
+            fi
+            echo "The bundled inference binary starts."
+          else
+            echo "CUDA build: not started here, because it links the NVIDIA driver library and this runner has no driver. Release QA on real hardware is what runs it."
           fi
 
       # ── Frontend: webpack build → electron-builder package + sign + publish ──
