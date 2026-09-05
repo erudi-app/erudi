@@ -174,11 +174,22 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I change the language, then the **native application menu** (Help → Clear All Data…) is rebuilt in that language.
 - [ ] When I use **Clear All Data**, then the app comes back in English on the next boot (settings deleted; the backend default wins).
 
+**Diagnostics panel**
+- [ ] When I open Settings with the backend running, then a **Diagnostics** card shows my Erudi version, operating system, inference engine, CPU/GPU, the model in memory (or none), the backend's Python version, the database state, and the absolute path of both log files.
+- [ ] When the backend has recorded warnings or errors, then they are listed newest last with their timestamp, level, source and request id, and an identical error repeated many times appears **once** with a repeat count.
+- [ ] When I read the recent-errors list, then no ordinary activity line appears — only `WARNING` and above — and the panel says logs can contain conversation content.
+- [ ] When I click **Copy**, then the button confirms *Copied* and the clipboard holds the whole summary plus the error list as plain text.
+- [ ] When I click **Report on GitHub**, then my browser opens this repository's bug report form with **Erudi version**, **Operating system**, **Hardware** and **Model** already filled in, and pasting into the **Logs** field gives the text I just copied. *(Dropdown prefill is unverified upstream: if **Operating system** arrives empty, that is the known gap — every other field must be filled.)*
+- [ ] When I click **Open log folder**, then the file manager opens with `backend.log` selected.
+- [ ] When I use the **contact page** link instead, then `erudi.app/contact` opens in my browser and the copy tells me to include everything above plus my screenshots.
+- [ ] When I kill the backend (or launch with the port blocked) and open the panel, then it says **the backend did not answer**, still shows my version, platform and app log path, still lists the app-side errors, and still offers Copy and Report — it does **not** go blank.
+- [ ] When I click the **bug icon** in the left rail, then I land on the Settings page scrolled to the Diagnostics panel — no web page opens.
+
 ## Shared chrome (sidebar, connection, downloads)
 
 - [ ] When I click the sidebar icons, then I navigate to Models (Brain), Chat (Chat), Arena (Swords), and Knowledge Base (Book); the active screen is highlighted (Chat stays highlighted while in a conversation).
-- [ ] When I click the bug/contact icon, then `erudi.app/contact` opens in my browser.
-- [ ] When a download is in progress, then the contact icon is hidden; navigation stays enabled and the progress widget follows me across screens.
+- [ ] When I click the bug icon, then the Settings page opens on the Diagnostics panel (the web contact page is offered from inside that panel, not by the icon).
+- [ ] When a download is in progress, then the bug icon is hidden; navigation stays enabled and the progress widget follows me across screens.
 - [ ] When I navigate to an unknown route, then I am redirected to the Models screen.
 
 ## Security — localhost hardening (#89)
@@ -209,6 +220,8 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I launch the app, then the window opens immediately on a loading screen and switches to the app once the backend is healthy, landing on Models.
 - [ ] When the **backend fails to start** (port in use, crash, timeout), then the app shows a clear error with the reason (code + log path) and Retry/Quit — **not** a perpetual spinner.
 - [ ] When the backend dies **after** load, then API calls fail per-screen with a visible error.
+- [ ] When the interface throws an **uncaught error** while rendering, then the window shows a recoverable screen (title, explanation, **Reload**, the report block) instead of going white, the error is in `erudi-backend.log` under `renderer:uncaught`, and it is listed in Settings → Diagnostics.
+- [ ] When something fails **repeatedly** — a poll that keeps rejecting, a render loop — then the log gains **one** entry with a repeat count, not thousands of identical lines, and the app stays responsive.
 
 **Offline & persistence**
 - [ ] When I launch **offline**, then my downloaded models still list and work, the catalog shows from the bundled snapshot, and Hugging Face search reports no connection.

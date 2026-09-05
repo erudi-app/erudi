@@ -50,11 +50,64 @@ cd backend && ERUDI_LOG_LEVEL=DEBUG python run.py
 ERUDI_LOG_LEVEL=DEBUG open -a Erudi
 ```
 
+## The Diagnostics panel
+
+Neither log file has to be found by hand. **Settings → Diagnostics** — also
+where the bug icon at the bottom of the left rail leads — shows the same
+information the two files carry, without leaving the app:
+
+- **Your setup**: the Erudi version, the operating system and architecture, the
+  selected inference engine, the CPU and GPU (with VRAM and compute capability
+  on NVIDIA), the model held in memory, the backend's Python version, the state
+  of the embedded database, and the absolute path of both log files on this
+  machine.
+- **Recent errors**: the last 200 records at `WARNING` or above, merged from
+  three sources and sorted on one timeline — `backend.log`,
+  `erudi-backend.log`, and the errors this window caught itself. Each row shows
+  its timestamp, level, source, request id when it has one, and how many times
+  an identical error repeated.
+- **Open log folder**, which reveals `backend.log` in the file manager.
+- **Report this**: the whole summary as plain text, a *Copy* button, a button
+  that opens this repository's bug report form with the version, operating
+  system, hardware and model already filled in, and the contact page for
+  reporters without a GitHub account.
+
+Two properties of that list are deliberate.
+
+**`INFO` records never appear.** They are the ones that carry conversation
+content (see [privacy](privacy.md)), and this panel exists to be pasted into a
+public issue. The filter is default-exclude in both readers: a record that does
+not state a level of `WARNING` or above is dropped, along with its continuation
+lines. In `erudi-backend.log` that also excludes the Electron main process's own
+unlevelled lines.
+
+**The panel sends nothing.** It reads `GET /erudi/diagnostics/` over loopback,
+reads the app log through the Electron preload bridge, and reads this window's
+error buffer from memory. What reaches a bug tracker is what you copy and paste
+there yourself. Warnings and errors can still quote a filename or a query, so
+read the text before you post it.
+
+The panel also survives the case it is most needed in. If the backend does not
+answer, the backend half of the report is reported as missing rather than
+silently left empty, and the app's own version, platform, log path and errors
+are still shown — which is usually enough to describe a backend that will not
+start.
+
+## Uncaught errors in the app window
+
+An exception that escapes a React render, an uncaught `window.onerror`, and an
+unhandled promise rejection are all recorded: they go to `erudi-backend.log`
+under the namespace `renderer:uncaught` and into the session buffer the
+Diagnostics panel reads. Identical errors are counted rather than logged again,
+so a render loop costs one line and a repeat count instead of filling the file.
+A render that throws replaces the screen with a recoverable page carrying the
+error, a *Reload* button and the same report block.
+
 ## Tracing a bug (QA recipe)
 
 1. Reproduce the problem and note the time (remember: logs are in UTC).
 2. Grab both files from the locations above.
-3. In `erudi-backend.log`, find the UI event at that time and copy its `fe-…` request id.
+3. In `erudi-backend.log`, find the UI event at that time and copy its `fe-…` request id. *Settings → Diagnostics → Open log folder* takes you there.
 4. Grep `backend.log` for that id — every backend line for that action carries it:
 
 ```bash
