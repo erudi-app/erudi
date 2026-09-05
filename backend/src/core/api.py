@@ -56,6 +56,7 @@ Note:
 """
 
 import asyncio
+import os
 import time
 
 from fastapi import FastAPI
@@ -79,6 +80,8 @@ from src.core.exceptions import (
 from src.core import config
 from src.core.request_context import new_request_id, request_id_var
 from src.engines.base_engine import BaseEngine
+from src.engines.cuda_compatibility import cuda_preflight_notice
+from src.launcher.events import emit_event
 from src.core.logging import logger
 from src.agents.checkpoint import open_checkpointer
 
@@ -320,6 +323,56 @@ def add_middleware(app: FastAPI) -> None:
     app.add_middleware(RequestLoggingMiddleware)
 
 
+def apply_inference_backend_preference() -> None:
+    """Replace the auto-detected CUDA engine with CPU when the user asked for it.
+
+    Runs AFTER the migrations and the catalog population, which is the earliest
+    point where ``user_settings.inference_backend`` is guaranteed to exist and
+    the latest point that still precedes any inference. ``ERUDI_FORCE_CPU``
+    wins over the setting: the developer override already returned
+    ``CPU_Engine`` from ``get_engine()`` and there is nothing left to swap.
+
+    A no-op unless the selected engine is ``CUDA_Engine`` and the preference is
+    ``"cpu"`` -- MLX has no CPU story on Apple Silicon and an already-CPU
+    machine has nothing to change.
+    """
+    from src.engines.cpu_engine import CPU_Engine
+    from src.engines.cuda_engine import CUDA_Engine
+    from src.domains.user_settings.repository import read_inference_backend
+
+    if os.environ.get("ERUDI_FORCE_CPU"):
+        return
+    if config.LLM_Engine is not CUDA_Engine:
+        return
+    if read_inference_backend() != "cpu":
+        return
+    logger.info("Inference backend preference is 'cpu': switching CUDA_Engine to CPU_Engine.")
+    config.LLM_Engine = CPU_Engine
+
+
+def emit_engine_notice(app: FastAPI) -> None:
+    """Emit an ``engine_notice`` when the selected GPU cannot run our CUDA build.
+
+    Two NVML reads (see ``src/engines/cuda_compatibility.py``); nothing is
+    applied, the frontend renders the verdict and the user decides. Silent on
+    every engine but CUDA, and silent when the machine checks out.
+
+    The event goes out on the same newline-JSON stdout channel as the launcher's
+    own lifecycle events, which ``frontend/src/main.js`` forwards wholesale to
+    the renderer. ``app.state.emit_event`` overrides the emitter (tests capture
+    it there, exactly as they capture phases through ``app.state.emit_phase``).
+    """
+    from src.engines.cuda_engine import CUDA_Engine
+
+    if config.LLM_Engine is not CUDA_Engine:
+        return
+    notice = cuda_preflight_notice()
+    if notice is None:
+        return
+    emit = getattr(app.state, "emit_event", None) or emit_event
+    emit(notice)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan with startup and shutdown hooks.
@@ -359,11 +412,13 @@ async def lifespan(app: FastAPI):
         3. Select engine via platform detection (BaseEngine.get_engine)
         4. Migrate the schema to head (Alembic, forward-only)
         5. Seed database with default models (startup_populate_database)
-        6. Open the LangGraph checkpointer (app.state.checkpointer)
-        7. Start cleanup background task (300s interval)
-        8. **[YIELD]** → Application handles requests
-        9. Shutdown (reverse order): cleanup task → engine → checkpointer
-           → embedded PostgreSQL cluster last
+        6. Apply the persisted inference-backend preference and run the CUDA
+           pre-flight (apply_inference_backend_preference / emit_engine_notice)
+        7. Open the LangGraph checkpointer (app.state.checkpointer)
+        8. Start cleanup background task (300s interval)
+        9. **[YIELD]** → Application handles requests
+        10. Shutdown (reverse order): cleanup task → engine → checkpointer
+            → embedded PostgreSQL cluster last
     """
     # Before yield comes the startup code
     logger.info("==== Starting up... ====")
@@ -395,6 +450,18 @@ async def lifespan(app: FastAPI):
     # (#131, #163). The catalog follows app releases; no live HF resync exists.
     _phase("loading_catalog")
     await startup_populate_database()
+    # The user may have REFUSED the auto-detected GPU. The preference lives
+    # in the database, so it can only be read here: `get_engine()` runs
+    # before `run_migrations`, where on the first boot after an upgrade the
+    # column does not exist yet, and it cannot be moved later because
+    # `startup_populate_database` reads `config.LLM_Engine.FORMAT_TAG`.
+    # Swapping CUDA for CPU afterwards is safe precisely because both share
+    # `FORMAT_TAG = "gguf"`: the catalog just reconciled under CUDA is
+    # identical under CPU.
+    await run_in_threadpool(apply_inference_backend_preference)
+    # Only now, on the engine that actually won, is the pre-flight meaningful:
+    # a user who already chose CPU must not be nagged about their GPU.
+    await run_in_threadpool(emit_engine_notice, app)
     # Hybrid KB vector store (rag.kb_chunks) — AFTER the schema migration: its
     # cross-schema FKs reference the business tables.
     app.state.kb_store = init_kb_store(app.state.postgres)

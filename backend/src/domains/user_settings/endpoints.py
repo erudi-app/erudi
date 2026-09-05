@@ -2,9 +2,11 @@
 
 GET/PUT ``/erudi/user_settings/``: the app-wide settings the frontend's
 Settings page binds to: the global web-search default (#310), the
-interface language (#385) and the automatic-update preference. Follows the
-startup domain's layering (endpoints -> repository) — the resource is a
-one-row singleton with no business logic beyond get-or-create.
+interface language (#385), the automatic-update preference and the inference
+backend. Follows the startup domain's layering (endpoints -> repository) — the resource is a
+one-row singleton with no business logic beyond get-or-create. The inference
+backend rides here too: it is read once per boot by the lifespan, so changing
+it needs a backend restart, which the frontend triggers explicitly.
 """
 
 from fastapi import Depends, APIRouter
@@ -35,7 +37,8 @@ async def get_user_settings(
 
     Example:
         GET /erudi/user_settings/
-        -> {"web_search_enabled": false, "language": "en", "auto_update_enabled": true}
+        -> {"web_search_enabled": false, "language": "en", "auto_update_enabled": true,
+            "inference_backend": "auto"}
     """
     try:
         settings = settings_repo.get_or_create()
@@ -57,7 +60,8 @@ async def update_user_settings(
 
     Example:
         PUT /erudi/user_settings/ {"language": "fr"}
-        -> {"web_search_enabled": false, "language": "fr", "auto_update_enabled": true}
+        -> {"web_search_enabled": false, "language": "fr", "auto_update_enabled": true,
+            "inference_backend": "auto"}
     """
     try:
         settings = settings_repo.get_or_create()
@@ -67,11 +71,14 @@ async def update_user_settings(
             settings_repo.set_language(settings, payload.language)
         if payload.auto_update_enabled is not None:
             settings_repo.set_auto_update_enabled(settings, payload.auto_update_enabled)
+        if payload.inference_backend is not None:
+            settings_repo.set_inference_backend(settings, payload.inference_backend)
         db.commit()
         logger.info(
             "User settings updated: "
             f"web_search_enabled={settings.web_search_enabled} language={settings.language} "
-            f"auto_update_enabled={settings.auto_update_enabled}"
+            f"auto_update_enabled={settings.auto_update_enabled} "
+            f"inference_backend={settings.inference_backend}"
         )
         return settings
     except Exception as e:

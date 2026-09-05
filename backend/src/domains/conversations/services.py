@@ -57,6 +57,25 @@ def _ndjson(event: dict) -> str:
     return json.dumps(event) + "\n"
 
 
+def build_stream_error_event(answer_event: dict) -> dict:
+    """The wire ``error`` event for a sentinel-carrying answer event.
+
+    The renderer has always read ``{"t": "error", "text": ...}`` and renders it
+    as the red turn. A failure the engine could identify adds two keys the
+    renderer acts on rather than displays: ``code`` (one of
+    ``src.engines.cuda_compatibility.CUDA_FAILURE_CODES``) and ``raw`` (the
+    child's captured output, shown in the copyable block of the decision
+    dialog). Both are omitted for every other failure, so the untyped path
+    keeps exactly the shape it had.
+    """
+    error_event: dict = {"t": "error", "text": answer_event["text"]}
+    for key in ("code", "raw"):
+        value = answer_event.get(key)
+        if value:
+            error_event[key] = value
+    return error_event
+
+
 def _cap_trace(events: list) -> Optional[list]:
     """Cap the serialized trace at ``TRACE_MAX_BYTES`` (drop-oldest).
 
@@ -382,7 +401,7 @@ class ConversationService:
                     # sentinel error string, if any) is accumulated for the DB.
                     assistant_response += text
                     if text.startswith(ERROR_SENTINEL):
-                        yield _ndjson({"t": "error", "text": text})
+                        yield _ndjson(build_stream_error_event(event))
                     else:
                         yield _ndjson(event)
                 else:

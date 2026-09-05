@@ -1,8 +1,9 @@
 """Pydantic validation schemas for the user-settings domain (issue #310).
 
 One singleton resource: the app-wide user settings. It carries the global
-web-search default (#310), the interface language (#385) and the
-automatic-update preference; new settings slot in as additional fields.
+web-search default (#310), the interface language (#385), the
+automatic-update preference and the inference backend; new settings slot in as
+additional fields.
 """
 
 from typing import Literal, Optional
@@ -10,6 +11,7 @@ from typing import Literal, Optional
 from pydantic import BaseModel, Field, model_validator
 
 LanguageCode = Literal["en", "fr", "es", "zh"]
+InferenceBackend = Literal["auto", "cpu"]
 
 
 class UserSettingsResponse(BaseModel):
@@ -22,6 +24,8 @@ class UserSettingsResponse(BaseModel):
         language: Interface language code the frontend renders in.
         auto_update_enabled: Whether the Electron main process may check for,
             download and install a new version on its own.
+        inference_backend: "auto" to let hardware detection pick the engine,
+            "cpu" to run models on the CPU build regardless of the GPU.
     """
 
     web_search_enabled: bool = Field(
@@ -35,6 +39,10 @@ class UserSettingsResponse(BaseModel):
     auto_update_enabled: bool = Field(
         ...,
         description="Whether the app may check for and install updates on its own",
+    )
+    inference_backend: InferenceBackend = Field(
+        ...,
+        description="Inference backend preference (auto: detect hardware, cpu: force the CPU build)",
     )
 
     class Config:
@@ -60,6 +68,10 @@ class UserSettingsUpdate(BaseModel):
         None,
         description="Allow or refuse automatic update checks, downloads and installs",
     )
+    inference_backend: Optional[InferenceBackend] = Field(
+        None,
+        description="Inference backend preference (auto or cpu); applies on the next app start",
+    )
 
     @model_validator(mode="after")
     def require_at_least_one_field(self):
@@ -67,6 +79,7 @@ class UserSettingsUpdate(BaseModel):
             self.web_search_enabled is None
             and self.language is None
             and self.auto_update_enabled is None
+            and self.inference_backend is None
         ):
             raise ValueError("At least one setting must be provided")
         return self
