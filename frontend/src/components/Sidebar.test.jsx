@@ -95,11 +95,14 @@ describe("Sidebar", () => {
     expect(document.querySelector(".lucide-brain")).not.toBeNull();
   });
 
-  it("opens the contact page from the bug report button", () => {
+  it("sends the bug report button to the Diagnostics panel, not straight to a web page", () => {
     const open = vi.spyOn(window, "open").mockImplementation(() => {});
     renderAt("/erudi/models");
-    fireEvent.click(screen.getByLabelText("Report a bug"));
-    expect(open).toHaveBeenCalledWith("https://erudi.app/contact", "_blank");
+    const button = screen.getByLabelText("Report a bug");
+    // In-app first: the panel shows the user what to send before any link out.
+    expect(button.getAttribute("href")).toBe("/erudi/settings#diagnostics");
+    fireEvent.click(button);
+    expect(open).not.toHaveBeenCalled();
   });
 
   it("hides the bug report button during a download", () => {

@@ -58,6 +58,18 @@ contextBridge.exposeInMainWorld("backendAPI", {
   getLogPath: () => ipcRenderer.invoke("app:getLogPath"),
 });
 
+// Diagnostics bridge: what the Diagnostics panel in Settings needs from the
+// main process — the app's own version and platform, the last WARNING/ERROR
+// records of the app log, and revealing a log file in the OS file manager.
+// Read-only and local; the panel sends nothing anywhere.
+contextBridge.exposeInMainWorld("diagnosticsAPI", {
+  getAppInfo: () => ipcRenderer.invoke("app:getInfo"),
+  appLogTail: (limit) => ipcRenderer.invoke("diagnostics:appLogTail", limit),
+  // Pass the backend log path to reveal that one; omit it for the app log.
+  // Main refuses a path outside its known log directories.
+  revealLog: (filePath) => ipcRenderer.invoke("logs:reveal", filePath),
+});
+
 // Renderer log bridge: fire-and-forget forwarding of renderer logger entries
 // ({ts, level, ns, msg, data}) to the main process, which persists them in the
 // same log file QA already reads (see main.js "renderer-log" handler).

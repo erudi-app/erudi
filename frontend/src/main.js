@@ -18,6 +18,7 @@ const { classifyStderrLine } = require("./utils/backendStderr");
 const { shouldRetrySpawn } = require("./utils/backendRetry");
 const { buildBackendSpawnOptions, buildBackendEnv } = require("./utils/backendSpawn");
 const { gracefulShutdown } = require("./utils/backendShutdown");
+const { readAppLogTail } = require("./utils/appLogTail");
 
 // electron-updater: only loaded in production to avoid dev noise.
 // Reads latest.yml / latest-mac.yml from GitHub Releases and handles
@@ -734,6 +735,88 @@ if (process.platform === "linux") {
 // (race-safe); restart actually re-spawns the backend (used by the Retry button).
 ipcMain.handle("backend:getInfo", () => ({ port: resolvedPort, ready: backendIsReady }));
 ipcMain.handle("app:getLogPath", () => logFile);
+
+// ── Diagnostics ───────────────────────────────────────────────────────────────
+// What the Diagnostics panel needs from the main process. All of it is read
+// locally and handed to the window; nothing is sent anywhere.
+
+// The app's own identity. The backend has no version of its own, so the one
+// electron-builder stamped into package.json is the app version, and it is
+// still available when the backend never started -- which is the report we
+// most want to receive.
+ipcMain.handle("app:getInfo", () => ({
+  version: app.getVersion(),
+  platform: process.platform,
+  arch: process.arch,
+  electron: process.versions.electron,
+  packaged: app.isPackaged,
+  appLogPath: logFile,
+}));
+
+// Last WARNING/ERROR records of the app log, parsed by the same rules the
+// backend applies to its own file (src/utils/appLogTail.js).
+ipcMain.handle("diagnostics:appLogTail", (_event, limit) => {
+  try {
+    const count = Number.isInteger(limit) && limit > 0 && limit <= 500 ? limit : undefined;
+    return readAppLogTail(logFile, count);
+  } catch (error) {
+    log(`Failed to read the app log tail: ${error.message}`);
+    return [];
+  }
+});
+
+/**
+ * Directories a log file is allowed to live in.
+ *
+ * `shell.showItemInFolder` takes whatever path it is given, and the path the
+ * renderer passes comes from an HTTP response. Rather than trust it, the
+ * handler checks the file sits in a directory this app writes logs to. The
+ * list mirrors `backend/src/launcher/runtime_paths.py`.
+ */
+function knownLogDirectories() {
+  const dirs = [path.dirname(logFile)];
+  const appName = "erudi";
+  if (process.platform === "darwin") {
+    dirs.push(path.join(os.homedir(), "Library", "Logs", appName));
+  } else if (process.platform === "win32") {
+    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
+    dirs.push(path.join(localAppData, appName, "logs"));
+  } else {
+    const stateHome = process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state");
+    dirs.push(path.join(stateHome, appName, "logs"));
+  }
+  if (process.env.ERUDI_DATA_ROOT) {
+    dirs.push(path.join(process.env.ERUDI_DATA_ROOT, "logs"));
+  }
+  if (!app.isPackaged) {
+    // Dev: backend/logs sits next to the frontend directory Electron runs from.
+    dirs.push(path.resolve(app.getAppPath(), "..", "backend", "logs"));
+  }
+  return dirs.map((dir) => path.resolve(dir));
+}
+
+// Reveal a log file in the OS file manager. Called with the backend log path
+// the backend reported, or with nothing, in which case the app log is used.
+// A path outside a known log directory is refused and the app log is revealed
+// instead -- never an arbitrary path.
+ipcMain.handle("logs:reveal", (_event, filePath) => {
+  let target = logFile;
+  if (typeof filePath === "string" && filePath) {
+    const resolved = path.resolve(filePath);
+    if (knownLogDirectories().includes(path.dirname(resolved))) {
+      target = resolved;
+    } else {
+      log(`Refused to reveal a path outside the log directories: ${resolved}`);
+    }
+  }
+  try {
+    shell.showItemInFolder(target);
+    return { success: true, path: target };
+  } catch (error) {
+    log(`Failed to reveal the log file: ${error.message}`);
+    return { success: false, error: error.message };
+  }
+});
 
 // Renderer log bridge: the renderer forwards its logger calls here (fire-and-
 // forget ipcRenderer.send, see preload.js logAPI) so they persist in the same

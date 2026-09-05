@@ -1,9 +1,11 @@
-import React from "react";
+import React, { useEffect } from "react";
 import PropTypes from "prop-types";
 import { Globe, Languages, RefreshCw, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { useLocation } from "react-router-dom";
 import Sidebar from "../components/Sidebar";
 import ToggleSwitch from "../components/ToggleSwitch";
+import DiagnosticsPanel from "../components/DiagnosticsPanel";
 import { useUserSettings } from "../shared/hooks/api";
 import { setAppLanguage } from "../i18n";
 import { LANGUAGE_NAMES, SUPPORTED_LANGUAGES } from "../i18n/languages";
@@ -74,10 +76,23 @@ SettingsCard.propTypes = {
  * -- refusing them stops the update traffic entirely, and the choice is handed
  * to the Electron main process, which owns electron-updater. The language
  * applies immediately through i18next and is persisted with the other settings.
+ *
+ * The page also carries the Diagnostics panel, the destination of the bug
+ * button in the sidebar rail. It shows what a bug report needs about this
+ * machine and hands it to the user to copy; it sends nothing anywhere.
  */
 export default function SettingsPage() {
   const { t, i18n } = useTranslation();
+  const { hash } = useLocation();
   const { settings, loading, updateSettings } = useUserSettings();
+
+  // The sidebar's bug button links to /erudi/settings#diagnostics. Under
+  // HashRouter the browser cannot follow that fragment on its own -- the whole
+  // route already lives in the hash -- so the scroll happens here.
+  useEffect(() => {
+    if (hash !== "#diagnostics") return;
+    document.getElementById("diagnostics")?.scrollIntoView({ behavior: "smooth" });
+  }, [hash]);
   const webSearchEnabled = settings?.web_search_enabled ?? false;
   const autoUpdateEnabled = settings?.auto_update_enabled ?? true;
 
@@ -192,6 +207,11 @@ export default function SettingsPage() {
               </a>
             }
           />
+
+          {/* The bug button in the sidebar rail links here. It owns its own
+              data loading, its own loading and error states and the shared
+              report block, so it is a section rather than a SettingsCard. */}
+          <DiagnosticsPanel />
         </div>
       </main>
     </div>
