@@ -92,9 +92,13 @@ then stays on that channel. So QA must, per release:
 - [ ] Cross-channel sanity: the CUDA draft is **not** offered to a CPU install,
       and vice versa (each follows only its own `*.yml`).
 
-> The Windows binaries are compiled in CI from the `llama.cpp` submodule and
-> **cannot be run-tested in CI** (no GPU runner, and boot is lazy) — real Windows
-> hardware QA here is the only validation of the inference path.
+> The Windows binaries are compiled in CI from the `llama.cpp` submodule. CI
+> starts the bundled CPU `llama-server` (`--version`, which prints llama.cpp's
+> build header and exits without loading a model) but **runs no inference**, and
+> it cannot start the CUDA one at all: that build links the NVIDIA driver library
+> `nvcuda.dll`, which is absent from a GPU-less runner, so the loader fails before
+> the program runs. Real Windows hardware QA here is the only validation of the
+> inference path.
 
 ## Promote
 
