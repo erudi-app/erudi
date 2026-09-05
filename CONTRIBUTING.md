@@ -329,9 +329,25 @@ your branch merged with `main`. A green pull request can still fail in the queue
 `main` moved underneath it — that is the point of the second pass, not a flake.
 
 If your change touches `scripts/dev/backend/build-llamacpp-*` or the llama.cpp
-submodule, **`llamacpp-build.yml`** will compile the inference binary for you. It is
-the only place in CI that does, so treat a failure there as real: nothing else will
-catch a bad compile flag before a release tag.
+submodule, **`llamacpp-build.yml`** will compile the inference binary for you and
+then start it. It is the only place in CI that does either, so treat a failure
+there as real: nothing else will catch a bad compile flag before a release tag.
+
+Starting it means running `llama-server --version`, which prints llama.cpp's build
+header and exits 0 from inside the argument parser, before any model is loaded.
+That is enough to prove the file is a loadable executable for the target
+architecture and that every library it links resolves — none of which a check on
+the filename can tell you. The CUDA binary is the exception: ggml links the NVIDIA
+driver library (`libcuda.so.1` on Linux, `nvcuda.dll` on Windows), which ships with
+the driver rather than the toolkit, so a driverless runner cannot load it at all
+and no argument changes that. The Linux CUDA leg checks that every *other*
+dependency resolves; the Windows CUDA leg checks that the CUDA runtime DLLs landed
+next to the server, which is what lets a user run the build with only a driver
+installed. On a release tag, `release.yml` applies the same three checks to the
+copy PyInstaller froze into `backend/dist` — a separate claim, because the freeze
+copies the file into a new tree and can pick up the wrong flavour, drop a sibling
+runtime library, or lose the executable bit. Neither workflow runs inference; the
+release QA pass on real hardware is the first thing that does.
 
 Then:
 

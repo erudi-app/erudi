@@ -171,7 +171,17 @@ Not a gate, but worth knowing: **`llamacpp-build.yml`** compiles the inference
 binary, and is the only thing in CI that does. It is path-filtered to pull
 requests touching `scripts/dev/backend/build-llamacpp-*` or the llama.cpp
 submodule. Change a compile flag anywhere else and nothing verifies it before a
-release tag.
+release tag. It also starts what it compiles: the CPU binary is run with
+`--version`, which prints llama.cpp's build header and exits 0 from the argument
+parser without loading a model. The CUDA binary cannot be started on a runner —
+ggml links the NVIDIA driver library (`libcuda.so.1` / `nvcuda.dll`, shipped with
+the driver, not the toolkit), so the loader fails before `main()`. The Linux CUDA
+leg checks instead that every dependency but that one resolves; the Windows CUDA
+leg checks the CUDA runtime DLLs landed beside the server. `release.yml` applies
+the same three checks to the copy PyInstaller froze into `backend/dist`, which is
+a separate claim: the freeze copies the file into a new tree and can pick up the
+wrong flavour, drop a sibling library, or lose the executable bit. Neither runs
+inference; only the release QA pass on real hardware does.
 
 ## Logs
 
