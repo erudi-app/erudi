@@ -13,6 +13,14 @@ Event shapes:
     - {"event": "ready", "port": N}                  (run.py)
     - {"event": "shutdown"}                           (run.py)
     - {"event": "startup_error", "code": "...", ...}  (run.py)
+    - {"event": "engine_notice", "code": "...", "gpu_name": "...",
+       "compute_capability": "...", "driver_cuda_version": "...",
+       "required_cuda_version": "...", "raw": "..."}  (lifespan)
+
+``engine_notice`` reports a GPU the bundled CUDA build cannot drive. It is NOT a
+startup failure: the backend is healthy and serving, and the frontend holds the
+event until after ``ready`` to show it as a decision (run on the processor
+instead, or update the driver) rather than an error screen.
 
 Every emitted event additionally carries a ``ts`` field (UTC ISO-8601 with
 milliseconds and a ``Z`` suffix, e.g. ``2026-07-02T09:15:32.123Z``) so the

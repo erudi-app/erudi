@@ -45,6 +45,7 @@ Every request, when it happens and the code behind it: **[What leaves your machi
 ## Install
 
 1. **[Download](https://github.com/erudi-app/erudi/releases)** the installer for your platform — a notarized `.dmg` for macOS (Apple Silicon, macOS 14+), a `Setup.exe` for Windows, an `.AppImage` for Linux. Windows and Linux each ship two builds: take the plain one unless you have an NVIDIA GPU, in which case take the `cuda` one. Nothing else to install — the inference engine and everything it needs are inside the installer.
+   The `cuda` build needs a card of compute capability 5.0 or newer (Maxwell, 2014, and up) and a recent NVIDIA driver: the 570 family for cards up to the RTX 20 series and for the H100, which run from the build's PTX, and any 12.0-era driver (525+) for the RTX 30, 40 and 50 series, which have native code in it. Erudi checks both at launch and offers to run on the processor instead when your card or driver falls short — it never switches on its own. The [hardware guide](https://erudi-app.github.io/erudi/guides/hardware/) has the per-generation table.
 2. Open it. The first launch prepares the embedded database and the model catalog; it takes a few seconds.
 3. Pick a model marked **Runs easily** or **Ideal fit** and press Download. Once it is on disk, you can unplug the network and keep working.
 
@@ -56,10 +57,10 @@ The app updates itself from the GitHub releases of this repository, and only fro
 
 | Platform | Backend | Status |
 |---|---|---|
-| Windows (NVIDIA GPU) | CUDA via `llama-server` | ✅ Supported |
+| Windows (NVIDIA GPU) | CUDA via `llama-server` | ✅ Supported (compute capability 5.0+, driver 570+ — 525+ for RTX 30/40/50) |
 | Windows (no GPU) | CPU via `llama-server` | ✅ Supported |
 | macOS Apple Silicon (macOS 14+) | MLX | ✅ Supported |
-| Linux (NVIDIA GPU) | CUDA via `llama-server` | 🚧 Builds and launches in CI, not yet tested on real hardware |
+| Linux (NVIDIA GPU) | CUDA via `llama-server` | 🚧 Builds and launches in CI, not yet tested on real hardware (same GPU and driver floors as Windows) |
 | Linux (CPU) | CPU via `llama-server` | 🚧 Builds and launches in CI, not yet tested on real hardware |
 
 ✅ means the packaged app is built by CI and manually tested on that platform. 🚧 means every release
@@ -87,7 +88,11 @@ Most local-AI tools are either a runtime you drive from a terminal, or a web int
 
 > These are **build** requirements. Running Erudi needs none of them: the installer
 > carries the inference engine and its CUDA runtime, so an NVIDIA user only needs a
-> driver, and everyone else needs nothing at all.
+> driver, and everyone else needs nothing at all. Which driver depends on the card —
+> 570+ for anything that runs from the build's PTX, 525+ for the RTX 30/40/50 series,
+> which have native code in it. The
+> [hardware guide](https://erudi-app.github.io/erudi/guides/hardware/) has the table, and
+> the app checks it at launch.
 
 ### 1. Clone the repository
 

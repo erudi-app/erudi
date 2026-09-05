@@ -293,8 +293,20 @@ python -c "import pynvml; pynvml.nvmlInit(); print(pynvml.nvmlDeviceGetCount())"
 - **CUDA** requires `pynvml` to report at least one device. Check the driver with
   `nvidia-smi`.
 - Set `ERUDI_FORCE_CPU=1` to bypass detection and force `CPU_Engine`.
+- Check `user_settings.inference_backend` (`GET /erudi/user_settings/`): `cpu` pins
+  `CPU_Engine` on a machine with a usable GPU. The lifespan applies it after the
+  migrations, and `ERUDI_FORCE_CPU` wins over it.
 
 The selected engine is logged at startup (`Engine chosen: ...`).
+
+### The GPU is detected but Erudi says it cannot use it
+
+The CUDA pre-flight compares the card's compute capability and the driver's CUDA version
+to the floors of the bundled `llama-server` build and emits an `engine_notice` event when
+either falls short. The verdict and both readings are in `backend/logs/backend.log`
+(`CUDA pre-flight: ...`), and the compatibility matrix is in
+[Hardware Detection](guides/hardware.md). Nothing is switched automatically — the app
+proposes processor mode and waits.
 
 ### `llama-server` not found
 

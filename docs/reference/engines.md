@@ -8,4 +8,6 @@
 
 ::: src.engines.cuda_engine
 
+::: src.engines.cuda_compatibility
+
 ::: src.engines.mlx_engine

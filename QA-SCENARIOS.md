@@ -165,6 +165,20 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I flip the Web Search toggle, then the change **persists across an app relaunch**.
 - [ ] When the global toggle is on and I start a **new** conversation, then that conversation's own Web search toggle starts **on** (inheritance at creation; the conversation owns it afterwards).
 
+**Inference engine**
+
+*Everything in this block needs a Windows or Linux machine with an NVIDIA GPU — on
+Apple Silicon the control shows but has nothing to switch, which is itself worth
+one check.*
+
+- [ ] When I open Settings, then an **Inference engine** card offers **Automatic** and **Processor only**, and the note says Erudi restarts its engine when the setting changes.
+- [ ] When I open Settings on a fresh install, then the engine is **Automatic**.
+- [ ] *(NVIDIA machine)* When I switch from Automatic to **Processor only**, then the backend restarts and comes back — the app is usable again within the usual boot time, not stuck on the loader.
+- [ ] *(NVIDIA machine)* After that switch, when I send a chat message, then it answers, and `backend.log` shows `Engine chosen: <CUDA_Engine>` followed by the processor swap line — i.e. the model actually runs on the CPU build.
+- [ ] *(NVIDIA machine)* When I relaunch the app, then the setting is still **Processor only** and inference is still on the processor.
+- [ ] *(NVIDIA machine)* When I switch back to **Automatic** and relaunch, then the GPU is used again — the choice is reversible.
+- [ ] *(Apple Silicon)* When I set **Processor only** on a Mac, then nothing about inference changes — MLX still runs the models (the setting only governs the NVIDIA path).
+
 **Application language (#385)**
 - [ ] When I open Settings, then an **Application language** card offers English, Français, Español and 中文, each named in its own language.
 - [ ] When I pick another language, then the **whole interface** switches immediately — every screen, the live download widget included — with no English left behind and no reload.
@@ -209,6 +223,29 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I launch the app, then the window opens immediately on a loading screen and switches to the app once the backend is healthy, landing on Models.
 - [ ] When the **backend fails to start** (port in use, crash, timeout), then the app shows a clear error with the reason (code + log path) and Retry/Quit — **not** a perpetual spinner.
 - [ ] When the backend dies **after** load, then API calls fail per-screen with a visible error.
+
+**Graphics card Erudi cannot use**
+
+*The whole point of this block is that a machine Erudi cannot drive on the GPU gets an
+honest explanation and a working way forward, instead of a crash on the first message.*
+
+*Two of these need hardware nobody on the team has — a pre-Maxwell card (GTX 700 or
+older) for the "too old" verdict, and an NVIDIA machine kept on a driver older than the
+570 family for the "driver too old" one. Mark them **NOT RUN** rather than guessing, and
+say which hardware was missing. The rest run on any machine.*
+
+- [ ] *(any machine, NVIDIA GPU that works)* When I launch the app on a supported card and driver, then **no** graphics-card dialog appears — a healthy machine is never nagged. (`backend.log` shows `CUDA pre-flight ok: ...`.)
+- [ ] *(needs a pre-Maxwell card — likely NOT RUN)* When I launch the app on a card below compute capability 5.0, then once the app has loaded a dialog says the card is too old for GPU mode, names the card and its capability, and states that no driver update changes it.
+- [ ] *(needs an old driver — likely NOT RUN)* When I launch the app on a supported card with a driver older than the 570 family, then the dialog says the **driver** is too old, names the CUDA version needed and the one installed, and says updating the driver is the fix.
+- [ ] When that dialog is open, then the app behind it is fully usable — it is a decision, not an error screen, and it never replaces the loading screen.
+- [ ] When I click **Not now**, then the dialog closes and nothing is saved; relaunching the app shows it again.
+- [ ] When I click **Switch to processor mode**, then Erudi restarts its engine, comes back, and chat works — and Settings shows **Processor only**.
+- [ ] After choosing processor mode, when I relaunch, then the dialog does **not** come back (a user who already decided is not nagged).
+- [ ] When the dialog is open, then a **Technical details** block shows what the graphics driver reported, and the copy button puts it on the clipboard (paste it somewhere to confirm).
+- [ ] When I click **Report on GitHub**, then the issue page opens in my **system browser**, not inside the app window; same for the **Erudi website** link and the processor-version download link.
+- [ ] When my interface language is French, Spanish or Chinese, then every word of that dialog is in that language — no English left behind.
+- [ ] *(NVIDIA machine)* When a chat turn dies because the graphics card could not run the model, then the red error bubble appears **and** the same dialog opens with the trace — the failure is explained, not just red.
+- [ ] When a chat turn fails for an ordinary reason (a corrupt model, a missing file), then only the red bubble appears — no graphics-card dialog.
 
 **Offline & persistence**
 - [ ] When I launch **offline**, then my downloaded models still list and work, the catalog shows from the bundled snapshot, and Hugging Face search reports no connection.

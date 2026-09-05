@@ -4,7 +4,7 @@ Hardware detection and inference scoring for the three engine backends: MLX (App
 
 ## Overview
 
-Detection is delegated to the engine selected at startup by `BaseEngine.get_engine()`; the domain only persists the result and serves it.
+Detection is delegated to the engine selected at startup by `BaseEngine.get_engine()`; the domain only persists the result and serves it. The engine that ends up selected can differ from what detection chose: `user_settings.inference_backend` pins the CPU engine when the user asked for it, and the CUDA pre-flight (`src/engines/cuda_compatibility.py`) reports — without changing anything — a GPU the bundled CUDA build cannot drive. See [Hardware Detection](../guides/hardware.md).
 
 ```
 Endpoints -> Service -> Repository -> HardwareProfile entity -> PostgreSQL
