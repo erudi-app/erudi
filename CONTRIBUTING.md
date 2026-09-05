@@ -341,12 +341,13 @@ the filename can tell you. The CUDA binary is the exception: ggml links the NVID
 driver library (`libcuda.so.1` on Linux, `nvcuda.dll` on Windows), which ships with
 the driver rather than the toolkit, so a driverless runner cannot load it at all
 and no argument changes that. The Linux CUDA leg checks that every *other*
-dependency resolves; the Windows CUDA leg checks only that the binary exists. On a
-release tag, `release.yml` repeats the start against the copy PyInstaller froze
-into `backend/dist` — a separate claim, because the freeze copies the file into a
-new tree and can pick up the wrong flavour or lose a sibling runtime library.
-Neither workflow runs inference; the release QA pass on real hardware is the first
-thing that does.
+dependency resolves; the Windows CUDA leg checks that the CUDA runtime DLLs landed
+next to the server, which is what lets a user run the build with only a driver
+installed. On a release tag, `release.yml` applies the same three checks to the
+copy PyInstaller froze into `backend/dist` — a separate claim, because the freeze
+copies the file into a new tree and can pick up the wrong flavour, drop a sibling
+runtime library, or lose the executable bit. Neither workflow runs inference; the
+release QA pass on real hardware is the first thing that does.
 
 Then:
 

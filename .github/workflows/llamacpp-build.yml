@@ -128,8 +128,9 @@ jobs:
       # before main() ever reads argv. Linux takes the next-strongest claim
       # instead: resolve every dependency without running the binary, and
       # require all of them except that one driver library. Windows has no
-      # equivalent tool on this runner, so its CUDA binary is proven to exist
-      # and no more; the first thing that runs it is release QA on real hardware.
+      # equivalent tool on this runner, so it checks that the CUDA runtime DLLs
+      # the release build depends on landed next to the server. Either way, the
+      # first thing that RUNS a CUDA binary is release QA on real hardware.
       - name: Assert the binary exists and starts
         env:
           BINARY: ${{ matrix.binary }}
@@ -184,4 +185,18 @@ jobs:
             exit 0
           fi
 
-          echo "CUDA build on ${RUNNER_OS}: it links nvcuda.dll from the NVIDIA driver, so a driverless runner cannot load it. Existence is all this leg proves."
+          # Windows has no way to resolve imports here, and the binary cannot be
+          # started, so this leg checks what it can: the build script copies the
+          # CUDA runtime next to the server so a user needs only a driver and
+          # never the toolkit, and release.yml treats those DLLs as a blocker.
+          # Catch their absence at the compile instead of at the tag.
+          bindir=$(dirname "$BINARY")
+          for dll in cudart64_12.dll cublas64_12.dll cublasLt64_12.dll; do
+            if [ ! -f "$bindir/$dll" ]; then
+              echo "::error::$dll is missing next to llama-server.exe; the CUDA build would require the user to install the CUDA toolkit."
+              ls -la "$bindir"
+              exit 1
+            fi
+          done
+          echo "CUDA runtime DLLs present next to the server."
+          echo "CUDA build on ${RUNNER_OS}: it links nvcuda.dll from the NVIDIA driver, so a driverless runner cannot load it; the DLLs above are the claim this leg makes."

@@ -215,7 +215,10 @@ jobs:
           # Windows -- which ships with the NVIDIA driver rather than the
           # toolkit. These runners have no driver, so the loader would fail
           # before main() reads argv, and no choice of argument avoids that.
-          # The CUDA binaries are first run by release QA on real hardware
+          # Linux CUDA gets the next-strongest claim instead: resolve the
+          # bundled copy's dependencies without running it. Windows CUDA has no
+          # equivalent tool here and keeps the DLL adjacency check above. Either
+          # way a CUDA binary is first RUN by release QA on real hardware
           # (docs/dev/release-qa-checklist.md).
           if [ "$LLAMA_FLAVOUR" = "cpu" ]; then
             # Same trap as the exe name above, from the other direction: not
@@ -238,8 +241,31 @@ jobs:
               exit 1
             fi
             echo "The bundled inference binary starts."
+          elif [ "${RUNNER_OS}" = "Linux" ]; then
+            # The CUDA binary cannot be started, but its dependencies can still
+            # be resolved without running it -- and this is the copy where that
+            # matters most. PyInstaller walked a tree and wrote the file into a
+            # new one; if the freeze lost a library the server needs, nothing
+            # else in the pipeline would notice. The DLL adjacency check above
+            # is Windows-only (#449), and the --version branch skips the CUDA
+            # legs, so this is the only claim the Linux CUDA bundle gets.
+            status=0
+            deps=$(ldd "$found" 2>&1) || status=$?
+            echo "$deps"
+            if [ "$status" -ne 0 ]; then
+              echo "::error::ldd could not read $found (exit $status): the bundled file is not a usable dynamic executable for this architecture."
+              exit 1
+            fi
+            # grep exits 1 when it matches nothing, which is the passing case.
+            missing=$(echo "$deps" | grep "not found" | grep -v "libcuda\.so\.1") || missing=""
+            if [ -n "$missing" ]; then
+              echo "::error::$found has unresolved dependencies beyond the NVIDIA driver library. Packaging it would ship an app whose inference engine cannot load:"
+              echo "$missing"
+              exit 1
+            fi
+            echo "Every dependency of the bundled binary resolves except libcuda.so.1, which comes from the NVIDIA driver."
           else
-            echo "CUDA build: not started here, because it links the NVIDIA driver library and this runner has no driver. Release QA on real hardware is what runs it."
+            echo "CUDA build on ${RUNNER_OS}: not started here, because it links nvcuda.dll from the NVIDIA driver and this runner has none. The DLL check above is the claim this leg makes; release QA on real hardware is what runs it."
           fi
 
       # ── Frontend: webpack build → electron-builder package + sign + publish ──

@@ -193,9 +193,11 @@ a truncated file or a wrong-architecture build; starting it proves the copy
 PyInstaller made is a loadable executable whose libraries resolve. The CUDA legs
 are not started: ggml links the NVIDIA driver library (`libcuda.so.1` /
 `nvcuda.dll`, shipped with the driver rather than the toolkit), so the loader
-fails before `main()` on a driverless runner. They are checked for the bundled
-CUDA runtime DLLs instead, and real hardware in the QA pass is the first thing
-that runs them.
+fails before `main()` on a driverless runner. Linux CUDA is checked with `ldd`
+instead — every dependency of the bundled binary must resolve except that driver
+library, which is the only thing that would catch a freeze dropping
+`libcublas.so.12` — and Windows CUDA is checked for the bundled CUDA runtime
+DLLs. Real hardware in the QA pass is the first thing that runs either.
 
 The CUDA legs inject `-c.publish.channel=cuda` (plus a distinct artifact name)
 so the GPU builds feed a separate `cuda` auto-update channel while the CPU
