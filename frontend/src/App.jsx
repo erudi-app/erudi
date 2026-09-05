@@ -11,6 +11,7 @@ import { KnowledgeBaseProvider } from "./contexts/KnowledgeBaseContext";
 import LoadingScreen from "./components/LoadingScreen";
 import BackendErrorScreen from "./components/BackendErrorScreen";
 import UpdateBanner from "./components/UpdateBanner";
+import EngineFailureModal from "./components/modals/EngineFailureModal";
 import InteractionLogger from "./components/InteractionLogger";
 import { apiClient } from "./services/api/client";
 import { setBackendPort } from "./config/api";
@@ -21,6 +22,7 @@ import {
   isStartupError,
   isBackendReady as isReadyEvent,
 } from "./utils/backendStatus";
+import { isEngineNotice } from "./utils/engineNotice";
 import { createLogger } from "./utils/logger";
 
 const log = createLogger("App");
@@ -36,6 +38,11 @@ export default function App() {
   const [phase, setPhase] = useState(null);
   const [firstRun, setFirstRun] = useState(false);
   const [retryNonce, setRetryNonce] = useState(0);
+  // The backend's CUDA pre-flight found a graphics card it cannot drive. This
+  // is NOT a startup failure — the app is fine, the first message would not be
+  // — so it is held here and shown over the real UI once the app is past
+  // `ready`, never on the loader and never on the error screen.
+  const [engineNotice, setEngineNotice] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -51,6 +58,11 @@ export default function App() {
         if (isStartupError(evt)) {
           log.warn("Backend startup error", evt);
           setBackendError(describeBackendError(evt));
+          return;
+        }
+        if (isEngineNotice(evt)) {
+          log.warn("Engine notice from the backend", evt);
+          setEngineNotice(evt);
           return;
         }
         if (evt?.port) setBackendPort(evt.port);
@@ -137,6 +149,9 @@ export default function App() {
     <DownloadModalProvider>
       <KnowledgeBaseProvider>
         <UpdateBanner />
+        {/* Dismissing persists nothing: the condition is real and still there
+            next launch, so the notice is expected to come back. */}
+        <EngineFailureModal notice={engineNotice} onDismiss={() => setEngineNotice(null)} />
         <Router>
           {/* Mounted-once UI interaction tracer (needs the Router for useLocation). */}
           <InteractionLogger />

@@ -25,5 +25,13 @@
     "description": "Models run on this computer and your conversations and documents stay on it. The page lists every network request the app can make, when it happens, and the code that proves it.",
     "note": "Opens in your browser.",
     "linkLabel": "Read the page"
+  },
+  "inferenceBackend": {
+    "title": "Inference engine",
+    "description": "Choose whether Erudi runs models on the graphics card or on the processor. Automatic uses the graphics card whenever this computer has one Erudi can drive.",
+    "note": "Erudi restarts its engine when this changes. The processor is slower but works on every machine.",
+    "selectLabel": "Inference engine",
+    "auto": "Automatic",
+    "cpu": "Processor only"
   }
 }

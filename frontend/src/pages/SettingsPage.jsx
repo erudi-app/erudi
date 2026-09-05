@@ -1,6 +1,6 @@
 import React from "react";
 import PropTypes from "prop-types";
-import { Globe, Languages, RefreshCw, ShieldCheck } from "lucide-react";
+import { Cpu, Globe, Languages, RefreshCw, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
 import ToggleSwitch from "../components/ToggleSwitch";
@@ -66,13 +66,17 @@ SettingsCard.propTypes = {
 /**
  * App-wide settings page (gear icon in the sidebar rail).
  *
- * Sections: the global Web Search default (#310), automatic updates and the
- * application language (#385). Enabling web search lets tool-capable models
+ * Sections: the global Web Search default (#310), automatic updates, the
+ * inference engine and the application language (#385). Enabling web search
+ * lets tool-capable models
  * search the web; the searched query is sent to external search engines, so it
  * ships OFF by default and new conversations inherit whatever the user picks
  * here (each conversation then owns its own toggle). Automatic updates ship ON
  * -- refusing them stops the update traffic entirely, and the choice is handed
- * to the Electron main process, which owns electron-updater. The language
+ * to the Electron main process, which owns electron-updater. The inference
+ * engine defaults to Automatic (the hardware decides) and can be pinned to the
+ * processor for a machine whose graphics card Erudi cannot drive; the backend
+ * reads it once per boot, so changing it restarts the engine. The language
  * applies immediately through i18next and is persisted with the other settings.
  */
 export default function SettingsPage() {
@@ -80,6 +84,7 @@ export default function SettingsPage() {
   const { settings, loading, updateSettings } = useUserSettings();
   const webSearchEnabled = settings?.web_search_enabled ?? false;
   const autoUpdateEnabled = settings?.auto_update_enabled ?? true;
+  const inferenceBackend = settings?.inference_backend ?? "auto";
 
   const handleWebSearchToggle = async (next) => {
     try {
@@ -97,6 +102,18 @@ export default function SettingsPage() {
       notifyAutoUpdatePreference(next);
     } catch (error) {
       log.error("Failed to update the automatic update setting", error);
+    }
+  };
+
+  const handleInferenceBackendChange = async (event) => {
+    const next = event.target.value;
+    try {
+      await updateSettings({ inference_backend: next });
+      // The engine is chosen once per boot, so the new preference only takes
+      // effect after the backend comes back up.
+      await window.backendAPI?.restartBackend?.();
+    } catch (error) {
+      log.error("Failed to update the inference engine setting", error);
     }
   };
 
@@ -151,6 +168,25 @@ export default function SettingsPage() {
                 label={t("settings:autoUpdate.toggleLabel")}
                 disabled={loading}
               />
+            }
+          />
+
+          <SettingsCard
+            icon={<Cpu className="w-5 h-5 text-[var(--fit-good)]" />}
+            title={t("settings:inferenceBackend.title")}
+            description={t("settings:inferenceBackend.description")}
+            note={t("settings:inferenceBackend.note")}
+            control={
+              <select
+                aria-label={t("settings:inferenceBackend.selectLabel")}
+                value={inferenceBackend}
+                onChange={handleInferenceBackendChange}
+                disabled={loading}
+                className="text-[13px] rounded-lg border border-[var(--line)] bg-[var(--canvas)] text-[var(--ink)] px-3 py-1.5 focus:outline-none focus:border-[var(--fit-good)] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                <option value="auto">{t("settings:inferenceBackend.auto")}</option>
+                <option value="cpu">{t("settings:inferenceBackend.cpu")}</option>
+              </select>
             }
           />
 

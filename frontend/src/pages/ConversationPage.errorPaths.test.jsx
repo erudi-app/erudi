@@ -179,6 +179,50 @@ describe("ConversationPage send failure paths", () => {
 
     await screen.findByText(/model exploded/);
   });
+
+  it("opens the decision dialog when the error event carries an engine code", async () => {
+    // The engine identified the cause: the red bubble is still there, and the
+    // dialog offers the remedy on top of it.
+    tracedFetchMock.mockImplementation(
+      routeFetch({
+        "/query": () =>
+          streamOf(
+            JSON.stringify({
+              t: "error",
+              text: "[ERROR_MESSAGE_SYSTEM] the inference server exited before becoming ready",
+              code: "CUDA_COMPUTE_CAPABILITY_TOO_LOW",
+              raw: "CUDA error: no kernel image is available for execution on the device",
+            }) + "\n",
+            '{"t":"done"}\n'
+          ),
+      })
+    );
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+
+    await screen.findByText(/too old for GPU mode/i);
+    expect(screen.getByText(/no kernel image is available/)).toBeTruthy();
+    expect(screen.getByText(/exited before becoming ready/)).toBeTruthy();
+  });
+
+  it("leaves an untyped error as a red bubble and nothing else", async () => {
+    tracedFetchMock.mockImplementation(
+      routeFetch({
+        "/query": () =>
+          streamOf(
+            '{"t":"error","text":"[ERROR_MESSAGE_SYSTEM] model exploded"}\n',
+            '{"t":"done"}\n'
+          ),
+      })
+    );
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+
+    await screen.findByText(/model exploded/);
+    expect(screen.queryByText(/Switch to processor mode/i)).toBeNull();
+  });
 });
 
 describe("ConversationPage first-message title stream", () => {

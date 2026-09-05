@@ -92,3 +92,55 @@ describe("App readiness", () => {
     expect(window.backendAPI.restartBackend).toHaveBeenCalled();
   });
 });
+
+describe("App engine notice", () => {
+  const NOTICE = {
+    event: "engine_notice",
+    code: "CUDA_DRIVER_TOO_OLD",
+    gpu_name: "NVIDIA GeForce GTX 1080",
+    compute_capability: "6.1",
+    driver_cuda_version: "12.1",
+    required_cuda_version: "12.8",
+    raw: "driver reports CUDA 12.1",
+  };
+
+  it("holds the notice until the app is ready, then shows the decision dialog", async () => {
+    render(<App />);
+    await act(async () => {
+      emit(NOTICE);
+    });
+    // Still on the loader: the notice is not a startup failure and must not
+    // replace the boot screen or the error screen.
+    expect(screen.queryByText(/driver is too old/i)).toBeNull();
+    expect(screen.queryByText(/Backend failed/i)).toBeNull();
+
+    await act(async () => {
+      emit({ event: "ready", port: 8766 });
+    });
+    await waitFor(() => expect(screen.getByText(/driver is too old/i)).toBeTruthy());
+    // Over the real UI, not instead of it.
+    expect(screen.getByText("MODELS_PAGE")).toBeTruthy();
+  });
+
+  it("closes on Not now without persisting anything", async () => {
+    render(<App />);
+    await act(async () => {
+      emit({ event: "ready", port: 8766 });
+      emit(NOTICE);
+    });
+    const notNow = await screen.findByText("Not now");
+    await act(async () => {
+      notNow.click();
+    });
+    await waitFor(() => expect(screen.queryByText(/driver is too old/i)).toBeNull());
+  });
+
+  it("does not treat the notice as a port or readiness event", async () => {
+    render(<App />);
+    await act(async () => {
+      emit(NOTICE);
+    });
+    // A notice carries no port and never makes the app think it is ready.
+    expect(screen.queryByText("MODELS_PAGE")).toBeNull();
+  });
+});

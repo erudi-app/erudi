@@ -25,5 +25,13 @@
     "description": "Les modèles tournent sur cet ordinateur et vos conversations et documents y restent. La page liste chaque requête réseau que l'application peut faire, quand elle a lieu, et le code qui le prouve.",
     "note": "S'ouvre dans votre navigateur.",
     "linkLabel": "Lire la page"
+  },
+  "inferenceBackend": {
+    "title": "Moteur d'inférence",
+    "description": "Choisissez si Erudi fait tourner les modèles sur la carte graphique ou sur le processeur. Automatique utilise la carte graphique dès que cet ordinateur en a une qu'Erudi sait piloter.",
+    "note": "Erudi redémarre son moteur quand ce réglage change. Le processeur est plus lent mais fonctionne sur toutes les machines.",
+    "selectLabel": "Moteur d'inférence",
+    "auto": "Automatique",
+    "cpu": "Processeur uniquement"
   }
 }
