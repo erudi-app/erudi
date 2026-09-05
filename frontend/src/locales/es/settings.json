@@ -25,5 +25,13 @@
     "description": "Los modelos se ejecutan en este ordenador y tus conversaciones y documentos se quedan en él. La página enumera cada solicitud de red que la aplicación puede hacer, cuándo ocurre y el código que lo demuestra.",
     "note": "Se abre en tu navegador.",
     "linkLabel": "Leer la página"
+  },
+  "inferenceBackend": {
+    "title": "Motor de inferencia",
+    "description": "Elige si Erudi ejecuta los modelos en la tarjeta gráfica o en el procesador. Automático usa la tarjeta gráfica siempre que este equipo tenga una que Erudi pueda manejar.",
+    "note": "Erudi reinicia su motor cuando cambia este ajuste. El procesador es más lento pero funciona en cualquier equipo.",
+    "selectLabel": "Motor de inferencia",
+    "auto": "Automático",
+    "cpu": "Solo procesador"
   }
 }

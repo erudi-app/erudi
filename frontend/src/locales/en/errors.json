@@ -124,5 +124,51 @@
   "api": {
     "timeout": "Request timeout",
     "httpStatus": "API Error: {{status}}"
+  },
+  "engine": {
+    "codes": {
+      "computeCapabilityTooLow": {
+        "title": "This graphics card is too old for GPU mode",
+        "detail": "This computer's NVIDIA graphics card is older than the oldest one Erudi's GPU mode supports, so it cannot run models on the GPU.",
+        "detailWithCapability": "{{gpu}} is a compute capability {{capability}} card. Erudi's GPU mode needs 5.0 or newer, and no driver update changes that.",
+        "hint": "Run Erudi on the processor instead. It is slower, but every feature works."
+      },
+      "driverTooOld": {
+        "title": "The NVIDIA driver is too old for GPU mode",
+        "detail": "Erudi's GPU mode needs a newer NVIDIA driver than the one installed on this computer.",
+        "detailWithVersions": "{{gpu}} needs an NVIDIA driver that provides CUDA {{required}} or newer. This computer reports CUDA {{driver}}.",
+        "hint": "Updating the NVIDIA driver is the fix. Running on the processor is the workaround until you do."
+      },
+      "outOfMemory": {
+        "title": "The graphics card ran out of memory",
+        "detail": "There is not enough free video memory to load this model on the GPU.",
+        "hint": "Choose a smaller model, close the other applications using the graphics card, or run Erudi on the processor."
+      },
+      "cudaError": {
+        "title": "GPU mode stopped working",
+        "detail": "Erudi's GPU mode stopped before it could answer. The technical details below say what the graphics driver reported.",
+        "hint": "Report the problem so it can be fixed, and run Erudi on the processor in the meantime."
+      }
+    },
+    "modal": {
+      "yourGpu": "This computer's graphics card",
+      "facts": "What Erudi detected",
+      "gpuLabel": "Graphics card",
+      "computeCapabilityLabel": "Compute capability",
+      "driverCudaLabel": "Driver CUDA version",
+      "requiredCudaLabel": "CUDA version needed",
+      "traceLabel": "Technical details",
+      "copyTrace": "Copy the technical details",
+      "reportIntro": "Telling us about it helps. Include the technical details above.",
+      "reportGithub": "Report on GitHub",
+      "reportWebsite": "Erudi website",
+      "switchToCpu": "Switch to processor mode",
+      "switching": "Switching...",
+      "switchNote": "Erudi restarts its engine to apply this. You can switch back in Settings at any time.",
+      "switchFailed": "The switch did not go through. Try again, or change it in Settings.",
+      "notNow": "Not now",
+      "cpuInstaller": "Download the processor version",
+      "cpuInstallerNote": "Reinstalling with the processor version of Erudi also avoids the GPU entirely."
+    }
   }
 }

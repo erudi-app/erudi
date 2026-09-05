@@ -169,6 +169,15 @@ At startup the engine class is selected by `BaseEngine.get_engine()`
 
 `ERUDI_FORCE_CPU=1` short-circuits detection entirely and returns `CPU_Engine`.
 
+Detection is not the last word. Once the schema is migrated, the lifespan reads
+`user_settings.inference_backend` and replaces `CUDA_Engine` with `CPU_Engine` when the
+user pinned the processor — safe because both carry `FORMAT_TAG = "gguf"`, so the catalog
+is identical either way. On the engine that actually wins, a CUDA pre-flight compares the
+GPU's compute capability and the driver's CUDA version to the floors of the bundled build
+(`src/engines/cuda_compatibility.py`) and emits an `engine_notice` event when the machine
+cannot run it. The event is a proposal, never an action. See
+[Hardware Detection](guides/hardware.md).
+
 Engines are never instantiated: they expose classmethods only, and the selected class is
 stored on `src.core.config.LLM_Engine`.
 
@@ -206,23 +215,28 @@ Other modules in the layer:
    this pays a one-time `initdb`; the phase event `preparing_database` is emitted so the
    Electron loader can say so.
 2. **Bind SQLAlchemy** — `init_database(app.state.postgres.sqlalchemy_url)`.
-3. **Engine selection** — `config.LLM_Engine = BaseEngine.get_engine()`.
+3. **Engine selection** — `config.LLM_Engine = BaseEngine.get_engine()`. Detection only;
+   the persisted preference is applied at step 6, once the column it lives in exists.
 4. **Schema migration** — Alembic, forward-only, run off the event loop
    (`run_in_threadpool(run_migrations, ...)`). Phase event: `running_migrations`. See
    [Database migrations](dev/db-migrations.md).
 5. **Seed and catalog** — `startup_populate_database()` sets startup variables, the
    hardware profile, and reconciles the model catalog from the bundled snapshots. Phase
    event: `loading_catalog`.
-6. **KB vector store** — `init_kb_store(...)`, after the migration because its
+6. **Engine preference and CUDA pre-flight** — `apply_inference_backend_preference()`
+   swaps `CUDA_Engine` for `CPU_Engine` when the user pinned the processor, then
+   `emit_engine_notice(app)` runs the pre-flight on the engine that won and emits an
+   `engine_notice` event if the GPU cannot drive the bundled CUDA build.
+7. **KB vector store** — `init_kb_store(...)`, after the migration because its
    cross-schema foreign keys reference the business tables.
-7. **Checkpointer** — `open_checkpointer(...)` on the same database, kept open for the
+8. **Checkpointer** — `open_checkpointer(...)` on the same database, kept open for the
    app lifetime and published on `app.state.checkpointer`.
-8. **Idle cleanup task** — `config.LLM_Engine.start_cleanup_task()`; the monitor ticks
+9. **Idle cleanup task** — `config.LLM_Engine.start_cleanup_task()`; the monitor ticks
    every 300 s and unloads the model once it has been idle longer than
    `_max_idle_time` (300 s).
-9. **Database watchdog** — `start_watchdog(app)` detects a dead embedded cluster,
-   resurrects it, and exposes the state on `/erudi/health/` as `db`.
-10. **Post-ready backfill** — a background task verifies the tool-call wire capability of
+10. **Database watchdog** — `start_watchdog(app)` detects a dead embedded cluster,
+    resurrects it, and exposes the state on `/erudi/health/` as `db`.
+11. **Post-ready backfill** — a background task verifies the tool-call wire capability of
     models downloaded before that column existed. It runs after readiness, in a
     threadpool, never inside the awaited boot sequence.
 
@@ -231,7 +245,9 @@ cleanup task, clean up the engine, close the checkpointer, close the KB store, a
 the PostgreSQL cluster last.
 
 Startup phase events are informational. Readiness is the launcher's `ready` event or a
-confirming health check — never a phase.
+confirming health check — never a phase. `engine_notice` is informational too: it reports
+a machine that cannot run the GPU build, and the app is otherwise healthy, so the frontend
+holds it until after `ready` and shows it as a decision rather than an error screen.
 
 ### Catalog snapshots
 

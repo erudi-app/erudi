@@ -34,11 +34,13 @@ beforeEach(() => {
     web_search_enabled: false,
     language: "en",
     auto_update_enabled: true,
+    inference_backend: "auto",
   });
   putMock.mockResolvedValue({
     web_search_enabled: true,
     language: "en",
     auto_update_enabled: true,
+    inference_backend: "auto",
   });
 });
 
@@ -195,6 +197,50 @@ describe("SettingsPage — automatic updates", () => {
     renderPage();
     await screen.findByText("Automatic updates");
     expect(document.body.textContent).toMatch(/install/i);
+  });
+});
+
+describe("SettingsPage inference engine", () => {
+  it("shows Automatic by default and says the engine restarts", async () => {
+    renderPage();
+    expect(await screen.findByText("Inference engine")).toBeTruthy();
+    const select = screen.getByLabelText("Inference engine");
+    await waitFor(() => expect(select.value).toBe("auto"));
+    expect(document.body.textContent).toMatch(/restarts its engine/i);
+  });
+
+  it("pins the processor and restarts the backend so the choice applies", async () => {
+    window.backendAPI = { restartBackend: vi.fn().mockResolvedValue(undefined) };
+    renderPage();
+    const select = await screen.findByLabelText("Inference engine");
+
+    fireEvent.change(select, { target: { value: "cpu" } });
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith("/user_settings/", { inference_backend: "cpu" })
+    );
+    await waitFor(() => expect(window.backendAPI.restartBackend).toHaveBeenCalled());
+    delete window.backendAPI;
+  });
+
+  it("reflects a persisted processor preference and switches back", async () => {
+    getMock.mockResolvedValue({
+      web_search_enabled: false,
+      language: "en",
+      auto_update_enabled: true,
+      inference_backend: "cpu",
+    });
+    window.backendAPI = { restartBackend: vi.fn().mockResolvedValue(undefined) };
+    renderPage();
+    const select = await screen.findByLabelText("Inference engine");
+    await waitFor(() => expect(select.value).toBe("cpu"));
+
+    fireEvent.change(select, { target: { value: "auto" } });
+
+    await waitFor(() =>
+      expect(putMock).toHaveBeenCalledWith("/user_settings/", { inference_backend: "auto" })
+    );
+    delete window.backendAPI;
   });
 });
 

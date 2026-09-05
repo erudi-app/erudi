@@ -39,6 +39,7 @@ from typing import Any, Callable, ClassVar, Dict, Optional, Tuple, Union
 import requests
 
 from src.core.exceptions import EngineException
+from src.engines.cuda_compatibility import classify_cuda_failure
 from src.core.logging import logger
 from src.engines.base_engine import BaseEngine
 
@@ -278,11 +279,17 @@ class BaseChatServerEngine(BaseEngine):
         last_err: Optional[Exception] = None
         while time.monotonic() < deadline:
             if proc is not None and not cls._proc_is_alive(proc):
+                # The tail is the only diagnostic there is, so it is shown to
+                # the user AND classified: a CUDA failure the app can propose a
+                # remedy for gets a code, everything else stays generic.
+                child_output = cls._read_child_output(proc)
                 raise EngineException(
                     message=(
                         f"{cls._server_name} child exited before becoming ready "
-                        f"(early crash). {cls._read_child_output(proc)}"
+                        f"(early crash). {child_output}"
                     ),
+                    trace=child_output,
+                    engine_code=classify_cuda_failure(child_output),
                 )
             try:
                 resp = requests.get(f"{base_url}/health", timeout=2.0, headers=headers)

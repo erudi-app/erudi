@@ -119,6 +119,7 @@ logs. The reader must tolerate interleaved non-JSON log lines.
 {"event":"ready","port":27182,"ts":"..."}
 {"event":"shutdown","ts":"..."}
 {"event":"startup_error","code":"PORT_IN_USE","message":"...","ts":"..."}
+{"event":"engine_notice","code":"CUDA_DRIVER_TOO_OLD","gpu_name":"...","ts":"..."}
 ```
 
 ### Startup phases
@@ -137,6 +138,36 @@ uvicorn they are a no-op.
 
 Phases are informational. Readiness is the `ready` event or a confirming health check —
 never a phase.
+
+### Engine notice
+
+`engine_notice` is emitted from the lifespan, after the migrations and the catalog, when
+the selected engine is `CUDA_Engine` and the pre-flight finds a GPU or a driver below what
+the bundled CUDA build needs. It is **not** a startup failure — the backend is healthy and
+about to serve — so the frontend holds it until the app is past `ready` and shows it as a
+decision, not as an error screen.
+
+```json
+{
+  "event": "engine_notice",
+  "code": "CUDA_DRIVER_TOO_OLD",
+  "gpu_name": "NVIDIA GeForce GTX 1080",
+  "compute_capability": "6.1",
+  "driver_cuda_version": "12.1",
+  "required_cuda_version": "12.8",
+  "raw": "...",
+  "ts": "..."
+}
+```
+
+| Code | Meaning |
+|---|---|
+| `CUDA_COMPUTE_CAPABILITY_TOO_LOW` | the card is below compute capability 5.0; no driver fixes it |
+| `CUDA_DRIVER_TOO_OLD` | the driver's CUDA version is below what this card needs to run the bundled build |
+
+At most one notice per boot, and none at all when a reading is unavailable. The floors and
+where each comes from are in `backend/src/engines/cuda_compatibility.py`; the
+per-generation table is in [Hardware Detection](hardware.md).
 
 ### Error codes
 

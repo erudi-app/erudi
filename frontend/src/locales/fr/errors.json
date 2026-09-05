@@ -124,5 +124,51 @@
   "api": {
     "timeout": "Délai de la requête dépassé",
     "httpStatus": "Erreur API : {{status}}"
+  },
+  "engine": {
+    "codes": {
+      "computeCapabilityTooLow": {
+        "title": "Cette carte graphique est trop ancienne pour le mode GPU",
+        "detail": "La carte graphique NVIDIA de cet ordinateur est plus ancienne que la plus ancienne prise en charge par le mode GPU d'Erudi : elle ne peut pas exécuter de modèles sur le GPU.",
+        "detailWithCapability": "{{gpu}} est une carte de capacité de calcul {{capability}}. Le mode GPU d'Erudi exige 5.0 ou plus récent, et aucune mise à jour de pilote n'y change rien.",
+        "hint": "Faites tourner Erudi sur le processeur. C'est plus lent, mais toutes les fonctionnalités marchent."
+      },
+      "driverTooOld": {
+        "title": "Le pilote NVIDIA est trop ancien pour le mode GPU",
+        "detail": "Le mode GPU d'Erudi exige un pilote NVIDIA plus récent que celui installé sur cet ordinateur.",
+        "detailWithVersions": "{{gpu}} exige un pilote NVIDIA fournissant CUDA {{required}} ou plus récent. Cet ordinateur annonce CUDA {{driver}}.",
+        "hint": "Mettre à jour le pilote NVIDIA est la solution. Passer sur le processeur est le contournement en attendant."
+      },
+      "outOfMemory": {
+        "title": "La carte graphique n'a plus de mémoire",
+        "detail": "Il n'y a pas assez de mémoire vidéo libre pour charger ce modèle sur le GPU.",
+        "hint": "Choisissez un modèle plus petit, fermez les autres applications qui utilisent la carte graphique, ou faites tourner Erudi sur le processeur."
+      },
+      "cudaError": {
+        "title": "Le mode GPU a cessé de fonctionner",
+        "detail": "Le mode GPU d'Erudi s'est arrêté avant de pouvoir répondre. Les détails techniques ci-dessous indiquent ce que le pilote graphique a signalé.",
+        "hint": "Signalez le problème pour qu'il soit corrigé, et faites tourner Erudi sur le processeur en attendant."
+      }
+    },
+    "modal": {
+      "yourGpu": "La carte graphique de cet ordinateur",
+      "facts": "Ce qu'Erudi a détecté",
+      "gpuLabel": "Carte graphique",
+      "computeCapabilityLabel": "Capacité de calcul",
+      "driverCudaLabel": "Version CUDA du pilote",
+      "requiredCudaLabel": "Version CUDA requise",
+      "traceLabel": "Détails techniques",
+      "copyTrace": "Copier les détails techniques",
+      "reportIntro": "Nous en informer aide. Joignez les détails techniques ci-dessus.",
+      "reportGithub": "Signaler sur GitHub",
+      "reportWebsite": "Site d'Erudi",
+      "switchToCpu": "Passer en mode processeur",
+      "switching": "Basculement...",
+      "switchNote": "Erudi redémarre son moteur pour appliquer ce choix. Vous pouvez revenir en arrière à tout moment dans les Paramètres.",
+      "switchFailed": "Le basculement n'a pas abouti. Réessayez, ou changez le réglage dans les Paramètres.",
+      "notNow": "Pas maintenant",
+      "cpuInstaller": "Télécharger la version processeur",
+      "cpuInstallerNote": "Réinstaller Erudi avec la version processeur évite aussi complètement le GPU."
+    }
   }
 }

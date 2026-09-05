@@ -55,6 +55,20 @@ config.LLM_Engine = BaseEngine.get_engine()
 
 `ERUDI_FORCE_CPU=1` bypasses GPU detection entirely.
 
+Detection runs before the migrations, so it cannot read the database. The lifespan
+finishes the job later, once the schema is at head: `apply_inference_backend_preference()`
+replaces `CUDA_Engine` with `CPU_Engine` when `user_settings.inference_backend` is `cpu`
+(safe only because both share `FORMAT_TAG = "gguf"` — the catalog reconciled under one is
+identical under the other), and `emit_engine_notice(app)` then runs the CUDA pre-flight on
+whichever engine won. `ERUDI_FORCE_CPU` wins over the preference. See
+`src/engines/cuda_compatibility.py` for the floors and
+[Hardware Detection](../../guides/hardware.md) for the compatibility matrix.
+
+A crash that gets past the pre-flight is classified where it happens:
+`BaseChatServerEngine._probe_ready` matches the dead child's captured tail against the
+strings ggml prints and raises `EngineException(engine_code=...)`, which the runner and
+the conversation service carry to the chat stream's error event as `code` + `raw`.
+
 ## Model specifications
 
 | Engine | Hardware | Model format | Server | Child launch | Ports |
