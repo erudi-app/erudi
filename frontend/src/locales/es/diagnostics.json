@@ -1,0 +1,51 @@
+{
+  "card": {
+    "title": "Diagnóstico",
+    "description": "Qué está ejecutando este equipo y los errores recientes que ha registrado. Todo se lee en tu ordenador; la aplicación no envía nada a ninguna parte.",
+    "note": "Cópialo en un informe de error para que podamos distinguir tu configuración de la de otra persona."
+  },
+  "environment": {
+    "title": "Tu configuración",
+    "appVersion": "Versión de Erudi",
+    "platform": "Sistema operativo",
+    "architecture": "Arquitectura",
+    "engine": "Motor de inferencia",
+    "hardware": "Hardware",
+    "model": "Modelo en memoria",
+    "python": "Python del backend",
+    "database": "Base de datos",
+    "appLog": "Registro de la aplicación",
+    "backendLog": "Registro del backend",
+    "none": "Ninguno",
+    "unknown": "Desconocido"
+  },
+  "recentErrors": {
+    "title": "Errores recientes",
+    "empty": "No se ha registrado ninguna advertencia ni error.",
+    "repeated": "{{count}} veces",
+    "privacyNote": "Los registros pueden contener el texto de tus conversaciones y los nombres de tus documentos, porque nada sale de tu equipo. Lee lo que copies antes de publicarlo.",
+    "sourceBackend": "Backend",
+    "sourceApp": "Aplicación",
+    "sourceSession": "Esta ventana"
+  },
+  "backendUnavailable": {
+    "title": "El backend no respondió",
+    "body": "Falta su parte de este informe. Abajo está lo que la propia aplicación sabe, y suele bastar para describir un backend que no arranca."
+  },
+  "loading": "Leyendo el diagnóstico…",
+  "openLogFolder": "Abrir la carpeta de registros",
+  "report": {
+    "heading": "Informar de esto",
+    "textareaLabel": "Diagnóstico para copiar",
+    "instruction": "Copia esto, abre el formulario de informe de errores y pégalo en el campo Logs. Describe qué hacías y añade una captura de pantalla si tienes alguna.",
+    "github": "Informar en GitHub",
+    "contactPrefix": "¿No tienes cuenta de GitHub?",
+    "contactLink": "Escríbenos desde la página de contacto",
+    "contactSuffix": "e incluye todo lo anterior, junto con las capturas de pantalla que tengas."
+  },
+  "boundary": {
+    "title": "Esta pantalla ha dejado de funcionar",
+    "body": "Algo en la interfaz lanzó un error del que la aplicación no pudo recuperarse por sí sola. Tus conversaciones, modelos y bases de conocimiento están intactos: recargar la ventana es seguro.",
+    "reload": "Recargar la aplicación"
+  }
+}

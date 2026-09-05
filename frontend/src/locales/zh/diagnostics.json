@@ -1,0 +1,51 @@
+{
+  "card": {
+    "title": "诊断信息",
+    "description": "这台机器正在运行什么，以及它记录的最近错误。全部内容都在你的电脑上读取，应用不会把其中任何内容发送到任何地方。",
+    "note": "把它复制到问题报告里，我们才能把你的环境和别人的区分开。"
+  },
+  "environment": {
+    "title": "你的环境",
+    "appVersion": "Erudi 版本",
+    "platform": "操作系统",
+    "architecture": "架构",
+    "engine": "推理引擎",
+    "hardware": "硬件",
+    "model": "内存中的模型",
+    "python": "后端 Python",
+    "database": "数据库",
+    "appLog": "应用日志",
+    "backendLog": "后端日志",
+    "none": "无",
+    "unknown": "未知"
+  },
+  "recentErrors": {
+    "title": "最近的错误",
+    "empty": "没有记录到警告或错误。",
+    "repeated": "{{count}} 次",
+    "privacyNote": "由于没有任何内容离开你的机器，日志可能包含你的对话文本和文档名称。公开发布前请先读一遍你复制的内容。",
+    "sourceBackend": "后端",
+    "sourceApp": "应用",
+    "sourceSession": "当前窗口"
+  },
+  "backendUnavailable": {
+    "title": "后端没有响应",
+    "body": "本报告中属于后端的部分缺失。下面是应用自身掌握的信息，通常已足以描述一个无法启动的后端。"
+  },
+  "loading": "正在读取诊断信息…",
+  "openLogFolder": "打开日志文件夹",
+  "report": {
+    "heading": "报告这个问题",
+    "textareaLabel": "待复制的诊断信息",
+    "instruction": "复制这些内容，然后打开问题报告表单，粘贴到 Logs 字段。描述你当时的操作，如果有截图请一并附上。",
+    "github": "在 GitHub 上报告",
+    "contactPrefix": "没有 GitHub 账号？",
+    "contactLink": "通过联系页面写信给我们",
+    "contactSuffix": "并附上以上全部内容，以及你手上的截图。"
+  },
+  "boundary": {
+    "title": "此页面已停止工作",
+    "body": "界面中的某处抛出了应用无法自行恢复的错误。你的对话、模型和知识库都没有受到影响，重新加载窗口是安全的。",
+    "reload": "重新加载应用"
+  }
+}
