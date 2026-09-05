@@ -129,6 +129,24 @@ describe("buildPrefill", () => {
     expect(prefill.model).toBeNull();
   });
 
+  it("takes an explicit hardware string over the backend's", () => {
+    // The engine-failure dialog knows the card that failed from the notice
+    // itself, and opens when the backend has nothing useful to say about it.
+    const prefill = buildPrefill({
+      app: APP,
+      backend: BACKEND,
+      hardware: "NVIDIA GeForce GTX 1080, compute 6.1",
+    });
+    expect(prefill.hardware).toBe("NVIDIA GeForce GTX 1080, compute 6.1");
+    expect(prefill.version).toBe("1.0.0");
+  });
+
+  it("falls back to the backend's hardware when the explicit one is empty", () => {
+    expect(buildPrefill({ app: APP, backend: BACKEND, hardware: "" }).hardware).toBe(
+      "Apple M3 Pro / Apple M3 Pro GPU"
+    );
+  });
+
   it("reports VRAM when the engine is CUDA", () => {
     const cuda = {
       environment: {

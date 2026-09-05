@@ -116,15 +116,23 @@ function hardwareSummary(environment) {
  * The version and the OS come from Electron, so they survive a dead backend —
  * which is precisely the report we most want to receive.
  *
- * @param {{app?: object, backend?: object}} sources - App info and backend response.
+ * `hardware` may be given explicitly, for a caller that knows the machine
+ * better than the backend does: the engine-failure dialog is handed the card
+ * and its compute capability by the notice that raised it, and opens when the
+ * backend either cannot describe that card or is not answering at all.
+ *
+ * @param {object} sources - Where the values come from.
+ * @param {object} [sources.app] - `app:getInfo` result.
+ * @param {object} [sources.backend] - `/erudi/diagnostics/` response, or null.
+ * @param {string} [sources.hardware] - Overrides the backend's hardware line.
  * @returns {{version: ?string, os: ?string, hardware: ?string, model: ?string}} Field values.
  */
-export function buildPrefill({ app = null, backend = null } = {}) {
+export function buildPrefill({ app = null, backend = null, hardware = null } = {}) {
   const environment = backend?.environment ?? null;
   return {
     version: app?.version ?? null,
     os: osLabel(app?.platform, app?.arch),
-    hardware: hardwareSummary(environment),
+    hardware: hardware || hardwareSummary(environment),
     model: environment?.loaded_model ?? null,
   };
 }
