@@ -36,13 +36,40 @@ describe("main-process crash handlers", () => {
     expect(handlers).not.toMatch(/process\.exit\(/);
   });
 
-  it("logs a backend exit nobody asked for at ERROR, and a requested one plainly", () => {
+  it("hands every backend exit to the start tracker, which owns the level", () => {
     const exitHandler = source.slice(
       source.indexOf('backendProcess.on("exit"'),
       source.indexOf('backendProcess.on("error"')
     );
-    expect(exitHandler).toMatch(/if \(backendStopRequested\) \{\s*log\(/);
-    expect(exitHandler).toMatch(/logError\(`\$\{outcome\} \(not requested/);
+    expect(exitHandler).toMatch(/tracker\.exited\(proc, code, signal\)/);
+    expect(exitHandler).not.toMatch(/logError\(/);
+  });
+
+  it("records a start failure once: the tracker writes it, the supervisor only surfaces it", () => {
+    // Inside startRealBackend every cause goes through failWith (the
+    // tracker); no site writes its own ERROR next to it.
+    const start = source.slice(
+      source.indexOf("const startRealBackend"),
+      source.indexOf("async function startBackendSupervised")
+    );
+    const errorCalls = start.match(/logError\(/g) || [];
+    // The two allowed ERROR writers before the tracker exists: the missing
+    // executable and the dev backend that does not answer.
+    expect(errorCalls.length).toBeLessThanOrEqual(2);
+    expect(start).not.toMatch(/logError\([^;]*startup_error/);
+    const supervisor = source.slice(
+      source.indexOf("async function startBackendSupervised"),
+      source.indexOf("const createApplicationMenu")
+    );
+    expect(supervisor).toMatch(
+      /log\(`Backend startup failed \(\$\{code\}\); surfacing to the user`\)/
+    );
+    expect(supervisor).not.toMatch(/logError\(/);
+  });
+
+  it("keeps the requested-stop state on the child process, never in a global", () => {
+    expect(source).not.toMatch(/backendStopRequested/);
+    expect(source).toMatch(/requestStop\(backendProcess\)/);
   });
 
   it("levels its own records in the shape the Diagnostics reader parses", () => {

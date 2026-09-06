@@ -20,6 +20,7 @@ const { buildBackendSpawnOptions, buildBackendEnv } = require("./utils/backendSp
 const { gracefulShutdown } = require("./utils/backendShutdown");
 const { readAppLogTail } = require("./utils/appLogTail");
 const { describeProcessGone, formatMainRecord } = require("./utils/mainLog");
+const { createBackendStartTracker, requestStop } = require("./utils/backendStartTracker");
 
 // electron-updater: only loaded in production to avoid dev noise.
 // Reads latest.yml / latest-mac.yml from GitHub Releases and handles
@@ -69,10 +70,10 @@ const MAIN_WINDOW_RENDERER_INDEX = path.join(
 const RENDERER_DEV_URL = "http://localhost:3000/";
 
 let backendProcess = null;
-// True from the moment main asks the backend to stop (quit, restart, clear
-// data, respawn) until the next spawn: an exit that arrives while this is
-// false is a backend that died on its own, and is logged as such.
-let backendStopRequested = false;
+// Whether main asked a child to stop is recorded ON that child
+// (requestStop, utils/backendStartTracker.js): a restart whose graceful
+// shutdown times out spawns the replacement before the old child's exit
+// event arrives, and a global flag reset at spawn would call that a crash.
 let mainWindow = null;
 let isCreatingWindow = false;
 // Set once a quit-time graceful shutdown is in flight so before-quit runs its
@@ -312,23 +313,31 @@ const startRealBackend = () => {
       ["--port", PORT.toString()],
       buildBackendSpawnOptions(process.platform, { cwd: workingDir, env: backendEnv })
     );
-    backendStopRequested = false;
 
     log(`Backend process spawned with PID: ${backendProcess.pid}`);
 
     const proc = backendProcess;
-    let settled = false;
     let actualPort = PORT;
     let capTimer = null;
-    const settle = (fn) => (arg) => {
-      if (settled) return;
-      settled = true;
-      if (capTimer) clearTimeout(capTimer);
-      fn(arg);
-    };
-    const succeed = settle(() => resolve({ port: actualPort }));
-    // reject carries the error CODE (string) so the supervisor can classify it.
-    const failWith = settle((code) => reject(new Error(code)));
+    // The tracker is the single owner of the start-failure record: the first
+    // cause to arrive (startup_error, spawn error, exit, safety cap) writes
+    // the one ERROR and settles the promise; everything after it is a plain
+    // line. reject carries the error CODE (string) so the supervisor can
+    // classify it.
+    const tracker = createBackendStartTracker({
+      log,
+      logError,
+      onFail: (code) => {
+        if (capTimer) clearTimeout(capTimer);
+        reject(new Error(code));
+      },
+      onSucceed: () => {
+        if (capTimer) clearTimeout(capTimer);
+        resolve({ port: actualPort });
+      },
+    });
+    const succeed = tracker.succeed;
+    const failWith = tracker.fail;
 
     // Absolute safety cap. The backend self-aborts at its own first-run-aware
     // budget (300s first run / 120s after) and emits startup_error, which we
@@ -336,8 +345,10 @@ const startRealBackend = () => {
     // the backend just for being slow — that was the 30s-kill bug.
     const MAX_READY_WAIT_MS = 330000;
     capTimer = setTimeout(() => {
-      logError(`Backend did not report ready within the ${MAX_READY_WAIT_MS / 1000}s safety cap`);
-      failWith("PORT_TIMEOUT");
+      failWith(
+        "PORT_TIMEOUT",
+        `did not report ready within the ${MAX_READY_WAIT_MS / 1000}s safety cap`
+      );
     }, MAX_READY_WAIT_MS);
 
     backendProcess.stdout.on("data", (data) => {
@@ -362,10 +373,10 @@ const startRealBackend = () => {
         } else if (event.event === "startup_error") {
           // The cause, with its traceback, is in backend.log (or on the
           // backend's stderr, echoed above); this is the parent's record.
-          logError(
-            `Backend reported startup_error ${event.code}${event.message ? `: ${event.message}` : ""}`
+          failWith(
+            event.code || "BACKEND_STARTUP_FAILED",
+            `backend reported startup_error${event.message ? `: ${event.message}` : ""}`
           );
-          failWith(event.code || "BACKEND_STARTUP_FAILED");
         } else if (event.event === "ready") {
           if (event.port) actualPort = event.port;
           log(`Backend reported ready on port ${actualPort}; confirming health...`);
@@ -378,15 +389,18 @@ const startRealBackend = () => {
                 log("Backend health confirmed.");
                 succeed();
               } else {
-                logError(
-                  `Backend reported ready on port ${actualPort} but health could not be confirmed`
+                failWith(
+                  "BACKEND_UNREACHABLE",
+                  `reported ready on port ${actualPort} but health could not be confirmed`
                 );
-                failWith("BACKEND_UNREACHABLE");
               }
             })
             .catch((error) => {
-              logError(`Health check of the backend on port ${actualPort} threw`, error);
-              failWith("BACKEND_UNREACHABLE");
+              failWith(
+                "BACKEND_UNREACHABLE",
+                `health check of port ${actualPort} threw: ${error.message}`,
+                error
+              );
             });
         }
       }
@@ -410,27 +424,19 @@ const startRealBackend = () => {
     });
 
     backendProcess.on("exit", (code, signal) => {
-      const outcome = `Backend process exited with code ${code}, signal ${signal}`;
-      if (backendStopRequested) {
-        log(`${outcome} (stop requested)`);
-      } else {
-        // Nobody asked it to stop: it crashed, or something killed it.
-        logError(`${outcome} (not requested: the backend died)`);
-      }
+      // The tracker decides the level: a stop main asked for, the crash that
+      // is the start failure, a running backend that died, or the exit that
+      // follows an already-recorded failure.
+      tracker.exited(proc, code, signal);
       if (backendProcess === proc) backendProcess = null;
-      if (code === 127) {
-        failWith("BACKEND_NOT_FOUND");
-      } else if (code !== 0 && code !== null) {
-        failWith("BACKEND_EXIT_ERROR");
-      } else {
-        // Clean exit before readiness was confirmed — treat as a crash. After a
-        // successful start this is a no-op (the promise is already settled).
-        failWith("CRASH_BEFORE_READY");
-      }
     });
 
     backendProcess.on("error", (error) => {
-      logError(`Failed to start the backend process ${backendPath}`, error);
+      failWith(
+        "BACKEND_SPAWN_FAILED",
+        `could not start the backend process ${backendPath}: ${error.message}`,
+        error
+      );
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("backend-event", {
           event: "startup_error",
@@ -439,7 +445,6 @@ const startRealBackend = () => {
           source: "spawn",
         });
       }
-      failWith("BACKEND_SPAWN_FAILED");
     });
   });
 };
@@ -461,13 +466,15 @@ async function startBackendSupervised(attempt = 0) {
     log(`Backend start attempt ${attempt + 1} failed: ${code}`);
     if (shouldRetrySpawn(code, attempt, MAX_SPAWN_ATTEMPTS)) {
       logWarn(`Transient backend start failure (${code}); respawning`);
-      backendStopRequested = true;
+      requestStop(backendProcess);
       killBackend(backendProcess);
       backendProcess = null;
       await new Promise((r) => setTimeout(r, 2000));
       return startBackendSupervised(attempt + 1);
     }
-    logError(`Backend startup failed (${code}); surfacing to the user`);
+    // The failure itself is already recorded (one ERROR, by startRealBackend's
+    // tracker, which knows the cause); this line only says it reached the user.
+    log(`Backend startup failed (${code}); surfacing to the user`);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("backend-event", {
         event: "startup_error",
@@ -622,7 +629,7 @@ const createApplicationMenu = () => {
                 // delete; killBackend is the hard tree-kill fallback (#216).
                 if (backendProcess) {
                   log("Stopping backend process...");
-                  backendStopRequested = true;
+                  requestStop(backendProcess);
                   await gracefulShutdown(backendProcess, { killFn: killBackend });
                   backendProcess = null;
                 }
@@ -917,7 +924,7 @@ ipcMain.handle("backend:restart", async () => {
   log("Renderer requested a backend restart.");
   // Graceful first (stop_postgres releases the data-dir locks) so the respawn
   // isn't racing an orphaned postmaster; killBackend is the hard fallback (#216).
-  backendStopRequested = true;
+  requestStop(backendProcess);
   await gracefulShutdown(backendProcess, { killFn: killBackend });
   backendProcess = null;
   backendIsReady = false;
@@ -1045,7 +1052,7 @@ ipcMain.handle("data:clearAll", async () => {
       // (not a bare SIGTERM, which on Windows only hits the parent — #147/#216).
       if (backendProcess) {
         log("Stopping backend process...");
-        backendStopRequested = true;
+        requestStop(backendProcess);
         await gracefulShutdown(backendProcess, { killFn: killBackend });
         backendProcess = null;
       }
@@ -1215,7 +1222,7 @@ app
             mainWindow.webContents.send("backend-event", { event: "backend_ready", port });
           }
         })
-        .catch((err) => logError("Dev backend not available", err));
+        .catch((err) => log(`Dev backend not available: ${err.message}`));
       return;
     }
 
@@ -1251,7 +1258,7 @@ app.on("before-quit", (e) => {
     e.preventDefault();
     shuttingDown = true;
     log("Stopping backend process before quit...");
-    backendStopRequested = true;
+    requestStop(backendProcess);
     gracefulShutdown(backendProcess, { killFn: killBackend }).finally(() => {
       backendProcess = null;
       app.quit();
