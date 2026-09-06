@@ -232,6 +232,8 @@ class Hardware_Service:
 
             return profile
 
+        except HardwareException:
+            raise  # logged where it was raised
         except Exception as e:
             logger.exception(f"Failed to get or create hardware profile: {e}")
             raise HardwareException("Failed to retrieve hardware information", trace=str(e))
@@ -442,6 +444,8 @@ class Hardware_Service:
             logger.info("Hardware profile refreshed successfully")
             return profile
 
+        except HardwareException:
+            raise  # logged where it was raised
         except Exception as e:
             logger.exception(f"Failed to refresh hardware profile: {e}")
             raise HardwareException("Failed to refresh hardware profile", trace=str(e))

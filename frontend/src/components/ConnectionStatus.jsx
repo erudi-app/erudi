@@ -5,6 +5,9 @@ import { HelpCircle, RefreshCw } from "lucide-react";
 import Tooltip from "./Tooltip";
 import { getApiBaseUrl } from "../config/api";
 import { isNetworkOnline, subscribeNetworkStatus } from "../utils/networkStatus";
+import { createLogger } from "../utils/logger";
+
+const log = createLogger("ConnectionStatus");
 
 /**
  * Live status pill for the bottom of the left rail.
@@ -153,7 +156,11 @@ export default function ConnectionStatus({
 
   const handleRestart = useCallback(() => {
     const pending = window.backendAPI?.restartBackend?.();
-    if (pending && typeof pending.catch === "function") pending.catch(() => {});
+    if (pending && typeof pending.catch === "function") {
+      pending.catch((error) => {
+        log.error("The backend restart the user asked for did not happen", error);
+      });
+    }
   }, []);
 
   const d = resolveDisplay(status);

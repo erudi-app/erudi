@@ -64,7 +64,7 @@ export default function ArenaPage() {
         setModels(data);
         setPanels([0, 1].map((i) => makePanel(i, data[i % data.length]?.name, data)));
       })
-      .catch((err) => log.error("Erreur lors du fetch des modèles:", err));
+      .catch((err) => log.error("Failed to fetch the local models", err));
   }, []);
 
   // Switching a panel's model re-defaults its sampling to the new model's
@@ -187,6 +187,10 @@ export default function ArenaPage() {
           // Deliberately swallow AbortError: a user-initiated stop is not an
           // error — panels keep whatever partial text they streamed (#136 H).
           if (err?.name !== "AbortError") {
+            log.error(
+              `Arena query failed for panel ${panel.id} (model ${panel.selectedModel})`,
+              err
+            );
             // The error is flagged on the message itself rather than sniffed
             // from its (now language-dependent) text.
             setPanels((prev) =>

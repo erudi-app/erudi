@@ -84,8 +84,18 @@ Two properties of that list are deliberate.
 content (see [privacy](privacy.md)), and this page exists to be pasted into a
 public issue. The filter is default-exclude in both readers: a record that does
 not state a level of `WARNING` or above is dropped, along with its continuation
-lines. In `erudi-backend.log` that also excludes the Electron main process's own
-unlevelled lines.
+lines. In `erudi-backend.log` the levelled lines are the renderer's
+(`[renderer:<ns>] WARN|ERROR …`) and the main process's own failures
+(`[main] WARN|ERROR …`: a backend that exited, a spawn that failed, a renderer
+that crashed); main's lifecycle chatter carries no level and stays out.
+
+**Each error appears once.** The same failure is legitimately written by more
+than one writer, and the merge removes the overlap rather than the writers: an
+uncaught renderer error is shown from the app log (the record that survives a
+reload), with the session buffer contributing only its repeat count; the app
+log's echo of the backend's stdout is dropped when the backend answered, since
+`backend.log` holds the same record with its traceback, and kept when it did
+not, since it is then the backend's last words.
 
 **The page sends nothing.** It reads `GET /erudi/diagnostics/` over loopback,
 reads the app log through the Electron preload bridge, and reads this window's
@@ -104,10 +114,86 @@ start.
 An exception that escapes a React render, an uncaught `window.onerror`, and an
 unhandled promise rejection are all recorded: they go to `erudi-backend.log`
 under the namespace `renderer:uncaught` and into the session buffer the
-Diagnostics page reads. Identical errors are counted rather than logged again,
-so a render loop costs one line and a repeat count instead of filling the file.
+Diagnostics page reads (which shows the file record once, with the buffer's
+repeat count). Identical errors are counted rather than logged again, so a
+render loop costs one line and a repeat count instead of filling the file.
 A render that throws replaces the screen with a recoverable page carrying the
 error, a *Reload* button and the same report block.
+
+## Logging rules
+
+The Diagnostics page is only as truthful as the records underneath it. Every
+place where something can go wrong — an `except` block, a `.catch(...)`, a
+child-process exit, a timeout, a retry, a fallback, a global handler — follows
+these rules, in both processes.
+
+### Level
+
+- **`ERROR`** — the operation the user or the app needed did not happen: a
+  request ended in 5xx, an inference child died or never became ready, a
+  download or an ingestion failed, the database or a migration failed, a
+  background task died, the backend or the renderer crashed. The record
+  always carries the exception: `logger.error(..., exc_info=True)` or
+  `logger.exception(...)` in Python, the error object (its stack) in JS.
+- **`WARNING`** — the app recovered or degraded on its own, and a maintainer
+  would want to know: a retry that succeeded after failures, a fallback that
+  was taken (the other `llama-server` flavour, the processor because NVML sees
+  no GPU, a default title, an answer without its knowledge-base excerpts), a
+  file skipped, an invalid value replaced by a default, a child that printed
+  something alarming but kept running, a probe that timed out once.
+- **`INFO`** — the expected outcomes of user actions and the normal
+  lifecycle. A 4xx that the client asked for — a model deleted a moment ago
+  (404), a guarded delete (409), a rejected input (422) — is one of them: it is
+  not a defect, and it must not fill a page meant for bug reports. The backend
+  logs it at `INFO` in the request's record, and the API client logs the same
+  status at `info` on its side.
+- Nothing that indicates a defect is logged at `INFO`/`DEBUG` or not at all.
+
+### One record per failure
+
+A failed request has exactly one record, written where the exception is
+handled, never where it is raised: the handler for `AppBaseException`
+(`backend/src/core/exceptions.py`) writes the method, path, status, Erudi code,
+message and the trace the raiser attached, at the level of the status; the
+fallback handler for anything else writes the traceback at `ERROR`, for a crash
+inside a streaming body too. Constructing an exception logs nothing, so an
+exception that is caught and recovered from leaves no record, and a repository
+or an endpoint does not log before raising. An `except` that recovers logs its
+own outcome, at the level of what it did.
+
+A background task nobody awaits (`BackgroundTasks`, `asyncio.create_task`, a
+thread) writes its own record at its boundary, with the traceback: that
+record is the only trace of its death. A task created with `create_task` has a
+done callback for the same reason.
+
+### Content
+
+A record says what failed, on what, and why: the model id, path, port, request
+id, exit code or HTTP status, and the exception with its traceback when it was
+unexpected. Huge payloads are truncated. Secrets never reach a line: the
+`HF_TOKEN`, the `--api-key` minted for `llama-server`, database URLs with a
+password, `Authorization` headers; argv, headers and environment blocks are
+not logged.
+
+### Silence
+
+No `except Exception: pass`, `except: return None`, `.catch(() => {})` or empty
+`catch {}` without a comment saying why the failure is genuinely irrelevant. A
+silent branch that would hide a real failure gets a record at the level above.
+
+### Process boundaries
+
+A parent logs the failures of its children. The backend logs an inference
+child that exits with its pid, port, exit code and the tail of its output
+(`llama-server` is drained by `ChildOutputDrainer`; `mlx_vlm.server` has no
+pipe and is reported by exit code). The Electron main process logs the
+backend's exit (`ERROR` unless main asked it to stop), a spawn that failed,
+every `startup_error` it receives, and what no `catch` sees: an uncaught
+exception or unhandled rejection in the main process, a renderer or Chromium
+child process that is gone, a window that stops responding. The backend
+launcher (`backend/run.py`) writes every `startup_error` it emits to
+`backend.log` with its traceback, and the lifespan logs a failed startup
+before it propagates, because uvicorn reports it on stderr only.
 
 ## Tracing a bug (QA recipe)
 

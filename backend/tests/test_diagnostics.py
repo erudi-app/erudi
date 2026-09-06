@@ -104,19 +104,21 @@ class TestParseRecords:
         assert levels == ["WARNING", "ERROR", "CRITICAL"]
 
     def test_joins_the_continuation_lines_of_a_kept_record(self):
-        # AppBaseException logs a multi-line record; the detail lives on the
-        # continuation lines, so dropping them would leave a useless header.
+        # A 5xx record carries its trace and traceback as continuation lines;
+        # dropping them would leave a header without its cause.
         text = "\n".join(
             [
-                _record("ERROR", "- Status Code: 500"),
-                "- Erudi Custom Code: MODEL_NOT_FOUND",
-                "- Message: model 12 is missing",
+                _record("ERROR", "GET /erudi/llms/12 -> 500 FILESYSTEM_ERROR: weights missing"),
+                "- Trace: /models/12: no such file",
+                "Traceback (most recent call last):",
+                '  File "x.py", line 1, in <module>',
                 _record("INFO", "next"),
             ]
         )
         (rec,) = log_reader.parse_records(text)
-        assert "MODEL_NOT_FOUND" in rec["message"]
-        assert "model 12 is missing" in rec["message"]
+        assert "FILESYSTEM_ERROR" in rec["message"]
+        assert "no such file" in rec["message"]
+        assert "Traceback" in rec["message"]
 
     def test_drops_the_continuation_lines_of_a_filtered_record(self):
         # THE PRIVACY TEST. An INFO record carrying a user prompt must not

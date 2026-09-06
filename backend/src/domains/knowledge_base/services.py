@@ -271,7 +271,8 @@ class KB_Service:
             self.repo.update_kb_job_status(db, kb_job, "completed")
 
         except Exception as e:
-            logger.error(f"Error in KB job {kb_job_id}: {e}")
+            # Marked failed for the polling UI and re-raised: the background
+            # task that owns this job logs the record, with the traceback.
             self._handle_indexing_error(db, kb_job_id, str(e))
             raise
 
@@ -282,7 +283,9 @@ class KB_Service:
         try:
             content = path.read_bytes()
         except OSError as e:
-            logger.error(f"KB {kb_id}: cannot read {path.name}: {e}")
+            # One file skipped; the batch goes on (and fails as a whole only
+            # when nothing at all could be indexed).
+            logger.warning(f"KB {kb_id}: cannot read {path.name}, skipping it: {e}")
             return "failed"
 
         content_hash = hashlib.sha256(content).hexdigest()
@@ -327,7 +330,9 @@ class KB_Service:
             return "indexed"
 
         except Exception as e:
-            logger.error(f"KB {kb_id}: ingestion failed for {path.name}: {e}")
+            # The traceback matters here: this is where a broken embedding
+            # model or a chunker that cannot load its tokenizer surfaces.
+            logger.error(f"KB {kb_id}: ingestion failed for {path.name}: {e}", exc_info=True)
             self.repo.update_document_status(db, document, "failed")
             return "failed"
 
@@ -351,4 +356,4 @@ class KB_Service:
             # This way users can see the error message before cleanup
 
         except Exception as e:
-            logger.error(f"Error handling indexing error: {e}")
+            logger.error(f"Could not mark KB job {kb_job_id} as failed: {e}", exc_info=True)

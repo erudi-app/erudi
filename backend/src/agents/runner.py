@@ -225,6 +225,18 @@ class GenParams:
     max_tokens: int
 
 
+def _child_crash_suffix(engine) -> str:
+    """`; llama-server child is dead (...)` when the engine's child died, else ""."""
+    report = getattr(engine, "child_crash_report", None)
+    if report is None:
+        return ""
+    try:
+        text = report()
+    except Exception:  # a diagnostic must never mask the failure it describes
+        return ""
+    return f"; {text}" if text else ""
+
+
 class AgentRunner:
     """Streams an agent turn as structured events. Shared by conversation and arena.
 
@@ -385,7 +397,10 @@ class AgentRunner:
                     f"kb_context={'yes' if kb_context_block else 'no'}"
                 )
             except Exception as exc:
-                logger.exception("Agent construction failed")
+                logger.exception(
+                    f"Agent construction failed: llm={getattr(llm, 'id', '?')} "
+                    f"({getattr(llm, 'name', '?')}), thread_id={thread_id}"
+                )
                 # #252: construction failed (model load / spawn). Emit the curated
                 # sentinel as an answer event; callers map it to an error turn.
                 yield _construction_error_event(exc)
@@ -575,7 +590,14 @@ class AgentRunner:
                 if stateful:
                     await self._repair_alternation(agent, run_config)
             except Exception:
-                logger.exception("Agent streaming failed")
+                # A stream that breaks because the inference child died shows
+                # up here as a connection error; the engine knows the exit
+                # code and the child's last lines, so ask it.
+                logger.exception(
+                    f"Agent streaming failed: llm={getattr(llm, 'id', '?')} "
+                    f"({getattr(llm, 'name', '?')}), thread_id={thread_id}"
+                    f"{_child_crash_suffix(engine)}"
+                )
                 if stateful:
                     await self._repair_alternation(agent, run_config)
                 # Parity with the pre-#297 live stream: text buffered before the
@@ -623,7 +645,13 @@ class AgentRunner:
                     sampling=resolve_sampling_defaults(llm),
                 )
             except Exception:
-                logger.exception("One-shot model construction failed")
+                # The caller falls back to a default title: recovered, but the
+                # cause is worth the traceback.
+                logger.warning(
+                    f"One-shot model construction failed: llm={getattr(llm, 'id', '?')} "
+                    f"({getattr(llm, 'name', '?')}); using the default",
+                    exc_info=True,
+                )
                 return
             splitter = ThinkSplitter()
             try:
@@ -635,7 +663,12 @@ class AgentRunner:
                         if event["t"] == "answer":
                             yield event["text"]
             except Exception:
-                logger.exception("One-shot streaming failed")
+                logger.warning(
+                    f"One-shot streaming failed: llm={getattr(llm, 'id', '?')} "
+                    f"({getattr(llm, 'name', '?')}); using the default"
+                    f"{_child_crash_suffix(engine)}",
+                    exc_info=True,
+                )
                 return
             # Stream completed normally: drain the splitter. An unclosed
             # <think> flushes as thinking and is dropped on purpose -- the

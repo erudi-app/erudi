@@ -798,18 +798,19 @@ async def download_llm(
     except (GatedRepoError, HfHubHTTPError) as e:
         status = getattr(getattr(e, "response", None), "status_code", None)
         if isinstance(e, GatedRepoError) or status in (401, 403):
-            logger.error(f"Anonymous access denied for {actual_download_link}: {e}")
             raise UnsupportedPlatformException(
                 feature=model_link,
                 reason="requires HuggingFace authentication and cannot be downloaded anonymously",
             )
-        logger.error(f"HuggingFace error for {actual_download_link}: {e}")
         raise
     except Exception as e:
+        # Re-raised in both branches: the download task that owns the job
+        # writes the record, with the traceback. Named here so the offline
+        # case still says which model it was about.
         if _is_offline_download_error(e):
-            logger.error(f"Model download failed (offline): {e}")
-            raise HuggingFaceAPIException(OFFLINE_DOWNLOAD_MESSAGE, trace=str(e))
-        logger.error(f"Failed to process model: {e}")
+            raise HuggingFaceAPIException(
+                OFFLINE_DOWNLOAD_MESSAGE, trace=f"{actual_download_link}: {e}"
+            )
         raise
     finally:
         if job_id is not None:

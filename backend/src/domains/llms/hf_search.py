@@ -97,7 +97,9 @@ def search_huggingface(query: str, limit: int = 30) -> List[Dict[str, Any]]:
             if not engine.is_runnable(m.id):
                 continue
         except Exception:
-            pass
+            # The runnability check is a KNOWN_BROKEN lookup; if it cannot
+            # decide, the hit stays listed and the download gate decides.
+            logger.debug(f"is_runnable check failed for {m.id}; keeping the hit", exc_info=True)
         seen.add(key)
         slug = m.id.split("/")[-1]
         results.append(

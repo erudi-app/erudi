@@ -78,28 +78,36 @@ def validate_gguf_file(gguf_path: Union[str, Path]) -> None:
     Raises :class:`EngineException` (with a curated user-facing message) on the
     first problem; returns None when the file is a plausible GGUF container.
     """
+    # The message is curated for the user; the path goes in the trace so the
+    # log record says which file failed the check.
     path = Path(gguf_path)
     if not path.exists():
-        raise EngineException(message=incomplete_message("the GGUF weights file is missing"))
+        raise EngineException(
+            message=incomplete_message("the GGUF weights file is missing"), trace=str(path)
+        )
     try:
         size = path.stat().st_size
     except OSError as exc:
         raise EngineException(
             message=incomplete_message("the GGUF weights file is unreadable"),
-            trace=str(exc),
+            trace=f"{path}: {exc}",
         )
     if size == 0:
-        raise EngineException(message=incomplete_message("the GGUF weights file is empty"))
+        raise EngineException(
+            message=incomplete_message("the GGUF weights file is empty"), trace=str(path)
+        )
     try:
         with open(path, "rb") as handle:
             head = handle.read(len(GGUF_MAGIC))
     except OSError as exc:
         raise EngineException(
             message=incomplete_message("the GGUF weights file is unreadable"),
-            trace=str(exc),
+            trace=f"{path}: {exc}",
         )
     if head != GGUF_MAGIC:
-        raise EngineException(message=incomplete_message("the GGUF weights file is corrupted"))
+        raise EngineException(
+            message=incomplete_message("the GGUF weights file is corrupted"), trace=str(path)
+        )
 
 
 def validate_hf_snapshot(model_dir: Union[str, Path]) -> None:
@@ -112,15 +120,19 @@ def validate_hf_snapshot(model_dir: Union[str, Path]) -> None:
     """
     path = Path(model_dir)
     if not path.exists() or not path.is_dir():
-        raise EngineException(message=incomplete_message("the model folder is missing"))
+        raise EngineException(
+            message=incomplete_message("the model folder is missing"), trace=str(path)
+        )
     if not _nonempty_file(path / "config.json"):
-        raise EngineException(message=incomplete_message("missing config.json"))
+        raise EngineException(message=incomplete_message("missing config.json"), trace=str(path))
     if not any(_nonempty_file(path / name) for name in _TOKENIZER_FILES):
-        raise EngineException(message=incomplete_message("missing tokenizer"))
+        raise EngineException(message=incomplete_message("missing tokenizer"), trace=str(path))
     has_weights = any(
         _nonempty_file(child)
         for child in path.iterdir()
         if child.suffix.lower() in _WEIGHT_SUFFIXES
     )
     if not has_weights:
-        raise EngineException(message=incomplete_message("no model weights were found"))
+        raise EngineException(
+            message=incomplete_message("no model weights were found"), trace=str(path)
+        )

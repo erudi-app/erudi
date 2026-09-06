@@ -179,11 +179,17 @@ class RequestLoggingMiddleware:
         try:
             await self.app(scope, receive, send_wrapper)
         except Exception:
-            # Access line for the crashed request; the traceback itself is
-            # logged by unhandled_exception_handler (ServerErrorMiddleware).
+            # Access line for the crashed request, at the access line's own
+            # level: the defect record -- one ERROR with the traceback -- is
+            # written by unhandled_exception_handler (ServerErrorMiddleware,
+            # which runs for a crash inside a streaming body too). A second
+            # ERROR here would show the same crash twice on the Diagnostics
+            # panel. The status is the one already sent when a stream crashed
+            # mid-body, 500 when the response never started.
             duration_ms = (time.perf_counter() - start) * 1000
-            logger.error(
-                f"HTTP {method} {path} -> 500 in {duration_ms:.1f}ms (unhandled exception)"
+            log = logger.debug if quiet else logger.info
+            log(
+                f"HTTP {method} {path} -> {status_code} in {duration_ms:.1f}ms (unhandled exception)"
             )
             raise
         if not logged:
@@ -376,6 +382,85 @@ def emit_engine_notice(app: FastAPI) -> None:
     emit(notice)
 
 
+async def _start_services(app: FastAPI, _phase) -> None:
+    """The startup half of :func:`lifespan`, in boot order.
+
+    ``_phase`` reports startup progress to the Electron loader (a no-op when
+    run.py did not inject an emitter).
+    """
+    # Step 0: embedded PostgreSQL cluster — must precede any DB usage. On first
+    # run this pays a one-time initdb (the long pole), so surface it explicitly.
+    _phase("preparing_database")
+    app.state.postgres = start_postgres(config.POSTGRES_DATA_DIR)
+    # Step 1: bind the SQLAlchemy engine/session factory to the live cluster.
+    init_database(app.state.postgres.sqlalchemy_url)
+    config.LLM_Engine = BaseEngine.get_engine()
+    # Step 4: migrate the schema to head (forward-only). Alembic is sync, so run
+    # it off the event loop. Replaces create_all — which never altered an existing
+    # (persisted) database — and auto-adopts pre-Alembic schemas (stamp baseline).
+    _phase("running_migrations")
+    await run_in_threadpool(run_migrations, app.state.postgres)
+    # await delete_all_data()
+    # Startup data (vars, cleanup, hardware) + the catalog reconciled from the
+    # bundled snapshot — zero network, all inside startup_populate_database
+    # (#131, #163). The catalog follows app releases; no live HF resync exists.
+    _phase("loading_catalog")
+    await startup_populate_database()
+    # The user may have REFUSED the auto-detected GPU. The preference lives
+    # in the database, so it can only be read here: `get_engine()` runs
+    # before `run_migrations`, where on the first boot after an upgrade the
+    # column does not exist yet, and it cannot be moved later because
+    # `startup_populate_database` reads `config.LLM_Engine.FORMAT_TAG`.
+    # Swapping CUDA for CPU afterwards is safe precisely because both share
+    # `FORMAT_TAG = "gguf"`: the catalog just reconciled under CUDA is
+    # identical under CPU.
+    await run_in_threadpool(apply_inference_backend_preference)
+    # Only now, on the engine that actually won, is the pre-flight meaningful:
+    # a user who already chose CPU must not be nagged about their GPU.
+    await run_in_threadpool(emit_engine_notice, app)
+    # Hybrid KB vector store (rag.kb_chunks) — AFTER the schema migration: its
+    # cross-schema FKs reference the business tables.
+    app.state.kb_store = init_kb_store(app.state.postgres)
+    # LangGraph conversation-state checkpointer (AsyncPostgresSaver on the
+    # same `erudi` database as the business schema), held open for the whole
+    # app lifetime and exposed on app.state.checkpointer.
+    checkpointer_cm = open_checkpointer(app.state.postgres.psycopg_url)
+    app.state.checkpointer = await checkpointer_cm.__aenter__()
+    # The DB watchdog may re-open the checkpointer on a resurrected cluster and
+    # swap this CM (#162), so publish it on app.state and let shutdown close the
+    # LIVE one rather than this now-possibly-stale local.
+    app.state.checkpointer_cm = checkpointer_cm
+    config.LLM_Engine.start_cleanup_task()
+    # DB watchdog: detect a dead embedded Postgres, resurrect it, expose db
+    # state on /health (#162). Started AFTER init_database bound the live engine
+    # (the disconnect hook attaches to it) and the checkpointer is on app.state.
+    start_watchdog(app)
+    # Post-ready backfill (#298): verify the tool-call wire capability of
+    # models downloaded before the supports_tools_wire column existed. Each
+    # verification loads a tokenizer (seconds per model), so it runs AFTER the
+    # ready handshake in a threadpool — never inside the awaited boot sequence
+    # (same non-blocking rationale as the post-ready resync of #109). Until a
+    # row is verified it stays NULL and its KB turns route systematic. Nobody
+    # awaits the task, so its failure is observed by a done callback: an
+    # exception in an un-awaited asyncio.Task is otherwise lost.
+    app.state.wire_backfill_task = asyncio.create_task(
+        run_in_threadpool(backfill_wire_tools_startup)
+    )
+    app.state.wire_backfill_task.add_done_callback(_log_background_task_failure)
+
+
+def _log_background_task_failure(task: "asyncio.Task") -> None:
+    """Done callback for fire-and-forget tasks: log a death at ERROR.
+
+    Cancellation is the shutdown path and is not a failure.
+    """
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(f"Background task {task.get_name()} failed: {exc}", exc_info=exc)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Manage application lifespan with startup and shutdown hooks.
@@ -435,62 +520,17 @@ async def lifespan(app: FastAPI):
         if _emit_phase is not None:
             _emit_phase(name)
 
-    # Step 0: embedded PostgreSQL cluster — must precede any DB usage. On first
-    # run this pays a one-time initdb (the long pole), so surface it explicitly.
-    _phase("preparing_database")
-    app.state.postgres = start_postgres(config.POSTGRES_DATA_DIR)
-    # Step 1: bind the SQLAlchemy engine/session factory to the live cluster.
-    init_database(app.state.postgres.sqlalchemy_url)
-    config.LLM_Engine = BaseEngine.get_engine()
-    # Step 4: migrate the schema to head (forward-only). Alembic is sync, so run
-    # it off the event loop. Replaces create_all — which never altered an existing
-    # (persisted) database — and auto-adopts pre-Alembic schemas (stamp baseline).
-    _phase("running_migrations")
-    await run_in_threadpool(run_migrations, app.state.postgres)
-    # await delete_all_data()
-    # Startup data (vars, cleanup, hardware) + the catalog reconciled from the
-    # bundled snapshot — zero network, all inside startup_populate_database
-    # (#131, #163). The catalog follows app releases; no live HF resync exists.
-    _phase("loading_catalog")
-    await startup_populate_database()
-    # The user may have REFUSED the auto-detected GPU. The preference lives
-    # in the database, so it can only be read here: `get_engine()` runs
-    # before `run_migrations`, where on the first boot after an upgrade the
-    # column does not exist yet, and it cannot be moved later because
-    # `startup_populate_database` reads `config.LLM_Engine.FORMAT_TAG`.
-    # Swapping CUDA for CPU afterwards is safe precisely because both share
-    # `FORMAT_TAG = "gguf"`: the catalog just reconciled under CUDA is
-    # identical under CPU.
-    await run_in_threadpool(apply_inference_backend_preference)
-    # Only now, on the engine that actually won, is the pre-flight meaningful:
-    # a user who already chose CPU must not be nagged about their GPU.
-    await run_in_threadpool(emit_engine_notice, app)
-    # Hybrid KB vector store (rag.kb_chunks) — AFTER the schema migration: its
-    # cross-schema FKs reference the business tables.
-    app.state.kb_store = init_kb_store(app.state.postgres)
-    # LangGraph conversation-state checkpointer (AsyncPostgresSaver on the
-    # same `erudi` database as the business schema), held open for the whole
-    # app lifetime and exposed on app.state.checkpointer.
-    checkpointer_cm = open_checkpointer(app.state.postgres.psycopg_url)
-    app.state.checkpointer = await checkpointer_cm.__aenter__()
-    # The DB watchdog may re-open the checkpointer on a resurrected cluster and
-    # swap this CM (#162), so publish it on app.state and let shutdown close the
-    # LIVE one rather than this now-possibly-stale local.
-    app.state.checkpointer_cm = checkpointer_cm
-    config.LLM_Engine.start_cleanup_task()
-    # DB watchdog: detect a dead embedded Postgres, resurrect it, expose db
-    # state on /health (#162). Started AFTER init_database bound the live engine
-    # (the disconnect hook attaches to it) and the checkpointer is on app.state.
-    start_watchdog(app)
-    # Post-ready backfill (#298): verify the tool-call wire capability of
-    # models downloaded before the supports_tools_wire column existed. Each
-    # verification loads a tokenizer (seconds per model), so it runs AFTER the
-    # ready handshake in a threadpool — never inside the awaited boot sequence
-    # (same non-blocking rationale as the post-ready resync of #109). Until a
-    # row is verified it stays NULL and its KB turns route systematic.
-    app.state.wire_backfill_task = asyncio.create_task(
-        run_in_threadpool(backfill_wire_tools_startup)
-    )
+    # A startup failure is logged HERE, with its traceback, before it
+    # propagates: uvicorn reports "Application startup failed" through its own
+    # logger, which writes to stderr and never to backend.log, so without this
+    # record the backend log of a backend that would not start says nothing
+    # about why. run.py then turns the dead server thread into a
+    # CRASH_BEFORE_READY event for Electron.
+    try:
+        await _start_services(app, _phase)
+    except Exception as exc:
+        logger.error(f"Startup failed: {exc}", exc_info=exc)
+        raise
     yield
     logger.info("==== Shutting down... ====")
     wire_backfill_task = getattr(app.state, "wire_backfill_task", None)

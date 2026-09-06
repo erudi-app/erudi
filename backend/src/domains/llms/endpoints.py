@@ -320,7 +320,9 @@ def _run_download_task(
                         )
             logger.info(f"Download job {job_id} completed successfully")
     except Exception as e:
-        logger.exception(f"Download job {job_id} failed: {e}")
+        # The task boundary: nobody awaits a BackgroundTask, so this is the
+        # record of the failed download, with the model and the traceback.
+        logger.exception(f"Download job {job_id} failed for LLM {model_id} ({model_link}): {e}")
         job_obj = session.query(DownloadJobModel).get(job_id)
         job_obj.status = "failed"
         job_obj.error_message = str(e)
@@ -635,7 +637,6 @@ async def update_llm(
         raise
     except Exception as e:
         db.rollback()
-        logger.exception(f"Failed to update LLM {llm_id}: {e}")
         raise DatabaseException("Failed to update LLM", trace=str(e))
 
 
@@ -742,7 +743,6 @@ async def delete_llm(
         raise
     except Exception as e:
         db.rollback()
-        logger.exception(f"Failed to delete LLM {llm_id}: {e}")
         raise DatabaseException("Failed to delete LLM", trace=str(e))
 
 
@@ -823,7 +823,6 @@ async def rebind_assistant(
         raise
     except Exception as e:
         db.rollback()
-        logger.exception(f"Failed to rebind assistant {assistant_id}: {e}")
         raise DatabaseException("Failed to rebind assistant", trace=str(e))
 
 
@@ -893,7 +892,6 @@ async def download_llm_route(
         raise
     except Exception as e:
         db.rollback()
-        logger.exception(f"Failed to initiate download for LLM {llm_id}: {e}")
         raise DatabaseException("Failed to start download", trace=str(e))
 
 
@@ -944,7 +942,6 @@ async def download_huggingface_route(
         raise
     except Exception as e:
         db.rollback()
-        logger.exception(f"Failed to start HF download for {payload.link}: {e}")
         raise DatabaseException("Failed to start download", trace=str(e))
 
 
@@ -970,7 +967,6 @@ def cancel_download(
         raise
     except Exception as e:
         db.rollback()
-        logger.exception(f"Failed to cancel download job {job_id}: {e}")
         raise DatabaseException("Failed to cancel download", trace=str(e))
 
 
@@ -1055,7 +1051,6 @@ def get_download_status_by_jobId(
         raise
     except Exception as e:
         db.rollback()
-        logger.exception(f"Failed to get download status for job {job_id}: {e}")
         raise DatabaseException("Failed to get download status", trace=str(e))
 
 
@@ -1130,5 +1125,4 @@ def get_download_status_without_jobId(
         raise
     except Exception as e:
         db.rollback()
-        logger.exception(f"Failed to get recent download status: {e}")
         raise DatabaseException("Failed to get download status", trace=str(e))

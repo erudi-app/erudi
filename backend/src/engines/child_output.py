@@ -29,9 +29,9 @@ class ChildOutputDrainer:
     `backend/logs/app.log` for the first time) and appended to a bounded tail.
 
     The thread is a daemon: a wedged or unkillable child must never hold up
-    interpreter shutdown. Every read error is swallowed -- this object exists to
-    keep a pipe empty, and a drainer that can raise into the engine's spawn path
-    would be worse than the problem it solves.
+    interpreter shutdown. A read error is logged at WARNING and never raised --
+    this object exists to keep a pipe empty, and a drainer that can raise into
+    the engine's spawn path would be worse than the problem it solves.
     """
 
     def __init__(self, stream: Optional[IO[str]], *, name: str, tail_lines: int = 200) -> None:
@@ -62,9 +62,12 @@ class ChildOutputDrainer:
                 self._first_line.set()
                 logger.debug(f"[{self._name}] {line}")
         except Exception as exc:
-            # Closed under us during shutdown, decoding error, dead fd: all
-            # normal ways for a child's pipe to end. Nothing to escalate.
-            logger.debug(f"[{self._name}] output drainer stopped: {exc}")
+            # EOF is not an exception: readline returns "" and the loop ends.
+            # Raising here means the pipe broke under us -- a decode error on
+            # a byte the child wrote, a stream closed from another thread. The
+            # drainer is gone from then on and the child can wedge once its
+            # pipe fills (#361), so this is worth a maintainer's attention.
+            logger.warning(f"[{self._name}] output drainer stopped: {type(exc).__name__}: {exc}")
         finally:
             try:
                 stream.close()

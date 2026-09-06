@@ -202,7 +202,8 @@ export default function LandingPage() {
         const data = await apiClient.get("/startup/welcome-popup");
         setShowWelcome(!data.has_already_displayed);
       } catch (error) {
-        log.error("Error fetching welcome popup status:", error);
+        // The popup is simply not shown: degraded.
+        log.warn("Failed to fetch the welcome popup status", error);
       }
     };
 
@@ -211,6 +212,8 @@ export default function LandingPage() {
         const data = await apiClient.get("/hardware/app_startup");
         setHardwareInfo(transformAppStartupInfo(data));
       } catch (error) {
+        // The hero and the recommendations depend on this answer.
+        log.error("Failed to fetch the hardware evaluation", error);
         setHardwareInfo({
           backend_type: "unknown",
           error: t("landing:messages.hardwareEvaluationFailed"),
@@ -229,7 +232,8 @@ export default function LandingPage() {
           setMachineDetail(data.hardware || null);
         }
       } catch (error) {
-        log.error("Error fetching hardware detail:", error);
+        // The readout falls back to the summary: degraded.
+        log.warn("Failed to fetch the hardware detail", error);
       }
     };
 
@@ -477,7 +481,7 @@ export default function LandingPage() {
             alt="Erudi"
             className="h-[40px] ml-2 w-auto cursor-pointer hover:opacity-80 transition-opacity"
             onClick={() => setShowWelcome(true)}
-            onError={(e) => log.error("Failed to load logo:", e.target.src)}
+            onError={(e) => log.warn("Failed to load the logo", e.target.src)}
           />
         </div>
         <div className="mb-6 flex-shrink-0">

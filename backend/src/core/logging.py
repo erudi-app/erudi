@@ -11,11 +11,15 @@ This module provides a centralized logging system with:
 - Log level driven by the ``ERUDI_LOG_LEVEL`` environment variable
   (default ``INFO``; invalid values fall back to ``INFO``).
 
-Log Levels:
+Log Levels (the rules are in docs/logging.md, "Logging rules"):
     - DEBUG: Internal diagnostics (token generation, model loading steps).
-    - INFO: Lifecycle transitions (startup, shutdown, model switched).
-    - WARNING: Recoverable issues (fallback to CPU, missing KB).
-    - ERROR: Operation failures (model not found, CUDA OOM).
+    - INFO: Lifecycle transitions (startup, shutdown, model switched) and the
+      expected outcomes of user actions, a 4xx the client asked for included.
+    - WARNING: The app recovered or degraded on its own (fallback to CPU, a
+      skipped file, an answer without its KB excerpts).
+    - ERROR: The operation did not happen (5xx, a dead inference child, a
+      failed download or ingestion, a background task that died), always with
+      the exception attached.
     - CRITICAL: System failures (database corruption, engine crash).
 
 Log Format:

@@ -56,11 +56,14 @@ let clipboardWriteText;
 beforeEach(() => {
   resetSessionErrors();
   getMock.mockResolvedValue(BACKEND);
+  // A record of the main process's own: shown whether or not the backend
+  // answers. (An echo of the backend's stdout would be dropped while the
+  // backend answers, since backend.log holds the same record.)
   appLogTail = vi.fn().mockResolvedValue([
     {
       timestamp: "2026-09-05T09:00:00.000Z",
       level: "WARNING",
-      message: "Backend stdout: [WARNING] slow boot",
+      message: "[main] WARN slow boot",
     },
   ]);
   revealLog = vi.fn().mockResolvedValue({ success: true });

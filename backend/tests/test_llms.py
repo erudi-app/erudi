@@ -1367,8 +1367,9 @@ class TestModelDeletionAndRebind:
 
         The listing already knows the weights are gone (``weights_available``
         False), so the on-the-fly vision probe must not resolve a path that
-        cannot exist: the engine raises a 500-class exception whose constructor
-        logs it at ERROR on every poll, while the request itself returns 200.
+        cannot exist: the engine would raise a 500-class exception on every
+        poll, and any ERROR record for it would be a phantom, since the request
+        itself returns 200.
         """
         import logging
 

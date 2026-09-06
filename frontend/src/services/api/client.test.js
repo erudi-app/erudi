@@ -90,6 +90,35 @@ describe("APIClient request tracing", () => {
     expect(typeof fail.duration_ms).toBe("number");
     expect(fail.rid).toBe(entryData("api.request").rid);
   });
+
+  it("logs a 5xx at error, naming the request", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      statusText: "boom",
+      json: async () => ({ detail: "kaput" }),
+    });
+    await expect(apiClient.post("/llms/7/download", {})).rejects.toThrow("kaput");
+    const entry = clientEntries().find((e) => e.msg === "api.failure");
+    expect(entry.level).toBe("error");
+    const fail = JSON.parse(entry.data);
+    expect(fail.method).toBe("POST");
+    expect(fail.path).toBe("/llms/7/download");
+  });
+
+  it("logs a 4xx at info: the backend refused something legitimately absent", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      statusText: "Not Found",
+      json: async () => ({ detail: "Model 'ghost' not found" }),
+    });
+    await expect(apiClient.get("/llms/ghost")).rejects.toThrow("not found");
+    const entry = clientEntries().find((e) => e.msg === "api.failure");
+    expect(entry.level).toBe("info");
+    expect(JSON.parse(entry.data).status).toBe(404);
+    expect(clientEntries().some((e) => e.level === "error")).toBe(false);
+  });
 });
 
 describe("tracedFetch", () => {
@@ -145,8 +174,19 @@ describe("tracedFetch", () => {
     expect(fetchMock).toHaveBeenCalledTimes(1); // no retry, unlike apiClient
     const fail = entryData("api.failure");
     expect(fail.error).toBe("Failed to fetch");
+    expect(fail.path).toBe("/erudi/llms/local");
     expect(typeof fail.duration_ms).toBe("number");
     expect(fail.rid).toBe(entryData("api.request").rid);
+  });
+
+  it("logs a caller's own abort at info, not as a failure", async () => {
+    const abort = new Error("The user aborted a request.");
+    abort.name = "AbortError";
+    fetchMock.mockRejectedValueOnce(abort);
+
+    await expect(tracedFetch("http://127.0.0.1:8765/erudi/arena/1/query")).rejects.toBe(abort);
+    const entry = clientEntries().find((e) => e.msg === "api.failure");
+    expect(entry.level).toBe("info");
   });
 
   it("logs a FormData body as kind and size, not a preview", async () => {

@@ -261,8 +261,13 @@ class ConversationService:
 
         try:
             return retrieve_kb_excerpts(query, llm.kb_id, token_budget=strategy["kb_token_budget"])
-        except Exception:
-            logger.exception("KB retrieval failed; continuing without context")
+        except Exception as e:
+            # Degraded, not failed: the turn is answered without the excerpts.
+            logger.warning(
+                f"KB retrieval failed for kb {llm.kb_id} (llm {getattr(llm, 'id', '?')}); "
+                f"continuing without context: {e}",
+                exc_info=True,
+            )
             return []
 
     async def query_and_respond_stream(
@@ -306,7 +311,9 @@ class ConversationService:
                 self._load_conversation_and_llm, conversation_id
             )
         except Exception:
-            logger.exception("Failed to load conversation/LLM for query")
+            # The response has started (an NDJSON stream), so no exception
+            # handler will see this: the record is written here.
+            logger.exception(f"Failed to load conversation {conversation_id} or its LLM for query")
             # No conversation loaded -> nothing to persist; just surface the error.
             yield _ndjson({"t": "error", "text": ERROR_MESSAGE})
             yield _ndjson({"t": "done"})
@@ -411,7 +418,7 @@ class ConversationService:
             await _persist_assistant_once()
             yield _ndjson({"t": "done"})
         except Exception:
-            logger.exception("Query streaming failed")
+            logger.exception(f"Query streaming failed for conversation {conversation_id}")
             if not assistant_response:
                 assistant_response = ERROR_MESSAGE
                 yield _ndjson({"t": "error", "text": ERROR_MESSAGE})
@@ -447,7 +454,12 @@ class ConversationService:
                 self._load_conversation_and_llm, conversation_id
             )
         except Exception:
-            logger.exception("Title gen: failed to load conversation/LLM")
+            # Recovered with the default title; the traceback says why.
+            logger.warning(
+                f"Title generation: could not load conversation {conversation_id} or its LLM; "
+                f"keeping the default title",
+                exc_info=True,
+            )
             await run_in_threadpool(self._save_title, conversation_id, "New Conversation")
             return
 

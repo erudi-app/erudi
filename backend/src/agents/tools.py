@@ -237,7 +237,12 @@ def map_web_search_error(exc: BaseException) -> str:
     ``TimeoutError`` is checked BEFORE the OSError chain walk: since 3.10 the
     builtin is an OSError subclass and would otherwise map to "no internet".
     """
-    from ddgs.exceptions import RatelimitException, TimeoutException
+    try:
+        from ddgs.exceptions import RatelimitException, TimeoutException
+    except ImportError:
+        # The failure being mapped may BE the missing package: the mapper
+        # must still return text, never raise into the agent loop.
+        RatelimitException = TimeoutException = ()  # type: ignore[assignment]
 
     if isinstance(exc, (TimeoutException, TimeoutError)):
         tail = "the request timed out"
@@ -307,8 +312,12 @@ async def web_search(query: str, runtime: ToolRuntime[TurnToolContext]) -> str:
     except Exception as exc:
         # Locked contract (#310): NEVER raise — return deterministic text the
         # model can read and react to (offline, rate-limits, timeouts...).
+        # The traceback is attached only when the cause is not one of the
+        # expected network outcomes, whose text says everything.
+        expected = isinstance(exc, TimeoutError) or _chain_has_network_error(exc)
         logger.warning(
-            f"web_search tool failed: {type(exc).__name__}: " f"{truncate_for_log(str(exc), 300)}"
+            f"web_search tool failed: {type(exc).__name__}: {truncate_for_log(str(exc), 300)}",
+            exc_info=not expected,
         )
         return map_web_search_error(exc)
     logger.info(f"Tool web_search returned {len(results)} result(s)")

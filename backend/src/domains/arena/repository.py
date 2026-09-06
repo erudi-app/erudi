@@ -53,7 +53,6 @@ class ArenaRepository:
             llm = self.db.query(Llm).filter(Llm.id == llm_id).first()
 
             if not llm:
-                logger.warning(f"LLM {llm_id} not found")
                 raise ModelNotFoundException(f"LLM {llm_id}")
 
             logger.debug(f"Retrieved LLM {llm_id}: {llm.name}")
@@ -62,5 +61,4 @@ class ArenaRepository:
         except ModelNotFoundException:
             raise
         except SQLAlchemyError as e:
-            logger.error(f"Database error retrieving LLM {llm_id}: {str(e)}")
             raise DatabaseException("Could not retrieve LLM", trace=str(e))

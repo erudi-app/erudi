@@ -46,7 +46,6 @@ async def get_user_settings(
         return settings
     except Exception as e:
         db.rollback()
-        logger.exception(f"Failed to get user settings: {e}")
         raise DatabaseException("Failed to get user settings", trace=str(e))
 
 
@@ -83,5 +82,4 @@ async def update_user_settings(
         return settings
     except Exception as e:
         db.rollback()
-        logger.exception(f"Failed to update user settings: {e}")
         raise DatabaseException("Failed to update user settings", trace=str(e))

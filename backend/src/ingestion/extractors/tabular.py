@@ -19,6 +19,9 @@ def _read_text(path: Path) -> str:
     try:
         return raw.decode("utf-8")
     except UnicodeDecodeError:
+        logger.warning(
+            f"Tabular file {path.name}: not valid UTF-8 - falling back to latin-1 decoding"
+        )
         return raw.decode("latin-1")
 
 

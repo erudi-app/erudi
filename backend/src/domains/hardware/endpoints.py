@@ -160,8 +160,9 @@ def get_app_startup_info(db: Session = Depends(get_db)):
         return response
 
     except (HardwareException, DatabaseException) as e:
+        # Already logged with its traceback where it was raised (services /
+        # repository); a second record here would show one failure twice.
         db.rollback()
-        logger.exception(f"Failed to get app startup info: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         db.rollback()
@@ -209,7 +210,6 @@ def get_detailed_hardware_info(db: Session = Depends(get_db)):
 
     except (HardwareException, DatabaseException) as e:
         db.rollback()
-        logger.exception(f"Failed to get detailed hardware info: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         db.rollback()
@@ -250,7 +250,6 @@ def refresh_hardware_profile(db: Session = Depends(get_db)):
 
     except (HardwareException, DatabaseException) as e:
         db.rollback()
-        logger.exception(f"Failed to refresh hardware profile: {e}")
         raise HTTPException(status_code=500, detail=str(e))
     except Exception as e:
         db.rollback()

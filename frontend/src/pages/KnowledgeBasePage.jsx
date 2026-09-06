@@ -1,4 +1,4 @@
-import React, { useEffect, useState } from "react";
+import React, { useEffect, useRef, useState } from "react";
 import { HelpCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { inferenceTierLabel } from "../utils/inferenceTier";
@@ -57,6 +57,8 @@ export default function KnowledgeBasePage() {
 
   // --- Embedding-model gate (#146): the KB needs the e5 model on disk. ---
   const [gateState, setGateState] = useState(GATE.CHECKING);
+  // True after a failed gate check has been logged, until the next success.
+  const gateCheckFailedRef = useRef(false);
   const [gateError, setGateError] = useState(null);
 
   // Handle files dropped from DragDropArea
@@ -105,7 +107,8 @@ export default function KnowledgeBasePage() {
     });
 
     if (!selectedModel || !modelName.trim() || paths.length === 0) {
-      log.warn("Knowledge base form validation failed", {
+      // A form the user has not finished: expected, not a defect.
+      log.info("Knowledge base form validation failed", {
         selectedModel: !selectedModel,
         modelNameEmpty: !modelName.trim(),
         noPaths: paths.length === 0,
@@ -129,7 +132,7 @@ export default function KnowledgeBasePage() {
         (m) => (m.name || "").trim().toLowerCase() === trimmedName.toLowerCase()
       );
       if (duplicate) {
-        log.warn("Duplicate assistant name rejected", { name: trimmedName });
+        log.info("Duplicate assistant name rejected", { name: trimmedName });
         setErrorMessage(t("knowledgeBase:page.errors.duplicateName", { name: duplicate.name }));
         return;
       }
@@ -163,10 +166,9 @@ export default function KnowledgeBasePage() {
           setFormResetKey((k) => k + 1);
         }, 3000);
       },
-      onError: (error) => {
-        log.error("Knowledge base creation failed", error);
-        setErrorMessage(error);
-      },
+      // UI only: the context wrote the record (it knows the job and the
+      // backend's message); a second ERROR here would show one failure twice.
+      onError: (error) => setErrorMessage(error),
     });
   };
 
@@ -194,7 +196,8 @@ export default function KnowledgeBasePage() {
         });
       })
       .catch((err) => {
-        log.error("Failed to fetch hardware info", err);
+        // The page works without the rating: degraded.
+        log.warn("Failed to fetch the hardware rating", err);
         setRating({ status: "error", score: null, label: null });
       });
     fetchModels();
@@ -237,11 +240,17 @@ export default function KnowledgeBasePage() {
   const refreshGateStatus = async (prev) => {
     try {
       const status = await apiClient.get("/knowledge_base/embedding-model/status");
+      gateCheckFailedRef.current = false;
       setGateError(status.error || null);
       setGateState((current) => gateStateFromStatus(status, prev ?? current));
       return status;
     } catch (err) {
-      log.warn("Embedding-model status check failed", err);
+      // Polled every 2s while a download runs: one record per outage, not
+      // one per tick. The flag resets on the next successful check.
+      if (!gateCheckFailedRef.current) {
+        gateCheckFailedRef.current = true;
+        log.error("Embedding-model status check failed", err);
+      }
       return null;
     }
   };
@@ -266,7 +275,8 @@ export default function KnowledgeBasePage() {
     try {
       await apiClient.post("/knowledge_base/embedding-model/download");
     } catch (err) {
-      log.warn("Embedding-model download request failed", err);
+      // The download the user asked for did not start.
+      log.error("Embedding-model download request failed", err);
       setGateError(String(err?.message || err));
       setGateState(GATE.ERROR);
     }

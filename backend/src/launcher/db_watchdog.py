@@ -180,12 +180,17 @@ def _probe_sync() -> None:
         conn.execute(text("SELECT 1"))
 
 
+# The exception of the last failed resurrection attempt, attached to the
+# final ERROR of a recovery episode so the record says why recovery failed.
+_last_failure: Optional[BaseException] = None
+
+
 async def _probe_ok() -> None:
     """Proactive health probe (healthy path). On failure flip to recovering."""
     try:
         await run_in_threadpool(_probe_sync)
     except Exception as exc:
-        _flag_down(f"proactive probe failed ({type(exc).__name__})")
+        _flag_down(f"proactive probe failed ({type(exc).__name__}: {exc})")
 
 
 # ---- resurrection ----------------------------------------------------------
@@ -263,7 +268,9 @@ async def _resurrect_once(attempt: int) -> bool:
             _app.state.postgres = handle
         return True
     except Exception as exc:
-        logger.warning(f"DB watchdog: resurrection attempt {attempt} failed: {exc}")
+        global _last_failure
+        _last_failure = exc
+        logger.warning(f"DB watchdog: resurrection attempt {attempt} failed: {exc}", exc_info=True)
         return False
 
 
@@ -282,7 +289,8 @@ async def _run_recovery_episode() -> None:
     db_state = DB_FAILED
     logger.error(
         f"DB watchdog: recovery failed after {len(_BACKOFF_LADDER)} attempts; "
-        f"state -> {DB_FAILED}"
+        f"state -> {DB_FAILED}; last failure: {_last_failure}",
+        exc_info=_last_failure,
     )
 
 
@@ -327,7 +335,7 @@ async def _recovery_loop() -> None:
             raise
         except Exception as exc:
             # The loop must never die: log and take a breath.
-            logger.error(f"DB watchdog loop error: {exc}")
+            logger.error(f"DB watchdog loop error: {exc}", exc_info=True)
             await asyncio.sleep(1.0)
 
 

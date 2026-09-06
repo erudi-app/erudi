@@ -39,7 +39,7 @@ import platform
 import os
 import time
 from datetime import datetime, timedelta
-from typing import Any, Optional, Tuple, Union, Type, Dict
+from typing import Any, ClassVar, Optional, Tuple, Union, Type, Dict
 from abc import ABC, abstractmethod, ABCMeta
 from contextlib import asynccontextmanager
 from pathlib import Path
@@ -59,6 +59,21 @@ class EngineMeta(ABCMeta):
 
         """
         return f"LLM Engine: {cls.__name__}"
+
+
+# Exception class names pynvml raises on a machine that simply has no NVIDIA
+# driver. Compared by name so the CPU build, which may not ship pynvml at all,
+# never has to import it to know them.
+_NO_NVIDIA_DRIVER_ERRORS = frozenset({"NVMLError_LibraryNotFound", "NVMLError_DriverNotLoaded"})
+
+
+def _log_monitor_death(task: "asyncio.Task") -> None:
+    """Done callback of the idle-cleanup task: a death nobody awaits is logged."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(f"Idle cleanup monitor died: {exc}", exc_info=exc)
 
 
 class BaseEngine(ABC, metaclass=EngineMeta):
@@ -568,8 +583,23 @@ class BaseEngine(ABC, metaclass=EngineMeta):
 
                     nv.nvmlInit()
                     cuda_present = nv.nvmlDeviceGetCount() > 0
-                except Exception:
-                    cuda_present = False
+                except ImportError:
+                    # A CPU build ships without pynvml: expected, not a defect.
+                    logger.info("pynvml is not installed; using CPU_Engine.")
+                except Exception as e:
+                    if type(e).__name__ in _NO_NVIDIA_DRIVER_ERRORS:
+                        # No NVIDIA driver on this machine: the ordinary way a
+                        # CPU-only PC boots, not a fallback worth a warning.
+                        logger.info(f"No NVIDIA driver ({e}); using CPU_Engine.")
+                    else:
+                        # A driver that is present but broken. The user lands
+                        # on the processor without being told why unless this
+                        # record says so.
+                        logger.warning(
+                            f"NVIDIA detection failed ({type(e).__name__}: {e}); "
+                            f"using CPU_Engine.",
+                            exc_info=True,
+                        )
                 if cuda_present:
                     llm_engine = CUDA_Engine
                 else:
@@ -577,7 +607,7 @@ class BaseEngine(ABC, metaclass=EngineMeta):
                     logger.info(f"System: {system} and CUDA not available.")
             logger.info(f"Engine chosen: {llm_engine}")
             if llm_engine is None:
-                raise
+                raise RuntimeError(f"no engine matches system={system!r} machine={machine!r}")
             return llm_engine
         except Exception as e:
             raise EngineException(
@@ -694,20 +724,35 @@ class BaseEngine(ABC, metaclass=EngineMeta):
             if cls._should_cleanup():
                 await asyncio.to_thread(cls.cleanup)
 
+    # Seconds between idle-cleanup ticks. A class attribute so tests can run
+    # the monitor loop at speed.
+    _cleanup_interval_s: ClassVar[float] = 300.0
+
     @classmethod
     async def _cleanup_monitor(cls):
         """Background task monitoring idle time and triggering cleanup.
 
-        Runs every 300 seconds, checks if model has been idle longer than
-        _max_idle_time, and calls cleanup() if threshold exceeded.
+        Runs every ``_cleanup_interval_s`` seconds, checks if the model has
+        been idle longer than ``_max_idle_time``, and calls ``cleanup()`` if
+        the threshold is exceeded. A tick that raises is logged at ERROR with
+        its traceback and the loop goes on: the task is awaited by nobody, so
+        an exception that escaped it would end idle cleanup for the life of
+        the process without a single record.
 
         Note:
             Internal method. Do not call directly. Use start_cleanup_task().
 
         """
         while True:
-            await asyncio.sleep(300)
-            await cls._cleanup_tick()
+            await asyncio.sleep(cls._cleanup_interval_s)
+            try:
+                await cls._cleanup_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(
+                    f"Idle cleanup tick failed; the model stays loaded: {exc}", exc_info=True
+                )
 
     @classmethod
     def start_cleanup_task(cls):
@@ -726,7 +771,8 @@ class BaseEngine(ABC, metaclass=EngineMeta):
 
         """
         if cls._cleanup_task is None:
-            cls._cleanup_task = asyncio.create_task(cls._cleanup_monitor())
+            cls._cleanup_task = asyncio.create_task(cls._cleanup_monitor(), name="idle-cleanup")
+            cls._cleanup_task.add_done_callback(_log_monitor_death)
             logger.info("Started cleanup monitor")
 
     @classmethod

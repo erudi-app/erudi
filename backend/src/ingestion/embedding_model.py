@@ -229,7 +229,8 @@ def _run_download() -> None:
         _state["error"] = None
         logger.info(f"Embedding model download complete ({time.perf_counter() - start_s:.1f}s)")
     except Exception as exc:  # noqa: BLE001 - any failure is surfaced to the UI
-        logger.error(f"Embedding model download failed: {exc}")
+        # Runs on a thread nobody joins: this record is the only trace.
+        logger.error(f"Embedding model download failed: {exc}", exc_info=True)
         _state["error"] = _describe_download_error(exc)
     finally:
         _state["downloading"] = False
