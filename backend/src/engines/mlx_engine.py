@@ -136,7 +136,7 @@ class MLX_Engine(BaseChatServerEngine):
     # ======================= SUBPROCESS HTTP SERVER (mlx_vlm.server) =======================
     #
     # Inference goes through a subprocess `mlx_vlm.server` (OpenAI-compatible HTTP),
-    # spawned via `multiprocessing.Process(target=run_mlx_vlm_server, args=([argv],))`.
+    # spawned via `mp.Process(target=run_mlx_vlm_server, args=(argv, log_path))`.
     # mlx-vlm is a superset of mlx-lm: it serves plain text models through the same
     # endpoint, carries its own tool-calling parser (no mlx_lm.server EOS-flush drop,
     # so agentic tool use works on Apple Silicon), and accepts image input. The
