@@ -1,7 +1,7 @@
 // Levelled records for the Electron main process's own log lines.
 //
 // The app log (`erudi-backend.log`) has no level column: a line is
-// `[<ISO>] <text>`, and the Diagnostics panel keeps a record only when its
+// `[<ISO>] <text>`, and the Diagnostics page keeps a record only when its
 // text states a level (see appLogTail.js). Main's own lines therefore need to
 // say their level themselves, in the same shape the renderer bridge uses --
 // `[main] ERROR <message>` -- or a backend that died, a renderer that crashed
