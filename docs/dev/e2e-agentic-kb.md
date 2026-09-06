@@ -18,7 +18,7 @@
 >   on disk at `backend/data/models/105`. Tool-capable → exercises the
 >   `search_knowledge_base` path.
 > - **Systematic path** — a **non**-tool-capable model (Gemma-270M was purged from
->   this machine). See [Prerequisites](#prerequisites--test-data): either re-download
+>   this machine). See [Prerequisites](#prerequisites-test-data): either re-download
 >   it for a real systematic E2E, or cover that path at Layer 1 only.
 
 ## What #84 changed (recap, code-grounded)
