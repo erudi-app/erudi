@@ -1,10 +1,17 @@
 # Documentation site only (mkdocs.yml). Not part of the application.
 # Pinned to the versions the site was last built and reviewed with.
+#
+# Built with Zensical, not mkdocs-material: Material for MkDocs reaches end
+# of life on 2026-11-05, and Zensical (by the same team) is its maintained
+# successor. Zensical reads this repo's mkdocs.yml directly, so the config
+# format and nav did not need to change. `mkdocs` itself stays pinned because
+# mkdocstrings is still an mkdocs plugin under the hood; Zensical's own build
+# pulls it in as a dependency and drives it through its mkdocs-compatibility
+# layer.
+zensical==0.0.59
 mkdocs==1.6.1
-mkdocs-material==9.7.7
 mkdocstrings[python]==1.0.6
 mkdocstrings-python==2.0.8
-griffe==2.2.0
-# 11.0 fixes the ReDoS in the caret/tilde/betterem/magiclink inline processors.
-# mkdocs-material caps pymdown-extensions per minor, so it has to move with it.
+griffe==2.3.0
+# Floor set by zensical (pymdown-extensions>=11.0); pin exact for reproducibility.
 pymdown-extensions==11.0.2
