@@ -39,6 +39,35 @@ let bySignature = new Map();
 /** The uninstaller of the single active installation, or null. */
 let activeUninstall = null;
 
+/**
+ * Notified after every `recordSessionError` call (a new entry or a repeat),
+ * and after `resetSessionErrors`. The bug-icon counter (#485) uses this to
+ * update its badge immediately instead of waiting for its next poll.
+ */
+const sessionErrorListeners = new Set();
+
+function notifySessionErrorListeners() {
+  for (const listener of sessionErrorListeners) {
+    try {
+      listener();
+    } catch {
+      // A listener that throws must not break error capture itself.
+    }
+  }
+}
+
+/**
+ * Watch the session error buffer. Called with no arguments whenever it
+ * changes (a new error, a repeat, or a reset) -- read `getSessionErrors()`
+ * for the current contents.
+ * @param {() => void} listener
+ * @returns {() => void} Unsubscribe.
+ */
+export function subscribeSessionErrors(listener) {
+  sessionErrorListeners.add(listener);
+  return () => sessionErrorListeners.delete(listener);
+}
+
 /** Truncate and stringify anything a handler was handed. */
 function asText(value, limit) {
   try {
@@ -70,6 +99,7 @@ export function recordSessionError(error) {
       // A repeat. Count it and say nothing: this is the flood guard.
       seen.count += 1;
       seen.timestamp = new Date().toISOString();
+      notifySessionErrorListeners();
       return;
     }
 
@@ -96,6 +126,7 @@ export function recordSessionError(error) {
     // Logging comes last and inside the same swallow: if the bridge is gone
     // the entry is still in the buffer the panel reads.
     log.error(`${origin}: ${message}`, stack || undefined);
+    notifySessionErrorListeners();
   } catch {
     // A capture mechanism that throws is worse than no capture mechanism.
   }
@@ -110,6 +141,7 @@ export function getSessionErrors() {
 export function resetSessionErrors() {
   sessionErrors = [];
   bySignature = new Map();
+  notifySessionErrorListeners();
 }
 
 /**

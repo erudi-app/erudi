@@ -10,6 +10,20 @@
 // Nothing here reaches the network. The caller has already read everything
 // locally: `/erudi/diagnostics/` over loopback, the app log through the
 // preload bridge, and the session buffer from this window's own memory.
+//
+// This is also the ONE place records are filtered for what merely describes
+// the environment (no network, a remote service down, the user's disk or
+// port) rather than Erudi itself being wrong (#485's follow-up product
+// decision): `isHiddenFromDiagnostics` (utils/bugCounter.js) drops an
+// ERROR/CRITICAL entry that matches, so an offline HuggingFace attempt never
+// appears in the list, the copied report, OR the sidebar badge -- all three
+// read this same merge, so they cannot disagree. WARNINGs are never touched
+// by that filter; only the bug-icon badge additionally ignores them (by
+// level, in `isCountableError`), not this page. The filter is presentation
+// only: `backend.log` and `erudi-backend.log` on disk still carry every
+// record, unfiltered.
+
+import { isHiddenFromDiagnostics } from "./bugCounter";
 
 /** Entries kept in the merged timeline. */
 export const DEFAULT_ENTRY_LIMIT = 200;
@@ -132,8 +146,12 @@ export function mergeRecentErrors({
     });
   }
 
-  entries.sort((a, b) => (timeKey(a) < timeKey(b) ? -1 : timeKey(a) > timeKey(b) ? 1 : 0));
-  return limit ? entries.slice(-limit) : entries;
+  // Drop what merely describes the environment before sorting/slicing, so an
+  // environmental record never occupies a slot a real error could otherwise
+  // hold within `limit`. WARNINGs are untouched -- see the file banner above.
+  const visible = entries.filter((entry) => !isHiddenFromDiagnostics(entry));
+  visible.sort((a, b) => (timeKey(a) < timeKey(b) ? -1 : timeKey(a) > timeKey(b) ? 1 : 0));
+  return limit ? visible.slice(-limit) : visible;
 }
 
 /** "Apple M3 Pro / Apple M3 Pro GPU, 12 GB VRAM, compute 8.9", or null. */

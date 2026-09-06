@@ -20,6 +20,7 @@ import {
   recordSessionError,
   getSessionErrors,
   resetSessionErrors,
+  subscribeSessionErrors,
   SESSION_ERROR_CAP,
 } from "./errorCapture";
 
@@ -156,5 +157,51 @@ describe("installGlobalErrorCapture", () => {
     window.dispatchEvent(new ErrorEvent("error", { message: "kaboom again" }));
     expect(window.logAPI.send).not.toHaveBeenCalled();
     expect(getSessionErrors()).toHaveLength(0);
+  });
+});
+
+describe("subscribeSessionErrors", () => {
+  it("notifies a subscriber when a new error is recorded", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeSessionErrors(listener);
+    recordSessionError({ origin: "x", message: "boom" });
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it("notifies a subscriber on a repeat too, without adding a second entry", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeSessionErrors(listener);
+    recordSessionError({ origin: "x", message: "boom" });
+    recordSessionError({ origin: "x", message: "boom" });
+    expect(listener).toHaveBeenCalledTimes(2);
+    expect(getSessionErrors()).toHaveLength(1);
+    unsubscribe();
+  });
+
+  it("notifies a subscriber when the buffer is reset", () => {
+    recordSessionError({ origin: "x", message: "boom" });
+    const listener = vi.fn();
+    const unsubscribe = subscribeSessionErrors(listener);
+    resetSessionErrors();
+    expect(listener).toHaveBeenCalledTimes(1);
+    unsubscribe();
+  });
+
+  it("stops notifying once unsubscribed", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeSessionErrors(listener);
+    unsubscribe();
+    recordSessionError({ origin: "x", message: "boom" });
+    expect(listener).not.toHaveBeenCalled();
+  });
+
+  it("never throws, and does not break capture, when a listener itself throws", () => {
+    const unsubscribe = subscribeSessionErrors(() => {
+      throw new Error("listener exploded");
+    });
+    expect(() => recordSessionError({ origin: "x", message: "boom" })).not.toThrow();
+    expect(getSessionErrors()).toHaveLength(1);
+    unsubscribe();
   });
 });

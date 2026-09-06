@@ -1,8 +1,9 @@
-import React from "react";
+import React, { useEffect } from "react";
 import { Bug } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
 import DiagnosticsPanel from "../components/DiagnosticsPanel";
+import { markDiagnosticsVisited } from "../utils/bugCounter";
 
 /**
  * Diagnostics page (bug icon at the bottom of the sidebar rail).
@@ -12,9 +13,18 @@ import DiagnosticsPanel from "../components/DiagnosticsPanel";
  * errors, the log folder and the report block. It sends nothing anywhere.
  * The page is the same chrome as Settings around the diagnostics content,
  * which owns its own data loading and its own loading and error states.
+ *
+ * Opening this page is also what clears the bug icon's counter badge (#485):
+ * mounting records "now" as the last visit, so anything recorded before this
+ * moment stops counting, immediately (the sidebar's badge subscribes to the
+ * same marker) and on every future visit until the next new error.
  */
 export default function DiagnosticsPage() {
   const { t } = useTranslation();
+
+  useEffect(() => {
+    markDiagnosticsVisited();
+  }, []);
 
   return (
     <div className="flex h-screen bg-[#071b18]">

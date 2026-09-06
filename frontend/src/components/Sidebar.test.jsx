@@ -9,6 +9,14 @@ vi.mock("../contexts/DownloadModalContext", () => ({
   useDownloadModal: () => mockDownloadModal,
 }));
 
+// The badge is a rendering concern of Sidebar; what feeds its number
+// (polling, the predicate, freshness) is unit-tested on its own in
+// shared/hooks/useBugCounter.test.js and utils/bugCounter.test.js.
+const mockBugCounter = { count: 0, label: "" };
+vi.mock("../shared/hooks/useBugCounter", () => ({
+  default: () => mockBugCounter,
+}));
+
 import Sidebar from "./Sidebar";
 
 function renderAt(path, props = {}) {
@@ -22,6 +30,8 @@ function renderAt(path, props = {}) {
 afterEach(() => {
   cleanup();
   mockDownloadModal.isDownloading = false;
+  mockBugCounter.count = 0;
+  mockBugCounter.label = "";
   vi.restoreAllMocks();
 });
 
@@ -141,5 +151,52 @@ describe("Sidebar", () => {
     mockDownloadModal.isDownloading = true;
     renderAt("/erudi/models");
     expect(screen.getByLabelText("Settings")).toBeTruthy();
+  });
+
+  describe("bug counter badge (#485)", () => {
+    it("shows no badge and the plain label when the count is 0", () => {
+      mockBugCounter.count = 0;
+      mockBugCounter.label = "";
+      renderAt("/erudi/models");
+      const button = screen.getByLabelText("Report a bug");
+      expect(button.querySelector('[data-testid="bug-badge"]')).toBeNull();
+    });
+
+    it("shows the exact count on the badge", () => {
+      mockBugCounter.count = 3;
+      mockBugCounter.label = "3";
+      renderAt("/erudi/models");
+      const badge = screen
+        .getByLabelText("Report a bug (3 new errors)")
+        .querySelector('[data-testid="bug-badge"]');
+      expect(badge).not.toBeNull();
+      expect(badge.textContent).toBe("3");
+    });
+
+    it("caps the badge text at 9+ beyond nine", () => {
+      mockBugCounter.count = 12;
+      mockBugCounter.label = "9+";
+      renderAt("/erudi/models");
+      const badge = screen
+        .getByLabelText("Report a bug (12 new errors)")
+        .querySelector('[data-testid="bug-badge"]');
+      expect(badge.textContent).toBe("9+");
+    });
+
+    it("uses the singular aria-label for exactly one new error", () => {
+      mockBugCounter.count = 1;
+      mockBugCounter.label = "1";
+      renderAt("/erudi/models");
+      expect(screen.getByLabelText("Report a bug (1 new error)")).toBeTruthy();
+    });
+
+    it("shows the badge on the diagnostics route too, alongside the active highlight", () => {
+      mockBugCounter.count = 2;
+      mockBugCounter.label = "2";
+      renderAt("/erudi/diagnostics");
+      const button = screen.getByLabelText("Report a bug (2 new errors)");
+      expect(button.className).toContain("border-green-500");
+      expect(button.querySelector('[data-testid="bug-badge"]').textContent).toBe("2");
+    });
   });
 });
