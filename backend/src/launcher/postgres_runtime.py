@@ -241,7 +241,13 @@ def _ensure_cluster_password(data_dir: Path) -> str:
     try:
         fd = os.open(secret_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
-        return secret_file.read_text(encoding="ascii").strip()
+        existing = secret_file.read_text(encoding="ascii").strip()
+        if existing:
+            return existing
+        # A truncated file would set an empty password, which PostgreSQL
+        # stores as NULL and can never match on a SCRAM host connection.
+        logger.warning("Embedded PostgreSQL password file is empty; generating a new one")
+        fd = os.open(secret_file, os.O_WRONLY | os.O_TRUNC, 0o600)
     with os.fdopen(fd, "w", encoding="ascii") as fh:
         password = secrets.token_urlsafe(32)
         fh.write(password)

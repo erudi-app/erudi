@@ -269,6 +269,15 @@ class TestClusterPasswordFile:
         assert _ensure_cluster_password(tmp_path) == "abc-DEF_123"
 
     @pytest.mark.unit
+    def test_an_empty_file_is_regenerated(self, tmp_path):
+        # A truncated file would set an empty password, which PostgreSQL
+        # stores as NULL: every SCRAM host connection would then be refused.
+        (tmp_path / PASSWORD_FILE_NAME).write_text("\n")
+        password = _ensure_cluster_password(tmp_path)
+        assert re.fullmatch(r"[A-Za-z0-9_-]{32,}", password)
+        assert (tmp_path / PASSWORD_FILE_NAME).read_text() == password
+
+    @pytest.mark.unit
     def test_regenerated_after_the_data_dir_is_wiped(self, tmp_path):
         first = _ensure_cluster_password(tmp_path)
         # A half-initialised PGDATA (no PG_VERSION) is wiped by the recovery
