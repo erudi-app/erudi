@@ -390,9 +390,8 @@ def test_build_chat_model_authenticates_with_the_handles_key(monkeypatch):
 
 
 def test_build_chat_model_keeps_the_placeholder_key_without_one(monkeypatch):
-    # MLX spawns mlx_vlm.server, which has no API-key option: its handle carries
-    # no key. The literal must stay, because an empty api_key makes the OpenAI
-    # client fall back to reading OPENAI_API_KEY from the environment.
+    # A handle without a key keeps the literal, because an empty api_key makes
+    # the OpenAI client fall back to reading OPENAI_API_KEY from the environment.
     monkeypatch.setattr(config, "LLM_Engine", _IdentityEngine)
     chat = build_chat_model(_Llm(), temperature=0.3, top_p=0.8, max_tokens=55)
     assert chat.openai_api_key.get_secret_value() == "not-needed"

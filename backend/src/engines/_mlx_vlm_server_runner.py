@@ -21,7 +21,10 @@ unit tests that run on Linux CI where `mlx-vlm` is not installed.
 
 In-child patches (pinned mlx-vlm 0.6.13)
 ----------------------------------------
-Three monkeypatches are applied before the server starts. Two 0.6.2-era
+Four patches are applied before the server starts: three monkeypatches on
+mlx-vlm internals (below) and one ASGI middleware that extends the server's
+own ``--api-key`` to every route (`_patch_require_api_key`, see its
+docstring). Two 0.6.2-era
 patches were dropped with the 0.6.13 bump because upstream now runs weight
 sanitization unconditionally in `mlx_vlm.utils.load_model` (the 0.6.2
 `format == "mlx"` sanitize skip is gone) — but hardware validation showed the
@@ -58,7 +61,119 @@ exiting only when the child process is terminated by the parent.
 
 from __future__ import annotations
 
-from typing import List
+import importlib
+import os
+import secrets
+from typing import Any, Callable, Iterable, List, Tuple
+
+# The env var mlx-vlm's own CLI fills from `--api-key` (`server/cli.py`) and
+# its management guard reads (`server/app.py:SERVER_API_KEY_ENV`). Read here at
+# request time, not at import time: `main()` sets it only after parsing argv,
+# i.e. after the middleware is installed.
+MLX_VLM_SERVER_API_KEY_ENV = "MLX_VLM_SERVER_API_KEY"
+
+_UNAUTHORIZED_BODY = b'{"detail":"Invalid API key"}'
+
+
+def _bearer_matches(headers: Iterable[Tuple[bytes, bytes]], api_key: str) -> bool:
+    """True when the raw ASGI ``headers`` carry ``Authorization: Bearer <api_key>``.
+
+    Constant-time comparison, same as mlx-vlm's own guard. Header names are
+    lower-cased by the ASGI server; the first ``authorization`` header decides.
+    """
+    expected = f"Bearer {api_key}".encode("latin-1")
+    for name, value in headers:
+        if name == b"authorization":
+            return secrets.compare_digest(value, expected)
+    return False
+
+
+class _RequireApiKeyMiddleware:
+    """Pure ASGI middleware: every request needs the server's bearer key.
+
+    Applies to ``http`` and ``websocket`` scopes (mlx-vlm registers
+    ``/v1/realtime`` as a websocket on the same app); ``lifespan`` passes
+    through. A no-op while ``MLX_VLM_SERVER_API_KEY`` is unset, so a server
+    started by hand without ``--api-key`` behaves as upstream ships it.
+    Rejections mirror mlx-vlm's ``_require_management_api_key``: 401 with
+    ``WWW-Authenticate: Bearer``; a websocket handshake is closed before it is
+    accepted (the server answers the upgrade with 403).
+    """
+
+    def __init__(self, app: Callable[..., Any]) -> None:
+        self.app = app
+
+    async def __call__(self, scope: dict, receive: Callable, send: Callable) -> None:
+        if scope["type"] not in ("http", "websocket"):
+            await self.app(scope, receive, send)
+            return
+        api_key = os.environ.get(MLX_VLM_SERVER_API_KEY_ENV)
+        if not api_key or _bearer_matches(scope.get("headers", ()), api_key):
+            await self.app(scope, receive, send)
+            return
+        if scope["type"] == "websocket":
+            await send({"type": "websocket.close", "code": 1008})
+            return
+        await send(
+            {
+                "type": "http.response.start",
+                "status": 401,
+                "headers": [
+                    (b"content-type", b"application/json"),
+                    (b"content-length", str(len(_UNAUTHORIZED_BODY)).encode("latin-1")),
+                    (b"www-authenticate", b"Bearer"),
+                ],
+            }
+        )
+        await send({"type": "http.response.body", "body": _UNAUTHORIZED_BODY})
+
+
+def _import_mlx_vlm_app():
+    """Import and return the FastAPI instance ``mlx_vlm.server.app:app``.
+
+    Separate seam so tests can substitute a throwaway app without mlx-vlm
+    installed. Resolved through the module object, not the package attribute:
+    ``mlx_vlm/server/__init__.py`` re-exports the instance under the same name
+    as the submodule, and the module object is what ``uvicorn.run`` finds in
+    ``sys.modules`` when `main()` passes the ``"mlx_vlm.server:app"`` import
+    string in the same process.
+    """
+    return importlib.import_module("mlx_vlm.server.app").app
+
+
+def _patch_require_api_key() -> bool:
+    """Require the server's ``--api-key`` on EVERY route, not just management.
+
+    mlx-vlm 0.6.17 accepts ``--api-key`` (``server/cli.py``, exported as
+    ``MLX_VLM_SERVER_API_KEY``) but its guard ``_require_management_api_key``
+    (``server/app.py``) is applied only to the ``inference_router`` (which
+    carries ``/v1/models`` and friends), ``/health``, ``/metrics``,
+    ``/cache/*``, ``/settings`` and ``/unload``. The routes that actually run
+    inference are registered directly on the app with no dependency:
+    ``/chat/completions`` and ``/v1/chat/completions``, ``/v1/responses*``
+    and ``/v1/images/*`` (``server/openai.py``), ``/v1/realtime``
+    (``server/realtime.py``). With a key set, management is locked and
+    inference stays open to any caller that can reach 127.0.0.1.
+
+    This installs `_RequireApiKeyMiddleware` as the outermost layer of the
+    app before uvicorn builds the middleware stack at startup (after which
+    ``add_middleware`` raises). The middleware reads the env var per request,
+    so it is inert until `main()` exports the key from argv.
+
+    Returns:
+        True if the middleware is installed (or already present), False if
+        mlx-vlm's server app could not be imported (non-MLX hosts, CI).
+        Idempotent.
+    """
+    try:
+        app = _import_mlx_vlm_app()
+    except Exception:
+        return False
+    if getattr(app.state, "_erudi_require_api_key_patch", False):
+        return True
+    app.add_middleware(_RequireApiKeyMiddleware)
+    app.state._erudi_require_api_key_patch = True
+    return True
 
 
 def _patch_gemma3_tied_lm_head_quant() -> bool:
@@ -334,5 +449,10 @@ def run_mlx_vlm_server(argv: List[str]) -> None:
     # builds keeps reasoning inline in delta.content (#90) — see the patch's
     # docstring for why 0.6.13 offers no configuration path for this.
     _patch_inline_thinking()
+    # Extend the server's own --api-key (minted per spawn by MLX_Engine) from
+    # its management endpoints to every route, inference included -- upstream
+    # leaves /v1/chat/completions open even with a key set. Must precede
+    # main(): uvicorn freezes the middleware stack at startup.
+    _patch_require_api_key()
     main = _import_mlx_vlm_server_main()
     main()

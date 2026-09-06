@@ -293,7 +293,26 @@ class MLX_Engine(BaseChatServerEngine):
         port: int,
         **ctx: Any,
     ) -> Dict[str, Any]:
-        """Spawn `mlx_vlm.server` as an mp.Process. Returns the handle dict."""
+        """Spawn `mlx_vlm.server` as an mp.Process. Returns the handle dict.
+
+        The child is started with a per-spawn `--api-key` (mlx-vlm's own flag,
+        exported in the child as `MLX_VLM_SERVER_API_KEY`) and the key travels
+        in the handle under `"api_key"`, where `_probe_ready` and the
+        ChatOpenAI factory read it. The argv goes to the child by pickle, not
+        on a command line, so the key is not visible in `ps` arguments.
+        """
+        # Close the loopback port to everything but us. Spawned without
+        # `--api-key`, mlx_vlm.server authenticates NOTHING: every endpoint
+        # answers any caller that can reach 127.0.0.1 -- another local process,
+        # or a web page the user has open, since a browser can POST across
+        # origins to a loopback port -- and `/v1/chat/completions` lets it run
+        # its own inference on the user's machine. The key is minted per spawn
+        # so a disclosure dies with the child. mlx-vlm's flag alone gates only
+        # its management endpoints; the in-child middleware installed by
+        # `_mlx_vlm_server_runner._patch_require_api_key` extends it to every
+        # route. `/health` is behind the key as well, and `_probe_ready` sends
+        # it from the handle.
+        api_key = secrets.token_urlsafe(32)
         argv = [
             "mlx_vlm.server",
             "--model",
@@ -319,6 +338,8 @@ class MLX_Engine(BaseChatServerEngine):
             # byte-identical prompts and answers; re-check in the 0.6.13
             # hardware pass).
             "--enable-thinking",
+            "--api-key",
+            api_key,
         ]
         proc = mp.Process(target=run_mlx_vlm_server, args=(argv,), daemon=False)
         proc.start()
@@ -333,6 +354,10 @@ class MLX_Engine(BaseChatServerEngine):
             "base_url": f"http://127.0.0.1:{port}",
             "alias": alias,
             "model_path": str(model_path),
+            # Every caller that talks to this child reaches it through the
+            # handle: the readiness probe and the ChatOpenAI inference client
+            # both read the key from here. Never log the handle wholesale.
+            "api_key": api_key,
         }
 
     @classmethod

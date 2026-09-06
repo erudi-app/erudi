@@ -340,10 +340,10 @@ class TestProbeReady:
         assert captured_headers["value"]["Authorization"] == "Bearer s3cret-token"
 
     def test_chat_ping_sends_no_auth_header_without_a_key(self):
-        """MLX spawns `mlx_vlm.server`, which has no API-key option at all.
+        """A handle without a key gets no `Authorization` header at all.
 
-        Sending a bogus `Authorization` header there would be at best noise and
-        at worst rejected, so the header must appear only when a key exists.
+        Sending a bogus header would be at best noise and at worst rejected,
+        so the header must appear only when a key exists.
         """
         health_ok = MagicMock(status_code=200)
         chat_ok = MagicMock(status_code=200, text='{"choices":[]}')

@@ -49,6 +49,7 @@ from typing import Iterator, List
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
+from fastapi import WebSocket
 
 from src.engines.mlx_engine import MLX_Engine
 
@@ -403,6 +404,7 @@ class TestMlxVlmServerRunnerHelper:
         order: list[str] = []
         monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
         monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
+        monkeypatch.setattr(runner, "_patch_require_api_key", lambda: True)
         monkeypatch.setattr(
             runner,
             "_patch_inline_thinking",
@@ -415,6 +417,33 @@ class TestMlxVlmServerRunnerHelper:
         runner.run_mlx_vlm_server(["mlx_vlm.server", "--port", "9080"])
 
         assert order == ["thinking-patch", "main"]
+
+    def test_runner_applies_require_api_key_patch_before_main(self, monkeypatch):
+        """The middleware must be on the app before uvicorn builds the
+        middleware stack at startup; after that, `add_middleware` raises.
+
+        Sibling in-child patches are stubbed out so this test never imports
+        the real mlx-vlm (absent on Linux CI, mutated-in-pytest-process on Mac).
+        """
+        import sys
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        order: list[str] = []
+        monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
+        monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
+        monkeypatch.setattr(runner, "_patch_inline_thinking", lambda: True)
+        monkeypatch.setattr(
+            runner,
+            "_patch_require_api_key",
+            lambda: order.append("api-key-patch") or True,
+        )
+        fake_main = MagicMock(side_effect=lambda: order.append("main"))
+        monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
+        monkeypatch.setattr(sys, "argv", ["pytest"])
+
+        runner.run_mlx_vlm_server(["mlx_vlm.server", "--port", "9080"])
+
+        assert order == ["api-key-patch", "main"]
 
     def test_runner_applies_tied_lm_head_patch_before_main(self, monkeypatch):
         """The tied-lm_head sanitize completion must run before the server's
@@ -435,6 +464,7 @@ class TestMlxVlmServerRunnerHelper:
         )
         monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
         monkeypatch.setattr(runner, "_patch_inline_thinking", lambda: True)
+        monkeypatch.setattr(runner, "_patch_require_api_key", lambda: True)
         fake_main = MagicMock(side_effect=lambda: order.append("main"))
         monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
         monkeypatch.setattr(sys, "argv", ["pytest"])
@@ -1072,7 +1102,12 @@ class TestSpawnArgv:
             )
 
         assert captured["target"] is run_mlx_vlm_server
-        assert captured["argv"] == [
+        argv = list(captured["argv"])
+        # The per-spawn credential is asserted by `TestSpawnApiKey`; strip it
+        # here so the rest of the argv is pinned verbatim.
+        key_at = argv.index("--api-key")
+        del argv[key_at : key_at + 2]
+        assert argv == [
             "mlx_vlm.server",
             "--model",
             str(model_dir),
@@ -1107,6 +1142,178 @@ class TestSpawnArgv:
             MLX_Engine._spawn_child(model_path=model_dir, alias="erudi-x", port=9087)
 
         assert "MLX_VLM_THINKING_START_TOKEN" not in os.environ
+
+
+def _spawn_mlx_child(tmp_path):
+    """Run `_spawn_child` with `mp.Process` stubbed; return (handle, argv)."""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir(exist_ok=True)
+    captured: dict = {}
+
+    def _fake_process(*, target, args, daemon):
+        captured["argv"] = list(args[0])
+        return MagicMock(pid=4321)
+
+    with patch("src.engines.mlx_engine.mp.Process", side_effect=_fake_process):
+        handle = MLX_Engine._spawn_child(model_path=model_dir, alias="erudi-x", port=9087)
+    return handle, captured["argv"]
+
+
+@pytest.mark.unit
+class TestSpawnApiKey:
+    """mlx_vlm.server must not be left open to everything on the loopback.
+
+    Spawned without `--api-key`, mlx_vlm.server authenticates NOTHING: any
+    caller that can reach 127.0.0.1 -- another local process, or a web page
+    the user has open, since a browser can POST across origins to a loopback
+    port -- can run its own inference on the loaded model. These tests pin
+    the same contract `TestSpawnHardeningFlags` pins for llama-server.
+    """
+
+    def test_api_key_flag_carries_a_non_empty_secret(self, tmp_path):
+        """`--api-key` is mlx-vlm's own flag; an empty value would leave the
+        env var unset and the server unauthenticated, so the value itself is
+        asserted, not just the flag."""
+        _handle, argv = _spawn_mlx_child(tmp_path)
+        assert "--api-key" in argv
+        key = argv[argv.index("--api-key") + 1]
+        assert isinstance(key, str) and len(key) >= 32
+
+    def test_each_spawn_gets_a_different_key(self, tmp_path):
+        """Per-spawn generation bounds a disclosure to the life of one child:
+        swapping models (or a crash-respawn) invalidates a scraped key."""
+        _h1, first = _spawn_mlx_child(tmp_path)
+        _h2, second = _spawn_mlx_child(tmp_path)
+        assert first[first.index("--api-key") + 1] != second[second.index("--api-key") + 1]
+
+    def test_handle_exposes_the_key_to_the_callers_that_need_it(self, tmp_path):
+        """The readiness probe and the ChatOpenAI client both reach the child
+        only through the spawn handle; a key kept local to `_spawn_child`
+        would lock Erudi out of its own server."""
+        handle, argv = _spawn_mlx_child(tmp_path)
+        assert handle["api_key"] == argv[argv.index("--api-key") + 1]
+
+    def test_the_key_never_reaches_the_logs(self, tmp_path, caplog):
+        """Backend logs are written to a world-readable temp file and shipped
+        in bug reports; a key printed there outlives the process that used it."""
+        import logging
+
+        with caplog.at_level(logging.DEBUG):
+            handle, _argv = _spawn_mlx_child(tmp_path)
+        key = handle["api_key"]
+        assert key
+        for record in caplog.records:
+            assert key not in record.getMessage()
+
+
+@pytest.mark.unit
+class TestRequireApiKeyMiddleware:
+    """The in-child ASGI middleware that extends mlx-vlm's key to every route.
+
+    mlx-vlm's own `--api-key` guard covers only its management endpoints
+    (`/health`, `/v1/models`, `/metrics`, ...); the chat, responses and image
+    routes are registered on the app without it. The middleware is pure ASGI
+    so it can be exercised here on a throwaway FastAPI app on any platform.
+    """
+
+    ENV = "MLX_VLM_SERVER_API_KEY"
+
+    @staticmethod
+    def _client():
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from src.engines._mlx_vlm_server_runner import _RequireApiKeyMiddleware
+
+        app = FastAPI()
+
+        @app.get("/health")
+        def _health():
+            return {"status": "healthy"}
+
+        @app.post("/v1/chat/completions")
+        def _chat():
+            return {"choices": []}
+
+        @app.websocket("/v1/realtime")
+        # `WebSocket` is imported at module level: with postponed annotations
+        # FastAPI resolves the hint in the module globals, not in this scope.
+        async def _realtime(ws: WebSocket):
+            await ws.accept()
+            await ws.send_text("hello")
+            await ws.close()
+
+        app.add_middleware(_RequireApiKeyMiddleware)
+        return TestClient(app)
+
+    def test_without_the_env_var_every_request_passes(self, monkeypatch):
+        """A developer running the server by hand sets no key; the middleware
+        must then change nothing."""
+        monkeypatch.delenv(self.ENV, raising=False)
+        client = self._client()
+        assert client.get("/health").status_code == 200
+        assert client.post("/v1/chat/completions", json={}).status_code == 200
+
+    def test_missing_header_is_refused_on_inference_and_health(self, monkeypatch):
+        monkeypatch.setenv(self.ENV, "s3cret-token")
+        client = self._client()
+        for resp in (client.post("/v1/chat/completions", json={}), client.get("/health")):
+            assert resp.status_code == 401
+            assert resp.headers["WWW-Authenticate"] == "Bearer"
+
+    def test_wrong_key_is_refused(self, monkeypatch):
+        monkeypatch.setenv(self.ENV, "s3cret-token")
+        client = self._client()
+        headers = {"Authorization": "Bearer wrong-token"}
+        assert client.post("/v1/chat/completions", json={}, headers=headers).status_code == 401
+        assert client.get("/health", headers=headers).status_code == 401
+
+    def test_right_key_is_accepted(self, monkeypatch):
+        monkeypatch.setenv(self.ENV, "s3cret-token")
+        client = self._client()
+        headers = {"Authorization": "Bearer s3cret-token"}
+        assert client.post("/v1/chat/completions", json={}, headers=headers).status_code == 200
+        assert client.get("/health", headers=headers).status_code == 200
+
+    def test_websocket_handshake_is_refused_without_the_key(self, monkeypatch):
+        """mlx-vlm registers `/v1/realtime` as a websocket on the same app;
+        a handshake without the key is closed before it is accepted."""
+        from starlette.websockets import WebSocketDisconnect
+
+        monkeypatch.setenv(self.ENV, "s3cret-token")
+        client = self._client()
+        with pytest.raises(WebSocketDisconnect):
+            with client.websocket_connect("/v1/realtime"):
+                pass
+        with client.websocket_connect(
+            "/v1/realtime", headers={"Authorization": "Bearer s3cret-token"}
+        ) as ws:
+            assert ws.receive_text() == "hello"
+
+
+@pytest.mark.unit
+class TestRequireApiKeyPatch:
+    """`_patch_require_api_key` installs the middleware on mlx-vlm's app object."""
+
+    def test_installs_the_middleware_once(self, monkeypatch):
+        from fastapi import FastAPI
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        app = FastAPI()
+        monkeypatch.setattr(runner, "_import_mlx_vlm_app", lambda: app)
+
+        assert runner._patch_require_api_key() is True
+        assert runner._patch_require_api_key() is True  # idempotent
+        installed = [m.cls for m in app.user_middleware]
+        assert installed.count(runner._RequireApiKeyMiddleware) == 1
+
+    def test_returns_false_when_mlx_vlm_is_absent(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        def _missing():
+            raise ImportError("no mlx_vlm here")
+
+        monkeypatch.setattr(runner, "_import_mlx_vlm_app", _missing)
+        assert runner._patch_require_api_key() is False
 
 
 @pytest.mark.unit
@@ -1202,9 +1409,51 @@ class TestSubprocessReal:
                 llm_local_path=str(mlx_test_model_path),
             )
             assert model["proc"].is_alive(), "subprocess died right after spawn"
-            r = requests.get(f"{model['base_url']}/health", timeout=5)
+            r = requests.get(
+                f"{model['base_url']}/health",
+                timeout=5,
+                headers={"Authorization": f"Bearer {model['api_key']}"},
+            )
             assert r.status_code == 200
             assert tokenizer == {"type": "remote", "provider": "mlx-vlm-server"}
+        finally:
+            MLX_Engine.cleanup()
+
+    def test_child_refuses_unauthenticated_requests_and_still_chats(self, mlx_test_model_path):
+        """The real child, with the engine's own handle: every route without
+        the key answers 401 (inference included -- the route mlx-vlm leaves
+        open by itself), and the normal generate path through ChatOpenAI,
+        which reads the key from the handle, still produces tokens."""
+        import requests
+
+        try:
+            model, _ = MLX_Engine.get_model_and_tokenizer(
+                llm_id="qwen-test",
+                llm_local_path=str(mlx_test_model_path),
+            )
+            base_url = model["base_url"]
+            chat_body = {
+                "model": model["model_path"],
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+            r = requests.post(f"{base_url}/v1/chat/completions", json=chat_body, timeout=10)
+            assert r.status_code == 401, r.text
+            assert r.headers.get("WWW-Authenticate") == "Bearer"
+            r = requests.get(f"{base_url}/health", timeout=5)
+            assert r.status_code == 401
+            r = requests.post(
+                f"{base_url}/v1/chat/completions",
+                json=chat_body,
+                timeout=10,
+                headers={"Authorization": "Bearer not-the-key"},
+            )
+            assert r.status_code == 401
+
+            chat = _build_real_mlx_chat_model("qwen-test", mlx_test_model_path, max_tokens=8)
+            reply = chat.invoke("Say hi.")
+            assert isinstance(reply.content, str) and reply.content.strip()
         finally:
             MLX_Engine.cleanup()
 
