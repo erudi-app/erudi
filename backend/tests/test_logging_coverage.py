@@ -240,3 +240,51 @@ class TestKbModeLogging:
         assert any(
             "Turn mode: agentic KB" in r.message and "kb_id=7" in r.message for r in caplog.records
         )
+
+
+# ============ Every record goes through the project logger ============
+
+
+@pytest.mark.unit
+class TestNoRootLoggerCalls:
+    """``logging.info(...)`` on the ROOT logger writes nowhere the app reads.
+
+    ``configure_logger`` attaches the console and ``backend.log`` handlers to
+    the ``erudi`` logger only, and nothing calls ``logging.basicConfig``. A
+    module that logs through the ``logging`` module itself therefore drops its
+    INFO records entirely and sends WARNING/ERROR to the stdlib's
+    ``lastResort`` handler on stderr -- out of ``backend.log``, and out of the
+    Diagnostics page with it. This scan is the enforcement: every log call in
+    ``src/`` goes through a ``logger`` obtained from ``src.core.logging``.
+    """
+
+    LOG_METHODS = {"debug", "info", "warning", "error", "exception", "critical", "log"}
+
+    def _root_log_calls(self) -> list[str]:
+        import ast
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1] / "src"
+        offenders: list[str] = []
+        for path in sorted(src.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr in self.LOG_METHODS
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "logging"
+                ):
+                    where = f"{path.relative_to(src.parent)}:{node.lineno}"
+                    offenders.append(f"{where} logging.{func.attr}")
+        return offenders
+
+    def test_no_module_logs_through_the_root_logger(self):
+        offenders = self._root_log_calls()
+        assert not offenders, (
+            "these records never reach backend.log -- use "
+            "`from src.core.logging import logger`:\n" + "\n".join(offenders)
+        )

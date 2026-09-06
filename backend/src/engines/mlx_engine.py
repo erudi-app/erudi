@@ -82,7 +82,6 @@ Warning:
 
 from __future__ import annotations
 
-import logging
 import multiprocessing as mp
 import os
 import platform
@@ -96,6 +95,7 @@ from src.engines.base_chat_server_engine import BaseChatServerEngine
 from src.engines._mlx_vlm_server_runner import run_mlx_vlm_server
 from src.core.logging import logger
 from src.core.exceptions import (
+    EngineException,
     FileSystemException,
     HardwareException,
 )
@@ -230,7 +230,7 @@ class MLX_Engine(BaseChatServerEngine):
         try:
             from mlx_vlm.tool_parsers import _infer_tool_parser
         except Exception:
-            logging.warning(
+            logger.warning(
                 f"[MLX_Engine] wire tool detection unavailable (mlx_vlm import failed) "
                 f"for {llm_local_path}"
             )
@@ -238,7 +238,7 @@ class MLX_Engine(BaseChatServerEngine):
         try:
             tokenizer = cls._load_capability_tokenizer(llm_local_path)
         except Exception:
-            logging.warning(
+            logger.warning(
                 f"[MLX_Engine] wire tool detection: could not load a tokenizer "
                 f"for {llm_local_path}"
             )
@@ -247,18 +247,18 @@ class MLX_Engine(BaseChatServerEngine):
             template = getattr(tokenizer, "chat_template", None)
             parser = _infer_tool_parser(template)
         except Exception:
-            logging.warning(
+            logger.warning(
                 f"[MLX_Engine] wire tool detection: parser inference failed "
                 f"for {llm_local_path}"
             )
             return None
         if parser is None:
-            logging.info(
+            logger.info(
                 f"[MLX_Engine] wire tools NOT verified for {llm_local_path}: "
                 f"chat template matches no mlx-vlm tool parser"
             )
             return False
-        logging.info(
+        logger.info(
             f"[MLX_Engine] wire tools verified for {llm_local_path}: "
             f"mlx-vlm inferred parser {parser}"
         )
@@ -280,8 +280,14 @@ class MLX_Engine(BaseChatServerEngine):
             model_dir = cls._resolve_model_artifact(llm_local_path)
             config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
             return config_declares_vision(config)
-        except Exception:
-            logging.warning(f"[MLX_Engine] vision detection failed for {llm_local_path}")
+        except Exception as exc:
+            # Permissive fallback (the model stays usable, vision unverified):
+            # a WARNING, with what went wrong -- an absent config and a corrupt
+            # one are the same verdict here but not the same defect.
+            logger.warning(
+                f"[MLX_Engine] vision detection failed for {llm_local_path}: "
+                f"{type(exc).__name__}: {exc}"
+            )
             return None
 
     @classmethod
@@ -340,7 +346,22 @@ class MLX_Engine(BaseChatServerEngine):
             api_key,
         ]
         proc = mp.Process(target=run_mlx_vlm_server, args=(argv,), daemon=False)
-        proc.start()
+        try:
+            proc.start()
+        except Exception as exc:
+            # Spawning can fail before the child exists at all: a process or
+            # file-descriptor limit, a sandbox that refuses the fork, a
+            # freeze whose bootstrap cannot re-exec the binary. Named here,
+            # because a bare OSError from start() says nothing about what was
+            # being spawned -- the same reason the llama-server Popen is
+            # wrapped in base_llama_cpp_engine.py.
+            raise EngineException(
+                message=(
+                    f"Could not start the {cls._server_name} child for model "
+                    f"{model_path} on port {port}: {exc}"
+                ),
+                trace=f"{type(exc).__name__}: {exc}",
+            ) from exc
         logger.info(
             f"[MLX_Engine] Spawned mlx_vlm.server child: pid={proc.pid}, "
             f"port={port}, model={model_path}"
@@ -365,6 +386,12 @@ class MLX_Engine(BaseChatServerEngine):
         Accepts `None` (no-op) and `MagicMock`-like proxies for testability.
         Mirrors the bounded-time semantics of cpu_engine.py:226-240, but uses
         `mp.Process` API (`terminate` = SIGTERM, `kill` = SIGKILL).
+
+        This is the ONLY place an mlx-vlm child's exit code is ever recorded,
+        so the level says what happened: `INFO` for an orderly stop (a model
+        swap, the idle reap), `WARNING` when the child had to be SIGKILLed or
+        had already died on its own with a nonzero code -- the two shapes a
+        maintainer wants to see on the Diagnostics page.
         """
         if not proc:
             return
@@ -376,11 +403,16 @@ class MLX_Engine(BaseChatServerEngine):
                     proc.kill()
                     proc.join(timeout=2)
                     outcome = "killed (SIGKILL after SIGTERM timeout)"
+                    degraded = True
                 else:
                     outcome = "terminated (SIGTERM)"
+                    degraded = False
             else:
                 outcome = "already exited"
-            logger.info(
+                exitcode = getattr(proc, "exitcode", None)
+                degraded = isinstance(exitcode, int) and exitcode != 0
+            record = logger.warning if degraded else logger.info
+            record(
                 f"[MLX_Engine] Child terminated: {outcome}, "
                 f"exitcode={getattr(proc, 'exitcode', None)}"
             )
@@ -557,7 +589,7 @@ class MLX_Engine(BaseChatServerEngine):
             return None
 
         except Exception as e:
-            logging.warning(f"Failed to detect Apple Silicon chip: {e}")
+            logger.warning(f"Failed to detect Apple Silicon chip: {e}")
             return None
 
     @classmethod
@@ -571,7 +603,8 @@ class MLX_Engine(BaseChatServerEngine):
         try:
             import torch
         except ImportError as e:
-            logging.warning(f"Optional hardware detection dependency missing: {e}")
+            logger.warning(f"Optional hardware detection dependency missing: {e}")
+            return False
 
         try:
             return torch.backends.mps.is_available()
@@ -615,7 +648,7 @@ class MLX_Engine(BaseChatServerEngine):
                 import psutil
                 import cpuinfo
             except ImportError as e:
-                logging.warning(f"Optional hardware detection dependency missing: {e}")
+                logger.warning(f"Optional hardware detection dependency missing: {e}")
 
             # Detect chip model
             chip_model = cls._detect_apple_silicon_chip()
@@ -698,13 +731,13 @@ class MLX_Engine(BaseChatServerEngine):
                 "timestamp": time.time(),
             }
 
-            logging.info(
+            logger.info(
                 f"MLX hardware detected: {chip_model}, {gpu_cores} GPU cores, {total_memory_gb:.1f}GB unified memory"
             )
             return hardware_info
 
         except Exception as e:
-            logging.exception(f"MLX hardware detection failed: {e}")
+            logger.exception(f"MLX hardware detection failed: {e}")
             raise HardwareException("Failed to detect Apple Silicon hardware", trace=str(e))
 
     @classmethod
@@ -729,7 +762,7 @@ class MLX_Engine(BaseChatServerEngine):
             ...     print("MPS device ready")
         """
         if not cls._mps_available():
-            logging.warning("MPS not available, skipping GPU warm-up")
+            logger.warning("MPS not available, skipping GPU warm-up")
             return False
 
         try:
@@ -737,9 +770,9 @@ class MLX_Engine(BaseChatServerEngine):
             try:
                 import torch
             except ImportError as e:
-                logging.warning(f"Optional hardware detection dependency missing: {e}")
+                logger.warning(f"Optional hardware detection dependency missing: {e}")
 
-            logging.info(f"Warming up MPS device for {duration_seconds}s...")
+            logger.info(f"Warming up MPS device for {duration_seconds}s...")
             start_time = time.time()
 
             # Create tensors on MPS device
@@ -755,11 +788,11 @@ class MLX_Engine(BaseChatServerEngine):
                 # Small sleep to prevent CPU overload
                 time.sleep(0.05)
 
-            logging.info("MPS warm-up completed successfully")
+            logger.info("MPS warm-up completed successfully")
             return True
 
         except Exception as e:
-            logging.exception(f"MPS warm-up failed: {e}")
+            logger.exception(f"MPS warm-up failed: {e}")
             return False
 
     @classmethod
@@ -920,13 +953,13 @@ class MLX_Engine(BaseChatServerEngine):
                 "performance_breakdown": performance_breakdown,
             }
 
-            logging.info(
+            logger.info(
                 f"Performance evaluation: Inference={inference_score:.1f}/100 ({inference_label})"
             )
             return eval_result
 
         except Exception as e:
-            logging.exception(f"Performance evaluation failed: {e}")
+            logger.exception(f"Performance evaluation failed: {e}")
             raise HardwareException("Failed to evaluate Apple Silicon performance", trace=str(e))
 
     @classmethod
