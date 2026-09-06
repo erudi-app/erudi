@@ -42,6 +42,10 @@ def _dump_target(psycopg_url: str) -> tuple[str, dict[str, str]]:
     params = conninfo_to_dict(psycopg_url)
     password = params.pop("password", None)
     env = dict(os.environ)
+    # The child authenticates with exactly what the URL says: an inherited
+    # PGPASSWORD (GitHub's Windows runners export one for their own PostgreSQL)
+    # must neither leak into the dump nor mask a URL without a password.
+    env.pop("PGPASSWORD", None)
     if password:
         env["PGPASSWORD"] = password
     return make_conninfo(**params), env
