@@ -75,9 +75,20 @@ export default function DiagnosticsPanel() {
       } else {
         log.warn("The backend did not answer the diagnostics request", backendResult.reason);
       }
-      if (appResult.status === "fulfilled") setApp(appResult.value);
+      if (appResult.status === "fulfilled") {
+        setApp(appResult.value);
+      } else {
+        // Half the report comes from the main process. Losing it silently
+        // makes this page the next thing to debug, with nothing to go on.
+        log.warn("The app process did not answer the environment request", appResult.reason);
+      }
       if (logResult.status === "fulfilled" && Array.isArray(logResult.value)) {
         setAppLog(logResult.value);
+      } else {
+        log.warn(
+          "The app log could not be read",
+          logResult.status === "rejected" ? logResult.reason : logResult.value
+        );
       }
       setLoading(false);
     };
@@ -111,6 +122,14 @@ export default function DiagnosticsPanel() {
     // main process validates the path and falls back to the app log.
     window.diagnosticsAPI
       ?.revealLog?.(backend?.environment?.backend_log_path ?? null)
+      ?.then?.((result) => {
+        // Main answers `{success:false}` when it refused the path or could
+        // not drive the file manager: the click then does nothing at all, and
+        // nothing on screen says why.
+        if (result && result.success === false) {
+          log.warn("The main process could not reveal the log folder", result);
+        }
+      })
       ?.catch?.((error) => log.warn("Could not reveal the log folder", error));
   }, [backend]);
 

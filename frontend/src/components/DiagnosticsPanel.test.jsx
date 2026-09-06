@@ -237,3 +237,55 @@ describe("DiagnosticsPanel — no Electron bridge", () => {
     expect(await screen.findByText("MLX_Engine")).toBeTruthy();
   });
 });
+
+/**
+ * The page degrades to whatever it could reach — but a source it could not
+ * reach must leave a record. This page is where someone lands when something
+ * is wrong; a bridge call that fails silently makes the page itself the next
+ * thing to debug, with nothing to go on.
+ */
+describe("DiagnosticsPanel — a source that does not answer", () => {
+  let warn;
+
+  beforeEach(() => {
+    warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    warn.mockRestore();
+  });
+
+  const warnings = () => warn.mock.calls.map((call) => String(call[0]));
+
+  it("records an app process that does not answer, and still renders", async () => {
+    window.diagnosticsAPI.getAppInfo = vi.fn().mockRejectedValue(new Error("no bridge"));
+    render(<DiagnosticsPanel />);
+    await waitFor(() => expect(screen.getByText("MLX_Engine")).toBeTruthy());
+    await waitFor(() => expect(warnings().some((m) => /app process/i.test(m))).toBe(true));
+  });
+
+  it("records an app log that cannot be read", async () => {
+    appLogTail.mockRejectedValue(new Error("EACCES"));
+    render(<DiagnosticsPanel />);
+    await waitFor(() => expect(screen.getByText("MLX_Engine")).toBeTruthy());
+    await waitFor(() => expect(warnings().some((m) => /app log/i.test(m))).toBe(true));
+  });
+
+  it("records a refused reveal instead of leaving the click silent", async () => {
+    // Main answers {success:false} when the path is refused or the file
+    // manager cannot be driven; nothing opens, so nothing on screen says so.
+    revealLog.mockResolvedValue({ success: false, error: "ENOENT" });
+    render(<DiagnosticsPanel />);
+    fireEvent.click(await screen.findByRole("button", { name: "Open log folder" }));
+    await waitFor(() => expect(revealLog).toHaveBeenCalled());
+    await waitFor(() => expect(warnings().some((m) => /reveal/i.test(m))).toBe(true));
+  });
+
+  it("keeps quiet when every source answers", async () => {
+    render(<DiagnosticsPanel />);
+    await waitFor(() => expect(screen.getByText("MLX_Engine")).toBeTruthy());
+    fireEvent.click(screen.getByRole("button", { name: "Open log folder" }));
+    await waitFor(() => expect(revealLog).toHaveBeenCalled());
+    expect(warnings()).toEqual([]);
+  });
+});
