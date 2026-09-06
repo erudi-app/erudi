@@ -15,6 +15,8 @@ from typing import Optional
 
 from py3langid.langid import MODEL_FILE, LanguageIdentifier
 
+from src.core.logging import logger
+
 # Below this normalized probability the signal is noise ("ok" scores ~0.17):
 # the caller falls back to the generic same-language instruction.
 MIN_CONFIDENCE = 0.7
@@ -37,7 +39,15 @@ def _get_identifier() -> Optional[LanguageIdentifier]:
         try:
             _identifier = LanguageIdentifier.from_pickled_model(MODEL_FILE, norm_probs=True)
         except Exception:
+            # Logged once per process: from here on every KB turn falls back
+            # to the generic answer-language line, which a maintainer would
+            # otherwise only discover through answers drifting to English.
             _load_failed = True
+            logger.warning(
+                f"Language detection is unavailable (could not load {MODEL_FILE}); "
+                f"KB prompts fall back to the generic answer-language line",
+                exc_info=True,
+            )
             return None
     return _identifier
 
@@ -53,5 +63,8 @@ def detect_language(text: str) -> Optional[str]:
     try:
         language, probability = identifier.classify(text)
     except Exception:
+        # Per-turn and best-effort: the generic line is the fallback, and the
+        # text itself is already in the request's INFO records.
+        logger.debug("Language detection failed for this turn", exc_info=True)
         return None
     return language if probability >= MIN_CONFIDENCE else None

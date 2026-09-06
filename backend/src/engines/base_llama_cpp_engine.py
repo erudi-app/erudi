@@ -136,10 +136,16 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         primary = install / exe
         if primary.exists():
             return primary
-        # Fallback to the other flavour.
+        # Fallback to the other flavour. Said out loud: a CUDA engine that
+        # silently starts the CPU binary runs every generation on the
+        # processor with nothing in the log to explain the speed.
         other = "cpu" if cls._use_cuda_build else "cuda"
         fallback = ROOT_DIR / "artifacts" / "llama-cpp" / other / "bin" / exe
         if fallback.exists():
+            logger.warning(
+                f"[{cls.__name__}] llama-server not found at {primary}; "
+                f"falling back to the {other} build at {fallback}"
+            )
             return fallback
         raise EngineException(
             message=(
@@ -211,10 +217,13 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         """
         from src.engines import integrity
 
+        # The message is curated for the user; the path goes in the trace so
+        # the log record says which folder failed the check.
         path = Path(llm_local_path)
         if not path.exists():
             raise EngineException(
-                message=integrity.incomplete_message("the model folder is missing")
+                message=integrity.incomplete_message("the model folder is missing"),
+                trace=str(path),
             )
         if path.is_file():
             chosen = path
@@ -222,7 +231,8 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
             ggufs = [g for g in path.glob("*.gguf") if not g.name.lower().startswith("mmproj")]
             if not ggufs:
                 raise EngineException(
-                    message=integrity.incomplete_message("no GGUF weights file was found")
+                    message=integrity.incomplete_message("no GGUF weights file was found"),
+                    trace=str(path),
                 )
             chosen = cls._select_gguf(path)
         integrity.validate_gguf_file(chosen)
@@ -298,7 +308,9 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
             gguf_path = cls._select_gguf(llm_local_path)
             return cls._find_mmproj(gguf_path) is not None
         except Exception:
-            logger.warning(f"[{cls.__name__}] vision detection failed for {llm_local_path}")
+            logger.warning(
+                f"[{cls.__name__}] vision detection failed for {llm_local_path}", exc_info=True
+            )
             return None
 
     @classmethod
@@ -319,9 +331,19 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
                 try:
                     proc.wait(timeout=5)
                 except Exception:
+                    # It ignored the polite signal for 5s: a server stuck in a
+                    # native call. Killed, and said so -- a child that has to
+                    # be killed on every swap is a symptom worth a record.
+                    logger.warning(
+                        f"[{cls.__name__}] llama-server pid {getattr(proc, 'pid', '?')} "
+                        f"did not exit within 5s of the stop signal; killing it"
+                    )
                     proc.kill()
-        except Exception:
-            pass  # best-effort
+        except Exception as exc:
+            # poll/signal/kill raising means the handle is already gone (the
+            # process exited and was reaped, or the pid is invalid): there is
+            # nothing left to terminate, so this is not a failure.
+            logger.debug(f"[{cls.__name__}] terminate skipped: {type(exc).__name__}: {exc}")
 
     @classmethod
     def _proc_is_alive(cls, proc: Any) -> bool:
@@ -424,18 +446,34 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         api_key = secrets.token_urlsafe(32)
         argv += ["--api-key", api_key, "--no-slots", "--no-webui"]
         env = cls._build_spawn_env()
-        proc = subprocess.Popen(
-            [str(a) for a in argv],
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            universal_newlines=True,
-            bufsize=1,
-            env=env,
-            # llama-server is a console exe: without this it opens its own
-            # terminal window on Windows when the backend's console isn't
-            # inheritable (#175). No-op (0) on POSIX.
-            creationflags=hidden_console_creationflags(),
-        )
+        try:
+            proc = subprocess.Popen(
+                [str(a) for a in argv],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.STDOUT,
+                universal_newlines=True,
+                # A byte the child writes that is not UTF-8 (a GGUF metadata
+                # dump can carry one) must degrade to U+FFFD, not raise inside
+                # the drainer and leave the pipe unread (#361).
+                errors="replace",
+                bufsize=1,
+                env=env,
+                # llama-server is a console exe: without this it opens its own
+                # terminal window on Windows when the backend's console isn't
+                # inheritable (#175). No-op (0) on POSIX.
+                creationflags=hidden_console_creationflags(),
+            )
+        except OSError as exc:
+            # The binary is missing, lost its executable bit in the freeze, or
+            # a DLL beside it is absent (Windows reports that as an OSError
+            # too). Named here, because a bare OSError from Popen does not say
+            # which file it was trying to run.
+            raise EngineException(
+                message=(
+                    f"Could not start llama-server at {llama_server}: " f"{exc.strerror or exc}"
+                ),
+                trace=f"{type(exc).__name__}: {exc}",
+            ) from exc
         # Start draining immediately: llama-server writes its banner and the
         # GGUF metadata dump before it is ever ready, and an unread pipe would
         # wedge it mid-startup once full (#361).

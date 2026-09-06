@@ -282,6 +282,13 @@ class CUDA_Engine(BaseLlamaCppEngine):
         if vram_override is None:
             gpus = cls._get_nvml_gpus()
             if not gpus:
+                # The CUDA engine was selected, yet NVML now sees no device:
+                # every generation runs on the processor from here on, which
+                # the user will experience as a slow model and nothing else.
+                logger.warning(
+                    "[CUDA_Engine] NVML reports no GPU; llama-server starts with 0 GPU "
+                    "layers (processor only)"
+                )
                 return 0
             best = cls._select_best_gpu(gpus)
             vram_free_gb = best["vram_free_mb"] / 1024
@@ -477,7 +484,10 @@ class CUDA_Engine(BaseLlamaCppEngine):
             return gpus
 
         except Exception as e:
-            logger.error(f"Failed to enumerate GPUs: {e}")
+            # The caller treats an empty list as "no GPU" and carries on, so
+            # this is a degradation with a fallback, and the traceback is the
+            # only way to tell a broken driver from an absent one.
+            logger.warning(f"Failed to enumerate GPUs: {e}", exc_info=True)
             return []
 
     @classmethod

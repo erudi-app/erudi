@@ -163,7 +163,7 @@ def cuda_preflight_notice() -> Optional[dict]:
         capability = tuple(CUDA_Engine._get_compute_capability(gpu.get("handle")))
         driver_version = CUDA_Engine._get_cuda_driver_version_int()
     except Exception as e:
-        logger.warning(f"CUDA pre-flight skipped: {e}")
+        logger.warning(f"CUDA pre-flight skipped: {e}", exc_info=True)
         return None
 
     if capability == (0, 0):

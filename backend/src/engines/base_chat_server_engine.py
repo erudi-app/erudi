@@ -111,6 +111,54 @@ class BaseChatServerEngine(BaseEngine):
         return "No child output is captured for this engine."
 
     @classmethod
+    def _child_exit_code(cls, proc: Any) -> Optional[int]:
+        """The child's exit status, or None while it runs or when unknown.
+
+        `subprocess.Popen` exposes `returncode`, `multiprocessing.Process`
+        exposes `exitcode`; both are read so the record of a death names the
+        code whichever child type the subclass spawns.
+        """
+        for attr in ("returncode", "exitcode"):
+            code = getattr(proc, attr, None)
+            if isinstance(code, int) and not isinstance(code, bool):
+                return code
+        return None
+
+    @classmethod
+    def _describe_child(cls, proc: Any, port: Any = None) -> str:
+        """`pid 1234, port 27200, exit code 139` -- what identifies a dead child."""
+        parts = []
+        pid = getattr(proc, "pid", None)
+        if isinstance(pid, int):
+            parts.append(f"pid {pid}")
+        if port is not None:
+            parts.append(f"port {port}")
+        code = cls._child_exit_code(proc)
+        parts.append(f"exit code {code}" if code is not None else "exit code unknown")
+        return ", ".join(parts)
+
+    @classmethod
+    def child_crash_report(cls) -> Optional[str]:
+        """Describe the loaded child if it is dead; None when it runs or when
+        nothing is loaded.
+
+        The agent layer calls this when a stream fails: a generation that
+        breaks because llama-server aborted mid-request surfaces as an HTTP
+        connection error, and the exit code and the child's last lines are
+        the only diagnostic there is. The engine does not notice the death by
+        itself; the next request for the same model does (see
+        `_should_not_reload_model`).
+        """
+        proc = cls._model.get("proc") if isinstance(cls._model, dict) else None
+        if proc is None or cls._proc_is_alive(proc):
+            return None
+        port = cls._model.get("port") if isinstance(cls._model, dict) else None
+        return (
+            f"{cls._server_name} child is dead ({cls._describe_child(proc, port)}). "
+            f"{cls._read_child_output(proc)}"
+        )
+
+    @classmethod
     @abstractmethod
     def _resolve_model_artifact(cls, llm_local_path: Union[str, Path]) -> Path:
         """Resolve the artifact handed to `_spawn_child`.
@@ -273,6 +321,7 @@ class BaseChatServerEngine(BaseEngine):
         None, and sends no header at all.
         """
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+        port = base_url.rsplit(":", 1)[-1]
         probe_start = time.monotonic()
         deadline = probe_start + cls._probe_timeout_s
         last_status: Optional[int] = None
@@ -281,12 +330,14 @@ class BaseChatServerEngine(BaseEngine):
             if proc is not None and not cls._proc_is_alive(proc):
                 # The tail is the only diagnostic there is, so it is shown to
                 # the user AND classified: a CUDA failure the app can propose a
-                # remedy for gets a code, everything else stays generic.
+                # remedy for gets a code, everything else stays generic. The
+                # exit code, pid and port identify the process in the log.
                 child_output = cls._read_child_output(proc)
                 raise EngineException(
                     message=(
                         f"{cls._server_name} child exited before becoming ready "
-                        f"(early crash). {child_output}"
+                        f"(early crash; {cls._describe_child(proc, port)}, "
+                        f"model {model_field}). {child_output}"
                     ),
                     trace=child_output,
                     engine_code=classify_cuda_failure(child_output),
@@ -306,15 +357,19 @@ class BaseChatServerEngine(BaseEngine):
                 last_err = e
             time.sleep(cls._probe_poll_interval_s)
         else:
-            port = base_url.rsplit(":", 1)[-1]
+            # The child is alive but never answered: its output is the only
+            # clue to what it was doing (a model still loading, a bind that
+            # went to the wrong interface), and the caller kills it next.
             raise EngineException(
                 message=(
                     f"{cls._server_name} did not become ready within "
                     f"{cls._probe_timeout_s:.0f}s (last status: {last_status}, "
-                    f"last err: {last_err}). If another process bound the port "
+                    f"last err: {last_err}; {cls._describe_child(proc, port)}, "
+                    f"model {model_field}). If another process bound the port "
                     f"between pick and spawn, the request may be hitting the wrong "
                     f"server — check `lsof -i :{port}`."
                 ),
+                trace=cls._read_child_output(proc) if proc is not None else None,
             )
         # Stage 2 — cheap chat-completions ping (1 token). `model_field` is the
         # real per-subclass model identifier computed by `_start_server`.
@@ -334,15 +389,20 @@ class BaseChatServerEngine(BaseEngine):
             )
         except requests.RequestException as e:
             raise EngineException(
-                message=f"{cls._server_name} chat-completions probe failed",
-                trace=str(e),
+                message=(
+                    f"{cls._server_name} chat-completions probe failed "
+                    f"({cls._describe_child(proc, port)}, model {model_field}): {e}"
+                ),
+                trace=cls._read_child_output(proc) if proc is not None else str(e),
             )
         if resp.status_code >= 400:
             raise EngineException(
                 message=(
                     f"{cls._server_name} chat-completions probe returned "
-                    f"HTTP {resp.status_code}: {resp.text[:200]}"
+                    f"HTTP {resp.status_code} ({cls._describe_child(proc, port)}, "
+                    f"model {model_field}): {resp.text[:200]}"
                 ),
+                trace=cls._read_child_output(proc) if proc is not None else None,
             )
         ping_ms = (time.monotonic() - ping_start) * 1000
         logger.info(f"[{cls.__name__}] {cls._server_name} chat-ping ok after {ping_ms:.0f}ms")
@@ -397,10 +457,12 @@ class BaseChatServerEngine(BaseEngine):
             return False
         proc = cls._model.get("proc") if isinstance(cls._model, dict) else None
         if not cls._proc_is_alive(proc):
+            port = cls._model.get("port") if isinstance(cls._model, dict) else None
             logger.warning(
                 f"[{cls.__name__}] Cached child for model {llm_id} is no "
-                f"longer running; forcing a respawn instead of reusing a "
-                f"dead handle. {cls._read_child_output(proc)}"
+                f"longer running ({cls._describe_child(proc, port)}); forcing a "
+                f"respawn instead of reusing a dead handle. "
+                f"{cls._read_child_output(proc)}"
             )
             return False
         return True
