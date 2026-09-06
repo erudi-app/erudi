@@ -51,6 +51,7 @@ const BACKEND = {
 
 let appLogTail;
 let revealLog;
+let clipboardWriteText;
 
 beforeEach(() => {
   resetSessionErrors();
@@ -74,8 +75,9 @@ beforeEach(() => {
     appLogTail,
     revealLog,
   };
+  clipboardWriteText = vi.fn().mockResolvedValue(undefined);
   Object.defineProperty(window.navigator, "clipboard", {
-    value: { writeText: vi.fn().mockResolvedValue(undefined) },
+    value: { writeText: clipboardWriteText },
     configurable: true,
   });
 });
@@ -90,45 +92,64 @@ afterEach(async () => {
 describe("DiagnosticsPanel — backend up", () => {
   it("shows the environment summary from both sides", async () => {
     render(<DiagnosticsPanel />);
-    expect(await screen.findByText("MLX_Engine")).toBeTruthy();
-    expect(screen.getByText("1.0.0")).toBeTruthy();
-    expect(screen.getByText("mlx-community/Qwen3-4B-4bit")).toBeTruthy();
-    expect(screen.getByText("3.12.9")).toBeTruthy();
-    expect(screen.getByText("/Users/x/Library/Logs/erudi/backend.log")).toBeTruthy();
-    expect(screen.getByText("/tmp/erudi-backend.log")).toBeTruthy();
+    // Every value comes from the same state-settling render, but wait on all
+    // of them together rather than trusting that the first one to appear
+    // means the rest already landed.
+    await waitFor(() => {
+      expect(screen.getByText("MLX_Engine")).toBeTruthy();
+      expect(screen.getByText("1.0.0")).toBeTruthy();
+      expect(screen.getByText("mlx-community/Qwen3-4B-4bit")).toBeTruthy();
+      expect(screen.getByText("3.12.9")).toBeTruthy();
+    });
+  });
+
+  it("does not show the log-path rows, nor a text preview", async () => {
+    render(<DiagnosticsPanel />);
+    await waitFor(() => expect(screen.getByText("MLX_Engine")).toBeTruthy());
+    expect(screen.queryByText("/Users/x/Library/Logs/erudi/backend.log")).toBeNull();
+    expect(screen.queryByText("/tmp/erudi-backend.log")).toBeNull();
+    expect(document.querySelector("textarea")).toBeNull();
   });
 
   it("merges backend, app-log and session errors into one list", async () => {
     recordSessionError({ origin: "window.onerror", message: "render blew up" });
     render(<DiagnosticsPanel />);
-    // Each message shows twice: once in the list, once inside the copyable
-    // block, which is the point of the block.
-    expect(await screen.findAllByText(/engine refused to start/)).toHaveLength(2);
-    expect(screen.getAllByText(/slow boot/).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/render blew up/).length).toBeGreaterThan(0);
-  });
-
-  it("warns next to the copy block that logs can contain conversation content", async () => {
-    render(<DiagnosticsPanel />);
-    const note = await screen.findByText(/Logs can contain the text of your conversations/);
-    const block = screen.getByLabelText("Diagnostics to copy").parentElement;
-    expect(block.contains(note)).toBe(true);
+    await waitFor(() => {
+      expect(screen.getAllByText(/engine refused to start/)).toHaveLength(1);
+      expect(screen.getAllByText(/slow boot/).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/render blew up/).length).toBeGreaterThan(0);
+    });
   });
 
   it("lists the entries rather than the quiet state when there is something to show", async () => {
     render(<DiagnosticsPanel />);
-    expect(await screen.findAllByText(/engine refused to start/)).toHaveLength(2);
+    await waitFor(() => expect(screen.getAllByText(/engine refused to start/)).toHaveLength(1));
     expect(screen.queryByText("No warning or error recorded.")).toBeNull();
     expect(document.querySelector(".lucide-circle-check")).toBeNull();
   });
 
-  it("puts the whole report in the copyable block", async () => {
+  it("copies the whole report, including the log paths, through a single button", async () => {
     render(<DiagnosticsPanel />);
-    const area = await screen.findByLabelText("Diagnostics to copy");
-    expect(area.value).toContain("Erudi 1.0.0");
-    expect(area.value).toContain("MLX_Engine");
-    expect(area.value).toContain("engine refused to start");
-    expect(area.value).toContain("be-1f2e3d4c");
+    // The copy button only mounts once `entries` reflects the loaded data, so
+    // waiting for it also waits for `app` and `backend` to have settled —
+    // unlike the old textarea, which existed from the very first render.
+    const copyButton = await screen.findByRole("button", { name: "Copy the full report" });
+    fireEvent.click(copyButton);
+    await waitFor(() => expect(clipboardWriteText).toHaveBeenCalled());
+    const copiedText = clipboardWriteText.mock.calls[0][0];
+    expect(copiedText).toContain("Erudi 1.0.0");
+    expect(copiedText).toContain("MLX_Engine");
+    expect(copiedText).toContain("engine refused to start");
+    expect(copiedText).toContain("be-1f2e3d4c");
+    expect(copiedText).toContain("/Users/x/Library/Logs/erudi/backend.log");
+    expect(copiedText).toContain("/tmp/erudi-backend.log");
+  });
+
+  it("offers the GitHub report route and the contact page alongside the copy button", async () => {
+    render(<DiagnosticsPanel />);
+    await screen.findByRole("button", { name: "Copy the full report" });
+    expect(screen.getByRole("button", { name: "Report on GitHub" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Write to us on the contact page" })).toBeTruthy();
   });
 
   it("reveals the log folder through the bridge", async () => {
@@ -145,23 +166,33 @@ describe("DiagnosticsPanel — backend down", () => {
 
   it("still shows what the app knows about itself", async () => {
     render(<DiagnosticsPanel />);
-    expect(await screen.findByText("The backend did not answer")).toBeTruthy();
-    expect(screen.getByText("1.0.0")).toBeTruthy();
-    expect(screen.getByText("/tmp/erudi-backend.log")).toBeTruthy();
+    await waitFor(() => {
+      expect(screen.getByText("The backend did not answer")).toBeTruthy();
+      expect(screen.getByText("1.0.0")).toBeTruthy();
+    });
   });
 
   it("still shows the app-side errors", async () => {
     recordSessionError({ origin: "window.onerror", message: "render blew up" });
     render(<DiagnosticsPanel />);
-    expect((await screen.findAllByText(/slow boot/)).length).toBeGreaterThan(0);
-    expect(screen.getAllByText(/render blew up/).length).toBeGreaterThan(0);
+    await waitFor(() => {
+      expect(screen.getAllByText(/slow boot/).length).toBeGreaterThan(0);
+      expect(screen.getAllByText(/render blew up/).length).toBeGreaterThan(0);
+    });
   });
 
   it("still offers a copyable report and the GitHub route", async () => {
     render(<DiagnosticsPanel />);
-    const area = await screen.findByLabelText("Diagnostics to copy");
-    expect(area.value).toContain("Erudi 1.0.0");
-    expect(area.value).toContain("backend did not answer");
+    // Wait on the copy button itself (mounted only once `entries` reflects
+    // the loaded data) rather than an element present from the first render:
+    // reading a still-empty value right after the element appears is exactly
+    // what made the old textarea-based version of this test flaky.
+    const copyButton = await screen.findByRole("button", { name: "Copy the full report" });
+    fireEvent.click(copyButton);
+    await waitFor(() => expect(clipboardWriteText).toHaveBeenCalled());
+    const copiedText = clipboardWriteText.mock.calls[0][0];
+    expect(copiedText).toContain("Erudi 1.0.0");
+    expect(copiedText).toContain("backend did not answer");
     expect(screen.getByRole("button", { name: "Report on GitHub" })).toBeTruthy();
   });
 });
@@ -181,11 +212,11 @@ describe("DiagnosticsPanel — nothing recorded", () => {
     expect(document.querySelector("pre")).toBeNull();
   });
 
-  it("keeps the log privacy note with the copy block, where it still applies", async () => {
+  it("shows no copy button and nothing about handling errors", async () => {
     render(<DiagnosticsPanel />);
-    const note = await screen.findByText(/Logs can contain the text of your conversations/);
-    const block = screen.getByLabelText("Diagnostics to copy").parentElement;
-    expect(block.contains(note)).toBe(true);
+    await screen.findByText("No warning or error recorded.");
+    expect(screen.queryByRole("button", { name: /copy/i })).toBeNull();
+    expect(screen.queryByText(/Paste the report/)).toBeNull();
   });
 
   it("still offers the report route and the log folder", async () => {

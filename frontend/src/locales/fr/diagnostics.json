@@ -15,8 +15,6 @@
     "model": "Modèle en mémoire",
     "python": "Python du backend",
     "database": "Base de données",
-    "appLog": "Logs de l'application",
-    "backendLog": "Logs du backend",
     "none": "Aucun",
     "unknown": "Inconnu"
   },
@@ -37,8 +35,9 @@
   "report": {
     "heading": "Signaler un problème",
     "textareaLabel": "Diagnostic à copier",
-    "privacyNote": "Les logs peuvent contenir le texte de vos conversations et le nom de vos documents, parce que rien ne quitte votre machine. Relisez ce que vous copiez avant de le publier.",
     "instruction": "Pour signaler quelque chose que vous avez remarqué, copiez ceci, ouvrez le formulaire de rapport de bug et collez-le dans le champ Logs. Décrivez ce qui s'est passé et ajoutez une capture d'écran si vous en avez une.",
+    "copyFullReport": "Copier le rapport complet",
+    "pasteHint": "Collez le rapport dans le champ Logs du formulaire de signalement de bug.",
     "github": "Signaler sur GitHub",
     "contactPrefix": "Pas de compte GitHub ?",
     "contactLink": "Écrivez-nous depuis la page de contact",
