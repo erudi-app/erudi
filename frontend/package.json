@@ -61,7 +61,7 @@
     "vitest": "^4.1.9",
     "wait-on": "^8.0.5",
     "webpack": "^5.110.3",
-    "webpack-cli": "^5.1.4",
+    "webpack-cli": "^7.2.3",
     "webpack-dev-server": "^4.15.2"
   },
   "dependencies": {
