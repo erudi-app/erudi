@@ -315,7 +315,7 @@ cd backend
 pytest tests/ -q --ignore=tests/e2e -m "not mlx_only"
 ```
 
-**Frontend** (`.github/workflows/frontend-ci.yml`, Node 20):
+**Frontend** (`.github/workflows/frontend-ci.yml`, Node 20 — `webpack-cli` needs >= 20.9, which the CI runner's Node 20 satisfies):
 
 ```bash
 cd frontend

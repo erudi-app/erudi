@@ -21,7 +21,7 @@ PyInstaller cannot cross-compile, so **each platform is built on that platform**
 | Tool | Version | Why |
 |---|---|---|
 | Python | **exactly 3.12** | `pgserver` only ships cp312 wheels; CI pins `3.12` |
-| Node.js | **20** | matches the CI runners |
+| Node.js | **>= 20.9** | matches the CI runners; `webpack-cli` declares this floor |
 | npm | bundled with Node 20 | |
 | PyInstaller | latest | installed into the backend venv |
 | CUDA toolkit | any **12.x**; releases use **12.8** | only for the Windows/Linux CUDA legs, to compile `llama-server`. 12.8 is the first that emits native code for Blackwell (RTX 50); on an older 12.x the build scripts drop `120-real` and those cards JIT from PTX instead. Not needed for a CPU or macOS build — and never needed to *run* Erudi. |

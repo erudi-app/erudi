@@ -21,7 +21,7 @@ Intel Macs are not a target.
 
 - **Python 3.12 exactly** — `pgserver`, which ships the embedded PostgreSQL cluster,
   publishes wheels up to cp312 only.
-- **Node.js 20 or later** — the CI legs run Node 20.
+- **Node.js >= 20.9** — the floor `webpack-cli` declares; the CI legs run Node 20, which satisfies it.
 - **Git**, with submodule support (llama.cpp is a submodule).
 - Platform extras: a CUDA toolkit on Windows/Linux to compile `llama-server` for an
   NVIDIA GPU — any 12.x builds, and releases use 12.8, the first that emits native

@@ -28,6 +28,9 @@
   "keywords": [],
   "author": "Djalil Chikhi, Rayan Hanader, Sami Taider, Youssef Chaouki, Youssef Laatar",
   "license": "MIT",
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "devDependencies": {
     "@babel/core": "^7.29.7",
     "@babel/preset-react": "^7.29.7",

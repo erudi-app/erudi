@@ -160,7 +160,7 @@ frontend/src/
 ## CI gates (must pass before merge)
 
 - **Backend** (`.github/workflows/backend-ci.yml`, Python 3.12, 3-leg matrix): `compileall`, `ruff check backend scripts`, `ruff format --check backend scripts`, `from src.main import app`, `pytest tests/ -q --ignore=tests/e2e -m "not mlx_only"`. All three legs (`ubuntu-latest`, `windows-latest`, `macos-14`) gate merges and run with `-x` — see `docs/dev/backend-ci-multi-os.md` for the triage that got them there. `pytest.ini` sets `timeout = 600` so a hung test fails instead of consuming the job. The Ubuntu leg runs against `CPU_Engine` only — keep CPU paths working.
-- **Frontend** (`.github/workflows/frontend-ci.yml`, Node 20): `npm ci`, `npm run lint:check`, `npm run format:check`, `npm run test:run` (Vitest).
+- **Frontend** (`.github/workflows/frontend-ci.yml`, Node 20 — `webpack-cli` needs >= 20.9, which the CI runner's Node 20 satisfies): `npm ci`, `npm run lint:check`, `npm run format:check`, `npm run test:run` (Vitest).
 - **Full-app smoke** (`.github/workflows/app-build-smoke.yml`): builds the complete shippable app on macOS, Windows and Linux, then boots the BUNDLED backend and asserts it reaches `ready`. It is the heaviest gate and the one most likely to fail on a packaging change — it runs on `pull_request` (ready for review) and in the merge queue. **The Linux leg is advisory**, not required: Linux has never had a manual pass on real hardware, so its signal is not yet trusted enough to block a merge. Read it, don't ignore it.
 
 These four workflows run on `pull_request` and again in the merge queue, on the
