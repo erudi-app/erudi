@@ -50,7 +50,7 @@ The inference servers listen on `127.0.0.1` too: `llama-server` on 27200–27299
 
 On Windows and Linux, `llama-server` is started with a random key that exists only for the life of that process, so nothing else on your machine can drive the loaded model — not another program, and not a web page in your browser, which can otherwise POST to a loopback port. Its slots endpoint, which would report the prompt of every request in flight, and its bundled web interface are both switched off, because Erudi uses neither ([base_llama_cpp_engine.py](https://github.com/erudi-app/erudi/blob/main/backend/src/engines/base_llama_cpp_engine.py#L417-L429)). On Apple Silicon, `mlx_vlm.server` offers no equivalent option — see [known gaps](#known-gaps).
 
-The embedded PostgreSQL database is reachable through a Unix socket only on macOS and Linux ([postgres_runtime.py](https://github.com/erudi-app/erudi/blob/main/backend/src/launcher/postgres_runtime.py#L12-L16)). On Windows, where Unix sockets are not available, it listens on a loopback TCP port without a password.
+The embedded PostgreSQL database requires a password on every network connection. Erudi generates a random one for each cluster and keeps it in `erudi_db_password` inside the `postgres/` data folder ([postgres_runtime.py](https://github.com/erudi-app/erudi/blob/main/backend/src/launcher/postgres_runtime.py#L230-L253)); at each start it sets that password on the database role, turns every network rule of `pg_hba.conf` to `scram-sha-256` and reloads the server ([postgres_runtime.py](https://github.com/erudi-app/erudi/blob/main/backend/src/launcher/postgres_runtime.py#L259-L305), [postgres_runtime.py](https://github.com/erudi-app/erudi/blob/main/backend/src/launcher/postgres_runtime.py#L408-L413)). On macOS and Linux the cluster does not open a TCP port at all: it is reachable through a Unix socket only, which the file system's permissions guard ([postgres_runtime.py](https://github.com/erudi-app/erudi/blob/main/backend/src/launcher/postgres_runtime.py#L12-L16)). On Windows, where Unix sockets are not available, it listens on a loopback TCP port, and a client that does not present the password is refused. The password never appears in a log line or on a command line: the pre-migration `pg_dump` receives it through its environment ([backup.py](https://github.com/erudi-app/erudi/blob/main/backend/src/database/backup.py#L32-L47)).
 
 The app window runs with Chromium's sandbox, context isolation and no Node integration ([main.js](https://github.com/erudi-app/erudi/blob/main/frontend/src/main.js#L640-L646)); the packaged build cannot be started with remote debugging or Node inspection flags ([electron-builder.yml](https://github.com/erudi-app/erudi/blob/main/frontend/electron-builder.yml#L29-L35)).
 
@@ -64,7 +64,7 @@ The app window runs with Chromium's sandbox, context isolation and no Node integ
 | Windows | `%LOCALAPPDATA%\erudi\backend\prod\data` | `%LOCALAPPDATA%\erudi\logs\backend.log` |
 | Linux | `$XDG_DATA_HOME/erudi/backend/prod/data` (default `~/.local/share/…`) | `$XDG_STATE_HOME/erudi/logs/backend.log` (default `~/.local/state/…`) |
 
-Source: [runtime_paths.py](https://github.com/erudi-app/erudi/blob/main/backend/src/launcher/runtime_paths.py#L173-L191). Inside the data folder: `models/` (the weights you downloaded), `models_cache/` (the embedding model), `postgres/` (conversations, knowledge-base chunks and embeddings), `db-backups/` (a copy taken before each database migration). *Open data folder* and *Clear all data* in the app act on this folder.
+Source: [runtime_paths.py](https://github.com/erudi-app/erudi/blob/main/backend/src/launcher/runtime_paths.py#L173-L191). Inside the data folder: `models/` (the weights you downloaded), `models_cache/` (the embedding model), `postgres/` (conversations, knowledge-base chunks and embeddings, plus `erudi_db_password`, the password the app presents to open them), `db-backups/` (a copy taken before each database migration). *Open data folder* and *Clear all data* in the app act on this folder.
 
 Two things are written outside it:
 
@@ -91,7 +91,6 @@ These are the points on which the current build is weaker than this page would l
 
 1. **Web search does not pin an engine.** The `auto` backend picks among ten engines. It should use one, named on this page.
 2. **On Apple Silicon, the inference server accepts requests from any local origin.** `mlx_vlm.server` has no API-key option, so while a model is loaded another program on your machine — or a web page open in your browser — can send it prompts. The backend and the `llama-server` used on Windows and Linux both require a key; this one cannot yet.
-3. **On Windows, the embedded database is reachable by any local process** on a loopback port without a password.
 
 ## How to check for yourself
 
