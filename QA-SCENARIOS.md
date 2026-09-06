@@ -196,6 +196,7 @@ one check.*
 **Diagnostics page**
 - [ ] When I open Diagnostics (the bug icon in the left rail) with the backend running, then the page shows my Erudi version, operating system, inference engine, CPU/GPU, the model in memory (or none), the backend's Python version and the database state — no log-file paths are listed on screen, and there is no text preview of the report.
 - [ ] When the backend has recorded warnings or errors, then they are listed newest last with their timestamp, level, source and request id, and an identical error repeated many times appears **once** with a repeat count.
+- [ ] When a recorded error merely describes the environment (no network, HuggingFace rate-limited or down, a gated repository with no token, the disk or the app's own port taken) rather than Erudi being wrong, then it does **not** appear in the list and is **not** in the copied report — the same exclusion the bug icon's badge uses, applied once so the two can never disagree. A `WARNING` is never excluded this way.
 - [ ] When I read the recent-errors list, then no ordinary activity line appears — only `WARNING` and above.
 - [ ] When there is at least one recent error, then a one-line hint says to paste the report into the bug form's Logs field, and a single **Copy the full report** button appears alongside **Report on GitHub** and the contact link, all headed **Report a problem**.
 - [ ] When nothing was recorded, then the recent-errors area shows a check mark and **No warning or error recorded.** and nothing else; there is no copy button and no line about pasting a report, but **Open log folder**, **Report on GitHub** and the contact link are still there, headed **Report a problem**.
@@ -205,6 +206,9 @@ one check.*
 - [ ] When I use the **contact page** link instead, then `erudi.app/contact` opens in my browser and the copy tells me to include everything above plus my screenshots.
 - [ ] When I kill the backend (or launch with the port blocked) and open the page, then it says **the backend did not answer**, still shows my version and platform, still lists the app-side errors, and still offers **Copy the full report** (when there is something to report) and **Report on GitHub** — it does **not** go blank.
 - [ ] When I click the **bug icon** in the left rail, then I land on the Diagnostics page, the icon is highlighted like the other destinations, and Settings shows no diagnostics of its own — no web page opens.
+- [ ] When something the app itself gets wrong happens silently (not offline, not a service outage) — for example the backend returns a real 500 — then a small badge appears on the bug icon showing **1**; opening Diagnostics lists that error and the badge disappears, with no popup, toast or sound at any point.
+- [ ] When I trigger a **Hugging Face download while offline**, then the download modal still tells me it failed, but the failure appears on **neither** the Diagnostics page's recent-errors list **nor** the copied report **nor** the bug icon's badge — an unreachable network is not counted as a defect anywhere.
+- [ ] When more than nine new errors accumulate before I next open Diagnostics, then the badge reads **9+** rather than the exact count.
 
 ## Shared chrome (sidebar, connection, downloads)
 

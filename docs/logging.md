@@ -64,10 +64,21 @@ two files carry, without leaving the app:
   travels in the copied report below, for whoever triages the issue.
 - **Recent errors**: the last 200 records at `WARNING` or above, merged from
   three sources and sorted on one timeline — `backend.log`,
-  `erudi-backend.log`, and the errors this window caught itself. Each row shows
-  its timestamp, level, source, request id when it has one, and how many times
-  an identical error repeated. When nothing was recorded, the area says so in
-  one line and asks nothing.
+  `erudi-backend.log`, and the errors this window caught itself — minus any
+  `ERROR`/`CRITICAL` record that merely describes the environment rather than
+  Erudi being wrong (a machine with no network, HuggingFace rate-limiting or
+  down, the user's disk or port — see `frontend/src/utils/bugCounter.js`'s
+  `isEnvironmental`, applied once in `diagnosticsReport.js` so the list, the
+  copied report and the badge below can never disagree). `WARNING` records are
+  never filtered this way. Each remaining row shows its timestamp, level,
+  source, request id when it has one, and how many times an identical error
+  repeated. When nothing was recorded, the area says so in one line and asks
+  nothing.
+- **A counter on the bug icon itself**: the sidebar badges the icon with how
+  many of those same (already-filtered) records are `ERROR`/`CRITICAL` and
+  newer than the later of app launch and the last time this page was opened;
+  it reads `9+` past nine and opening the page clears it. Nothing pops up —
+  the badge is the entire surface.
 - **Open log folder**, which reveals `backend.log` in the file manager.
 - **Report a problem**: a button that opens this repository's bug report form
   with the version, operating system, hardware and model already filled in,
@@ -78,7 +89,7 @@ two files carry, without leaving the app:
   **Logs** field. When nothing was recorded there is nothing to copy, so the
   button is not offered.
 
-Two properties of that list are deliberate.
+Three properties of that list are deliberate.
 
 **`INFO` records never appear.** They are the ones that carry conversation
 content (see [privacy](privacy.md)), and this page exists to be pasted into a
@@ -88,6 +99,18 @@ lines. In `erudi-backend.log` the levelled lines are the renderer's
 (`[renderer:<ns>] WARN|ERROR …`) and the main process's own failures
 (`[main] WARN|ERROR …`: a backend that exited, a spawn that failed, a renderer
 that crashed); main's lifecycle chatter carries no level and stays out.
+
+**An environmental `ERROR` never appears either.** A no-network HuggingFace
+download, a rate-limited or degraded HuggingFace API, a gated repository this
+install has no token for, the machine's disk or the app's port being taken by
+something else — none of these are Erudi getting something wrong, so none of
+them belong on a page whose whole point is nudging a real defect toward a
+report. The exclusion is one predicate, `isEnvironmental` in
+`frontend/src/utils/bugCounter.js`, matched against the error codes and
+message shapes the app itself produces for each case (documented inline,
+patch by patch) — never a request to Erudi's OWN backend or one of its
+inference children, which stays counted no matter how "connection"-shaped its
+message reads.
 
 **Each error appears once.** The same failure is legitimately written by more
 than one writer, and the merge removes the overlap rather than the writers: an
