@@ -28,6 +28,9 @@
   "keywords": [],
   "author": "Djalil Chikhi, Rayan Hanader, Sami Taider, Youssef Chaouki, Youssef Laatar",
   "license": "MIT",
+  "engines": {
+    "node": ">=20.9.0"
+  },
   "devDependencies": {
     "@babel/core": "^7.29.7",
     "@babel/preset-react": "^7.29.7",
@@ -35,8 +38,8 @@
     "@testing-library/jest-dom": "^6.9.1",
     "@testing-library/react": "^16.3.3",
     "@testing-library/user-event": "^14.6.7",
-    "@vercel/webpack-asset-relocator-loader": "1.7.3",
-    "@vitest/coverage-v8": "4.1.9",
+    "@vercel/webpack-asset-relocator-loader": "1.11.0",
+    "@vitest/coverage-v8": "4.1.11",
     "autoprefixer": "^10.5.5",
     "babel-loader": "^10.1.1",
     "concurrently": "^9.2.4",
@@ -61,8 +64,8 @@
     "vitest": "^4.1.9",
     "wait-on": "^8.0.5",
     "webpack": "^5.110.3",
-    "webpack-cli": "^5.1.4",
-    "webpack-dev-server": "^4.15.2"
+    "webpack-cli": "^7.2.3",
+    "webpack-dev-server": "^5.2.6"
   },
   "dependencies": {
     "@fontsource/montserrat": "^5.3.0",
@@ -74,7 +77,7 @@
     "electron-updater": "^6.8.9",
     "framer-motion": "^12.43.0",
     "i18next": "^26.4.2",
-    "katex": "^0.16.47",
+    "katex": "^0.18.5",
     "lucide-react": "^0.507.0",
     "prop-types": "^15.8.1",
     "react": "^19.2.8",
@@ -85,5 +88,8 @@
     "rehype-katex": "^7.0.1",
     "remark-gfm": "^4.0.1",
     "remark-math": "^6.0.0"
+  },
+  "overrides": {
+    "uuid": "^11.1.1"
   }
 }

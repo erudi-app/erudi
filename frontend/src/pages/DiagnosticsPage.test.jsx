@@ -23,8 +23,24 @@ vi.mock("../components/Sidebar", () => ({
 
 import DiagnosticsPage from "./DiagnosticsPage";
 import { DIAGNOSTICS_PATH } from "../utils/routes";
+import { getLastDiagnosticsVisit, LAST_VISIT_STORAGE_KEY } from "../utils/bugCounter";
+
+function memoryStorage(initial = {}) {
+  const store = new Map(Object.entries(initial));
+  return {
+    getItem: (k) => (store.has(k) ? store.get(k) : null),
+    setItem: (k, v) => store.set(k, String(v)),
+    removeItem: (k) => store.delete(k),
+    clear: () => store.clear(),
+  };
+}
 
 beforeEach(() => {
+  Object.defineProperty(window, "localStorage", {
+    value: memoryStorage(),
+    configurable: true,
+    writable: true,
+  });
   getMock.mockResolvedValue({
     environment: {
       platform: "Darwin",
@@ -66,5 +82,12 @@ describe("DiagnosticsPage", () => {
     const { container } = renderPage();
     expect(container.querySelector("header .lucide-bug")).not.toBeNull();
     expect(container.querySelector(".lucide-stethoscope")).toBeNull();
+  });
+
+  it("marks the Diagnostics visit on mount, clearing the bug icon's counter (#485)", () => {
+    expect(window.localStorage.getItem(LAST_VISIT_STORAGE_KEY)).toBeNull();
+    const before = Date.now();
+    renderPage();
+    expect(getLastDiagnosticsVisit()).toBeGreaterThanOrEqual(before);
   });
 });

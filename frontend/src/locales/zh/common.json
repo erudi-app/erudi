@@ -54,6 +54,8 @@
     "knowledgeBase": "知识库",
     "settings": "设置",
     "reportBug": "报告问题",
+    "reportBugWithCount_one": "报告问题（{{count}} 个新错误）",
+    "reportBugWithCount_other": "报告问题（{{count}} 个新错误）",
     "toggleModelsSidebar": "显示或隐藏模型侧栏",
     "toggleChatSidebar": "显示或隐藏聊天侧栏"
   },

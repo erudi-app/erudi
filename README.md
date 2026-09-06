@@ -79,7 +79,7 @@ Most local-AI tools are either a runtime you drive from a terminal, or a web int
 
 ### Prerequisites
 
-- **Node.js** >= 20
+- **Node.js** >= 20.9 — the floor `webpack-cli` declares
 - **Python 3.12** exactly — `pgserver`, which ships the embedded PostgreSQL cluster, publishes wheels up to cp312 only
 - **Git**
 - Platform-specific requirements:

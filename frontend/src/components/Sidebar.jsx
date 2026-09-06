@@ -14,6 +14,7 @@ import { Link, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useDownloadModal } from "../contexts/DownloadModalContext";
 import { DIAGNOSTICS_PATH, SETTINGS_PATH } from "../utils/routes";
+import useBugCounter from "../shared/hooks/useBugCounter";
 
 /**
  * Sidebar with icons that highlight based on the current route.
@@ -31,6 +32,7 @@ export default function Sidebar({
   const [isHovering, setIsHovering] = useState(false);
   const [isBrainHovering, setIsBrainHovering] = useState(false);
   const { isDownloading } = useDownloadModal();
+  const { count: bugCount, label: bugBadgeLabel } = useBugCounter();
   const location = useLocation();
   const isModelsActive = location.pathname === "/erudi/models";
   const isChatActive =
@@ -175,18 +177,41 @@ export default function Sidebar({
         // what to send, lets them copy it, and takes them to the issue form or
         // the contact page from there. A destination like the others, so it
         // highlights like the others.
+        //
+        // The small badge (#485) is the whole surface for errors the app
+        // recovered from silently: it counts real defects (ERROR/CRITICAL,
+        // environmental failures excluded -- see utils/bugCounter.js) recorded
+        // since the later of app launch and the last Diagnostics visit, caps
+        // its text at "9+", and disappears the moment that page is opened
+        // (DiagnosticsPage marks the visit on mount). Nothing pops up, ever:
+        // no dialog, no toast, no sound -- this number is it.
         <Link
           to={DIAGNOSTICS_PATH}
-          aria-label={t("common:nav.reportBug")}
+          aria-label={
+            bugCount > 0
+              ? t("common:nav.reportBugWithCount", { count: bugCount })
+              : t("common:nav.reportBug")
+          }
           className={`w-full flex justify-center items-center py-5 border-l-4 mb-4 ${
             isDiagnosticsActive ? "border-green-500" : "border-transparent"
           }`}
         >
-          <Bug
-            className={`w-5 h-5 transition-colors duration-200 ${
-              isDiagnosticsActive ? "text-green-400" : "text-gray-400 hover:text-green-400"
-            }`}
-          />
+          <span className="relative inline-flex">
+            <Bug
+              className={`w-5 h-5 transition-colors duration-200 ${
+                isDiagnosticsActive ? "text-green-400" : "text-gray-400 hover:text-green-400"
+              }`}
+            />
+            {bugCount > 0 && (
+              <span
+                data-testid="bug-badge"
+                aria-hidden="true"
+                className="absolute -top-1.5 -right-2 min-w-[16px] h-4 px-[3px] flex items-center justify-center rounded-full bg-red-500 text-white text-[10px] font-semibold leading-none"
+              >
+                {bugBadgeLabel}
+              </span>
+            )}
+          </span>
         </Link>
       )}
     </div>

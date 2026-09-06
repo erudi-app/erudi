@@ -196,6 +196,48 @@ describe("mergeRecentErrors", () => {
   it("survives every source being absent", () => {
     expect(mergeRecentErrors({})).toEqual([]);
   });
+
+  it("drops an environmental ERROR (#485): an offline HuggingFace download never appears", () => {
+    const entries = mergeRecentErrors({
+      backend: {
+        recent_errors: [
+          {
+            timestamp: "2026-09-05T10:00:00.000Z",
+            level: "ERROR",
+            request_id: "be-9",
+            message:
+              "POST /erudi/llms/download -> 503 HUGGINGFACE_API_ERROR: you appear to be offline - check your connection and retry",
+          },
+          {
+            timestamp: "2026-09-05T10:00:01.000Z",
+            level: "ERROR",
+            request_id: "be-10",
+            message: "GET /erudi/conversations -> 500 DATABASE_ERROR: a real bug",
+          },
+        ],
+      },
+      appLog: [],
+      sessionErrors: [],
+    });
+    expect(entries.map((e) => e.message)).toEqual([
+      "GET /erudi/conversations -> 500 DATABASE_ERROR: a real bug",
+    ]);
+  });
+
+  it("keeps an environmental WARNING: the filter never touches WARNING/INFO-adjacent levels", () => {
+    const entries = mergeRecentErrors({
+      backend: null,
+      appLog: [
+        {
+          timestamp: "2026-09-05T10:00:00.000Z",
+          level: "WARNING",
+          message: "you appear to be offline - retrying later",
+        },
+      ],
+      sessionErrors: [],
+    });
+    expect(entries).toHaveLength(1);
+  });
 });
 
 describe("buildPrefill", () => {

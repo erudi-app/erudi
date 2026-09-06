@@ -54,6 +54,8 @@
     "knowledgeBase": "Base de connaissances",
     "settings": "Paramètres",
     "reportBug": "Signaler un bug",
+    "reportBugWithCount_one": "Signaler un bug ({{count}} nouvelle erreur)",
+    "reportBugWithCount_other": "Signaler un bug ({{count}} nouvelles erreurs)",
     "toggleModelsSidebar": "Afficher ou masquer le panneau des modèles",
     "toggleChatSidebar": "Afficher ou masquer le panneau des discussions"
   },

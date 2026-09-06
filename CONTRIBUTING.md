@@ -19,12 +19,14 @@ Thank you for your interest in contributing. This document explains how the proj
 ## How to contribute
 
 0. **Reporting a bug?** Open **Diagnostics** in the app (the bug icon at the
-   bottom of the left rail goes there). It shows your version, hardware,
-   engine and recent errors; when there is at least one, a *Copy the full
-   report* button copies it all to your clipboard. Either way, **Report on
-   GitHub** opens the bug report form with the first fields already filled —
-   paste the copied text into the **Logs** field. Everything is read on your
-   machine; the app sends none of it anywhere.
+   bottom of the left rail goes there — a small badge appears on it when the
+   app has recorded a real defect since your last visit, and disappears once
+   you open the page). It shows your version, hardware, engine and recent
+   errors; when there is at least one, a *Copy the full report* button copies
+   it all to your clipboard. Either way, **Report on GitHub** opens the bug
+   report form with the first fields already filled — paste the copied text
+   into the **Logs** field. Everything is read on your machine; the app sends
+   none of it anywhere.
 1. **Open an issue first** for anything non-trivial (new features, engine changes, architecture decisions). It saves everyone time if we align before you write code.
 2. **Fork and branch** — branch off an up-to-date `main`, name your branch descriptively (`fix/cpu-engine-port-reuse`, `feat/ollama-backend`, etc.).
 3. **Keep PRs focused** — one concern per PR. A bug fix doesn't need a refactor attached.
@@ -315,7 +317,7 @@ cd backend
 pytest tests/ -q --ignore=tests/e2e -m "not mlx_only"
 ```
 
-**Frontend** (`.github/workflows/frontend-ci.yml`, Node 20):
+**Frontend** (`.github/workflows/frontend-ci.yml`, Node 20 — `webpack-cli` needs >= 20.9, which the CI runner's Node 20 satisfies):
 
 ```bash
 cd frontend
