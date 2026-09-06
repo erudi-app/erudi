@@ -219,7 +219,7 @@ one check.*
 
 ### The inference child requires a key (all platforms)
 
-*Every inference child is spawned with a per-process `--api-key`: `llama-server` on Windows and Linux (also with `--no-slots` and `--no-webui`), `mlx_vlm.server` on Apple Silicon (where an in-child layer extends mlx-vlm's key from its management endpoints to every route). The first scenario is the one that matters most in the whole pass: if the key wiring is wrong, **every** model load fails at readiness rather than degrading quietly, so run it before anything else.*
+*Every inference child is spawned with a per-process `--api-key`: `llama-server` on Windows and Linux (also with `--no-slots` and `--no-webui`), `mlx_vlm.server` on Apple Silicon. The first scenario is the one that matters most in the whole pass: if the key wiring is wrong, **every** model load fails at readiness rather than degrading quietly, so run it before anything else.*
 
 - [ ] When I download a model and send it a message, then the answer streams normally (proof the backend authenticates itself to its own child; a broken key shows up as a readiness timeout at load, never as a bad answer).
 
@@ -235,7 +235,7 @@ one check.*
 
 *The child is an `mp.Process` of the backend: its arguments travel by pickle, not on a command line, so `ps` shows neither the `--api-key` flag nor the value, and `ps -E` does not show the `MLX_VLM_SERVER_API_KEY` variable either (the child sets it after start). Find the port with `lsof -nP -iTCP:27300-27399 -sTCP:LISTEN` or in `$TMPDIR/erudi-backend.log` (`Spawned mlx_vlm.server child: pid=..., port=...`).*
 
-- [ ] When a model is loaded, then an **unauthenticated** chat request to the child is refused: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:<port>/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"x","messages":[]}'` answers **401**, and `curl -si http://127.0.0.1:<port>/v1/chat/completions -d '{}'` shows `WWW-Authenticate: Bearer` (this is the route mlx-vlm leaves open on its own; the 401 proves Erudi's layer is in place).
+- [ ] When a model is loaded, then an **unauthenticated** chat request to the child is refused: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:<port>/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"x","messages":[]}'` answers **401**, and `curl -si http://127.0.0.1:<port>/v1/chat/completions -d '{}'` shows `WWW-Authenticate: Bearer`.
 - [ ] When I request `http://127.0.0.1:<port>/health` without a key, then it answers **401** too — and the app keeps chatting normally, which proves the backend's own probe presents the key.
 - [ ] When I send the same chat request with a made-up key (`-H 'Authorization: Bearer nope'`), then it is still **401**.
 - [ ] When I grep `$TMPDIR/erudi-backend.log` and `~/Library/Logs/erudi/backend.log` for `api-key`, `api_key`, `MLX_VLM_SERVER_API_KEY` and `Bearer`, then no line carries a key value (the key exists only in the backend's and the child's memory; that it changes on every load is pinned by the unit tests in `backend/tests/test_mlx_engine_server.py`, `TestSpawnApiKey`, and cannot be observed from outside the processes).

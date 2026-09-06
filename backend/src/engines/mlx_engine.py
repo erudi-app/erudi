@@ -307,11 +307,9 @@ class MLX_Engine(BaseChatServerEngine):
         # or a web page the user has open, since a browser can POST across
         # origins to a loopback port -- and `/v1/chat/completions` lets it run
         # its own inference on the user's machine. The key is minted per spawn
-        # so a disclosure dies with the child. mlx-vlm's flag alone gates only
-        # its management endpoints; the in-child middleware installed by
-        # `_mlx_vlm_server_runner._patch_require_api_key` extends it to every
-        # route. `/health` is behind the key as well, and `_probe_ready` sends
-        # it from the handle.
+        # so a disclosure dies with the child. mlx-vlm applies the key to every
+        # route it registers, `/health` included, so `_probe_ready` sends it
+        # from the handle on both probe stages.
         api_key = secrets.token_urlsafe(32)
         argv = [
             "mlx_vlm.server",

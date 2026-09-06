@@ -49,7 +49,6 @@ from typing import Iterator, List
 from unittest.mock import MagicMock, Mock, patch
 
 import pytest
-from fastapi import WebSocket
 
 from src.engines.mlx_engine import MLX_Engine
 
@@ -404,7 +403,6 @@ class TestMlxVlmServerRunnerHelper:
         order: list[str] = []
         monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
         monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
-        monkeypatch.setattr(runner, "_patch_require_api_key", lambda: True)
         monkeypatch.setattr(
             runner,
             "_patch_inline_thinking",
@@ -417,33 +415,6 @@ class TestMlxVlmServerRunnerHelper:
         runner.run_mlx_vlm_server(["mlx_vlm.server", "--port", "9080"])
 
         assert order == ["thinking-patch", "main"]
-
-    def test_runner_applies_require_api_key_patch_before_main(self, monkeypatch):
-        """The middleware must be on the app before uvicorn builds the
-        middleware stack at startup; after that, `add_middleware` raises.
-
-        Sibling in-child patches are stubbed out so this test never imports
-        the real mlx-vlm (absent on Linux CI, mutated-in-pytest-process on Mac).
-        """
-        import sys
-        from src.engines import _mlx_vlm_server_runner as runner
-
-        order: list[str] = []
-        monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
-        monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
-        monkeypatch.setattr(runner, "_patch_inline_thinking", lambda: True)
-        monkeypatch.setattr(
-            runner,
-            "_patch_require_api_key",
-            lambda: order.append("api-key-patch") or True,
-        )
-        fake_main = MagicMock(side_effect=lambda: order.append("main"))
-        monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
-        monkeypatch.setattr(sys, "argv", ["pytest"])
-
-        runner.run_mlx_vlm_server(["mlx_vlm.server", "--port", "9080"])
-
-        assert order == ["api-key-patch", "main"]
 
     def test_runner_applies_tied_lm_head_patch_before_main(self, monkeypatch):
         """The tied-lm_head sanitize completion must run before the server's
@@ -464,7 +435,6 @@ class TestMlxVlmServerRunnerHelper:
         )
         monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
         monkeypatch.setattr(runner, "_patch_inline_thinking", lambda: True)
-        monkeypatch.setattr(runner, "_patch_require_api_key", lambda: True)
         fake_main = MagicMock(side_effect=lambda: order.append("main"))
         monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
         monkeypatch.setattr(sys, "argv", ["pytest"])
@@ -1166,8 +1136,10 @@ class TestSpawnApiKey:
     Spawned without `--api-key`, mlx_vlm.server authenticates NOTHING: any
     caller that can reach 127.0.0.1 -- another local process, or a web page
     the user has open, since a browser can POST across origins to a loopback
-    port -- can run its own inference on the loaded model. These tests pin
-    the same contract `TestSpawnHardeningFlags` pins for llama-server.
+    port -- can run its own inference on the loaded model. mlx-vlm's own
+    `--api-key` guard covers every route it registers, `/health` included
+    (`TestMlxVlmApiKeyGuard` pins that upstream fact). These tests pin the
+    same spawn contract `TestSpawnHardeningFlags` pins for llama-server.
     """
 
     def test_api_key_flag_carries_a_non_empty_secret(self, tmp_path):
@@ -1207,113 +1179,41 @@ class TestSpawnApiKey:
 
 
 @pytest.mark.unit
-class TestRequireApiKeyMiddleware:
-    """The in-child ASGI middleware that extends mlx-vlm's key to every route.
+class TestMlxVlmApiKeyGuard:
+    """The upstream fact the MLX key relies on, pinned against the installed mlx-vlm.
 
-    mlx-vlm's own `--api-key` guard covers only its management endpoints
-    (`/health`, `/v1/models`, `/metrics`, ...); the chat, responses and image
-    routes are registered on the app without it. The middleware is pure ASGI
-    so it can be exercised here on a throwaway FastAPI app on any platform.
+    `MLX_Engine` passes `--api-key` and nothing else: it is mlx-vlm's own guard
+    (`_require_management_api_key`, a dependency of the router every inference
+    route is registered on) that turns the key into 401s. If an mlx-vlm bump
+    ever moved `/v1/chat/completions` or `/health` off that router, the key
+    would guard nothing and this test is what says so. Skips where mlx-vlm is
+    not installed (Linux CI).
     """
 
     ENV = "MLX_VLM_SERVER_API_KEY"
 
-    @staticmethod
-    def _client():
-        from fastapi import FastAPI
+    @pytest.fixture
+    def client(self, monkeypatch):
+        pytest.importorskip("mlx_vlm.server.app")
         from fastapi.testclient import TestClient
-        from src.engines._mlx_vlm_server_runner import _RequireApiKeyMiddleware
+        from mlx_vlm.server.app import app
 
-        app = FastAPI()
-
-        @app.get("/health")
-        def _health():
-            return {"status": "healthy"}
-
-        @app.post("/v1/chat/completions")
-        def _chat():
-            return {"choices": []}
-
-        @app.websocket("/v1/realtime")
-        # `WebSocket` is imported at module level: with postponed annotations
-        # FastAPI resolves the hint in the module globals, not in this scope.
-        async def _realtime(ws: WebSocket):
-            await ws.accept()
-            await ws.send_text("hello")
-            await ws.close()
-
-        app.add_middleware(_RequireApiKeyMiddleware)
-        return TestClient(app)
-
-    def test_without_the_env_var_every_request_passes(self, monkeypatch):
-        """A developer running the server by hand sets no key; the middleware
-        must then change nothing."""
-        monkeypatch.delenv(self.ENV, raising=False)
-        client = self._client()
-        assert client.get("/health").status_code == 200
-        assert client.post("/v1/chat/completions", json={}).status_code == 200
-
-    def test_missing_header_is_refused_on_inference_and_health(self, monkeypatch):
         monkeypatch.setenv(self.ENV, "s3cret-token")
-        client = self._client()
-        for resp in (client.post("/v1/chat/completions", json={}), client.get("/health")):
-            assert resp.status_code == 401
-            assert resp.headers["WWW-Authenticate"] == "Bearer"
+        # No lifespan (no model is loaded); with the key a request reaches the
+        # route and fails there in whatever way mlx-vlm sees fit -- anything
+        # but 401 is the proof that the guard, not the route, was the gate.
+        return TestClient(app, raise_server_exceptions=False)
 
-    def test_wrong_key_is_refused(self, monkeypatch):
-        monkeypatch.setenv(self.ENV, "s3cret-token")
-        client = self._client()
-        headers = {"Authorization": "Bearer wrong-token"}
-        assert client.post("/v1/chat/completions", json={}, headers=headers).status_code == 401
-        assert client.get("/health", headers=headers).status_code == 401
-
-    def test_right_key_is_accepted(self, monkeypatch):
-        monkeypatch.setenv(self.ENV, "s3cret-token")
-        client = self._client()
+    def test_chat_completions_requires_the_key(self, client):
+        body = {"model": "x", "messages": [{"role": "user", "content": "ping"}]}
+        assert client.post("/v1/chat/completions", json=body).status_code == 401
         headers = {"Authorization": "Bearer s3cret-token"}
-        assert client.post("/v1/chat/completions", json={}, headers=headers).status_code == 200
-        assert client.get("/health", headers=headers).status_code == 200
+        assert client.post("/v1/chat/completions", json=body, headers=headers).status_code != 401
 
-    def test_websocket_handshake_is_refused_without_the_key(self, monkeypatch):
-        """mlx-vlm registers `/v1/realtime` as a websocket on the same app;
-        a handshake without the key is closed before it is accepted."""
-        from starlette.websockets import WebSocketDisconnect
-
-        monkeypatch.setenv(self.ENV, "s3cret-token")
-        client = self._client()
-        with pytest.raises(WebSocketDisconnect):
-            with client.websocket_connect("/v1/realtime"):
-                pass
-        with client.websocket_connect(
-            "/v1/realtime", headers={"Authorization": "Bearer s3cret-token"}
-        ) as ws:
-            assert ws.receive_text() == "hello"
-
-
-@pytest.mark.unit
-class TestRequireApiKeyPatch:
-    """`_patch_require_api_key` installs the middleware on mlx-vlm's app object."""
-
-    def test_installs_the_middleware_once(self, monkeypatch):
-        from fastapi import FastAPI
-        from src.engines import _mlx_vlm_server_runner as runner
-
-        app = FastAPI()
-        monkeypatch.setattr(runner, "_import_mlx_vlm_app", lambda: app)
-
-        assert runner._patch_require_api_key() is True
-        assert runner._patch_require_api_key() is True  # idempotent
-        installed = [m.cls for m in app.user_middleware]
-        assert installed.count(runner._RequireApiKeyMiddleware) == 1
-
-    def test_returns_false_when_mlx_vlm_is_absent(self, monkeypatch):
-        from src.engines import _mlx_vlm_server_runner as runner
-
-        def _missing():
-            raise ImportError("no mlx_vlm here")
-
-        monkeypatch.setattr(runner, "_import_mlx_vlm_app", _missing)
-        assert runner._patch_require_api_key() is False
+    def test_health_requires_the_key(self, client):
+        assert client.get("/health").status_code == 401
+        headers = {"Authorization": "Bearer s3cret-token"}
+        assert client.get("/health", headers=headers).status_code != 401
 
 
 @pytest.mark.unit
@@ -1420,10 +1320,11 @@ class TestSubprocessReal:
             MLX_Engine.cleanup()
 
     def test_child_refuses_unauthenticated_requests_and_still_chats(self, mlx_test_model_path):
-        """The real child, with the engine's own handle: every route without
-        the key answers 401 (inference included -- the route mlx-vlm leaves
-        open by itself), and the normal generate path through ChatOpenAI,
-        which reads the key from the handle, still produces tokens."""
+        """The real child, with the engine's own handle: mlx-vlm's `--api-key`
+        guard rejects an unauthenticated (or wrongly keyed) chat request and
+        `/health` with 401, while the backend's probe (already passed inside
+        `get_model_and_tokenizer`) and the ChatOpenAI client, which read the
+        key from the handle, still drive the model."""
         import requests
 
         try:
