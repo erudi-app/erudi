@@ -14,18 +14,33 @@ POSIX; ``get_server`` is idempotent (initdb on first run, refcounted across
 processes) and registers an atexit cleanup. We still stop the cluster
 explicitly from the FastAPI lifespan shutdown for a deterministic order
 (checkpointer first, cluster last).
+
+Authentication (#462). pgserver runs ``initdb --auth=trust --auth-local=trust``
+and, on Windows, where there are no Unix sockets, starts the postmaster on a
+loopback TCP port -- so any process under the user's account could open the
+database with no credential. Every ``start_postgres`` therefore generates a
+random password once per cluster (``<data_dir>/erudi_db_password``), sets it
+on the ``postgres`` role, rewrites ``pg_hba.conf`` so every ``host`` rule
+requires ``scram-sha-256`` (``local`` socket rules stay ``trust``: filesystem
+permissions guard the socket), reloads the postmaster, and carries the
+password in both derived URLs. The same code runs on every platform so the
+POSIX test suites exercise it too; only the TCP refusal itself is Windows-only.
 """
 
 from __future__ import annotations
 
 import hashlib
 import json
+import os
+import re
+import secrets
 import shutil
 import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
 from pathlib import Path
+from urllib.parse import quote
 
 import pgserver
 import pgserver.postgres_server as _pg_server_mod
@@ -34,12 +49,22 @@ import psycopg
 from pgserver.utils import PostmasterInfo
 from pgserver.utils import find_suitable_socket_dir as _orig_find_socket_dir
 from pgserver.utils import socket_name_length_ok
+from psycopg import sql
 
 from src.core.logging import logger
 from src.core.subprocess_flags import hidden_console_creationflags
 from src.launcher.events import emit_phase
 
 DB_NAME = "erudi"
+
+# The superuser pgserver creates at initdb (``-U postgres``) and the only role
+# the app connects as.
+ROLE_NAME = "postgres"
+
+# Per-cluster secret, inside PGDATA: initdb creates PGDATA with mode 0700, and
+# the half-initialised-dir recovery wipes it together with the cluster it
+# belongs to. Never logged.
+PASSWORD_FILE_NAME = "erudi_db_password"
 
 # How long a WAL crash-recovery may take before we give up on the boot. Must
 # stay under run.py's STARTUP_TIMEOUT_SECONDS (120s non-first-run) minus the
@@ -181,6 +206,105 @@ def _uri_for_db(base_uri: str, dbname: str) -> str:
     return f"{head}?{query}" if query else head
 
 
+# ``postgresql://<user>:<password>@`` -- pgserver always emits the user with an
+# empty password (``postgres:@``); the authority that follows is either empty
+# (socket form, host in the query) or ``host:port`` (TCP form).
+_URI_CREDENTIALS = re.compile(
+    r"^(?P<scheme>postgresql://)(?P<user>[^:@/?]+):(?P<password>[^@/?]*)@"
+)
+
+
+def _uri_with_password(uri: str, password: str) -> str:
+    """Inject (or replace) the password in a pgserver URI, both socket and TCP forms.
+
+    The password is percent-quoted so a value containing ``/``, ``@`` or ``?``
+    cannot be mistaken for a URI delimiter. The generated secret is URL-safe
+    already, so in practice quoting is the identity.
+    """
+    match = _URI_CREDENTIALS.match(uri)
+    if match is None:
+        raise ValueError("expected a postgresql://<user>:<password>@ URI")
+    return f"{match['scheme']}{match['user']}:{quote(password, safe='')}@{uri[match.end() :]}"
+
+
+def _ensure_cluster_password(data_dir: Path) -> str:
+    """Read the per-cluster password, generating it on the cluster's first boot.
+
+    Must run AFTER initdb: initdb refuses a non-empty target directory, so the
+    file can only be added once ``PG_VERSION`` exists. The file is created
+    ``0600`` (owner-only) through ``O_EXCL`` so two processes joining a brand
+    new cluster at once cannot both win. On Windows the mode is best effort:
+    ``%LOCALAPPDATA%`` is already private to the user's account, and NTFS ACL
+    hardening is out of scope.
+    """
+    secret_file = data_dir / PASSWORD_FILE_NAME
+    try:
+        fd = os.open(secret_file, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return secret_file.read_text(encoding="ascii").strip()
+    with os.fdopen(fd, "w", encoding="ascii") as fh:
+        password = secrets.token_urlsafe(32)
+        fh.write(password)
+    try:
+        secret_file.chmod(0o600)  # O_CREAT mode is subject to the umask
+    except OSError:
+        pass
+    logger.info(f"Generated the embedded PostgreSQL password file: {secret_file}")
+    return password
+
+
+# A ``host`` / ``hostssl`` / ``hostnossl`` / ``hostgssenc`` / ``hostnogssenc``
+# rule whose method is ``trust``: TYPE DATABASE USER ADDRESS METHOD, then an
+# optional trailing comment. ``local`` rules are deliberately not matched.
+_TRUSTED_HOST_RULE = re.compile(
+    r"^(?P<rule>[ \t]*host\w*[ \t]+\S+[ \t]+\S+[ \t]+\S+[ \t]+)trust(?P<rest>[ \t]*(?:#.*)?)$",
+    re.MULTILINE,
+)
+
+
+def harden_pg_hba(text: str) -> str:
+    """Rewrite ``pg_hba.conf`` so every ``host`` rule authenticates with SCRAM.
+
+    Pure text -> text: ``trust`` on a ``host*`` line becomes ``scram-sha-256``;
+    ``local`` (Unix socket) rules, comments, blank lines, spacing and every
+    other method are left byte-for-byte as they were. Idempotent.
+    """
+    return _TRUSTED_HOST_RULE.sub(r"\g<rule>scram-sha-256\g<rest>", text)
+
+
+def _enforce_password_auth(admin_uri: str, data_dir: Path, password: str) -> None:
+    """Set the role password and require it on every host connection.
+
+    Runs on every boot, right after the cluster is up and before anything else
+    connects. ``admin_uri`` already carries the password: under ``trust`` (a
+    fresh or pre-#462 cluster) it is ignored, under ``scram-sha-256`` it is
+    required, so one URI form works before and after the switch and existing
+    installs migrate on their next start with no special path. ``ALTER ROLE``
+    is idempotent; the ``pg_hba.conf`` rewrite only touches the file (and
+    reloads the postmaster) when a ``trust`` host rule is still present, which
+    also covers a cluster left running by a previous process (pgserver
+    refcounts it): ``pg_reload_conf()`` is enough, no restart.
+    """
+    with psycopg.connect(admin_uri, autocommit=True) as conn:
+        # scram-sha-256 is the default since PostgreSQL 14 (bundled: 16); pin
+        # it for the session anyway so the stored verifier can never be md5.
+        conn.execute("SET password_encryption = 'scram-sha-256'")
+        conn.execute(
+            sql.SQL("ALTER ROLE {} PASSWORD {}").format(
+                sql.Identifier(ROLE_NAME), sql.Literal(password)
+            )
+        )
+        hba_file = data_dir / "pg_hba.conf"
+        before = hba_file.read_text(encoding="utf-8")
+        after = harden_pg_hba(before)
+        if after != before:
+            tmp_file = hba_file.with_name(hba_file.name + ".erudi-tmp")
+            tmp_file.write_text(after, encoding="utf-8")
+            os.replace(tmp_file, hba_file)
+            conn.execute("SELECT pg_reload_conf()")
+            logger.info("Embedded PostgreSQL host connections now require the cluster password")
+
+
 def _wait_for_postmaster_ready(data_dir: Path, deadline_seconds: float) -> bool:
     """Wait for a background postmaster to finish WAL crash-recovery (#161).
 
@@ -282,7 +406,11 @@ def start_postgres(data_dir: Path | str) -> PostgresHandle:
     _recover_corrupt_pgdata(data_dir)
 
     server = _get_server_with_recovery(data_dir)
-    admin_uri = server.get_uri()
+    # After initdb (the secret file must not pre-exist in PGDATA) and before
+    # any other connection: the URLs handed out below all carry the password.
+    password = _ensure_cluster_password(data_dir)
+    admin_uri = _uri_with_password(server.get_uri(), password)
+    _enforce_password_auth(admin_uri, data_dir, password)
 
     # CREATE DATABASE has no IF NOT EXISTS → guard on pg_database.
     # DB_NAME is an internal constant, never user input.

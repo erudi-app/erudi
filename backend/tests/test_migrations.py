@@ -14,7 +14,7 @@ import pytest
 from alembic import command
 from sqlalchemy import create_engine, inspect, text
 
-from src.database.backup import backup_database, backups_dir_for
+from src.database.backup import _dump_target, backup_database, backups_dir_for
 from src.database.core import Base
 from src.database.migrations import (
     BASELINE_REVISION,
@@ -236,6 +236,32 @@ def test_backup_database_writes_a_dump(fresh_cluster):
 
     assert dump.exists() and dump.stat().st_size > 0
     assert dump.parent == backups_dir_for(fresh_cluster.data_dir)
+
+
+@pytest.mark.unit
+def test_dump_target_keeps_the_password_out_of_the_command_line():
+    # pg_dump's argv is visible in the process list and echoed by
+    # CalledProcessError on failure: the cluster password goes through the
+    # environment (PGPASSWORD), never through --dbname.
+    conninfo, env = _dump_target("postgresql://postgres:s3cr-_et@127.0.0.1:5433/erudi")
+    assert "s3cr-_et" not in conninfo
+    assert "dbname=erudi" in conninfo and "host=127.0.0.1" in conninfo and "port=5433" in conninfo
+    assert env["PGPASSWORD"] == "s3cr-_et"
+
+
+@pytest.mark.unit
+def test_dump_target_socket_form_without_password():
+    conninfo, env = _dump_target("postgresql://postgres:@/erudi?host=/tmp/erudi-pg-ab12")
+    assert conninfo == "user=postgres dbname=erudi host=/tmp/erudi-pg-ab12"
+    assert "PGPASSWORD" not in env
+
+
+@pytest.mark.unit
+def test_alembic_config_survives_a_percent_sign_in_the_url():
+    # ConfigParser interpolates '%' in set_main_option values; a percent-encoded
+    # password must round-trip unchanged (Alembic documents the %% escape).
+    url = "postgresql+psycopg://postgres:a%2Fb@127.0.0.1:1/erudi"
+    assert _alembic_config(url).get_main_option("sqlalchemy.url") == url
 
 
 @pytest.mark.integration
