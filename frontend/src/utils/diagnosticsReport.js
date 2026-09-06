@@ -37,11 +37,37 @@ export function osLabel(platform, arch) {
 const timeKey = (entry) => entry?.timestamp ?? "";
 
 /**
+ * An app-log record that is the backend's own stdout or stderr, echoed line
+ * by line by main.js. The backend writes the same record to `backend.log`,
+ * with its continuation lines intact, so when the backend answers the echo
+ * is a duplicate of a better copy.
+ */
+const BACKEND_ECHO_RE = /^Backend (?:stdout|stderr): /;
+
+/** The app-log namespace of the renderer's uncaught-error capture. */
+const UNCAUGHT_NAMESPACE = "[renderer:renderer:uncaught]";
+
+/**
  * Merge the backend log, the app log and this window's session errors into one
- * timeline.
+ * timeline, each error once.
  *
  * Every source is optional. The backend one is the one that goes missing in
  * practice — that is exactly when the other two matter.
+ *
+ * Two sources overlap by construction, and the overlap is removed here rather
+ * than at the writers, because each writer is right to write:
+ *
+ * - An uncaught renderer error is written to the app log through the
+ *   `renderer-log` bridge AND kept in the session buffer. The file record is
+ *   the one kept: it survives a reload, and it is what QA reads. The session
+ *   entry is dropped when the app log has its record, and only contributes
+ *   what the file cannot hold — the repeat count. When the bridge was absent
+ *   (a browser, a test, an early boot) the file has nothing and the session
+ *   entry stands.
+ * - Every backend stdout/stderr line is echoed into the app log by main.js.
+ *   When the backend answered, its own log is the source of truth for those
+ *   records and the echoes are dropped; when it did not answer, the echoes
+ *   are the only copy of its last words and are kept.
  *
  * @param {object} sources - The three sources.
  * @param {object} [sources.backend] - `/erudi/diagnostics/` response, or null.
@@ -69,25 +95,39 @@ export function mergeRecentErrors({
     });
   }
 
+  const appEntries = [];
   for (const record of appLog ?? []) {
-    entries.push({
+    const message = String(record.message ?? "");
+    if (backend && BACKEND_ECHO_RE.test(message)) continue;
+    const entry = {
       timestamp: record.timestamp,
       level: record.level,
       source: "app",
       requestId: null,
-      message: record.message,
+      message,
       count: 1,
-    });
+    };
+    appEntries.push(entry);
+    entries.push(entry);
   }
 
   for (const record of sessionErrors ?? []) {
+    const message = [record.origin, record.message].filter(Boolean).join(": ");
+    const count = record.count ?? 1;
+    const fileRecord = appEntries.find(
+      (entry) => entry.message.startsWith(UNCAUGHT_NAMESPACE) && entry.message.includes(message)
+    );
+    if (fileRecord) {
+      fileRecord.count = Math.max(fileRecord.count, count);
+      continue;
+    }
     entries.push({
       timestamp: record.timestamp,
       level: "ERROR",
       source: "session",
       requestId: null,
-      message: [record.origin, record.message].filter(Boolean).join(": "),
-      count: record.count ?? 1,
+      message,
+      count,
       stack: record.stack || undefined,
     });
   }

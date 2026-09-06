@@ -18,6 +18,9 @@ import { isKbAssistant, hasMissingWeights } from "../utils/modelWeights";
 import { isTestedModel } from "../utils/testedModels";
 import { isVerySmallModel, SMALL_MODEL_PARAM_THRESHOLD_B } from "../utils/modelCapabilities";
 import { displayModelSize } from "../utils/modelSize";
+import { createLogger } from "../utils/logger";
+
+const log = createLogger("ModelCard");
 
 /**
  * ModelCard component - displays model information with actions
@@ -61,7 +64,7 @@ function ModelCard({
     if (model) {
       open(model, {
         onComplete: () => onDownload && onDownload(model),
-        onError: (error) => console.error("Download error:", error),
+        onError: (error) => log.error(`Download failed for ${model.name}`, error),
       });
     } else if (type === "add" && onDownload) {
       onDownload();

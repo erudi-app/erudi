@@ -85,6 +85,93 @@ describe("mergeRecentErrors", () => {
     expect(entries[1].requestId).toBe("be-1");
   });
 
+  it("shows an uncaught renderer error once: the file record, with the session's count", () => {
+    // The capture writes the error to the app log through the bridge AND keeps
+    // it in the session buffer. The file record survives a reload, so it is
+    // the one shown; the session entry only contributes its repeat count.
+    const entries = mergeRecentErrors({
+      backend: null,
+      appLog: [
+        {
+          timestamp: "2026-09-05T11:00:00.120Z",
+          level: "ERROR",
+          message:
+            "[renderer:renderer:uncaught] ERROR window.onerror: render blew up Error: render blew up\n    at x",
+        },
+      ],
+      sessionErrors: [
+        {
+          timestamp: "2026-09-05T11:00:00.000Z",
+          origin: "window.onerror",
+          message: "render blew up",
+          stack: "Error: render blew up\n    at x",
+          count: 3,
+        },
+      ],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].source).toBe("app");
+    expect(entries[0].count).toBe(3);
+  });
+
+  it("keeps a session error the app log does not have", () => {
+    // The bridge was absent (a browser, a test, an early boot): the session
+    // buffer is the only copy.
+    const entries = mergeRecentErrors({
+      backend: null,
+      appLog: [
+        {
+          timestamp: "2026-09-05T11:00:00.120Z",
+          level: "ERROR",
+          message: "[renderer:renderer:uncaught] ERROR window.onerror: a different error",
+        },
+      ],
+      sessionErrors: [
+        { timestamp: "2026-09-05T11:00:00.000Z", origin: "unhandledrejection", message: "lost" },
+      ],
+    });
+    expect(entries.map((e) => e.source)).toEqual(["session", "app"]);
+  });
+
+  it("drops the app log's echo of backend output when the backend answered", () => {
+    // main.js copies every backend stdout line into the app log; the backend's
+    // own log has the same record with its traceback attached.
+    const entries = mergeRecentErrors({
+      backend: BACKEND,
+      appLog: [
+        {
+          timestamp: "2026-09-05T10:00:00.010Z",
+          level: "ERROR",
+          message:
+            "Backend stdout: [ERROR] 2026-09-05T10:00:00.000Z [be-1] - erudi - x.py:1 - boom",
+        },
+        { timestamp: "2026-09-05T10:00:01.000Z", level: "ERROR", message: "[main] ERROR kept" },
+      ],
+      sessionErrors: [],
+    });
+    expect(entries.map((e) => [e.source, e.message])).toEqual([
+      ["backend", "boom"],
+      ["app", "[main] ERROR kept"],
+    ]);
+  });
+
+  it("keeps the echo of backend output when the backend did not answer", () => {
+    // A backend that will not start leaves its last words only in the echo.
+    const entries = mergeRecentErrors({
+      backend: null,
+      appLog: [
+        {
+          timestamp: "2026-09-05T10:00:00.010Z",
+          level: "ERROR",
+          message: "Backend stderr: [ERROR] Startup failed: alembic exploded",
+        },
+      ],
+      sessionErrors: [],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].message).toContain("alembic exploded");
+  });
+
   it("keeps the app-side sources when the backend is missing", () => {
     const entries = mergeRecentErrors({
       backend: null,
