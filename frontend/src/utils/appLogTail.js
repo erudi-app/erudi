@@ -1,20 +1,22 @@
 // Reading the tail of `erudi-backend.log` for the Diagnostics panel.
 //
 // The app log is not the backend log. Its lines are `[<ISO>] <text>`, written
-// by main.js, and `<text>` has three origins: main's own lifecycle messages,
-// the backend's stdout (each line already carrying the backend formatter's own
+// by main.js, and `<text>` has three origins: main's own messages, the
+// backend's stdout (each line already carrying the backend formatter's own
 // `[LEVEL]`), and renderer entries forwarded over the `renderer-log` IPC as
 // `[renderer:<ns>] <LEVEL> <msg>`. There is no level column of its own.
 //
 // So the level is read out of the text, and only when the text states one:
 //   - `[WARNING]` / `[ERROR]` / `[CRITICAL]` — the backend's file format;
-//   - `[renderer:ns] WARN|ERROR ...` — the renderer bridge's format.
+//   - `[renderer:ns] WARN|ERROR ...` — the renderer bridge's format;
+//   - `[main] WARN|ERROR ...` — main's own failures (utils/mainLog.js): a
+//     backend that exited, a spawn that failed, a renderer that crashed.
 // A line that declares no level is dropped. That is deliberate and it is the
 // conservative direction: the backend logs conversation content at INFO on
 // purpose (docs/privacy.md), and this text is written to be pasted into a
 // public issue. Default-exclude means a format we have not taught this parser
-// about is left out rather than leaked; the cost is that main's own unlevelled
-// lines (`Updater error (non-fatal): ...`) do not appear.
+// about is left out rather than leaked; main's lifecycle chatter (`Creating
+// main window...`) stays out the same way.
 //
 // Records span lines: an Electron stack trace or a dumped HTTP header block is
 // appended to the file as one write with embedded newlines. A record therefore
@@ -44,8 +46,11 @@ const RECORD_RE = /^\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\]\s?([\s\S]*)$/;
 /** The backend's own level marker, as it survives inside a stdout line. */
 const BACKEND_LEVEL_RE = /\[(WARNING|ERROR|CRITICAL)\]/;
 
-/** The renderer bridge's shape: `[renderer:ns] LEVEL message`. */
-const RENDERER_LEVEL_RE = /^\[renderer:[^\]]*\]\s+(WARN|ERROR)\b/;
+/**
+ * The shape of the two levelled writers of this process: the renderer bridge
+ * (`[renderer:ns] LEVEL message`) and main itself (`[main] LEVEL message`).
+ */
+const LEVELLED_PREFIX_RE = /^\[(?:renderer:[^\]]*|main)\]\s+(WARN|ERROR)\b/;
 
 /**
  * The level a record declares, or null when it declares none.
@@ -53,8 +58,8 @@ const RENDERER_LEVEL_RE = /^\[renderer:[^\]]*\]\s+(WARN|ERROR)\b/;
  * @returns {string|null} "WARNING", "ERROR" or "CRITICAL".
  */
 export function detectLevel(text) {
-  const renderer = RENDERER_LEVEL_RE.exec(text);
-  if (renderer) return renderer[1] === "WARN" ? "WARNING" : "ERROR";
+  const levelled = LEVELLED_PREFIX_RE.exec(text);
+  if (levelled) return levelled[1] === "WARN" ? "WARNING" : "ERROR";
   const backend = BACKEND_LEVEL_RE.exec(text);
   if (backend) return backend[1];
   return null;

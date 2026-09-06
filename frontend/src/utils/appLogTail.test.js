@@ -43,10 +43,18 @@ describe("detectLevel", () => {
     expect(detectLevel("[renderer:App] WARN slow")).toBe("WARNING");
   });
 
+  it("reads the main process's own level", () => {
+    expect(detectLevel("[main] ERROR Backend process exited with code 1, signal null")).toBe(
+      "ERROR"
+    );
+    expect(detectLevel("[main] WARN Updater: periodic check failed - offline")).toBe("WARNING");
+  });
+
   it("returns null for a line that declares no level", () => {
     expect(detectLevel("Backend stdout: [INFO] all good")).toBeNull();
     expect(detectLevel("[renderer:App] INFO Backend is ready")).toBeNull();
     expect(detectLevel("Creating main window...")).toBeNull();
+    expect(detectLevel("[main] INFO Backend is ready on port 27182.")).toBeNull();
   });
 });
 

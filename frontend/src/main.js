@@ -19,18 +19,22 @@ const { shouldRetrySpawn } = require("./utils/backendRetry");
 const { buildBackendSpawnOptions, buildBackendEnv } = require("./utils/backendSpawn");
 const { gracefulShutdown } = require("./utils/backendShutdown");
 const { readAppLogTail } = require("./utils/appLogTail");
+const { describeProcessGone, formatMainRecord } = require("./utils/mainLog");
 
 // electron-updater: only loaded in production to avoid dev noise.
 // Reads latest.yml / latest-mac.yml from GitHub Releases and handles
 // download + install of new versions.
 let autoUpdater = null;
+// Kept until the log file is set up below, then logged: electron-updater ships
+// with every packaged build, so a require that fails is a packaging defect.
+let updaterLoadError = null;
 if (app.isPackaged) {
   try {
     autoUpdater = require("electron-updater").autoUpdater;
     autoUpdater.logger = require("electron-log");
     autoUpdater.logger.transports.file.level = "info";
   } catch (e) {
-    // electron-updater not available — skip updates silently
+    updaterLoadError = e;
     autoUpdater = null;
   }
 }
@@ -65,6 +69,10 @@ const MAIN_WINDOW_RENDERER_INDEX = path.join(
 const RENDERER_DEV_URL = "http://localhost:3000/";
 
 let backendProcess = null;
+// True from the moment main asks the backend to stop (quit, restart, clear
+// data, respawn) until the next spawn: an exit that arrives while this is
+// false is a backend that died on its own, and is logged as such.
+let backendStopRequested = false;
 let mainWindow = null;
 let isCreatingWindow = false;
 // Set once a quit-time graceful shutdown is in flight so before-quit runs its
@@ -144,7 +152,36 @@ const log = (message) => {
   }
 };
 
+// Levelled records for main's own failures. `log()` writes unlevelled lines,
+// which the Diagnostics panel skips on purpose (utils/appLogTail.js); these two
+// state the level in the same shape the renderer bridge uses, so a backend that
+// died or a renderer that crashed reaches the page that exists to report bugs.
+const logWarn = (message, error) => log(formatMainRecord("WARN", message, error));
+const logError = (message, error) => log(formatMainRecord("ERROR", message, error));
+
 log(`Starting app, log file: ${logFile}`);
+if (updaterLoadError) {
+  logWarn("electron-updater could not be loaded; automatic updates are off", updaterLoadError);
+}
+
+// ── What no catch sees ────────────────────────────────────────────────────────
+// Each handler writes one ERROR record and changes nothing else about how the
+// app behaves: `uncaughtExceptionMonitor` observes without replacing Electron's
+// default handling of an uncaught exception (its dialog stays); an unhandled
+// rejection in the main process is otherwise a warning on stderr after which
+// the process goes on, and it still does; a process that is gone is gone.
+process.on("uncaughtExceptionMonitor", (error, origin) => {
+  logError(`Uncaught exception in the main process (${origin})`, error);
+});
+process.on("unhandledRejection", (reason) => {
+  logError("Unhandled promise rejection in the main process", reason);
+});
+app.on("child-process-gone", (_event, details) => {
+  logError(describeProcessGone(details?.type || "child", details));
+});
+app.on("render-process-gone", (_event, _contents, details) => {
+  logError(describeProcessGone("renderer", details));
+});
 
 if (require("electron-squirrel-startup")) {
   app.quit();
@@ -176,7 +213,7 @@ function resolvePackagedBackendPath() {
         log(`Path does not exist: ${c}`);
       }
     } catch (error) {
-      log(`Error checking ${c}: ${error.message}`);
+      logWarn(`Could not check the backend candidate ${c}`, error);
     }
   }
   return null;
@@ -220,8 +257,8 @@ const startRealBackend = () => {
         }
 
         // If we get here, backend is not responding
-        log(
-          "Backend is not responding. Make sure to run: scripts/dev/dev-start.sh or set BACKEND_PORT env variable"
+        logError(
+          `Backend is not responding on localhost:${devPort}. Make sure to run: scripts/dev/dev-start.sh or set BACKEND_PORT env variable`
         );
         reject(new Error(`Backend is not responding on localhost:${devPort}`));
       };
@@ -253,7 +290,7 @@ const startRealBackend = () => {
       const error =
         `Backend executable not found. Checked path: ${backendPath || "None"}\n` +
         "You likely need to build it first (e.g. 'pyinstaller backend.spec').";
-      log(error);
+      logError(error);
       reject(new Error(error));
       return;
     }
@@ -275,6 +312,7 @@ const startRealBackend = () => {
       ["--port", PORT.toString()],
       buildBackendSpawnOptions(process.platform, { cwd: workingDir, env: backendEnv })
     );
+    backendStopRequested = false;
 
     log(`Backend process spawned with PID: ${backendProcess.pid}`);
 
@@ -298,7 +336,7 @@ const startRealBackend = () => {
     // the backend just for being slow — that was the 30s-kill bug.
     const MAX_READY_WAIT_MS = 330000;
     capTimer = setTimeout(() => {
-      log("Backend did not report ready within the safety cap.");
+      logError(`Backend did not report ready within the ${MAX_READY_WAIT_MS / 1000}s safety cap`);
       failWith("PORT_TIMEOUT");
     }, MAX_READY_WAIT_MS);
 
@@ -322,7 +360,11 @@ const startRealBackend = () => {
           actualPort = event.port;
           log(`Backend selected port: ${actualPort}`);
         } else if (event.event === "startup_error") {
-          log(`Backend reported startup_error: ${event.code}`);
+          // The cause, with its traceback, is in backend.log (or on the
+          // backend's stderr, echoed above); this is the parent's record.
+          logError(
+            `Backend reported startup_error ${event.code}${event.message ? `: ${event.message}` : ""}`
+          );
           failWith(event.code || "BACKEND_STARTUP_FAILED");
         } else if (event.event === "ready") {
           if (event.port) actualPort = event.port;
@@ -336,11 +378,16 @@ const startRealBackend = () => {
                 log("Backend health confirmed.");
                 succeed();
               } else {
-                log("Backend reported ready but health could not be confirmed.");
+                logError(
+                  `Backend reported ready on port ${actualPort} but health could not be confirmed`
+                );
                 failWith("BACKEND_UNREACHABLE");
               }
             })
-            .catch(() => failWith("BACKEND_UNREACHABLE"));
+            .catch((error) => {
+              logError(`Health check of the backend on port ${actualPort} threw`, error);
+              failWith("BACKEND_UNREACHABLE");
+            });
         }
       }
     });
@@ -354,11 +401,22 @@ const startRealBackend = () => {
       // CPU build prints benign lines like "CUDA not available" / NVML / SQLAlchemy
       // "database" logs during a perfectly healthy boot. Log a hint at most.
       const hint = classifyStderrLine(output);
-      if (hint) log(`stderr hint: ${hint.code} - ${hint.message}`);
+      if (hint) {
+        // A missing Python module is a packaging defect; the GPU diagnostics
+        // are the expected noise of a CPU build and stay unlevelled.
+        const write = hint.code === "MISSING_DEPENDENCY" ? logError : log;
+        write(`stderr hint: ${hint.code} - ${hint.message}`);
+      }
     });
 
     backendProcess.on("exit", (code, signal) => {
-      log(`Backend process exited with code ${code}, signal ${signal}`);
+      const outcome = `Backend process exited with code ${code}, signal ${signal}`;
+      if (backendStopRequested) {
+        log(`${outcome} (stop requested)`);
+      } else {
+        // Nobody asked it to stop: it crashed, or something killed it.
+        logError(`${outcome} (not requested: the backend died)`);
+      }
       if (backendProcess === proc) backendProcess = null;
       if (code === 127) {
         failWith("BACKEND_NOT_FOUND");
@@ -372,7 +430,7 @@ const startRealBackend = () => {
     });
 
     backendProcess.on("error", (error) => {
-      log(`Failed to start backend process: ${error.message}`);
+      logError(`Failed to start the backend process ${backendPath}`, error);
       if (mainWindow && !mainWindow.isDestroyed()) {
         mainWindow.webContents.send("backend-event", {
           event: "startup_error",
@@ -402,13 +460,14 @@ async function startBackendSupervised(attempt = 0) {
     const code = (error && error.message) || "BACKEND_STARTUP_FAILED";
     log(`Backend start attempt ${attempt + 1} failed: ${code}`);
     if (shouldRetrySpawn(code, attempt, MAX_SPAWN_ATTEMPTS)) {
-      log(`Transient failure (${code}); respawning...`);
+      logWarn(`Transient backend start failure (${code}); respawning`);
+      backendStopRequested = true;
       killBackend(backendProcess);
       backendProcess = null;
       await new Promise((r) => setTimeout(r, 2000));
       return startBackendSupervised(attempt + 1);
     }
-    log(`Backend startup failed (${code}); surfacing to the user.`);
+    logError(`Backend startup failed (${code}); surfacing to the user`);
     if (mainWindow && !mainWindow.isDestroyed()) {
       mainWindow.webContents.send("backend-event", {
         event: "startup_error",
@@ -523,7 +582,7 @@ const createApplicationMenu = () => {
               shell.openPath(dataDir);
               log(`Opened data folder: ${dataDir}`);
             } catch (error) {
-              log(`Failed to open data folder: ${error.message}`);
+              logError("Failed to open the data folder", error);
               dialog.showErrorBox(
                 t("dialogs.errorTitle"),
                 t("dialogs.openDataFolderFailed", { error: error.message })
@@ -537,7 +596,7 @@ const createApplicationMenu = () => {
           click: async () => {
             try {
               if (!mainWindow) {
-                log("Cannot clear data: no main window");
+                logWarn("Cannot clear data: no main window");
                 return;
               }
 
@@ -563,6 +622,7 @@ const createApplicationMenu = () => {
                 // delete; killBackend is the hard tree-kill fallback (#216).
                 if (backendProcess) {
                   log("Stopping backend process...");
+                  backendStopRequested = true;
                   await gracefulShutdown(backendProcess, { killFn: killBackend });
                   backendProcess = null;
                 }
@@ -576,7 +636,7 @@ const createApplicationMenu = () => {
                     fs.rmSync(dataDir, { recursive: true, force: true });
                     log(`Successfully deleted data directory: ${dataDir}`);
                   } catch (error) {
-                    log(`Failed to delete data directory: ${error.message}`);
+                    logError(`Failed to delete the data directory ${dataDir}`, error);
                     throw error;
                   }
                 }
@@ -596,7 +656,7 @@ const createApplicationMenu = () => {
                 log("User cancelled data deletion");
               }
             } catch (error) {
-              log(`Failed to clear data: ${error.message}`);
+              logError("Failed to clear the data", error);
               dialog.showErrorBox(
                 t("dialogs.errorTitle"),
                 t("dialogs.clearAll.failedWithError", { error: error.message })
@@ -608,7 +668,9 @@ const createApplicationMenu = () => {
         {
           label: t("menu.help.learnMore"),
           click: async () => {
-            await shell.openExternal("https://github.com/erudi-app/erudi");
+            await shell
+              .openExternal("https://github.com/erudi-app/erudi")
+              .catch((error) => logWarn("Could not open the project page in the browser", error));
           },
         },
       ],
@@ -669,20 +731,35 @@ const createWindow = () => {
     isCreatingWindow = false;
   });
 
+  // A hung renderer is the app not working, from the user's chair; both
+  // transitions are recorded so the log says how long it lasted.
+  mainWindow.webContents.on("unresponsive", () => {
+    logError("The window's renderer is not responding");
+  });
+  mainWindow.webContents.on("responsive", () => {
+    log("The window's renderer is responding again");
+  });
+
   mainWindow.webContents.on("dom-ready", () => {
-    mainWindow.webContents.executeJavaScript(`
+    mainWindow.webContents
+      .executeJavaScript(
+        `
       // Block navigation everywhere, but let events bubble to React
       ['dragover','drop'].forEach(type =>
         window.addEventListener(type, e => e.preventDefault(), false)
       );
-    `);
+    `
+      )
+      .catch((error) => logWarn("Could not install the drop-navigation guard", error));
   });
 
   mainWindow.webContents.on("will-navigate", (event) => {
     event.preventDefault();
   });
 
-  mainWindow.webContents.session.clearCache();
+  mainWindow.webContents.session
+    .clearCache()
+    .catch((error) => logWarn("Could not clear the session cache", error));
 
   mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
     // Skip header modification for backend API responses to preserve
@@ -760,7 +837,7 @@ ipcMain.handle("diagnostics:appLogTail", (_event, limit) => {
     const count = Number.isInteger(limit) && limit > 0 && limit <= 500 ? limit : undefined;
     return readAppLogTail(logFile, count);
   } catch (error) {
-    log(`Failed to read the app log tail: ${error.message}`);
+    logWarn("Could not read the app log tail for the Diagnostics panel", error);
     return [];
   }
 });
@@ -806,14 +883,14 @@ ipcMain.handle("logs:reveal", (_event, filePath) => {
     if (knownLogDirectories().includes(path.dirname(resolved))) {
       target = resolved;
     } else {
-      log(`Refused to reveal a path outside the log directories: ${resolved}`);
+      logWarn(`Refused to reveal a path outside the log directories: ${resolved}`);
     }
   }
   try {
     shell.showItemInFolder(target);
     return { success: true, path: target };
   } catch (error) {
-    log(`Failed to reveal the log file: ${error.message}`);
+    logError(`Failed to reveal the log file ${target}`, error);
     return { success: false, error: error.message };
   }
 });
@@ -840,6 +917,7 @@ ipcMain.handle("backend:restart", async () => {
   log("Renderer requested a backend restart.");
   // Graceful first (stop_postgres releases the data-dir locks) so the respawn
   // isn't racing an orphaned postmaster; killBackend is the hard fallback (#216).
+  backendStopRequested = true;
   await gracefulShutdown(backendProcess, { killFn: killBackend });
   backendProcess = null;
   backendIsReady = false;
@@ -869,7 +947,10 @@ ipcMain.handle("fs:readImageAsDataURL", async (_event, filePath) => {
     const ext = path.extname(filePath).slice(1).toLowerCase();
     const mime = ext === "jpg" ? "jpeg" : ext || "png";
     return `data:image/${mime};base64,${data.toString("base64")}`;
-  } catch {
+  } catch (error) {
+    // The conversation renders without this attachment: degraded, and the
+    // path says which one (a file the user moved or deleted, usually).
+    logWarn(`Could not read the image attachment ${filePath}`, error);
     return null;
   }
 });
@@ -902,7 +983,8 @@ ipcMain.handle("image:savePasted", async (_event, dataUrl) => {
     fs.writeFileSync(filePath, bytes);
     return filePath;
   } catch (error) {
-    log(`Failed to save pasted image: ${error.message}`);
+    // The pasted image is then kept as a bare placeholder and lost on reload.
+    logError("Failed to save the pasted image to disk", error);
     return null;
   }
 });
@@ -932,7 +1014,7 @@ ipcMain.handle("data:openFolder", async () => {
     log(`Opened data folder: ${dataDir}`);
     return { success: true, path: dataDir };
   } catch (error) {
-    log(`Failed to open data folder: ${error.message}`);
+    logError("Failed to open the data folder", error);
     return { success: false, error: error.message };
   }
 });
@@ -963,6 +1045,7 @@ ipcMain.handle("data:clearAll", async () => {
       // (not a bare SIGTERM, which on Windows only hits the parent — #147/#216).
       if (backendProcess) {
         log("Stopping backend process...");
+        backendStopRequested = true;
         await gracefulShutdown(backendProcess, { killFn: killBackend });
         backendProcess = null;
       }
@@ -976,7 +1059,7 @@ ipcMain.handle("data:clearAll", async () => {
           fs.rmSync(dataDir, { recursive: true, force: true });
           log(`Successfully deleted data directory: ${dataDir}`);
         } catch (error) {
-          log(`Failed to delete data directory: ${error.message}`);
+          logError(`Failed to delete the data directory ${dataDir}`, error);
           throw error;
         }
       }
@@ -999,7 +1082,7 @@ ipcMain.handle("data:clearAll", async () => {
       return { success: false, cancelled: true };
     }
   } catch (error) {
-    log(`Failed to clear data: ${error.message}`);
+    logError("Failed to clear the data", error);
 
     await dialog.showMessageBox(mainWindow, {
       type: "error",
@@ -1056,8 +1139,9 @@ function setupAutoUpdater() {
   });
 
   autoUpdater.on("error", (err) => {
-    // Log but never crash the app over an update failure
-    log(`Updater error (non-fatal): ${err.message}`);
+    // Never crash the app over an update failure: the feature is degraded,
+    // the app is not.
+    logWarn("Updater error (non-fatal)", err);
   });
 
   // No check yet: applyAutoUpdatePreference() starts the first one once the
@@ -1095,48 +1179,51 @@ function applyAutoUpdatePreference() {
 
   log("Updater: automatic updates are on; checking now, then every 4 hours");
   autoUpdater.checkForUpdates().catch((err) => {
-    log(`Updater: initial check failed - ${err.message}`);
+    logWarn("Updater: initial check failed", err);
   });
 
   updatePollTimer = setInterval(
     () => {
       autoUpdater.checkForUpdates().catch((err) => {
-        log(`Updater: periodic check failed - ${err.message}`);
+        logWarn("Updater: periodic check failed", err);
       });
     },
     4 * 60 * 60 * 1000
   );
 }
 
-app.whenReady().then(async () => {
-  log("App ready.");
+app
+  .whenReady()
+  .then(async () => {
+    log("App ready.");
 
-  // Create application menu and window immediately — never block on backend startup.
-  // The renderer handles the loading/error state via backend-event IPC messages.
-  createApplicationMenu();
-  createWindow();
+    // Create application menu and window immediately — never block on backend startup.
+    // The renderer handles the loading/error state via backend-event IPC messages.
+    createApplicationMenu();
+    createWindow();
 
-  // Auto-updater: wire up events and kick off initial check (production only).
-  setupAutoUpdater();
+    // Auto-updater: wire up events and kick off initial check (production only).
+    setupAutoUpdater();
 
-  if (!app.isPackaged) {
-    // Dev mode: backend is expected to be already running via dev-start.sh.
-    startRealBackend()
-      .then(({ port }) => {
-        resolvedPort = port;
-        backendIsReady = true;
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          mainWindow.webContents.send("backend-event", { event: "backend_ready", port });
-        }
-      })
-      .catch((err) => log(`Dev backend not available: ${err.message}`));
-    return;
-  }
+    if (!app.isPackaged) {
+      // Dev mode: backend is expected to be already running via dev-start.sh.
+      startRealBackend()
+        .then(({ port }) => {
+          resolvedPort = port;
+          backendIsReady = true;
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send("backend-event", { event: "backend_ready", port });
+          }
+        })
+        .catch((err) => logError("Dev backend not available", err));
+      return;
+    }
 
-  // Production: supervise the backend in the background so the window stays
-  // immediately usable (the renderer shows the loading/error state via events).
-  startBackendSupervised();
-});
+    // Production: supervise the backend in the background so the window stays
+    // immediately usable (the renderer shows the loading/error state via events).
+    startBackendSupervised();
+  })
+  .catch((error) => logError("Application start-up failed", error));
 
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0 && !mainWindow) {
@@ -1164,6 +1251,7 @@ app.on("before-quit", (e) => {
     e.preventDefault();
     shuttingDown = true;
     log("Stopping backend process before quit...");
+    backendStopRequested = true;
     gracefulShutdown(backendProcess, { killFn: killBackend }).finally(() => {
       backendProcess = null;
       app.quit();
