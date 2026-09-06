@@ -153,7 +153,7 @@ describe("isEnvironmental", () => {
     // backend/src/domains/llms/endpoints.py's `_run_download_task` and
     // backend/src/domains/knowledge_base/services.py's `_ingest_one_file`
     // both log a bare OSError at ERROR through their generic exception
-    // handler; ENOSPC surfaces with the OS's own wording.
+    // handler; ENOSPC/EDQUOT surface with Python's structured errno text.
     expect(
       isEnvironmental({
         message: "KB 2: ingestion failed for report.pdf: [Errno 28] No space left on device",
@@ -165,6 +165,38 @@ describe("isEnvironmental", () => {
           "Download job 6 failed for LLM 1 (org/model): [WinError 112] There is not enough space on the disk",
       })
     ).toBe(true);
+    expect(
+      isEnvironmental({
+        message: "KB 4: ingestion failed for report.pdf: [Errno 122] Disk quota exceeded",
+      })
+    ).toBe(true);
+  });
+
+  it("does NOT hide a real parser crash just because the user's own file name happens to say a disk is full (adversarial, #485 review)", () => {
+    // KB ingestion messages embed the file's name verbatim
+    // ("_ingest_one_file: ingestion failed for <file.name>: <exc>"). A file a
+    // user genuinely might have -- an error screenshot, a saved support doc
+    // -- named exactly with the English disk-full wording must not hide an
+    // unrelated real defect behind that coincidence. Only the STRUCTURED
+    // errno/winerror segment of the actual exception text is trusted, never
+    // an arbitrary substring of the whole display message.
+    expect(
+      isEnvironmental({
+        message:
+          "KB 3: ingestion failed for No space left on device.pdf: UnicodeDecodeError: invalid start byte",
+      })
+    ).toBe(false);
+    expect(
+      isEnvironmental({
+        message:
+          "KB 5: ingestion failed for There is not enough space on the disk.docx: zipfile.BadZipFile: File is not a zip file",
+      })
+    ).toBe(false);
+    expect(
+      isEnvironmental({
+        message: "KB 6: ingestion failed for disk quota exceeded notes.txt: ValueError: bad header",
+      })
+    ).toBe(false);
   });
 
   it("matches the backend startup failing because every port it scans is already taken", () => {

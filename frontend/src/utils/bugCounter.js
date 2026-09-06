@@ -22,6 +22,25 @@
 // reset) -- the machine being the user's does not make our process's own
 // death legitimate, so none of these patterns match on host/path alone
 // without also matching text specific to a genuinely external cause.
+//
+// A second, narrower risk was audited separately: several of these messages
+// embed something a user chose -- a KB document's file name
+// (`_ingest_one_file`) or a download's model link -- so a pattern matched
+// against the WHOLE display message can be fooled by a coincidence in that
+// user-chosen text, hiding a genuine unrelated defect (a corrupt-file parser
+// crash on a file literally named to describe some other problem). Every
+// pattern's anchor was checked against this: fixed log-message prefixes and
+// exact constant strings Erudi itself writes (`hf_download_offline`,
+// `embedding_model_download_offline`'s prefix, `hf_download_gated_requires_auth`,
+// `port_in_use`) are immune, since a file name cannot forge Erudi's own log
+// text. `disk_full` was the one genuine case -- its markers used to be the
+// OS's English wording, exactly the shape a real file name plausibly takes
+// (see its own comment for the fix: match the structured errno/winerror
+// code instead). `hf_download_rate_limited_or_service_error` and
+// `hub_or_forge_unreachable` require a "huggingface.co"/"github.com"
+// substring, which is a far less natural thing for a document's file name to
+// contain than an English sentence -- accepted as a small residual risk
+// rather than a live one, called out here rather than silently assumed away.
 
 /**
  * Lowercased substrings that mark a no-network failure reaching
@@ -129,19 +148,31 @@ const ENVIRONMENTAL_PATTERNS = [
   },
   {
     name: "disk_full",
-    // No dedicated exception -- ENOSPC bubbles up as a plain OSError through
-    // the two generic task-boundary handlers that log it at ERROR with the
-    // OS's own wording: backend/src/domains/llms/endpoints.py's
-    // `_run_download_task` ("Download job N failed for LLM ...: [Errno 28]
-    // No space left on device") and
-    // backend/src/domains/knowledge_base/services.py's `_ingest_one_file`
-    // ("KB N: ingestion failed for <file>: [Errno 28] No space left on
-    // device") when `add_kb_chunks` or the temp-to-final move runs out of
-    // room. POSIX and Windows phrase it differently, so both are matched.
+    // No dedicated exception -- ENOSPC/EDQUOT bubble up as a plain OSError
+    // through the two generic task-boundary handlers that log it at ERROR,
+    // with the display message built around whatever a user named the file:
+    // backend/src/domains/llms/endpoints.py's `_run_download_task`
+    // ("Download job N failed for LLM ... (<model_link>): [Errno 28] No
+    // space left on device") and backend/src/domains/knowledge_base/services.py's
+    // `_ingest_one_file` ("KB N: ingestion failed for <file.name>: [Errno 28]
+    // No space left on device"). The KB one is why this matches the
+    // STRUCTURED exception segment Python's OSError renders (`[Errno 28] ...`)
+    // rather than the English phrase that segment carries: a phrase like "no
+    // space left on device" is exactly the kind of thing a real user names a
+    // file (an error screenshot, a support doc) -- matching it loosely would
+    // hide a genuine parser crash on "No space left on device.pdf" behind a
+    // filename that happens to describe an unrelated problem. The errno/
+    // winerror NUMBERS are what an OS actually emits and are not something a
+    // filename collides with by coincidence the way a plain English sentence
+    // is -- deliberately including EDQUOT's own code (122) rather than
+    // matching the bare phrase "disk quota exceeded", which would have kept
+    // exactly the weakness this pattern exists to close.
     test: (message) =>
-      message.includes("no space left on device") ||
-      message.includes("not enough space on the disk") ||
-      message.includes("disk quota exceeded"),
+      message.includes("[errno 28]") ||
+      message.includes("errno 28") ||
+      message.includes("winerror 112") ||
+      message.includes("[errno 122]") ||
+      message.includes("errno 122"),
   },
   {
     name: "port_in_use",
