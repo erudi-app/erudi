@@ -1,12 +1,10 @@
-// @vitest-environment jsdom
 /**
- * The Diagnostics anchor under HashRouter.
+ * The Diagnostics route.
  *
- * The app routes with `HashRouter`, so the whole route already lives in the
- * URL fragment. `#/erudi/settings#diagnostics` therefore has two `#`, and the
- * browser will not scroll to the second one on its own — SettingsPage does the
- * scroll. What this test pins is the half that must hold for that to be
- * possible: react-router still parses the path into a pathname and a hash.
+ * Diagnostics is a page of its own, reached from the bug button at the bottom
+ * of the sidebar rail. It is not a section of Settings, so its path carries no
+ * fragment: under `HashRouter` the whole route already lives in the URL hash,
+ * and a second `#` would be something the browser cannot follow on its own.
  */
 import { describe, it, expect } from "vitest";
 import { parsePath } from "react-router-dom";
@@ -14,13 +12,13 @@ import { parsePath } from "react-router-dom";
 import { DIAGNOSTICS_PATH, SETTINGS_PATH } from "./routes";
 
 describe("DIAGNOSTICS_PATH", () => {
-  it("points at the settings route with the panel's anchor", () => {
-    expect(DIAGNOSTICS_PATH).toBe("/erudi/settings#diagnostics");
+  it("is a route of its own", () => {
+    expect(DIAGNOSTICS_PATH).toBe("/erudi/diagnostics");
   });
 
-  it("parses into the settings pathname and the panel's hash", () => {
+  it("does not live under the settings route", () => {
     const parsed = parsePath(DIAGNOSTICS_PATH);
-    expect(parsed.pathname).toBe(SETTINGS_PATH);
-    expect(parsed.hash).toBe("#diagnostics");
+    expect(parsed.pathname).not.toBe(SETTINGS_PATH);
+    expect(parsed.hash).toBeFalsy();
   });
 });

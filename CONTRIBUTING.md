@@ -18,8 +18,8 @@ Thank you for your interest in contributing. This document explains how the proj
 
 ## How to contribute
 
-0. **Reporting a bug?** Open **Settings → Diagnostics** in the app (the bug icon
-   at the bottom of the left rail goes there). It shows your version, hardware,
+0. **Reporting a bug?** Open **Diagnostics** in the app (the bug icon at the
+   bottom of the left rail goes there). It shows your version, hardware,
    engine and recent errors, copies them to your clipboard, and opens the bug
    report form with the first fields already filled — paste the copied text into
    the **Logs** field. Everything is read on your machine; the app sends none of
