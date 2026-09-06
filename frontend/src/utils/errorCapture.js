@@ -4,7 +4,7 @@
 // Without this, an exception that escapes React reaches no log at all — the
 // window goes blank and the two log files say nothing about why. With it, the
 // error lands in `erudi-backend.log` through the existing `renderer-log`
-// bridge, and in an in-memory buffer the Diagnostics panel reads.
+// bridge, and in an in-memory buffer the Diagnostics page reads.
 //
 // The hard part is not catching; it is not making things worse:
 //

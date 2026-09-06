@@ -174,7 +174,7 @@ export default function EngineFailureModal({ notice, onDismiss }) {
                 )}
 
                 {/* The app has one report block, shared with the Diagnostics
-                    panel and the renderer error screen, so what a reporter is
+                    page and the renderer error screen, so what a reporter is
                     asked to send never depends on which dialog they reached. */}
                 <div className="mt-4">
                   <ReportProblem diagnostics={diagnostics} prefill={prefill} />

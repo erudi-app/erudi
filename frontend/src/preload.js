@@ -58,10 +58,10 @@ contextBridge.exposeInMainWorld("backendAPI", {
   getLogPath: () => ipcRenderer.invoke("app:getLogPath"),
 });
 
-// Diagnostics bridge: what the Diagnostics panel in Settings needs from the
-// main process — the app's own version and platform, the last WARNING/ERROR
-// records of the app log, and revealing a log file in the OS file manager.
-// Read-only and local; the panel sends nothing anywhere.
+// Diagnostics bridge: what the Diagnostics page needs from the main process —
+// the app's own version and platform, the last WARNING/ERROR records of the
+// app log, and revealing a log file in the OS file manager. Read-only and
+// local; the page sends nothing anywhere.
 contextBridge.exposeInMainWorld("diagnosticsAPI", {
   getAppInfo: () => ipcRenderer.invoke("app:getInfo"),
   appLogTail: (limit) => ipcRenderer.invoke("diagnostics:appLogTail", limit),
