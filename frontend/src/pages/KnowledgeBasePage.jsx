@@ -166,10 +166,9 @@ export default function KnowledgeBasePage() {
           setFormResetKey((k) => k + 1);
         }, 3000);
       },
-      onError: (error) => {
-        log.error("Knowledge base creation failed", error);
-        setErrorMessage(error);
-      },
+      // UI only: the context wrote the record (it knows the job and the
+      // backend's message); a second ERROR here would show one failure twice.
+      onError: (error) => setErrorMessage(error),
     });
   };
 
