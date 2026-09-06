@@ -104,9 +104,10 @@ class BaseChatServerEngine(BaseEngine):
     def _read_child_output(cls, proc: Any) -> str:
         """Best-effort tail of what the child printed before it died.
 
-        Default: nothing to show. MLX spawns an `mp.Process`, which has no
-        output pipe to read. `BaseLlamaCppEngine` overrides this to return the
-        tail its drainer collected (#360, #361).
+        Default: nothing to show, for a subclass that captures nothing. Both
+        shipped families override it -- `BaseLlamaCppEngine` returns the tail
+        its drainer collected from the child's pipe (#360, #361), `MLX_Engine`
+        the tail of the file its child redirects itself into, having no pipe.
         """
         return "No child output is captured for this engine."
 
