@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 /**
- * The Diagnostics panel in Settings.
+ * The content of the Diagnostics page.
  *
  * The test that earns this file is "the backend is dead". A panel that goes
  * blank when the backend does not answer is useless exactly when someone needs
@@ -108,9 +108,18 @@ describe("DiagnosticsPanel — backend up", () => {
     expect(screen.getAllByText(/render blew up/).length).toBeGreaterThan(0);
   });
 
-  it("warns that logs can contain conversation content", async () => {
+  it("warns next to the copy block that logs can contain conversation content", async () => {
     render(<DiagnosticsPanel />);
-    expect(await screen.findByText(/Logs can contain the text of your conversations/)).toBeTruthy();
+    const note = await screen.findByText(/Logs can contain the text of your conversations/);
+    const block = screen.getByLabelText("Diagnostics to copy").parentElement;
+    expect(block.contains(note)).toBe(true);
+  });
+
+  it("lists the entries rather than the quiet state when there is something to show", async () => {
+    render(<DiagnosticsPanel />);
+    expect(await screen.findAllByText(/engine refused to start/)).toHaveLength(2);
+    expect(screen.queryByText("No warning or error recorded.")).toBeNull();
+    expect(document.querySelector(".lucide-circle-check")).toBeNull();
   });
 
   it("puts the whole report in the copyable block", async () => {
@@ -154,6 +163,36 @@ describe("DiagnosticsPanel — backend down", () => {
     expect(area.value).toContain("Erudi 1.0.0");
     expect(area.value).toContain("backend did not answer");
     expect(screen.getByRole("button", { name: "Report on GitHub" })).toBeTruthy();
+  });
+});
+
+describe("DiagnosticsPanel — nothing recorded", () => {
+  beforeEach(() => {
+    getMock.mockResolvedValue({ ...BACKEND, recent_errors: [] });
+    appLogTail.mockResolvedValue([]);
+  });
+
+  it("says so in one quiet line, with nothing else in the errors area", async () => {
+    render(<DiagnosticsPanel />);
+    const empty = await screen.findByText("No warning or error recorded.");
+    // A check mark, not a warning: nothing happened and nothing is asked.
+    expect(empty.parentElement.querySelector(".lucide-circle-check")).not.toBeNull();
+    expect(document.querySelector("ul")).toBeNull();
+    expect(document.querySelector("pre")).toBeNull();
+  });
+
+  it("keeps the log privacy note with the copy block, where it still applies", async () => {
+    render(<DiagnosticsPanel />);
+    const note = await screen.findByText(/Logs can contain the text of your conversations/);
+    const block = screen.getByLabelText("Diagnostics to copy").parentElement;
+    expect(block.contains(note)).toBe(true);
+  });
+
+  it("still offers the report route and the log folder", async () => {
+    render(<DiagnosticsPanel />);
+    expect(await screen.findByText("Report a problem")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Report on GitHub" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Open log folder" })).toBeTruthy();
   });
 });
 
