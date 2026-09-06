@@ -119,6 +119,7 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I delete the conversation I'm viewing, then it's removed and I'm redirected to `/erudi/chat`; deleting a different one keeps me in place.
 - [ ] When I quit and relaunch and reopen the conversation, then its full history is intact.
 - [ ] When generation **fails** or the connection **drops** mid-reply, then a red error message shows and any partial reply is kept.
+- [ ] When an answer contains a **markdown image pointing at a web address** (ask the model to reply with exactly `![logo](https://example.com/logo.png)`), then no picture is fetched or shown — at most a broken-image placeholder — because the window loads no remote images, so no site learns my address from an answer on screen.
 - [ ] When the conversation's assigned model was **deleted**, then the conversation survives with no model assigned: sending is **blocked**, the header model picker shows a red "Please select a model" attention state, and **explicitly picking** an installed model unblocks sending (no auto-fallback).
 
 ## Arena — `/erudi/arena`
@@ -164,6 +165,10 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I open Settings on a fresh install, then the **Web Search** toggle is **off** and the copy explains that enabling it sends the searched query to external search engines when the model decides to search.
 - [ ] When I flip the Web Search toggle, then the change **persists across an app relaunch**.
 - [ ] When the global toggle is on and I start a **new** conversation, then that conversation's own Web search toggle starts **on** (inheritance at creation; the conversation owns it afterwards).
+
+**Automatic updates**
+- [ ] When I open Settings on a fresh install, then the **Automatic updates** toggle is **on** and the copy says the request goes to this project's GitHub releases and carries nothing but my version and platform.
+- [ ] When I turn Automatic updates **off** and relaunch, then it is still off and `erudi-backend.log` says `Updater: automatic updates are turned off; no check will run` — with it on, the same file says `checking now, then every 4 hours` instead.
 
 **Inference engine**
 
@@ -249,6 +254,7 @@ older) for the "too old" verdict, and an NVIDIA machine kept on a driver older t
 say which hardware was missing. The rest run on any machine.*
 
 - [ ] *(any machine, NVIDIA GPU that works)* When I launch the app on a supported card and driver, then **no** graphics-card dialog appears — a healthy machine is never nagged. (`backend.log` shows `CUDA pre-flight ok: ...`.)
+- [ ] *(NVIDIA machine with the driver only — no CUDA toolkit installed)* When I send a chat message, then it answers on the graphics card (`backend.log` shows `Engine chosen: <CUDA_Engine>` and no processor swap line) — the installer carries the CUDA runtime, so the driver is the only prerequisite. An RTX 50-series card counts double here: it is the newest generation the build carries native code for.
 - [ ] *(needs a pre-Maxwell card — likely NOT RUN)* When I launch the app on a card below compute capability 5.0, then once the app has loaded a dialog says the card is too old for GPU mode, names the card and its capability, and states that no driver update changes it.
 - [ ] *(needs an old driver — likely NOT RUN)* When I launch the app on a supported card with a driver older than the 570 family, then the dialog says the **driver** is too old, names the CUDA version needed and the one installed, and says updating the driver is the fix.
 - [ ] When that dialog is open, then the app behind it is fully usable — it is a decision, not an error screen, and it never replaces the loading screen.
@@ -313,6 +319,7 @@ tool path explicitly — a working chat proves nothing about it.*
 **Updates & first run**
 - [ ] When I run a **packaged** build and a newer release is published, then a banner shows "downloading…", then "ready — restart to install", and it installs on click or next quit.
 - [ ] When a release is still a **draft**, then my installed build is **not** offered that update.
+- [ ] When **Automatic updates** is off in Settings and a newer release is published, then no banner appears, nothing is downloaded and quitting installs nothing; turning the toggle back on starts a check at once — the "downloading…" banner appears without a relaunch.
 - [ ] When I do a **fresh install**, then the Welcome dialog shows once, the catalog seeds instantly from the bundled snapshot (then refreshes in the background), and the machine readout renders (even if hardware profiling falls back).
 - [ ] When the app quits, then the backend and its inference child processes are stopped (none left orphaned).
 
