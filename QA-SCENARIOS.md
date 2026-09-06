@@ -235,6 +235,15 @@ one check.*
 - [ ] When I unload the model and load it again, then the child's key has **changed** — grep the process arguments (`ps aux | grep llama-server` on macOS/Linux, Task Manager details on Windows) before and after; the two values must differ, which is what makes a leaked key worthless.
 - [ ] When I read `%TEMP%\erudi-backend.log` after a load, then the key appears **nowhere** in it.
 
+### The embedded database requires a password (Windows)
+
+*On Windows the embedded PostgreSQL listens on a loopback TCP port (there are no Unix sockets), so the per-cluster password is the only thing between the database and any other program running under the user's account. On macOS and Linux the cluster opens no port at all, so the first three scenarios do not apply there; the last one does.*
+
+- [ ] When the app is running and I find the database port in `%LOCALAPPDATA%\erudi\backend\prod\data\postgres\postmaster.pid` (fourth line), then connecting **without a password** is refused: `psql -h 127.0.0.1 -p <port> -U postgres -d erudi -c "select 1"` (any client will do) fails with a password error, and connecting with a **wrong** password fails with `password authentication failed`.
+- [ ] When I connect with the password read from `%LOCALAPPDATA%\erudi\backend\prod\data\postgres\erudi_db_password` (`set PGPASSWORD=<value>` first), then the same command succeeds — proof that the app's own credential works and nothing else does.
+- [ ] When I quit and relaunch the app, then it boots, migrates and chats normally (the password is set and enforced on **every** start, and a second start on the same data folder changes nothing) — and the log contains neither the password nor a connection URL carrying it.
+- [ ] When I open the data folder, then `postgres\erudi_db_password` exists, contains a single random value, and `postgres\pg_hba.conf` has **no** `host … trust` line left (every `host` rule reads `scram-sha-256`; the `local` lines stay `trust`).
+
 ## Non-functional (boot, offline, persistence, updates, errors)
 
 **Boot & errors**

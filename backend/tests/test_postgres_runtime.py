@@ -9,7 +9,10 @@ Covers:
 """
 
 import platform
+import re
+import stat
 import subprocess
+import sys
 
 import psycopg
 import pytest
@@ -18,11 +21,22 @@ from sqlalchemy import create_engine, inspect as sa_inspect, text
 from src.core.subprocess_flags import hidden_console_creationflags
 from src.launcher import postgres_runtime
 from src.launcher.postgres_runtime import (
+    PASSWORD_FILE_NAME,
     _console_isolated,
+    _enforce_password_auth,
+    _ensure_cluster_password,
     _recover_corrupt_pgdata,
+    _relax_pg_hba,
+    _uri_with_password,
+    harden_pg_hba,
     start_postgres,
     stop_postgres,
 )
+
+
+def _without_password(uri: str) -> str:
+    """The pgserver-shaped URI (empty password) for a handle's URI."""
+    return re.sub(r"://postgres:[^@]*@", "://postgres:@", uri, count=1)
 
 
 @pytest.fixture(scope="module")
@@ -66,11 +80,377 @@ class TestPostgresRuntime:
 
     @pytest.mark.integration
     def test_start_postgres_is_idempotent(self, pg):
+        password_before = (pg.data_dir / PASSWORD_FILE_NAME).read_text()
+        hba_before = (pg.data_dir / "pg_hba.conf").read_text()
+
         again = start_postgres(pg.data_dir)
+
         assert again.sqlalchemy_url == pg.sqlalchemy_url
+        assert again.psycopg_url == pg.psycopg_url
+        # Joining a running cluster neither rotates the password nor rewrites
+        # an already-hardened pg_hba.conf.
+        assert (pg.data_dir / PASSWORD_FILE_NAME).read_text() == password_before
+        assert (pg.data_dir / "pg_hba.conf").read_text() == hba_before
         # Same cluster, still answering.
         with psycopg.connect(again.psycopg_url, autocommit=True) as conn:
             assert conn.execute("SELECT 1").fetchone()[0] == 1
+
+
+class TestClusterPasswordEnforced:
+    """#462 - the cluster requires a per-cluster password on every host connection.
+
+    Runs against the module cluster on every platform: the password file, the
+    SCRAM verifier and the hardened pg_hba.conf are the same code path on
+    macOS, Linux and Windows. Only the TCP refusal itself needs Windows, the
+    one platform where pgserver listens on a loopback port instead of a
+    trust-authenticated Unix socket.
+    """
+
+    @pytest.mark.integration
+    def test_password_file_exists_and_is_in_the_urls(self, pg):
+        secret_file = pg.data_dir / PASSWORD_FILE_NAME
+        assert secret_file.exists()
+        password = secret_file.read_text().strip()
+        assert len(password) >= 32
+        assert f"postgres:{password}@" in pg.psycopg_url
+        assert f"postgres:{password}@" in pg.sqlalchemy_url
+
+    @pytest.mark.integration
+    def test_pg_hba_has_no_trusted_host_line_on_disk(self, pg):
+        lines = (pg.data_dir / "pg_hba.conf").read_text().splitlines()
+        rules = [ln.split() for ln in lines if ln.strip() and not ln.lstrip().startswith("#")]
+        host_rules = [r for r in rules if r[0].startswith("host")]
+        assert host_rules, "pgserver's initdb always writes host rules"
+        assert all(r[-1] == "scram-sha-256" for r in host_rules), host_rules
+        # The Unix socket stays trust: filesystem permissions guard it on
+        # POSIX and Windows never opens one.
+        assert all(r[-1] == "trust" for r in rules if r[0] == "local")
+
+    @pytest.mark.integration
+    def test_role_has_a_scram_verifier(self, pg):
+        with psycopg.connect(pg.psycopg_url) as conn:
+            stored = conn.execute(
+                "SELECT rolpassword FROM pg_authid WHERE rolname = 'postgres'"
+            ).fetchone()[0]
+        assert stored is not None and stored.startswith("SCRAM-SHA-256$")
+
+    @pytest.mark.integration
+    def test_hardened_hba_parses_and_was_reloaded(self, pg):
+        with psycopg.connect(pg.psycopg_url) as conn:
+            # The rewritten file must be one the server can load: no rule in
+            # error, every host rule on SCRAM (pg_hba_file_rules parses the
+            # file on disk, independently of what the postmaster has loaded).
+            rows = conn.execute("SELECT type, auth_method, error FROM pg_hba_file_rules").fetchall()
+            assert rows
+            assert all(error is None for _, _, error in rows), rows
+            assert all(
+                method == "scram-sha-256" for kind, method, _ in rows if kind.startswith("host")
+            )
+            # And pg_reload_conf() was issued after the postmaster booted on
+            # the trust rules: the config load time moved past the start time.
+            reloaded = conn.execute(
+                "SELECT pg_conf_load_time() > pg_postmaster_start_time()"
+            ).fetchone()[0]
+        assert reloaded is True
+
+    @pytest.mark.integration
+    @pytest.mark.skipif(
+        sys.platform != "win32",
+        reason="TCP refusal needs Windows: on POSIX pgserver listens on a trust Unix socket only",
+    )
+    def test_tcp_connection_without_the_password_is_refused(self, pg):
+        assert "127.0.0.1" in pg.psycopg_url  # the Windows loopback-port form
+        with pytest.raises(psycopg.OperationalError, match="password"):
+            psycopg.connect(_without_password(pg.psycopg_url))
+        wrong = _uri_with_password(_without_password(pg.psycopg_url), "not-the-password")
+        with pytest.raises(psycopg.OperationalError, match="password authentication failed"):
+            psycopg.connect(wrong)
+        with psycopg.connect(pg.psycopg_url) as conn:
+            assert conn.execute("SELECT 1").fetchone()[0] == 1
+
+
+class TestPgHbaHardening:
+    """Pure text -> text rewrite of pg_hba.conf, no cluster needed."""
+
+    INITDB_TRUST = (
+        "# PostgreSQL Client Authentication Configuration File\n"
+        "# TYPE  DATABASE        USER            ADDRESS                 METHOD\n"
+        "\n"
+        '# "local" is for Unix domain socket connections only\n'
+        "local   all             all                                     trust\n"
+        "# IPv4 local connections:\n"
+        "host    all             all             127.0.0.1/32            trust\n"
+        "# IPv6 local connections:\n"
+        "host    all             all             ::1/128                 trust\n"
+        "# Allow replication connections from localhost, by a user with the\n"
+        "# replication privilege.\n"
+        "local   replication     all                                     trust\n"
+        "host    replication     all             127.0.0.1/32            trust\n"
+        "host    replication     all             ::1/128                 trust\n"
+    )
+
+    @pytest.mark.unit
+    def test_every_host_rule_switches_to_scram(self):
+        out = harden_pg_hba(self.INITDB_TRUST)
+        rules = [ln.split() for ln in out.splitlines() if ln and not ln.startswith("#")]
+        host_rules = [r for r in rules if r[0] == "host"]
+        assert len(host_rules) == 4  # all + replication, IPv4 + IPv6
+        assert all(r[-1] == "scram-sha-256" for r in host_rules)
+
+    @pytest.mark.unit
+    def test_local_rules_stay_trust(self):
+        out = harden_pg_hba(self.INITDB_TRUST)
+        assert "local   all             all                                     trust\n" in out
+        assert "local   replication     all                                     trust\n" in out
+
+    @pytest.mark.unit
+    def test_comments_and_blank_lines_are_preserved(self):
+        out = harden_pg_hba(self.INITDB_TRUST)
+        comments_in = [ln for ln in self.INITDB_TRUST.splitlines() if ln.startswith("#")]
+        comments_out = [ln for ln in out.splitlines() if ln.startswith("#")]
+        assert comments_out == comments_in
+        assert out.count("\n\n") == self.INITDB_TRUST.count("\n\n")
+        assert out.endswith("\n")
+
+    @pytest.mark.unit
+    def test_idempotent_on_already_hardened_text(self):
+        once = harden_pg_hba(self.INITDB_TRUST)
+        assert harden_pg_hba(once) == once
+
+    @pytest.mark.unit
+    def test_ssl_and_gssapi_host_variants_are_covered(self):
+        text_in = (
+            "hostssl all all 127.0.0.1/32 trust\n"
+            "hostnossl all all ::1/128 trust\n"
+            "hostgssenc all all 0.0.0.0/0 trust\n"
+        )
+        out = harden_pg_hba(text_in)
+        assert "trust" not in out
+        assert out.count("scram-sha-256") == 3
+
+    @pytest.mark.unit
+    def test_trailing_comment_on_a_rule_survives(self):
+        out = harden_pg_hba("host all all 127.0.0.1/32 trust # loopback\n")
+        assert out == "host all all 127.0.0.1/32 scram-sha-256 # loopback\n"
+
+    @pytest.mark.unit
+    def test_other_methods_are_left_alone(self):
+        text_in = "host all all 127.0.0.1/32 md5\nhost all all ::1/128 reject\n"
+        assert harden_pg_hba(text_in) == text_in
+
+
+class TestPgHbaRelax:
+    """Pure inverse of harden_pg_hba, used to re-key a cluster whose secret is lost."""
+
+    @pytest.mark.unit
+    def test_relax_is_the_inverse_of_harden(self):
+        hardened = harden_pg_hba(TestPgHbaHardening.INITDB_TRUST)
+        assert _relax_pg_hba(hardened) == TestPgHbaHardening.INITDB_TRUST
+
+    @pytest.mark.unit
+    def test_relax_leaves_local_rules_and_other_methods_alone(self):
+        text_in = "local all all scram-sha-256\nhost all all 127.0.0.1/32 md5 # keep\n"
+        assert _relax_pg_hba(text_in) == text_in
+
+    @pytest.mark.unit
+    def test_relax_is_idempotent(self):
+        assert _relax_pg_hba(TestPgHbaHardening.INITDB_TRUST) == TestPgHbaHardening.INITDB_TRUST
+
+
+class _FakeConn:
+    """Records executed statements; usable as a context manager like psycopg."""
+
+    def __init__(self, log):
+        self._log = log
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, query, *args):
+        self._log.append(("sql", str(query)))
+        return self
+
+
+class TestLostPasswordRecovery:
+    """A deleted erudi_db_password on a SCRAM-hardened cluster must self-heal.
+
+    Pure-unit with mocks: psycopg.connect raises the auth failure once, then the
+    normal path runs. The expected sequence is relax pg_hba -> pg_ctl reload
+    (no connection possible) -> reconnect -> ALTER ROLE -> re-harden -> reload.
+    """
+
+    AUTH_ERROR = 'connection failed: FATAL:  password authentication failed for user "postgres"'
+
+    @pytest.fixture
+    def hardened_dir(self, tmp_path):
+        (tmp_path / "pg_hba.conf").write_text(harden_pg_hba(TestPgHbaHardening.INITDB_TRUST))
+        return tmp_path
+
+    @pytest.mark.unit
+    def test_auth_failure_relaxes_reloads_and_rekeys(self, hardened_dir, monkeypatch):
+        events = []
+        attempts = {"n": 0}
+
+        def fake_connect(uri, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise psycopg.OperationalError(self.AUTH_ERROR)
+            # By the time the retry connects, the file must already be trust.
+            hba = (hardened_dir / "pg_hba.conf").read_text()
+            events.append(("connect", "trust" in hba and "scram-sha-256" not in hba))
+            return _FakeConn(events)
+
+        def fake_pg_ctl(args, pgdata=None, **kwargs):
+            events.append(("pg_ctl", tuple(args), pgdata))
+            return ""
+
+        monkeypatch.setattr(postgres_runtime.psycopg, "connect", fake_connect)
+        monkeypatch.setattr(postgres_runtime._pg_server_mod, "pg_ctl", fake_pg_ctl)
+
+        _enforce_password_auth(
+            "postgresql://postgres:new@127.0.0.1:1/postgres", hardened_dir, "new"
+        )
+
+        assert attempts["n"] == 2
+        # relax -> reload without a connection -> reconnect on trust
+        assert events[0] == ("pg_ctl", ("reload",), hardened_dir)
+        assert events[1] == ("connect", True)
+        sql_text = " ".join(event[1] for event in events if event[0] == "sql")
+        assert "ALTER ROLE" in sql_text and "pg_reload_conf" in sql_text
+        # ...and the normal path re-hardened the file afterwards.
+        final = (hardened_dir / "pg_hba.conf").read_text()
+        assert final == harden_pg_hba(TestPgHbaHardening.INITDB_TRUST)
+
+    @pytest.mark.unit
+    def test_other_operational_errors_are_not_retried(self, hardened_dir, monkeypatch):
+        attempts = {"n": 0}
+
+        def fake_connect(uri, **kwargs):
+            attempts["n"] += 1
+            raise psycopg.OperationalError("connection refused")
+
+        reloads = []
+        monkeypatch.setattr(postgres_runtime.psycopg, "connect", fake_connect)
+        monkeypatch.setattr(
+            postgres_runtime._pg_server_mod, "pg_ctl", lambda *a, **k: reloads.append(a)
+        )
+
+        with pytest.raises(psycopg.OperationalError, match="connection refused"):
+            _enforce_password_auth(
+                "postgresql://postgres:x@127.0.0.1:1/postgres", hardened_dir, "x"
+            )
+
+        assert attempts["n"] == 1
+        assert reloads == []
+        # The file was not touched either.
+        assert (hardened_dir / "pg_hba.conf").read_text() == harden_pg_hba(
+            TestPgHbaHardening.INITDB_TRUST
+        )
+
+    @pytest.mark.unit
+    def test_auth_failure_that_persists_after_rekey_propagates(self, hardened_dir, monkeypatch):
+        # One recovery attempt only: if trust + reload still does not let us
+        # in, the error is real and must surface.
+        monkeypatch.setattr(
+            postgres_runtime.psycopg,
+            "connect",
+            lambda uri, **kw: (_ for _ in ()).throw(psycopg.OperationalError(self.AUTH_ERROR)),
+        )
+        monkeypatch.setattr(postgres_runtime._pg_server_mod, "pg_ctl", lambda *a, **k: "")
+
+        with pytest.raises(psycopg.OperationalError, match="password authentication failed"):
+            _enforce_password_auth(
+                "postgresql://postgres:x@127.0.0.1:1/postgres", hardened_dir, "x"
+            )
+
+
+class TestClusterPasswordFile:
+    """The secret lives inside PGDATA and is generated once per cluster."""
+
+    @pytest.mark.unit
+    def test_created_on_first_call_with_a_strong_url_safe_value(self, tmp_path):
+        password = _ensure_cluster_password(tmp_path)
+        secret_file = tmp_path / PASSWORD_FILE_NAME
+        assert secret_file.exists()
+        assert secret_file.read_text() == password
+        assert len(password) >= 32
+        # URL-safe alphabet: the value can sit in a URI verbatim.
+        assert re.fullmatch(r"[A-Za-z0-9_-]+", password)
+
+    @pytest.mark.unit
+    @pytest.mark.skipif(sys.platform == "win32", reason="POSIX mode bits; NTFS ACLs differ")
+    def test_file_is_private_to_the_user(self, tmp_path):
+        _ensure_cluster_password(tmp_path)
+        mode = stat.S_IMODE((tmp_path / PASSWORD_FILE_NAME).stat().st_mode)
+        assert mode == 0o600
+
+    @pytest.mark.unit
+    def test_second_call_reuses_the_same_value(self, tmp_path):
+        first = _ensure_cluster_password(tmp_path)
+        second = _ensure_cluster_password(tmp_path)
+        assert first == second
+
+    @pytest.mark.unit
+    def test_surrounding_whitespace_in_the_file_is_ignored(self, tmp_path):
+        (tmp_path / PASSWORD_FILE_NAME).write_text("  abc-DEF_123  \n")
+        assert _ensure_cluster_password(tmp_path) == "abc-DEF_123"
+
+    @pytest.mark.unit
+    def test_an_empty_file_is_regenerated(self, tmp_path):
+        # A truncated file would set an empty password, which PostgreSQL
+        # stores as NULL: every SCRAM host connection would then be refused.
+        (tmp_path / PASSWORD_FILE_NAME).write_text("\n")
+        password = _ensure_cluster_password(tmp_path)
+        assert re.fullmatch(r"[A-Za-z0-9_-]{32,}", password)
+        assert (tmp_path / PASSWORD_FILE_NAME).read_text() == password
+
+    @pytest.mark.unit
+    def test_regenerated_after_the_data_dir_is_wiped(self, tmp_path):
+        first = _ensure_cluster_password(tmp_path)
+        # A half-initialised PGDATA (no PG_VERSION) is wiped by the recovery
+        # path; the secret goes with it and a fresh cluster gets a fresh one.
+        _recover_corrupt_pgdata(tmp_path)
+        assert not (tmp_path / PASSWORD_FILE_NAME).exists()
+        assert _ensure_cluster_password(tmp_path) != first
+
+
+class TestUriWithPassword:
+    @pytest.mark.unit
+    def test_socket_form(self):
+        uri = "postgresql://postgres:@/postgres?host=/tmp/erudi-pg-ab12"
+        assert (
+            _uri_with_password(uri, "s3cret")
+            == "postgresql://postgres:s3cret@/postgres?host=/tmp/erudi-pg-ab12"
+        )
+
+    @pytest.mark.unit
+    def test_tcp_form(self):
+        uri = "postgresql://postgres:@127.0.0.1:54329/postgres"
+        assert (
+            _uri_with_password(uri, "s3cret")
+            == "postgresql://postgres:s3cret@127.0.0.1:54329/postgres"
+        )
+
+    @pytest.mark.unit
+    def test_password_is_percent_quoted(self):
+        uri = "postgresql://postgres:@127.0.0.1:54329/postgres"
+        out = _uri_with_password(uri, "a/b@c?d")
+        assert out == "postgresql://postgres:a%2Fb%40c%3Fd@127.0.0.1:54329/postgres"
+        # And it round-trips through psycopg's parser.
+        assert psycopg.conninfo.conninfo_to_dict(out)["password"] == "a/b@c?d"
+
+    @pytest.mark.unit
+    def test_replaces_an_existing_password(self):
+        uri = "postgresql://postgres:old@127.0.0.1:1/postgres"
+        assert _uri_with_password(uri, "new") == "postgresql://postgres:new@127.0.0.1:1/postgres"
+
+    @pytest.mark.unit
+    def test_rejects_a_uri_without_a_user(self):
+        with pytest.raises(ValueError):
+            _uri_with_password("postgresql://127.0.0.1:1/postgres", "x")
 
     @pytest.mark.integration
     def test_stale_handle_pids_are_pruned(self, tmp_path_factory):
