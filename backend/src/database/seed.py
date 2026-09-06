@@ -466,9 +466,16 @@ class Model_Seeder:
                         out.append(self._create_base_llm_fallback(model_config, quant_link))
                         seen_quant.add(quant_link)
                     except Exception as fe:
-                        logger.error(f"Fallback build failed for {model_config.link}: {fe}")
+                        # The model is skipped; the catalog goes on without it.
+                        logger.warning(
+                            f"Fallback build failed for {model_config.link}, skipping it: {fe}",
+                            exc_info=True,
+                        )
                 except Exception as e:
-                    logger.error(f"Failed to build base model {model_config.link}: {e}")
+                    logger.warning(
+                        f"Failed to build base model {model_config.link}, skipping it: {e}",
+                        exc_info=True,
+                    )
         return out
 
     def seed_from_snapshot(self) -> int:
@@ -554,7 +561,10 @@ class Model_Seeder:
                 logger.info(f"Added base model (offline): {model_data['name']}")
 
             except Exception as e:
-                logger.error(f"Failed to add offline model {model_data['name']}: {e}")
+                logger.warning(
+                    f"Failed to add offline model {model_data['name']}, skipping it: {e}",
+                    exc_info=True,
+                )
                 continue
 
         self.db.commit()
@@ -888,16 +898,21 @@ class Job_Cleanup_Service:
             try:
                 validator(str(link))
                 return True
-            except Exception:
+            except Exception as e:
                 # Engine says the artifact is incomplete/corrupt: it is genuine
-                # download debris, fall through and let it be removed.
+                # download debris, fall through and let it be removed. Said
+                # out loud, because what follows deletes gigabytes.
+                logger.warning(
+                    f"Artifact at {link} failed the integrity check and will be removed: {e}"
+                )
                 return False
 
         total_bytes = getattr(job, "total_bytes", None) or 0
         if total_bytes > 0:
             try:
                 measured_bytes = measure_dir_size_bytes(link)
-            except Exception:
+            except Exception as e:
+                logger.warning(f"Could not measure {link}; treating it as debris: {e}")
                 return False
             return measured_bytes >= total_bytes
         return False
@@ -993,11 +1008,10 @@ class Job_Cleanup_Service:
                 job.temp_local_model_link = ""
 
                 count += 1
-            except FileSystemException as e:
-                logger.error(f"Filesystem error cleaning download job {job.id}: {e}")
-                continue
-            except DatabaseException as e:
-                logger.error(f"Database error cleaning download job {job.id}: {e}")
+            except Exception as e:
+                # One job's cleanup must not sink the boot: log it with the
+                # traceback and move on to the next.
+                logger.error(f"Failed to clean up download job {job.id}: {e}", exc_info=True)
                 continue
 
         if count > 0:
@@ -1754,7 +1768,8 @@ def backfill_wire_tools_startup() -> int:
         db = SessionLocal()
         return Database_Seeder().backfill_wire_tools(db)
     except Exception as e:
-        logger.warning(f"Wire-capability backfill failed: {e}")
+        # Runs after ready in a task nobody awaits: this is its only record.
+        logger.warning(f"Wire-capability backfill failed: {e}", exc_info=True)
         return 0
     finally:
         if db is not None:

@@ -72,6 +72,7 @@ if TYPE_CHECKING:  # pragma: no cover - import for type checking only
 
 
 import argparse
+import traceback
 
 from src.launcher.events import emit_event, emit_phase
 
@@ -109,6 +110,25 @@ PARENT_POLL_SECONDS = 2.0
 # (inference child terminated, embedded Postgres stopped) promptly. For a
 # desktop app a quit is a quit: nobody is reading a 10s-stale stream anyway.
 GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 10
+
+
+def log_startup_failure(code: str, message: str, exc: "BaseException | None" = None) -> None:
+    """Write a startup failure to ``backend.log``, with the traceback when there is one.
+
+    The JSON ``startup_error`` event on stdout tells Electron WHAT failed; this
+    record tells a maintainer WHY, in the file the Diagnostics panel reads.
+    The logger is imported lazily because it needs the runtime paths, and a
+    failure before they exist (``DATA_PREP_ERROR``) falls back to stderr, which
+    Electron copies into its own log with the same ``[ERROR]`` marker.
+    """
+    try:
+        from src.core.logging import logger
+    except Exception:
+        print(f"[ERROR] startup_error {code}: {message}", file=sys.stderr, flush=True)
+        if exc is not None:
+            traceback.print_exception(exc, file=sys.stderr)
+        return
+    logger.error(f"startup_error {code}: {message}", exc_info=exc)
 
 
 def parse_args():
@@ -225,7 +245,11 @@ def ensure_backend_on_path(backend_dir: Path) -> None:
 
 
 def ensure_working_directory(backend_dir: Path) -> None:
-    """Switch the process working directory to the backend root."""
+    """Switch the process working directory to the backend root.
+
+    Best-effort: every path the backend opens is absolute (runtime_paths), so
+    a chdir that fails changes nothing that matters.
+    """
     try:
         os.chdir(backend_dir)
     except Exception:
@@ -247,8 +271,11 @@ def force_mp_spawn() -> None:
 
             tmp.set_start_method("spawn", force=True)
         except Exception:
-            pass
+            pass  # torch absent (CPU build without it) or already configured
     except Exception:
+        # Expected only on exotic interpreters; on the ones we ship the MLX
+        # child would then fail to spawn, and that failure is logged by the
+        # engine with its own record.
         pass
 
 
@@ -298,8 +325,10 @@ def kill_port_process(port: int) -> bool:
             subprocess.run(["kill", "-9", pid], timeout=2)
             time.sleep(0.5)
             return True
-    except Exception:
-        pass
+    except Exception as exc:
+        # lsof/kill absent (Windows) or timed out: the caller reports
+        # NO_PORT_AVAILABLE, which names the port.
+        print(f"[WARNING] could not free port {port}: {exc}", file=sys.stderr, flush=True)
     return False
 
 
@@ -318,6 +347,7 @@ def run_server(server: "uvicorn.Server") -> None:
     except KeyboardInterrupt:
         pass
     except Exception as exc:  # pragma: no cover - defensive
+        log_startup_failure("UNEXPECTED_ERROR", f"Server thread crashed: {exc}", exc)
         emit_event(
             {
                 "event": "startup_error",
@@ -592,6 +622,7 @@ def main() -> None:
         except ValueError:
             runtime_paths = get_runtime_paths()
     except Exception as exc:
+        log_startup_failure("DATA_PREP_ERROR", f"Failed to prepare data directories: {exc}", exc)
         emit_event(
             {
                 "event": "startup_error",
@@ -631,6 +662,7 @@ def main() -> None:
     try:
         from src.main import app as fastapi_app
     except Exception as exc:  # pragma: no cover - defensive
+        log_startup_failure("IMPORT_ERROR", f"Failed to import FastAPI application: {exc}", exc)
         emit_event(
             {
                 "event": "startup_error",
@@ -655,16 +687,12 @@ def main() -> None:
                 port = fallback_port
 
         if port is None:
-            emit_event(
-                {
-                    "event": "startup_error",
-                    "code": "NO_PORT_AVAILABLE",
-                    "message": (
-                        f"Ports {requested_port}-{requested_port + PORT_SCAN_COUNT - 1} "
-                        f"all busy, failed to free {fallback_port}"
-                    ),
-                }
+            message = (
+                f"Ports {requested_port}-{requested_port + PORT_SCAN_COUNT - 1} "
+                f"all busy, failed to free {fallback_port}"
             )
+            log_startup_failure("NO_PORT_AVAILABLE", message)
+            emit_event({"event": "startup_error", "code": "NO_PORT_AVAILABLE", "message": message})
             sys.exit(1)
 
     first_run = compute_first_run(data_dir)
@@ -744,6 +772,9 @@ def main() -> None:
                 break
 
             if not server_thread.is_alive():
+                # Not logged here: the cause already is, with its traceback,
+                # by the lifespan ("Startup failed") or by run_server
+                # (UNEXPECTED_ERROR). This event only tells Electron.
                 emit_event(
                     {
                         "event": "startup_error",
@@ -755,6 +786,11 @@ def main() -> None:
 
             time.sleep(READINESS_POLL_SECONDS)
         else:
+            log_startup_failure(
+                "PORT_TIMEOUT",
+                f"Server did not bind port {port} within "
+                f"{startup_timeout_seconds(first_run)}s (first_run={first_run})",
+            )
             emit_event(
                 {
                     "event": "startup_error",
@@ -767,6 +803,7 @@ def main() -> None:
         emit_event({"event": "shutdown"})
         sys.exit(0)
     except Exception as exc:  # pragma: no cover - defensive
+        log_startup_failure("POLLING_ERROR", f"Startup polling loop crashed: {exc}", exc)
         emit_event(
             {
                 "event": "startup_error",

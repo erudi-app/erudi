@@ -114,7 +114,6 @@ class Hardware_Repository:
             return profile
 
         except Exception as e:
-            logger.exception(f"Failed to query hardware profile: {e}")
             raise DatabaseException("Failed to retrieve hardware profile", trace=str(e))
 
     def create_profile(self, hardware_data: Dict[str, Any]) -> HardwareProfile:
@@ -156,7 +155,6 @@ class Hardware_Repository:
             return profile
 
         except Exception as e:
-            logger.exception(f"Failed to create hardware profile: {e}")
             raise DatabaseException("Failed to create hardware profile", trace=str(e))
 
     def update_profile(self, profile: HardwareProfile, updates: Dict[str, Any]) -> HardwareProfile:
@@ -201,7 +199,6 @@ class Hardware_Repository:
             return profile
 
         except Exception as e:
-            logger.exception(f"Failed to update hardware profile: {e}")
             raise DatabaseException("Failed to update hardware profile", trace=str(e))
 
     def delete_profile(self, profile: HardwareProfile) -> None:
@@ -233,5 +230,4 @@ class Hardware_Repository:
             logger.info("Hardware profile deleted successfully")
 
         except Exception as e:
-            logger.exception(f"Failed to delete hardware profile: {e}")
             raise DatabaseException("Failed to delete hardware profile", trace=str(e))

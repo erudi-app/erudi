@@ -70,12 +70,11 @@ def get_kb_job_status(llm_id: int, db: Session = Depends(get_db)):
         status_data = service.get_kb_job_status(db, llm_id)
         return status_data
 
-    except ValueError as e:
-        logger.error(f"KB job not found: {e}")
+    except ValueError:
+        # Polled by the UI: an absent job is a 404 the handler logs at INFO.
         raise KnowledgeBaseNotFoundException(llm_id)
 
     except Exception as e:
-        logger.error(f"Error fetching KB job status: {e}")
         raise DatabaseException("Error fetching KB job status", trace=str(e))
 
 
@@ -190,7 +189,6 @@ def create_knowledge_base(
         raise KnowledgeBaseNotFoundException(payload.selectedModel)
 
     except Exception as e:
-        logger.error(f"Error creating KB assistant: {e}")
         raise DatabaseException("Error creating Knowledge Base Assistant", trace=str(e))
 
 
@@ -209,7 +207,10 @@ def _run_kb_creation_task(kb_job_id: int, file_paths: List[str]) -> None:
             db=db, kb_job_id=kb_job_id, file_paths=file_paths, is_update=False
         )
     except Exception as e:
-        logger.error(f"KB creation task failed: {e}")
+        # The task boundary: nobody awaits a BackgroundTask, so this record
+        # (with the traceback) is the only trace of the failure in the log.
+        # The job row already says "failed" to the polling UI.
+        logger.error(f"KB creation task failed for job {kb_job_id}: {e}", exc_info=True)
     finally:
         db.close()
 
@@ -229,6 +230,6 @@ def _run_kb_update_task(kb_job_id: int, file_paths: List[str]) -> None:
             db=db, kb_job_id=kb_job_id, file_paths=file_paths, is_update=True
         )
     except Exception as e:
-        logger.error(f"KB update task failed: {e}")
+        logger.error(f"KB update task failed for job {kb_job_id}: {e}", exc_info=True)
     finally:
         db.close()

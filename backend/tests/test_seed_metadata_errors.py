@@ -109,14 +109,17 @@ class TestBaseCatalog:
             monkeypatch,
             SimpleNamespace(model_info=lambda link: _BrokenInfo(id=link)),
         )
-        with caplog.at_level(logging.ERROR, logger="erudi"):
+        with caplog.at_level(logging.WARNING, logger="erudi"):
             rows = seeder.build_base_models([("org", "test", "test")])
 
         assert rows == []
+        # The catalog goes on without the model: a skipped row is a WARNING,
+        # with the traceback attached so the broken payload can be traced.
         assert any(
-            r.levelno == logging.ERROR
+            r.levelno == logging.WARNING
             and "org/test-7b" in r.message
             and "hub payload broken" in r.message
+            and r.exc_info
             for r in caplog.records
         )
 

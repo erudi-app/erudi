@@ -91,5 +91,4 @@ async def get_welcome_popup_status(
 
     except Exception as e:
         db.rollback()
-        logger.exception(f"Failed to get welcome popup status: {e}")
         raise DatabaseException("Failed to get welcome popup status", trace=str(e))
