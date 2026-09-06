@@ -1,0 +1,51 @@
+{
+  "card": {
+    "title": "Diagnostics",
+    "description": "What this machine is running and the recent errors it recorded. Everything here is read on your computer; the app sends none of it anywhere.",
+    "note": "Copy it into a bug report so we can tell your setup apart from someone else's."
+  },
+  "environment": {
+    "title": "Your setup",
+    "appVersion": "Erudi version",
+    "platform": "Operating system",
+    "architecture": "Architecture",
+    "engine": "Inference engine",
+    "hardware": "Hardware",
+    "model": "Model in memory",
+    "python": "Backend Python",
+    "database": "Database",
+    "appLog": "App log",
+    "backendLog": "Backend log",
+    "none": "None",
+    "unknown": "Unknown"
+  },
+  "recentErrors": {
+    "title": "Recent errors",
+    "empty": "No warnings or errors recorded.",
+    "repeated": "{{count}} times",
+    "privacyNote": "Logs can contain the text of your conversations and the names of your documents, because nothing leaves your machine. Read what you copy before you post it publicly.",
+    "sourceBackend": "Backend",
+    "sourceApp": "App",
+    "sourceSession": "This window"
+  },
+  "backendUnavailable": {
+    "title": "The backend did not answer",
+    "body": "Its part of this report is missing. What the app itself knows is below, and that is usually enough to describe a backend that will not start."
+  },
+  "loading": "Reading diagnostics…",
+  "openLogFolder": "Open log folder",
+  "report": {
+    "heading": "Report this",
+    "textareaLabel": "Diagnostics to copy",
+    "instruction": "Copy this, then open the bug report form and paste it into the Logs field. Describe what you did and add a screenshot if you have one.",
+    "github": "Report on GitHub",
+    "contactPrefix": "No GitHub account?",
+    "contactLink": "Write to us on the contact page",
+    "contactSuffix": "and include everything above, plus any screenshots you have."
+  },
+  "boundary": {
+    "title": "This screen stopped working",
+    "body": "Something in the interface threw an error the app could not recover from on its own. Your conversations, models and knowledge bases are untouched — reloading the window is safe.",
+    "reload": "Reload the app"
+  }
+}

@@ -1,0 +1,51 @@
+{
+  "card": {
+    "title": "Diagnostic",
+    "description": "Ce que fait tourner cette machine et les erreurs récentes qu'elle a enregistrées. Tout est lu sur votre ordinateur ; l'application n'en envoie rien nulle part.",
+    "note": "Copiez-le dans un rapport de bug pour que nous distinguions votre configuration d'une autre."
+  },
+  "environment": {
+    "title": "Votre configuration",
+    "appVersion": "Version d'Erudi",
+    "platform": "Système d'exploitation",
+    "architecture": "Architecture",
+    "engine": "Moteur d'inférence",
+    "hardware": "Matériel",
+    "model": "Modèle en mémoire",
+    "python": "Python du backend",
+    "database": "Base de données",
+    "appLog": "Journal de l'application",
+    "backendLog": "Journal du backend",
+    "none": "Aucun",
+    "unknown": "Inconnu"
+  },
+  "recentErrors": {
+    "title": "Erreurs récentes",
+    "empty": "Aucun avertissement ni erreur enregistré.",
+    "repeated": "{{count}} fois",
+    "privacyNote": "Les journaux peuvent contenir le texte de vos conversations et le nom de vos documents, parce que rien ne quitte votre machine. Relisez ce que vous copiez avant de le publier.",
+    "sourceBackend": "Backend",
+    "sourceApp": "Application",
+    "sourceSession": "Cette fenêtre"
+  },
+  "backendUnavailable": {
+    "title": "Le backend n'a pas répondu",
+    "body": "Sa part de ce rapport manque. Ce que l'application sait d'elle-même figure ci-dessous, et cela suffit généralement à décrire un backend qui refuse de démarrer."
+  },
+  "loading": "Lecture du diagnostic…",
+  "openLogFolder": "Ouvrir le dossier des journaux",
+  "report": {
+    "heading": "Signaler ce problème",
+    "textareaLabel": "Diagnostic à copier",
+    "instruction": "Copiez ceci, puis ouvrez le formulaire de rapport de bug et collez-le dans le champ Logs. Décrivez ce que vous faisiez et ajoutez une capture d'écran si vous en avez une.",
+    "github": "Signaler sur GitHub",
+    "contactPrefix": "Pas de compte GitHub ?",
+    "contactLink": "Écrivez-nous depuis la page de contact",
+    "contactSuffix": "en joignant tout ce qui précède, ainsi que vos captures d'écran."
+  },
+  "boundary": {
+    "title": "Cet écran a cessé de fonctionner",
+    "body": "Un élément de l'interface a déclenché une erreur dont l'application n'a pas pu se remettre seule. Vos conversations, vos modèles et vos bases de connaissances sont intacts : recharger la fenêtre est sans risque.",
+    "reload": "Recharger l'application"
+  }
+}

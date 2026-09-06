@@ -1,18 +1,16 @@
-import React, { useCallback, useState } from "react";
+import React, { useCallback, useEffect, useMemo, useState } from "react";
 import PropTypes from "prop-types";
 import { motion, AnimatePresence } from "framer-motion";
-import { AlertTriangle, Check, Copy, Github, Globe } from "lucide-react";
+import { AlertTriangle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { apiClient } from "../../services/api/client";
+import ReportProblem from "../ReportProblem";
 import { describeEngineFailure } from "../../utils/engineNotice";
+import { buildPrefill } from "../../utils/diagnosticsReport";
 import { createLogger } from "../../utils/logger";
 
 const log = createLogger("EngineFailureModal");
 
-// Where a report goes. Both open in the system browser: the Electron main
-// process routes target="_blank" through shell.openExternal.
-export const REPORT_ISSUE_URL = "https://github.com/erudi-app/erudi/issues/new";
-export const WEBSITE_URL = "https://erudi-app.github.io/erudi/";
 // The processor build of Erudi avoids the graphics card altogether, for someone
 // who would rather reinstall than carry a setting.
 export const RELEASES_URL = "https://github.com/erudi-app/erudi/releases/latest";
@@ -32,21 +30,58 @@ export const RELEASES_URL = "https://github.com/erudi-app/erudi/releases/latest"
  */
 export default function EngineFailureModal({ notice, onDismiss }) {
   const { t } = useTranslation();
-  const [copied, setCopied] = useState(false);
   const [switching, setSwitching] = useState(false);
   const [switchFailed, setSwitchFailed] = useState(false);
+  const [appInfo, setAppInfo] = useState(null);
   const described = describeEngineFailure(notice);
 
-  const handleCopy = useCallback(() => {
-    if (!described?.raw) return;
-    navigator.clipboard
-      ?.writeText(described.raw)
-      .then(() => {
-        setCopied(true);
-        setTimeout(() => setCopied(false), 1500);
+  // The version and the operating system, for the report's prefilled fields.
+  // They come from the Electron main process, which still answers when the
+  // backend does not -- and a backend that cannot start its engine is exactly
+  // the case this dialog is open for.
+  useEffect(() => {
+    let cancelled = false;
+    window.diagnosticsAPI
+      ?.getAppInfo?.()
+      .then((info) => {
+        if (!cancelled) setAppInfo(info);
       })
-      .catch((error) => log.error("Failed to copy the engine failure details", error));
-  }, [described?.raw]);
+      .catch((error) => log.warn("Could not read the app info for the report", error));
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  const gpuName = described?.gpuName ?? null;
+  const computeCapability = described?.computeCapability ?? null;
+
+  // The card that failed, named by the notice itself. The backend cannot be
+  // asked for it here: it either could not describe the card or is restarting.
+  const hardware = useMemo(
+    () =>
+      [gpuName, computeCapability ? `compute ${computeCapability}` : null]
+        .filter(Boolean)
+        .join(", ") || null,
+    [gpuName, computeCapability]
+  );
+
+  const prefill = useMemo(() => buildPrefill({ app: appInfo, hardware }), [appInfo, hardware]);
+
+  // What a maintainer needs to reproduce this failure: the code, the readings
+  // the pre-flight took, and the driver's own words.
+  const diagnostics = useMemo(() => {
+    if (!described) return "";
+    return [
+      `Erudi engine failure: ${described.code}`,
+      gpuName ? `GPU: ${gpuName}` : null,
+      computeCapability ? `Compute capability: ${computeCapability}` : null,
+      described.driverCudaVersion ? `Driver CUDA: ${described.driverCudaVersion}` : null,
+      described.requiredCudaVersion ? `Required CUDA: ${described.requiredCudaVersion}` : null,
+      described.raw ? `\n${described.raw}` : null,
+    ]
+      .filter(Boolean)
+      .join("\n");
+  }, [described, gpuName, computeCapability]);
 
   const handleSwitchToCpu = useCallback(async () => {
     setSwitching(true);
@@ -138,60 +173,11 @@ export default function EngineFailureModal({ notice, onDismiss }) {
                   </div>
                 )}
 
-                {described.raw && (
-                  <div className="mt-4">
-                    <div className="flex items-center justify-between mb-1.5">
-                      <p className="text-[11px] uppercase tracking-wide text-[#8aa39b]">
-                        {t("errors:engine.modal.traceLabel")}
-                      </p>
-                      <button
-                        type="button"
-                        onClick={handleCopy}
-                        aria-label={t("errors:engine.modal.copyTrace")}
-                        title={t("errors:engine.modal.copyTrace")}
-                        className="inline-flex items-center gap-1.5 text-[12px] text-[#9fb0aa] hover:text-[#e6efeb] transition-colors"
-                      >
-                        {copied ? (
-                          <Check className="w-3.5 h-3.5 text-green-400" />
-                        ) : (
-                          <Copy className="w-3.5 h-3.5" />
-                        )}
-                        <span>
-                          {copied ? t("common:actions.copied") : t("common:actions.copy")}
-                        </span>
-                      </button>
-                    </div>
-                    <pre
-                      readOnly
-                      className="text-[11px] leading-relaxed font-mono text-[#8aa39b] bg-black/30 rounded-xl px-3 py-2 max-h-48 overflow-auto whitespace-pre-wrap break-words"
-                    >
-                      {described.raw}
-                    </pre>
-                  </div>
-                )}
-
-                <div className="mt-4 text-[12px] text-[#9fb0aa]">
-                  <p>{t("errors:engine.modal.reportIntro")}</p>
-                  <div className="flex flex-wrap gap-3 mt-2">
-                    <a
-                      href={REPORT_ISSUE_URL}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1.5 text-[#e6efeb] hover:text-white underline underline-offset-2"
-                    >
-                      <Github className="w-3.5 h-3.5" />
-                      {t("errors:engine.modal.reportGithub")}
-                    </a>
-                    <a
-                      href={WEBSITE_URL}
-                      target="_blank"
-                      rel="noreferrer"
-                      className="inline-flex items-center gap-1.5 text-[#e6efeb] hover:text-white underline underline-offset-2"
-                    >
-                      <Globe className="w-3.5 h-3.5" />
-                      {t("errors:engine.modal.reportWebsite")}
-                    </a>
-                  </div>
+                {/* The app has one report block, shared with the Diagnostics
+                    panel and the renderer error screen, so what a reporter is
+                    asked to send never depends on which dialog they reached. */}
+                <div className="mt-4">
+                  <ReportProblem diagnostics={diagnostics} prefill={prefill} />
                 </div>
 
                 {switchFailed && (

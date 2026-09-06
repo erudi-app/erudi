@@ -167,3 +167,18 @@ class TestExceptionContract:
             assert instance.erudi_code == erudi_code
         assert instance.message
         assert isinstance(instance.erudi_code, str)
+
+    def test_message_is_exactly_what_the_raiser_wrote(self):
+        # The error message is the failure, nothing else. Where to report a
+        # bug is the interface's job (the Diagnostics panel in Settings), so
+        # no support address or reporting instruction is appended here: it
+        # would reach the user twice, in one language, inside a payload that
+        # domain code also logs and matches on.
+        instance = exc.EngineException("model failed to load")
+        assert instance.message == "model failed to load"
+        assert str(instance) == "model failed to load"
+
+    def test_message_carries_no_contact_details(self):
+        instance = exc.AppBaseException("boom")
+        assert "@" not in instance.message
+        assert "report" not in instance.message.lower()

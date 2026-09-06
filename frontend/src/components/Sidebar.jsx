@@ -13,7 +13,7 @@ import {
 import { Link, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import { useDownloadModal } from "../contexts/DownloadModalContext";
-import { SETTINGS_PATH } from "../utils/routes";
+import { DIAGNOSTICS_PATH, SETTINGS_PATH } from "../utils/routes";
 
 /**
  * Sidebar with icons that highlight based on the current route.
@@ -170,13 +170,16 @@ export default function Sidebar({
         />
       </Link>
       {!isDownloading && (
-        <button
+        // Reporting a bug starts with the Diagnostics panel in Settings: it
+        // shows the user what to send, lets them copy it, and takes them to the
+        // issue form or the contact page from there.
+        <Link
+          to={DIAGNOSTICS_PATH}
           aria-label={t("common:nav.reportBug")}
-          onClick={() => window.open("https://erudi.app/contact", "_blank")}
           className="w-full flex justify-center items-center py-5 border-l-4 border-transparent mb-4"
         >
           <Bug className="w-5 h-5 transition-colors duration-200 text-gray-400 hover:text-red-400" />
-        </button>
+        </Link>
       )}
     </div>
   );

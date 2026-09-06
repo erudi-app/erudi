@@ -29,6 +29,7 @@ Architecture:
     │  - /erudi/arena         → Model comparison                  │
     │  - /erudi/hardware      → System monitoring                 │
     │  - /erudi/health        → Health checks                     │
+    │  - /erudi/diagnostics   → Bug-report environment summary    │
     │  - /erudi/startup       → Initialization state              │
     └─────────────────────────────────────────────────────────────┘
 
@@ -92,6 +93,7 @@ from src.domains.hardware.endpoints import router as hardware_router
 from src.domains.knowledge_base.endpoints import router as knowledge_base_router
 from src.domains.startup.endpoints import router as startup_router
 from src.domains.user_settings.endpoints import router as user_settings_router
+from src.domains.diagnostics.endpoints import router as diagnostics_router
 from src.core.health import router as health_router
 
 
@@ -239,6 +241,7 @@ def register_routers(app: FastAPI) -> None:
     app.include_router(health_router, prefix="/erudi")
     app.include_router(startup_router, prefix="/erudi")
     app.include_router(user_settings_router, prefix="/erudi")
+    app.include_router(diagnostics_router, prefix="/erudi")
 
 
 def add_exception_handlers(app: FastAPI) -> None:

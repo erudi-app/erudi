@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, fireEvent, cleanup, waitFor } from "@testing-library/react";
+import { render, screen, fireEvent, cleanup, waitFor, act } from "@testing-library/react";
 import EngineFailureModal from "./EngineFailureModal.jsx";
 import { apiClient } from "../../services/api/client";
 
@@ -23,12 +23,25 @@ beforeEach(() => {
   apiClient.put.mockReset();
   apiClient.put.mockResolvedValue({ inference_backend: "cpu" });
   window.backendAPI = { restartBackend: vi.fn().mockResolvedValue(undefined) };
+  // The shared report block reads the app's own version and platform from the
+  // main process, because the backend may be the thing that just failed.
+  window.diagnosticsAPI = {
+    getAppInfo: vi.fn().mockResolvedValue({
+      version: "1.0.0",
+      platform: "win32",
+      arch: "x64",
+      appLogPath: "C:\\Temp\\erudi-backend.log",
+    }),
+  };
+  window.open = vi.fn();
 });
 
 afterEach(() => {
   cleanup();
   delete window.backendAPI;
+  delete window.diagnosticsAPI;
   delete navigator.clipboard;
+  vi.restoreAllMocks();
 });
 
 describe("EngineFailureModal", () => {
@@ -55,7 +68,18 @@ describe("EngineFailureModal", () => {
     expect(screen.getByText(/GPU mode stopped working/i)).toBeTruthy();
   });
 
-  it("shows the trace and copies it to the clipboard", async () => {
+  it("hands the failure to the app's one report block, trace included", () => {
+    render(<EngineFailureModal notice={STARTUP_NOTICE} onDismiss={() => {}} />);
+
+    const area = screen.getByLabelText("Diagnostics to copy");
+    expect(area.value).toContain(STARTUP_NOTICE.raw);
+    // Plus what a maintainer cannot get from the trace alone.
+    expect(area.value).toContain("CUDA_DRIVER_TOO_OLD");
+    expect(area.value).toContain("NVIDIA GeForce GTX 1080");
+    expect(area.value).toContain("6.1");
+  });
+
+  it("copies the report through the shared block", async () => {
     const writeText = vi.fn().mockResolvedValue(undefined);
     Object.defineProperty(navigator, "clipboard", {
       value: { writeText },
@@ -63,21 +87,40 @@ describe("EngineFailureModal", () => {
     });
     render(<EngineFailureModal notice={STARTUP_NOTICE} onDismiss={() => {}} />);
 
-    expect(screen.getByText(STARTUP_NOTICE.raw)).toBeTruthy();
-    fireEvent.click(screen.getByLabelText(/copy the technical details/i));
+    fireEvent.click(screen.getByRole("button", { name: "Copy" }));
 
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith(STARTUP_NOTICE.raw));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(expect.stringContaining(STARTUP_NOTICE.raw))
+    );
   });
 
-  it("offers both report destinations as external links", () => {
+  it("prefills the issue form with the card that failed", async () => {
+    Object.defineProperty(navigator, "clipboard", {
+      value: { writeText: vi.fn().mockResolvedValue(undefined) },
+      configurable: true,
+    });
+    render(<EngineFailureModal notice={STARTUP_NOTICE} onDismiss={() => {}} />);
+    // The app info arrives from the main process a microtask later; the
+    // prefill is read at click time, so let it land first.
+    await waitFor(() => expect(window.diagnosticsAPI.getAppInfo).toHaveBeenCalled());
+    await act(async () => {});
+
+    fireEvent.click(screen.getByRole("button", { name: "Report on GitHub" }));
+
+    await waitFor(() => expect(window.open).toHaveBeenCalled());
+    const url = new URL(window.open.mock.calls[0][0]);
+    expect(url.searchParams.get("template")).toBe("bug_report.yml");
+    expect(url.searchParams.get("version")).toBe("1.0.0");
+    expect(url.searchParams.get("os")).toBe("Windows 10 / 11");
+    expect(url.searchParams.get("hardware")).toBe("NVIDIA GeForce GTX 1080, compute 6.1");
+  });
+
+  it("offers the contact page as the route for reporters without GitHub", () => {
     render(<EngineFailureModal notice={STARTUP_NOTICE} onDismiss={() => {}} />);
 
-    const github = screen.getByRole("link", { name: /report on github/i });
-    expect(github.getAttribute("href")).toBe("https://github.com/erudi-app/erudi/issues/new");
-    expect(github.getAttribute("target")).toBe("_blank");
-
-    const site = screen.getByRole("link", { name: /erudi website/i });
-    expect(site.getAttribute("href")).toBe("https://erudi-app.github.io/erudi/");
+    const site = screen.getByRole("link", { name: /contact page/i });
+    expect(site.getAttribute("href")).toBe("https://erudi.app/contact");
+    expect(site.getAttribute("target")).toBe("_blank");
   });
 
   it("links to the processor build on the releases page", () => {
@@ -141,6 +184,8 @@ describe("EngineFailureModal", () => {
     );
 
     expect(screen.queryByText(/what erudi detected/i)).toBeNull();
-    expect(screen.getByText("CUDA error: out of memory")).toBeTruthy();
+    expect(screen.getByLabelText("Diagnostics to copy").value).toContain(
+      "CUDA error: out of memory"
+    );
   });
 });
