@@ -67,7 +67,9 @@ two files carry, without leaving the app:
   `erudi-backend.log`, and the errors this window caught itself. Each row shows
   its timestamp, level, source, request id when it has one, and how many times
   an identical error repeated. When nothing was recorded, the area says so in
-  one line and asks nothing.
+  one line and asks nothing — but only when all three sources answered: a
+  source that could not be read is reported as missing, never counted as
+  silence.
 - **Open log folder**, which reveals `backend.log` in the file manager.
 - **Report a problem**: a button that opens this repository's bug report form
   with the version, operating system, hardware and model already filled in,
@@ -135,6 +137,10 @@ including everything MLX and Metal write from native code, into a file beside
 - Stopping a model — switching to another one, the idle reap, quitting — deletes
   both files. A child that died on its own keeps them: that output is the whole
   account of the death.
+- A report quotes only the child it is about. Ports are reused, so a new child
+  can inherit the previous one's file as `mlx-child-<port>.log.1`; that older
+  file is read only when it belongs to the running child, so two crashes on one
+  port never read as one.
 
 The backend quotes the tail of that file in the record it writes when the child
 crashes, fails its readiness probe, or is found dead by a later request — so
@@ -179,7 +185,16 @@ Erudi's own records say what the app asked the cluster to do; that file is the
 only place the server's answer is written. So when starting or joining the
 cluster fails, the backend attaches the last 40 lines of it to the failure —
 they travel inside the single `ERROR` the startup writes to `backend.log`, and
-therefore appear on the **Diagnostics** page and in a copied report.
+therefore appear on the **Diagnostics** page and in a copied report. Only a
+window at the end of the file is read: nothing rotates it, and it grows for the
+life of the cluster.
+
+PostgreSQL writes the statement that failed into that log, and exactly one
+statement in Erudi carries a secret — the one that sets the database password
+at every start. That statement is excluded from the server's log for as long as
+it runs, and any password literal quoted from the file is replaced by
+`[redacted]` before it can reach a record. Two layers, because a password must
+not depend on one setting being right.
 
 ## Uncaught errors in the app window
 

@@ -129,6 +129,11 @@ class MLX_Engine(BaseChatServerEngine):
     # reason: the lifetime is the child's.
     _CHILD_LOG_ATTR = "erudi_child_log_path"
 
+    # When this child was spawned. Ports are reused and a crashed child keeps
+    # its file, so this is what tells one spawn's rolled output from the dead
+    # predecessor's -- see `mlx_child_log.read_child_log_tail`.
+    _CHILD_LOG_STARTED_ATTR = "erudi_child_log_started_at"
+
     # How much of the tail a crash message quotes. mlx-vlm's startup banner and
     # per-request lines are long; the reason it died is in the last lines.
     _CHILD_OUTPUT_TAIL_CHARS = child_log.DEFAULT_TAIL_CHARS
@@ -334,6 +339,9 @@ class MLX_Engine(BaseChatServerEngine):
         # route it registers, `/health` included, so `_probe_ready` sends it
         # from the handle on both probe stages.
         api_key = secrets.token_urlsafe(32)
+        # Before the roll below, so a file the PREVIOUS child on this port left
+        # behind is older than this mark and cannot be read as ours.
+        started_at = time.time()
         # The child captures its own output into this file (an mp.Process has
         # no pipe to drain); the path is resolved HERE because a frozen child
         # re-executes the binary with uninitialized runtime paths. Best
@@ -397,6 +405,7 @@ class MLX_Engine(BaseChatServerEngine):
         # no chance of a recycled pid handing out another child's output.
         if log_path:
             setattr(proc, cls._CHILD_LOG_ATTR, log_path)
+        setattr(proc, cls._CHILD_LOG_STARTED_ATTR, started_at)
         logger.info(
             f"[MLX_Engine] Spawned mlx_vlm.server child: pid={proc.pid}, "
             f"port={port}, model={model_path}, output={log_path or 'not captured'}"
@@ -485,7 +494,12 @@ class MLX_Engine(BaseChatServerEngine):
         path = cls._child_log_path_of(proc)
         if path is None:
             return "No child output was captured."
-        tail = child_log.read_child_log_tail(path, max_chars=cls._CHILD_OUTPUT_TAIL_CHARS)
+        started_at = getattr(proc, cls._CHILD_LOG_STARTED_ATTR, None)
+        tail = child_log.read_child_log_tail(
+            path,
+            max_chars=cls._CHILD_OUTPUT_TAIL_CHARS,
+            since=started_at if isinstance(started_at, (int, float)) else None,
+        )
         if not tail:
             return "The child produced no output."
         return f"Child output (last {len(tail)} chars, from {path}):\n{tail}"

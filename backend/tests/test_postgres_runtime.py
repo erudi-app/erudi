@@ -328,6 +328,36 @@ class TestLostPasswordRecovery:
         assert final == harden_pg_hba(TestPgHbaHardening.INITDB_TRUST)
 
     @pytest.mark.unit
+    def test_the_password_statement_is_kept_out_of_the_postmaster_log(
+        self, hardened_dir, monkeypatch
+    ):
+        """`ALTER ROLE ... PASSWORD '<clear>'` is the one statement in this app
+        that carries a secret, and PostgreSQL writes the statement that failed
+        to its own log (`log_min_error_statement` defaults to ERROR). Silence
+        that setting for the session around it, so a refusal cannot put the
+        cluster password in a file we quote into bug reports."""
+        events = []
+        monkeypatch.setattr(
+            postgres_runtime.psycopg, "connect", lambda uri, **kw: _FakeConn(events)
+        )
+        monkeypatch.setattr(postgres_runtime._pg_server_mod, "pg_ctl", lambda *a, **k: "")
+
+        _enforce_password_auth(
+            "postgresql://postgres:new@127.0.0.1:1/postgres", hardened_dir, "new"
+        )
+
+        statements = [sql for kind, sql in events if kind == "sql"]
+        silenced = next(i for i, s in enumerate(statements) if "log_min_error_statement" in s)
+        altered = next(i for i, s in enumerate(statements) if "ALTER ROLE" in s)
+        restored = next(
+            i
+            for i, s in enumerate(statements)
+            if "RESET" in s.upper() and "log_min_error_statement" in s
+        )
+        assert silenced < altered < restored
+        assert "panic" in statements[silenced].lower()
+
+    @pytest.mark.unit
     def test_the_rekey_record_carries_the_refusal(self, hardened_dir, monkeypatch, caplog):
         """A recovery nobody asked for gets one record, and the postmaster's
         refusal is what names the role and the rule that rejected us."""
@@ -598,6 +628,86 @@ class TestPostmasterLog:
     def test_is_bounded(self, tmp_path):
         (tmp_path / "log").write_text("x" * 50_000, encoding="utf-8")
         assert len(postgres_runtime.postmaster_log_tail(tmp_path)) <= 4000
+
+    @pytest.mark.unit
+    def test_reads_only_a_window_from_the_end(self, tmp_path, monkeypatch):
+        """The postmaster log grows for the life of the cluster and nothing
+        rotates it. Reading it whole to quote 40 lines would load megabytes
+        into memory at the exact moment the app is already failing."""
+        log = tmp_path / "log"
+        log.write_text("\n".join(f"LOG:  line {i}" for i in range(150_000)), encoding="utf-8")
+        assert log.stat().st_size > 2_000_000
+
+        read_bytes = []
+        real_open = Path.open
+
+        class _Counting:
+            def __init__(self, inner):
+                self._inner = inner
+
+            def __enter__(self):
+                self._inner.__enter__()
+                return self
+
+            def __exit__(self, *exc):
+                return self._inner.__exit__(*exc)
+
+            def seek(self, *args):
+                return self._inner.seek(*args)
+
+            def read(self, *args):
+                data = self._inner.read(*args)
+                read_bytes.append(len(data))
+                return data
+
+        def counting_open(self, *args, **kwargs):
+            return _Counting(real_open(self, *args, **kwargs))
+
+        monkeypatch.setattr(Path, "open", counting_open)
+        tail = postgres_runtime.postmaster_log_tail(tmp_path)
+
+        assert sum(read_bytes) <= postgres_runtime.POSTMASTER_LOG_WINDOW_BYTES
+        assert "line 149999" in tail  # still the END of the file
+
+    @pytest.mark.unit
+    def test_a_password_in_a_logged_statement_is_redacted(self, tmp_path):
+        """PostgreSQL logs the statement that failed (`log_min_error_statement`
+        defaults to ERROR), so a refused `ALTER ROLE ... PASSWORD '<clear>'`
+        puts the cluster password in this file -- which is quoted into
+        backend.log, the Diagnostics page and whatever the user pastes into a
+        public issue."""
+        (tmp_path / "log").write_text(
+            'ERROR:  syntax error at or near "PASSWORD"\n'
+            "STATEMENT:  ALTER ROLE \"postgres\" PASSWORD 'S3cretToken123'\n"
+            'STATEMENT:  CREATE USER other WITH ENCRYPTED PASSWORD "AlsoS3cret"\n',
+            encoding="utf-8",
+        )
+
+        tail = postgres_runtime.postmaster_log_tail(tmp_path)
+
+        assert "S3cretToken123" not in tail
+        assert "AlsoS3cret" not in tail
+        # ...and the statement is still recognisable, which is the point of
+        # quoting it at all.
+        assert "ALTER ROLE" in tail and "CREATE USER" in tail
+        assert "[redacted]" in tail
+
+    @pytest.mark.unit
+    def test_a_failed_start_note_carries_no_password(self, tmp_path, monkeypatch):
+        (tmp_path / "PG_VERSION").write_text("16\n")
+        (tmp_path / "log").write_text(
+            "STATEMENT:  ALTER ROLE \"postgres\" PASSWORD 'S3cretToken123'\n", encoding="utf-8"
+        )
+        monkeypatch.setattr(
+            postgres_runtime,
+            "_get_server_with_recovery",
+            lambda data_dir: (_ for _ in ()).throw(AssertionError()),
+        )
+
+        with pytest.raises(AssertionError) as excinfo:
+            start_postgres(tmp_path)
+
+        assert "S3cretToken123" not in "\n".join(getattr(excinfo.value, "__notes__", []))
 
     @pytest.mark.unit
     def test_a_failed_start_carries_the_postmaster_log(self, tmp_path, monkeypatch):

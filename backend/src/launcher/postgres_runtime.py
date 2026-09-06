@@ -148,9 +148,34 @@ POSTMASTER_LOG_NAME = "log"
 POSTMASTER_LOG_TAIL_LINES = 40
 POSTMASTER_LOG_TAIL_CHARS = 4000
 
+# Nothing rotates that file: it grows for the life of the cluster. Read a
+# window from its end rather than the whole thing -- quoting 40 lines must not
+# load megabytes at the moment the app is already failing to start.
+POSTMASTER_LOG_WINDOW_BYTES = 64 * 1024
+
+# ``PASSWORD '<literal>'`` in any statement PostgreSQL echoed into its log.
+# `log_min_error_statement` defaults to ERROR, so a REFUSED
+# ``ALTER ROLE ... PASSWORD '<clear>'`` (see `_enforce_password_auth`) is
+# written there verbatim -- and this file is quoted into backend.log, the
+# Diagnostics page, and whatever a user pastes into a public issue. That
+# statement is silenced at the source; this is the second layer, because a
+# password must not depend on one setting being right.
+_LOGGED_PASSWORD = re.compile(
+    r"(?i)\bPASSWORD\s+('(?:[^']|'')*'|\"(?:[^\"]|\"\")*\")",
+)
+
+
+def _redact_passwords(text: str) -> str:
+    """Replace every ``PASSWORD '<literal>'`` value with a marker."""
+    return _LOGGED_PASSWORD.sub("PASSWORD '[redacted]'", text)
+
 
 def postmaster_log_tail(data_dir: Path | str, max_lines: int = POSTMASTER_LOG_TAIL_LINES) -> str:
     """The embedded postmaster's own last lines, or ``""`` when it wrote none.
+
+    Reads a bounded window from the end of the file (the log is unbounded),
+    drops the partial line that window starts on, and redacts any password
+    literal PostgreSQL echoed from a failing statement.
 
     Decoded defensively: Postgres writes its messages in the server encoding
     and in the operating system's language, so a byte that is not UTF-8 must
@@ -159,11 +184,21 @@ def postmaster_log_tail(data_dir: Path | str, max_lines: int = POSTMASTER_LOG_TA
     """
     log_file = Path(data_dir) / POSTMASTER_LOG_NAME
     try:
-        raw = log_file.read_bytes()
+        size = log_file.stat().st_size
+        start = max(0, size - POSTMASTER_LOG_WINDOW_BYTES)
+        with log_file.open("rb") as handle:
+            if start:
+                handle.seek(start)
+            raw = handle.read(POSTMASTER_LOG_WINDOW_BYTES)
     except OSError:
         return ""
-    lines = [line for line in raw.decode("utf-8", errors="replace").splitlines() if line.strip()]
-    tail = "\n".join(lines[-max_lines:])
+    text = raw.decode("utf-8", errors="replace")
+    if start:
+        # The window landed mid-line; that fragment belongs to a line whose
+        # beginning was not read.
+        _, _, text = text.partition("\n")
+    lines = [line for line in text.splitlines() if line.strip()]
+    tail = _redact_passwords("\n".join(lines[-max_lines:]))
     return tail[-POSTMASTER_LOG_TAIL_CHARS:] if len(tail) > POSTMASTER_LOG_TAIL_CHARS else tail
 
 
@@ -416,11 +451,25 @@ def _enforce_password_auth(admin_uri: str, data_dir: Path, password: str) -> Non
         # scram-sha-256 is the default since PostgreSQL 14 (bundled: 16); pin
         # it for the session anyway so the stored verifier can never be md5.
         conn.execute("SET password_encryption = 'scram-sha-256'")
-        conn.execute(
-            sql.SQL("ALTER ROLE {} PASSWORD {}").format(
-                sql.Identifier(ROLE_NAME), sql.Literal(password)
+        # `log_min_error_statement` defaults to ERROR, which makes PostgreSQL
+        # echo the statement that failed into its own log -- and the next
+        # statement is the only one in this app that carries a secret in
+        # clear. That log is read back on a failed start and quoted into
+        # backend.log and the Diagnostics page, so a refused ALTER ROLE would
+        # publish the cluster password. Silenced for this session only (the
+        # connection is closed a few lines below) and restored right after, so
+        # nothing else stops being logged. `SET`, not `SET LOCAL`: the
+        # connection is autocommit, where a LOCAL setting dies with the
+        # implicit transaction of the very statement that set it.
+        conn.execute("SET log_min_error_statement = 'panic'")
+        try:
+            conn.execute(
+                sql.SQL("ALTER ROLE {} PASSWORD {}").format(
+                    sql.Identifier(ROLE_NAME), sql.Literal(password)
+                )
             )
-        )
+        finally:
+            conn.execute("RESET log_min_error_statement")
         hba_file = data_dir / "pg_hba.conf"
         before = hba_file.read_text(encoding="utf-8")
         after = harden_pg_hba(before)

@@ -130,6 +130,35 @@ class TestReadChildLogTail:
 
         assert tail.index("older output") < tail.index("newest output")
 
+    def test_a_previous_childs_words_are_not_read_as_this_ones(self, tmp_path):
+        """Ports are reused, and a child that died keeps its file: the next
+        spawn rolls it to `.1`. Without the spawn's own start time, that dead
+        child's errors would be quoted at the top of the NEXT child's crash
+        report -- two failures read as one, the wrong one first."""
+        path = tmp_path / "mlx-child-27300.log"
+        previous = Path(f"{path}.1")
+        previous.write_text("the first child died here\n", encoding="utf-8")
+        os.utime(previous, (1_000_000, 1_000_000))  # long before this spawn
+        path.write_text("the second child died here\n", encoding="utf-8")
+
+        tail = child_log.read_child_log_tail(path, max_chars=2000, since=2_000_000)
+
+        assert "the second child died here" in tail
+        assert "the first child died here" not in tail
+
+    def test_a_rollover_of_this_spawn_is_still_included(self, tmp_path):
+        """The `.1` written by THIS child's size guard is its own output and
+        belongs in its report."""
+        path = tmp_path / "mlx-child-27300.log"
+        rolled = Path(f"{path}.1")
+        rolled.write_text("earlier in this run\n", encoding="utf-8")
+        os.utime(rolled, (3_000_000, 3_000_000))  # after the spawn started
+        path.write_text("and then it died\n", encoding="utf-8")
+
+        tail = child_log.read_child_log_tail(path, max_chars=2000, since=2_000_000)
+
+        assert tail.index("earlier in this run") < tail.index("and then it died")
+
     def test_never_raises_on_an_unreadable_path(self, tmp_path):
         assert child_log.read_child_log_tail(tmp_path) == ""  # a directory
 
@@ -262,6 +291,41 @@ class TestEngineReadsTheChildLog:
         output = MLX_Engine._read_child_output(proc)
 
         assert "Expected shape (262144, 640)" in output
+
+    def test_read_child_output_quotes_only_this_spawn(self, tmp_path):
+        """Two crashes on one port: the second report must carry the second
+        child's words and not the first's."""
+        from src.engines.mlx_engine import MLX_Engine
+
+        path = tmp_path / "mlx-child-27300.log"
+        previous = Path(f"{path}.1")
+        previous.write_text("first child: Metal command buffer error\n", encoding="utf-8")
+        os.utime(previous, (1_000_000, 1_000_000))
+        path.write_text("second child: model file is corrupt\n", encoding="utf-8")
+        proc = MagicMock()
+        setattr(proc, MLX_Engine._CHILD_LOG_ATTR, str(path))
+        setattr(proc, MLX_Engine._CHILD_LOG_STARTED_ATTR, 2_000_000.0)
+
+        output = MLX_Engine._read_child_output(proc)
+
+        assert "model file is corrupt" in output
+        assert "Metal command buffer error" not in output
+
+    def test_spawn_records_when_this_child_started(self, tmp_path):
+        from src.engines.mlx_engine import MLX_Engine
+
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        with (
+            patch("src.engines.mlx_engine.mp.Process", return_value=MagicMock(pid=4321)),
+            patch.object(child_log, "_log_dir", return_value=tmp_path / "logs"),
+        ):
+            before = time.time()
+            handle = MLX_Engine._spawn_child(model_path=model_dir, alias="erudi-x", port=9087)
+            after = time.time()
+
+        started = getattr(handle["proc"], MLX_Engine._CHILD_LOG_STARTED_ATTR)
+        assert before <= started <= after
 
     def test_read_child_output_explains_itself_when_there_is_no_file(self, tmp_path):
         from src.engines.mlx_engine import MLX_Engine

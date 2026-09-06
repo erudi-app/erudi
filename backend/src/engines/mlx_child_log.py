@@ -136,20 +136,52 @@ def discard_child_log(path: Union[str, Path], keep: int = KEEP_PER_PORT) -> None
         Path(f"{path}.{index}").unlink(missing_ok=True)
 
 
-def read_child_log_tail(path: Union[str, Path], max_chars: int = DEFAULT_TAIL_CHARS) -> str:
+def read_child_log_tail(
+    path: Union[str, Path],
+    max_chars: int = DEFAULT_TAIL_CHARS,
+    since: Optional[float] = None,
+) -> str:
     """The child's last ``max_chars`` characters, oldest first, or ``""``.
 
     Reads the rolled ``.1`` file too: a roll that happened moments before the
-    crash would otherwise leave a tail of two lines. Never raises -- an absent,
-    unreadable or half-written file is answered with what could be read.
+    crash would otherwise leave a tail of two lines.
+
+    ``since`` is the spawn's start time (``time.time()``), and it decides
+    whether that ``.1`` belongs to this child at all. Ports are reused and a
+    crashed child keeps its file, so the next spawn on the same port rolls a
+    DEAD child's output to ``.1``; quoting it would put the previous failure
+    at the top of this one's report -- two crashes read as one, the wrong one
+    first. A ``.1`` last written before the spawn began is therefore skipped.
+    Passing ``None`` reads whatever is there (tests, and any caller with no
+    spawn to speak of).
+
+    Never raises -- an absent, unreadable or half-written file is answered
+    with what could be read.
     """
     path = Path(path)
     tail = _read_tail(path, max_chars)
     if len(tail) < max_chars:
-        previous = _read_tail(Path(f"{path}.1"), max_chars - len(tail))
-        if previous:
-            tail = f"{previous}{tail}"
+        rolled = Path(f"{path}.1")
+        if _belongs_to_spawn(rolled, since):
+            previous = _read_tail(rolled, max_chars - len(tail))
+            if previous:
+                tail = f"{previous}{tail}"
     return tail
+
+
+def _belongs_to_spawn(path: Path, since: Optional[float]) -> bool:
+    """Whether ``path`` was last written after the spawn at ``since`` began.
+
+    A rename preserves the modification time, so the file a new spawn rolls
+    aside still carries the dead child's last write -- which is exactly what
+    tells the two apart.
+    """
+    if since is None:
+        return True
+    try:
+        return path.stat().st_mtime >= since
+    except OSError:
+        return False
 
 
 def _read_tail(path: Path, max_chars: int) -> str:
