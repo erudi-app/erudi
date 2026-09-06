@@ -230,11 +230,22 @@ class APIClient {
    * Core request method with retry logic and error handling
    * @private
    * @param {string} endpoint - API endpoint
-   * @param {Object} options - Fetch options
+   * @param {Object} options - Fetch options, plus one client-only flag:
+   *   `silentFailure` (boolean) logs a failed request's `api.failure` entry
+   *   at `info` instead of the usual level. For a caller that OBSERVES its
+   *   own health by polling this endpoint (the bug-icon counter's poll of
+   *   `/diagnostics/`, see `shared/hooks/useBugCounter.js`) — a backend that
+   *   is down is already surfaced by `ConnectionStatus` and the error
+   *   screen, and logging that failure at `error` would feed the very
+   *   Diagnostics list/badge the poll exists to read, growing forever on
+   *   every tick. Never set this for a request a person asked for: it
+   *   should still count once, like any other real failure. Not forwarded
+   *   to `fetch()`.
    * @param {number} attempt - Current attempt number
    * @returns {Promise<*>} Parsed response
    */
   async request(endpoint, options = {}, attempt = 1) {
+    const { silentFailure = false, ...fetchOptions } = options;
     const url = `${this.baseURL || getApiBaseUrl()}${endpoint}`;
     const controller = new AbortController();
     const rid = nextRequestId();
@@ -258,12 +269,12 @@ class APIClient {
 
       const headers = {
         "Content-Type": "application/json",
-        ...options.headers,
+        ...fetchOptions.headers,
         "X-Request-ID": rid,
       };
 
       const response = await fetch(url, {
-        ...options,
+        ...fetchOptions,
         headers,
         signal: controller.signal,
       });
@@ -300,7 +311,7 @@ class APIClient {
       if (error.name === "AbortError") {
         const timeoutError = new Error(i18n.t("errors:api.timeout"));
         timeoutError.code = "TIMEOUT";
-        log.error("api.failure", {
+        (silentFailure ? log.info : log.error)("api.failure", {
           rid,
           method,
           path: endpoint,
@@ -325,7 +336,8 @@ class APIClient {
       // network is fine, and reporting each attempt would flicker the pill.
       if (isNetworkLevelError(error)) reportNetworkFailure();
 
-      log[failureLevel(error.status)]("api.failure", {
+      const level = silentFailure ? "info" : failureLevel(error.status);
+      log[level]("api.failure", {
         rid,
         method,
         path: endpoint,

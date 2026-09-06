@@ -65,8 +65,17 @@ export default function useBugCounter({ pollMs = BUG_COUNTER_POLL_MS } = {}) {
       // Every source settles independently, same as DiagnosticsPanel: the
       // backend being unreachable must not blank out the app-log half, and
       // vice versa.
+      //
+      // `silentFailure` matters here specifically: this poll is the counter
+      // OBSERVING /diagnostics/, not a person asking for it. Without it, a
+      // down backend would log this very failure as an ERROR api.failure,
+      // which the next tick's `appLogTail` read would feed straight back
+      // into `entries` below -- the counter creating the signal it counts,
+      // growing every interval forever. A real user-initiated call to
+      // /diagnostics/ (there is none today, but if one existed) would not
+      // set this flag and would still count once, like any other failure.
       const [backendResult, logResult] = await Promise.allSettled([
-        apiClient.get("/diagnostics/"),
+        apiClient.get("/diagnostics/", { silentFailure: true }),
         window.diagnosticsAPI?.appLogTail?.(APP_LOG_TAIL_LIMIT) ?? Promise.resolve([]),
       ]);
 

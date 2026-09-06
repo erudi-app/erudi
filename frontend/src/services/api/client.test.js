@@ -220,3 +220,89 @@ describe("tracedFetch", () => {
     expect(start.body).toMatch(/… \[\+\d+\]$/);
   });
 });
+
+describe("APIClient silentFailure (#485 self-feeding-badge fix)", () => {
+  // The bug-icon counter polls apiClient.get("/diagnostics/") on its own to
+  // decide the badge's count. Without an opt-out, a down backend makes that
+  // very poll log an ERROR-level api.failure, which the counter itself then
+  // reads back through the app log on its next tick -- the observer creating
+  // the signal it observes. `silentFailure` breaks that loop by logging the
+  // request's own failure at `info` instead, while everything else about the
+  // request (retries, thrown error, network-status tracking) is unchanged.
+  it("logs a 5xx api.failure at info instead of error when silentFailure is set", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      statusText: "boom",
+      json: async () => ({ detail: "backend unreachable" }),
+    });
+    await expect(apiClient.get("/diagnostics/", { silentFailure: true })).rejects.toThrow(
+      "backend unreachable"
+    );
+    const entry = clientEntries().find((e) => e.msg === "api.failure");
+    expect(entry.level).toBe("info");
+    expect(clientEntries().some((e) => e.msg === "api.failure" && e.level === "error")).toBe(false);
+  });
+
+  it("logs a network-level failure (no status: a dead backend) at info when silentFailure is set", async () => {
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+    await expect(apiClient.get("/diagnostics/", { silentFailure: true })).rejects.toThrow(
+      "Failed to fetch"
+    );
+    const failures = clientEntries().filter((e) => e.msg === "api.failure");
+    expect(failures.length).toBeGreaterThan(0);
+    expect(failures.every((e) => e.level === "info")).toBe(true);
+  });
+
+  it("logs a client-side timeout at info when silentFailure is set", async () => {
+    fetchMock.mockImplementationOnce(
+      () =>
+        new Promise((_, reject) => {
+          const abort = new Error("The operation was aborted.");
+          abort.name = "AbortError";
+          reject(abort);
+        })
+    );
+    await expect(apiClient.get("/diagnostics/", { silentFailure: true })).rejects.toThrow();
+    const entry = clientEntries().find((e) => e.msg === "api.failure");
+    expect(entry.level).toBe("info");
+  });
+
+  it("still logs at error without silentFailure (regression: default behavior unchanged)", async () => {
+    fetchMock.mockRejectedValue(new TypeError("Failed to fetch"));
+    await expect(apiClient.get("/diagnostics/")).rejects.toThrow("Failed to fetch");
+    const failures = clientEntries().filter((e) => e.msg === "api.failure");
+    expect(failures.length).toBeGreaterThan(0);
+    expect(failures.every((e) => e.level === "error")).toBe(true);
+  });
+
+  it("still retries a transient failure when silentFailure is set", async () => {
+    fetchMock
+      .mockRejectedValueOnce(new TypeError("Failed to fetch"))
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ ok: true }) });
+    const result = await apiClient.get("/diagnostics/", { silentFailure: true });
+    expect(result).toEqual({ ok: true });
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+    // The retry succeeded: no failure entry at all, silent or otherwise.
+    expect(clientEntries().some((e) => e.msg === "api.failure")).toBe(false);
+  });
+
+  it("never forwards silentFailure to fetch() itself", async () => {
+    fetchMock.mockResolvedValueOnce({ ok: true, status: 200, json: async () => ({ ok: true }) });
+    await apiClient.get("/diagnostics/", { silentFailure: true });
+    const [, init] = fetchMock.mock.calls[0];
+    expect(init.silentFailure).toBeUndefined();
+  });
+
+  it("logs a 4xx at info regardless (unaffected by silentFailure, already info by status)", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 404,
+      statusText: "Not Found",
+      json: async () => ({ detail: "not found" }),
+    });
+    await expect(apiClient.get("/diagnostics/", { silentFailure: true })).rejects.toThrow();
+    const entry = clientEntries().find((e) => e.msg === "api.failure");
+    expect(entry.level).toBe("info");
+  });
+});

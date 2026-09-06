@@ -64,9 +64,19 @@ afterEach(() => {
 describe("useBugCounter", () => {
   it("starts at 0 with no errors recorded", async () => {
     const { result } = renderHook(() => useBugCounter({ pollMs: 20 }));
-    await waitFor(() => expect(getMock).toHaveBeenCalledWith("/diagnostics/"));
+    await waitFor(() =>
+      expect(getMock).toHaveBeenCalledWith("/diagnostics/", { silentFailure: true })
+    );
     expect(result.current.count).toBe(0);
     expect(result.current.label).toBe("");
+  });
+
+  it("polls with silentFailure so its own failure is never logged as a countable ERROR (#485 fix)", async () => {
+    renderHook(() => useBugCounter({ pollMs: 20 }));
+    await waitFor(() => expect(getMock).toHaveBeenCalled());
+    for (const [, options] of getMock.mock.calls) {
+      expect(options).toEqual({ silentFailure: true });
+    }
   });
 
   it("counts a real backend ERROR newer than app launch", async () => {
