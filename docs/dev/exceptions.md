@@ -30,7 +30,7 @@ class AppBaseException(Exception):
 
 | Parameter | Meaning |
 |---|---|
-| `message` | Human-readable description, exactly as the raiser wrote it. Nothing is appended: telling the user where to report a bug belongs to the interface (Settings -> Diagnostics), not to a payload that is also logged, matched on and shown in four languages. |
+| `message` | Human-readable description, exactly as the raiser wrote it. Nothing is appended: telling the user where to report a bug belongs to the interface (the Diagnostics page), not to a payload that is also logged, matched on and shown in four languages. |
 | `status_code` | HTTP status of the response. Defaults to 500. |
 | `erudi_code` | Machine-readable code surfaced as `error.type`. Defaults to `INTERNAL_SERVER_ERROR`. |
 | `trace` | Extra debugging context. **Logged only** — never returned to the client. |

@@ -1,11 +1,12 @@
 // @vitest-environment jsdom
 /**
- * The Diagnostics panel's place on the settings page, and the anchor the
- * sidebar's bug button lands on.
+ * Diagnostics is not on the settings page. It has a page of its own behind the
+ * bug button, so Settings must neither render the diagnostics content nor ask
+ * the backend for it.
  */
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, waitFor } from "@testing-library/react";
+import { render, screen, cleanup } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 const { getMock, putMock } = vi.hoisted(() => ({ getMock: vi.fn(), putMock: vi.fn() }));
@@ -20,33 +21,13 @@ vi.mock("../components/Sidebar", () => ({
 }));
 
 import SettingsPage from "./SettingsPage";
-import { DIAGNOSTICS_PATH } from "../utils/routes";
-
-const renderAt = (entry) =>
-  render(
-    <MemoryRouter initialEntries={[entry]}>
-      <SettingsPage />
-    </MemoryRouter>
-  );
+import { SETTINGS_PATH } from "../utils/routes";
 
 beforeEach(() => {
-  getMock.mockImplementation((path) => {
-    if (path === "/diagnostics/") {
-      return Promise.resolve({
-        environment: {
-          platform: "Darwin",
-          engine: "MLX_Engine",
-          db: "ok",
-          backend_log_path: "/Users/x/Library/Logs/erudi/backend.log",
-        },
-        recent_errors: [],
-      });
-    }
-    return Promise.resolve({
-      web_search_enabled: false,
-      language: "en",
-      auto_update_enabled: true,
-    });
+  getMock.mockResolvedValue({
+    web_search_enabled: false,
+    language: "en",
+    auto_update_enabled: true,
   });
 });
 
@@ -55,27 +36,17 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("SettingsPage — Diagnostics", () => {
-  it("renders the Diagnostics panel under an anchorable id", async () => {
-    const { container } = renderAt("/erudi/settings");
-    expect(await screen.findByText("Diagnostics")).toBeTruthy();
-    expect(container.querySelector("#diagnostics")).toBeTruthy();
-  });
-
-  it("scrolls to the panel when arriving on the diagnostics anchor", async () => {
-    // HashRouter puts the whole route in the fragment, so the browser cannot
-    // follow the second `#` itself; the page does the scroll.
-    const scrollIntoView = vi.fn();
-    Element.prototype.scrollIntoView = scrollIntoView;
-    renderAt(DIAGNOSTICS_PATH);
-    await waitFor(() => expect(scrollIntoView).toHaveBeenCalled());
-  });
-
-  it("does not scroll when arriving on the page itself", async () => {
-    const scrollIntoView = vi.fn();
-    Element.prototype.scrollIntoView = scrollIntoView;
-    renderAt("/erudi/settings");
-    expect(await screen.findByText("Diagnostics")).toBeTruthy();
-    expect(scrollIntoView).not.toHaveBeenCalled();
+describe("SettingsPage — no Diagnostics", () => {
+  it("renders none of the diagnostics content and never requests it", async () => {
+    render(
+      <MemoryRouter initialEntries={[SETTINGS_PATH]}>
+        <SettingsPage />
+      </MemoryRouter>
+    );
+    expect(await screen.findByRole("heading", { level: 1, name: "Settings" })).toBeTruthy();
+    expect(screen.queryByText("Diagnostics")).toBeNull();
+    expect(screen.queryByLabelText("Diagnostics to copy")).toBeNull();
+    expect(screen.queryByRole("button", { name: "Open log folder" })).toBeNull();
+    expect(getMock).not.toHaveBeenCalledWith("/diagnostics/");
   });
 });

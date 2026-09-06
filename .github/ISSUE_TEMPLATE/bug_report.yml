@@ -7,7 +7,7 @@ body:
       value: |
         Thanks for taking the time to report this. A few precise details get a bug fixed far faster than a long description, so the form asks for them up front.
 
-        **The app fills most of this in for you.** Open **Settings → Diagnostics** in Erudi (the bug icon at the bottom of the left rail goes there), press **Copy**, then **Report on GitHub**: the version, operating system, hardware and model arrive prefilled, and the copied text goes straight into the **Logs** field below. It sends nothing on its own — you paste it.
+        **The app fills most of this in for you.** Open **Diagnostics** in Erudi (the bug icon at the bottom of the left rail), press **Copy**, then **Report on GitHub**: the version, operating system, hardware and model arrive prefilled, and the copied text goes straight into the **Logs** field below. It sends nothing on its own — you paste it.
 
         If you are not sure it is a bug, or you need help getting started, [Discussions](https://github.com/erudi-app/erudi/discussions) is the right place.
 
@@ -27,7 +27,7 @@ body:
     id: version
     attributes:
       label: Erudi version
-      description: Shown in Settings → Diagnostics, or the release tag you installed. Say "built from source" plus the commit if that is the case.
+      description: Shown on the Diagnostics page, or the release tag you installed. Say "built from source" plus the commit if that is the case.
       placeholder: 1.0.0
     validations:
       required: true
@@ -64,7 +64,7 @@ body:
     attributes:
       label: Logs
       description: |
-        Paste what **Settings → Diagnostics → Copy** put on your clipboard. That is the environment summary plus the recent warnings and errors from both log files, already filtered.
+        Paste what **Diagnostics → Copy** put on your clipboard. That is the environment summary plus the recent warnings and errors from both log files, already filtered.
 
         If you would rather attach the files themselves (details in [docs/logging.md](https://github.com/erudi-app/erudi/blob/main/docs/logging.md)):
 

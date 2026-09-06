@@ -737,7 +737,7 @@ ipcMain.handle("backend:getInfo", () => ({ port: resolvedPort, ready: backendIsR
 ipcMain.handle("app:getLogPath", () => logFile);
 
 // ── Diagnostics ───────────────────────────────────────────────────────────────
-// What the Diagnostics panel needs from the main process. All of it is read
+// What the Diagnostics page needs from the main process. All of it is read
 // locally and handed to the window; nothing is sent anywhere.
 
 // The app's own identity. The backend has no version of its own, so the one

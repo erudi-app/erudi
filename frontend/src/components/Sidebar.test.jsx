@@ -95,14 +95,29 @@ describe("Sidebar", () => {
     expect(document.querySelector(".lucide-brain")).not.toBeNull();
   });
 
-  it("sends the bug report button to the Diagnostics panel, not straight to a web page", () => {
+  it("sends the bug report button to the Diagnostics page, not straight to a web page", () => {
     const open = vi.spyOn(window, "open").mockImplementation(() => {});
     renderAt("/erudi/models");
     const button = screen.getByLabelText("Report a bug");
-    // In-app first: the panel shows the user what to send before any link out.
-    expect(button.getAttribute("href")).toBe("/erudi/settings#diagnostics");
+    // In-app first: the page shows the user what to send before any link out.
+    expect(button.getAttribute("href")).toBe("/erudi/diagnostics");
     fireEvent.click(button);
     expect(open).not.toHaveBeenCalled();
+  });
+
+  it("highlights the bug button on the diagnostics route, like any other destination", () => {
+    renderAt("/erudi/diagnostics");
+    const button = screen.getByLabelText("Report a bug");
+    expect(button.className).toContain("border-green-500");
+    expect(button.querySelector("svg").getAttribute("class")).toContain("text-green-400");
+    expect(screen.getByLabelText("Settings").className).toContain("border-transparent");
+  });
+
+  it("hovers the bug button green rather than red: it is a destination, not an alarm", () => {
+    renderAt("/erudi/models");
+    const icon = screen.getByLabelText("Report a bug").querySelector("svg");
+    expect(icon.getAttribute("class")).toContain("hover:text-green-400");
+    expect(icon.getAttribute("class")).not.toContain("red");
   });
 
   it("hides the bug report button during a download", () => {

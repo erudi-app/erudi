@@ -45,7 +45,10 @@ def _alembic_config(sqlalchemy_url: str) -> Config:
     """
     cfg = Config(str(ROOT_DIR / "alembic.ini"))
     cfg.set_main_option("script_location", str(ROOT_DIR / "alembic"))
-    cfg.set_main_option("sqlalchemy.url", sqlalchemy_url)
+    # ConfigParser interpolates '%' in option values; the URL carries the
+    # per-cluster password (#462), percent-quoted, so escape it the way the
+    # Alembic documentation prescribes.
+    cfg.set_main_option("sqlalchemy.url", sqlalchemy_url.replace("%", "%%"))
     # Do NOT let env.py's fileConfig reconfigure (and disable) the app's loggers.
     cfg.attributes["configure_logger"] = False
     return cfg

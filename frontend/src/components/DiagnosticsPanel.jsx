@@ -1,6 +1,6 @@
 import React, { useCallback, useEffect, useMemo, useState } from "react";
 import PropTypes from "prop-types";
-import { FolderOpen, Stethoscope } from "lucide-react";
+import { CircleCheck, FolderOpen } from "lucide-react";
 import { useTranslation } from "react-i18next";
 
 import ReportProblem from "./ReportProblem";
@@ -31,7 +31,8 @@ Row.propTypes = {
 };
 
 /**
- * Everything a bug report needs, read from this machine and shown to its owner.
+ * The content of the Diagnostics page: everything a bug report needs, read
+ * from this machine and shown to its owner.
  *
  * Three sources are merged: the backend's own log (over loopback), the app log
  * (through the preload bridge) and this window's session error buffer. Each is
@@ -39,6 +40,10 @@ Row.propTypes = {
  * point: the backend being unreachable is the single most likely reason
  * somebody opens this, so the backend's absence is reported as a fact rather
  * than blanking the screen.
+ *
+ * When nothing was recorded, the errors area says so and asks nothing: the
+ * page is also where people look to check that all is well. The report block
+ * stays, for whatever they saw that the logs did not.
  *
  * Nothing here is sent anywhere. The user copies the text and decides where it
  * goes.
@@ -117,32 +122,12 @@ export default function DiagnosticsPanel() {
   };
 
   return (
-    <section
-      id="diagnostics"
-      className="relative overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface)] rise"
-    >
+    <section className="relative overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface)] rise">
       <div
         className="pointer-events-none absolute -right-24 -top-24 w-72 h-72 rounded-full blur-3xl"
         style={{ background: "radial-gradient(circle, rgba(52,214,165,0.10), transparent 70%)" }}
       />
       <div className="relative p-6 space-y-6">
-        <div className="flex items-start gap-3.5">
-          <div className="mt-0.5 rounded-xl border border-[var(--line)] bg-[var(--surface-2)] p-2.5">
-            <Stethoscope className="w-5 h-5 text-[var(--fit-good)]" />
-          </div>
-          <div>
-            <h2 className="text-[15px] font-semibold text-[var(--ink)] tracking-tight">
-              {t("diagnostics:card.title")}
-            </h2>
-            <p className="text-[13px] text-[var(--ink-dim)] mt-1.5 max-w-md leading-relaxed">
-              {t("diagnostics:card.description")}
-            </p>
-            <p className="text-[12px] text-[var(--ink-faint)] mt-2.5 leading-relaxed">
-              {t("diagnostics:card.note")}
-            </p>
-          </div>
-        </div>
-
         {loading && (
           <p className="text-[12px] text-[var(--ink-faint)]">{t("diagnostics:loading")}</p>
         )}
@@ -206,24 +191,22 @@ export default function DiagnosticsPanel() {
           />
           <Row label={t("diagnostics:environment.python")} value={environment?.python_version} />
           <Row label={t("diagnostics:environment.database")} value={environment?.db} />
-          <Row label={t("diagnostics:environment.appLog")} value={app?.appLogPath} />
-          <Row
-            label={t("diagnostics:environment.backendLog")}
-            value={environment?.backend_log_path}
-          />
         </div>
 
         <div>
           <h3 className="text-[13px] font-semibold text-[var(--ink)] mb-2">
             {t("diagnostics:recentErrors.title")}
           </h3>
-          <p className="text-[12px] text-[var(--ink-faint)] mb-2 leading-relaxed">
-            {t("diagnostics:recentErrors.privacyNote")}
-          </p>
           {entries.length === 0 ? (
-            <p className="text-[12px] text-[var(--ink-dim)]">
-              {t("diagnostics:recentErrors.empty")}
-            </p>
+            // Nothing recorded, nothing to do: one line and a check mark, so
+            // the page reads as "all is well" rather than as a form to fill.
+            // Not before the sources answered: the mark would be a guess.
+            !loading && (
+              <p className="flex items-center gap-2 text-[12px] text-[var(--ink-dim)]">
+                <CircleCheck className="w-3.5 h-3.5 shrink-0 text-[var(--fit-good)]" />
+                <span>{t("diagnostics:recentErrors.empty")}</span>
+              </p>
+            )
           ) : (
             <ul className="max-h-64 overflow-auto custom-scroll rounded-lg border border-[var(--line)] bg-[var(--canvas)] divide-y divide-[var(--line)]">
               {entries.map((entry, index) => (
@@ -255,7 +238,15 @@ export default function DiagnosticsPanel() {
           {t("diagnostics:openLogFolder")}
         </button>
 
-        <ReportProblem diagnostics={diagnostics} prefill={prefill} />
+        {/* The lighter rendering: no text preview (the configuration and the
+            errors are already listed above), and the copy button only earns
+            its place when there is something recorded to copy. */}
+        <ReportProblem
+          diagnostics={diagnostics}
+          prefill={prefill}
+          preview={false}
+          hasErrors={entries.length > 0}
+        />
       </div>
     </section>
   );

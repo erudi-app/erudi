@@ -1,8 +1,9 @@
 {
-  "card": {
+  "page": {
+    "eyebrow": "Assistance",
     "title": "Diagnostic",
     "description": "Ce que fait tourner cette machine et les erreurs récentes qu'elle a enregistrées. Tout est lu sur votre ordinateur ; l'application n'en envoie rien nulle part.",
-    "note": "Copiez-le dans un rapport de bug pour que nous distinguions votre configuration d'une autre."
+    "note": "Si vous signalez un problème, c'est ce qu'il faut envoyer : cela distingue votre configuration d'une autre."
   },
   "environment": {
     "title": "Votre configuration",
@@ -14,8 +15,6 @@
     "model": "Modèle en mémoire",
     "python": "Python du backend",
     "database": "Base de données",
-    "appLog": "Journal de l'application",
-    "backendLog": "Journal du backend",
     "none": "Aucun",
     "unknown": "Inconnu"
   },
@@ -23,7 +22,6 @@
     "title": "Erreurs récentes",
     "empty": "Aucun avertissement ni erreur enregistré.",
     "repeated": "{{count}} fois",
-    "privacyNote": "Les journaux peuvent contenir le texte de vos conversations et le nom de vos documents, parce que rien ne quitte votre machine. Relisez ce que vous copiez avant de le publier.",
     "sourceBackend": "Backend",
     "sourceApp": "Application",
     "sourceSession": "Cette fenêtre"
@@ -33,11 +31,13 @@
     "body": "Sa part de ce rapport manque. Ce que l'application sait d'elle-même figure ci-dessous, et cela suffit généralement à décrire un backend qui refuse de démarrer."
   },
   "loading": "Lecture du diagnostic…",
-  "openLogFolder": "Ouvrir le dossier des journaux",
+  "openLogFolder": "Ouvrir le dossier des logs",
   "report": {
-    "heading": "Signaler ce problème",
+    "heading": "Signaler un problème",
     "textareaLabel": "Diagnostic à copier",
-    "instruction": "Copiez ceci, puis ouvrez le formulaire de rapport de bug et collez-le dans le champ Logs. Décrivez ce que vous faisiez et ajoutez une capture d'écran si vous en avez une.",
+    "instruction": "Pour signaler quelque chose que vous avez remarqué, copiez ceci, ouvrez le formulaire de rapport de bug et collez-le dans le champ Logs. Décrivez ce qui s'est passé et ajoutez une capture d'écran si vous en avez une.",
+    "copyFullReport": "Copier le rapport complet",
+    "pasteHint": "Collez le rapport dans le champ Logs du formulaire de signalement de bug.",
     "github": "Signaler sur GitHub",
     "contactPrefix": "Pas de compte GitHub ?",
     "contactLink": "Écrivez-nous depuis la page de contact",

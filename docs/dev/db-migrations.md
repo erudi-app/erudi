@@ -35,8 +35,10 @@ the on-disk schema must be reconciled to the models on every launch. We use
 
    ```bash
    cd backend && source venv/bin/activate
-   # point Alembic at a running cluster that is already at head, e.g. the dev one:
-   export ERUDI_ALEMBIC_URL='postgresql+psycopg://.../erudi'
+   # point Alembic at a running cluster that is already at head, e.g. the dev one.
+   # The cluster requires its per-cluster password on every host connection:
+   # read it from <data_dir>/erudi_db_password (backend/data/postgres/ in dev).
+   export ERUDI_ALEMBIC_URL='postgresql+psycopg://postgres:<password>@.../erudi'
    alembic upgrade head
    alembic revision --autogenerate -m "describe the change"
    ```
@@ -68,5 +70,11 @@ let app N run — recovery is at the **app-version** level:
    same way in dev and in the PyInstaller bundle:
 
    ```bash
-   pg_restore --clean --dbname '<psycopg_url>' '…/db-backups/erudi-<rev>.dump'
+   PGPASSWORD="$(cat '<data_dir>/erudi_db_password')" \
+     pg_restore --clean --dbname '<psycopg_url>' '…/db-backups/erudi-<rev>.dump'
    ```
+
+   `pg_restore` authenticates like every other client: the cluster password
+   lives in `erudi_db_password` inside the data dir (`backup.py` passes it to
+   `pg_dump` the same way, through `PGPASSWORD`, so it never sits on a command
+   line).

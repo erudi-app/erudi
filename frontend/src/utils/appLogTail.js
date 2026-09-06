@@ -1,4 +1,4 @@
-// Reading the tail of `erudi-backend.log` for the Diagnostics panel.
+// Reading the tail of `erudi-backend.log` for the Diagnostics page.
 //
 // The app log is not the backend log. Its lines are `[<ISO>] <text>`, written
 // by main.js, and `<text>` has three origins: main's own lifecycle messages,

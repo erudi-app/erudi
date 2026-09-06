@@ -110,6 +110,21 @@ describe("ReportProblem", () => {
     await waitFor(() => expect(window.open).toHaveBeenCalled());
   });
 
+  it("is headed for the case with an error and the case without one alike", () => {
+    render(<ReportProblem diagnostics={DIAGNOSTICS} />);
+    expect(screen.getByRole("heading", { name: "Report a problem" })).toBeTruthy();
+  });
+
+  it("shows the caller's note beside the text, and nothing when there is none", () => {
+    const { unmount } = render(
+      <ReportProblem diagnostics={DIAGNOSTICS} note="Read what you copy before you post it." />
+    );
+    expect(screen.getByText("Read what you copy before you post it.")).toBeTruthy();
+    unmount();
+    render(<ReportProblem diagnostics={DIAGNOSTICS} />);
+    expect(screen.queryByText("Read what you copy before you post it.")).toBeNull();
+  });
+
   it("offers the contact page for people without a GitHub account", () => {
     render(<ReportProblem diagnostics={DIAGNOSTICS} />);
     const link = screen.getByRole("link", { name: "Write to us on the contact page" });
@@ -127,5 +142,68 @@ describe("ReportProblem", () => {
     expect(screen.getByRole("button", { name: "Signaler sur GitHub" })).toBeTruthy();
     const link = screen.getByRole("link", { name: /page de contact/ });
     expect(link.closest("p").textContent).toContain("Pas de compte GitHub ?");
+  });
+});
+
+describe("ReportProblem — preview={false} (the Diagnostics page's lighter rendering)", () => {
+  it("shows no text preview", () => {
+    render(<ReportProblem diagnostics={DIAGNOSTICS} preview={false} hasErrors />);
+    expect(screen.queryByLabelText("Diagnostics to copy")).toBeNull();
+    expect(document.querySelector("textarea")).toBeNull();
+  });
+
+  it("shows a single copy button when there are errors, and it copies the full report", async () => {
+    render(<ReportProblem diagnostics={DIAGNOSTICS} preview={false} hasErrors />);
+    const button = screen.getByRole("button", { name: "Copy the full report" });
+    fireEvent.click(button);
+    expect(writeText).toHaveBeenCalledWith(DIAGNOSTICS);
+    await waitFor(() => expect(screen.getByText("Copied")).toBeTruthy());
+  });
+
+  it("shows no copy button and no paste hint when there is nothing to report", () => {
+    render(<ReportProblem diagnostics={DIAGNOSTICS} preview={false} hasErrors={false} />);
+    expect(screen.queryByRole("button", { name: "Copy the full report" })).toBeNull();
+    expect(screen.queryByRole("button", { name: "Copy" })).toBeNull();
+    expect(screen.queryByText("Paste the report into the Logs field of the bug form.")).toBeNull();
+  });
+
+  it("shows the short paste hint only alongside the copy button", () => {
+    const { unmount } = render(
+      <ReportProblem diagnostics={DIAGNOSTICS} preview={false} hasErrors />
+    );
+    expect(screen.getByText("Paste the report into the Logs field of the bug form.")).toBeTruthy();
+    unmount();
+    render(<ReportProblem diagnostics={DIAGNOSTICS} preview={false} hasErrors={false} />);
+    expect(screen.queryByText("Paste the report into the Logs field of the bug form.")).toBeNull();
+  });
+
+  it("keeps the GitHub button and the contact link in both states", () => {
+    const { unmount } = render(
+      <ReportProblem diagnostics={DIAGNOSTICS} preview={false} hasErrors={false} />
+    );
+    expect(screen.getByRole("button", { name: "Report on GitHub" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Write to us on the contact page" })).toBeTruthy();
+    unmount();
+    render(<ReportProblem diagnostics={DIAGNOSTICS} preview={false} hasErrors />);
+    expect(screen.getByRole("button", { name: "Report on GitHub" })).toBeTruthy();
+    expect(screen.getByRole("link", { name: "Write to us on the contact page" })).toBeTruthy();
+  });
+
+  it("keeps the heading", () => {
+    render(<ReportProblem diagnostics={DIAGNOSTICS} preview={false} hasErrors={false} />);
+    expect(screen.getByRole("heading", { name: "Report a problem" })).toBeTruthy();
+  });
+
+  it("never shows the preview-only note or the long instruction", () => {
+    render(
+      <ReportProblem
+        diagnostics={DIAGNOSTICS}
+        preview={false}
+        hasErrors
+        note="should never appear in this mode"
+      />
+    );
+    expect(screen.queryByText("should never appear in this mode")).toBeNull();
+    expect(screen.queryByText(/To report something you noticed, copy this/)).toBeNull();
   });
 });
