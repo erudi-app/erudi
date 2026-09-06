@@ -224,16 +224,28 @@ one check.*
 - [ ] When the app runs on **macOS or Windows**, then the Chromium renderer processes run **sandboxed** (no `--no-sandbox` in the renderer process arguments — check the process list); on Linux the flag is expected (user-namespace workaround).
 - [ ] When the backend logs a request with a foreign Origin or Host, then the request id correlation (`X-Request-ID`) still works for allowed requests (tracing survives the tightening).
 
-### The inference child requires a key (Windows and Linux)
+### The inference child requires a key (all platforms)
 
-*`llama-server` is spawned with a per-process `--api-key`, and with `--no-slots` and `--no-webui`. The first scenario is the one that matters most in the whole pass: if the key wiring is wrong, **every** GGUF model load fails at readiness rather than degrading quietly, so run it before anything else on those platforms. Not applicable on Apple Silicon, where `mlx_vlm.server` has no such option — see the privacy page's known gaps.*
+*Every inference child is spawned with a per-process `--api-key`: `llama-server` on Windows and Linux (also with `--no-slots` and `--no-webui`), `mlx_vlm.server` on Apple Silicon. The first scenario is the one that matters most in the whole pass: if the key wiring is wrong, **every** model load fails at readiness rather than degrading quietly, so run it before anything else.*
 
-- [ ] When I download a GGUF model and send it a message, then the answer streams normally (proof the backend authenticates itself to its own child; a broken key shows up as a readiness timeout at load, never as a bad answer).
+- [ ] When I download a model and send it a message, then the answer streams normally (proof the backend authenticates itself to its own child; a broken key shows up as a readiness timeout at load, never as a bad answer).
+
+**Windows and Linux (`llama-server`)**
+
 - [ ] When a model is loaded and I find the child's port in `%TEMP%\erudi-backend.log` (or `/tmp/erudi-backend.log`), then an **unauthenticated** request to it is refused: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:<port>/v1/chat/completions -d '{"model":"x","messages":[]}'` answers **401**.
 - [ ] When I request `http://127.0.0.1:<port>/slots` on that same port, then it does **not** return the prompts of in-flight requests (the endpoint is disabled; a 404 or an error is the expected outcome, never a JSON list of slots carrying prompt text).
 - [ ] When I open `http://127.0.0.1:<port>/` in a browser, then llama.cpp's bundled web interface does **not** load.
 - [ ] When I unload the model and load it again, then the child's key has **changed** — grep the process arguments (`ps aux | grep llama-server` on macOS/Linux, Task Manager details on Windows) before and after; the two values must differ, which is what makes a leaked key worthless.
 - [ ] When I read `%TEMP%\erudi-backend.log` after a load, then the key appears **nowhere** in it.
+
+**Apple Silicon (`mlx_vlm.server`)**
+
+*The child is an `mp.Process` of the backend: its arguments travel by pickle, not on a command line, so `ps` shows neither the `--api-key` flag nor the value, and `ps -E` does not show the `MLX_VLM_SERVER_API_KEY` variable either (the child sets it after start). Find the port with `lsof -nP -iTCP:27300-27399 -sTCP:LISTEN` or in `$TMPDIR/erudi-backend.log` (`Spawned mlx_vlm.server child: pid=..., port=...`).*
+
+- [ ] When a model is loaded, then an **unauthenticated** chat request to the child is refused: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:<port>/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"x","messages":[]}'` answers **401**, and `curl -si http://127.0.0.1:<port>/v1/chat/completions -d '{}'` shows `WWW-Authenticate: Bearer`.
+- [ ] When I request `http://127.0.0.1:<port>/health` without a key, then it answers **401** too — and the app keeps chatting normally, which proves the backend's own probe presents the key.
+- [ ] When I send the same chat request with a made-up key (`-H 'Authorization: Bearer nope'`), then it is still **401**.
+- [ ] When I grep `$TMPDIR/erudi-backend.log` and `~/Library/Logs/erudi/backend.log` for `api-key`, `api_key`, `MLX_VLM_SERVER_API_KEY` and `Bearer`, then no line carries a key value (the key exists only in the backend's and the child's memory; that it changes on every load is pinned by the unit tests in `backend/tests/test_mlx_engine_server.py`, `TestSpawnApiKey`, and cannot be observed from outside the processes).
 
 ### The embedded database requires a password (Windows)
 

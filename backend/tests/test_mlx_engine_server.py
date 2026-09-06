@@ -1072,7 +1072,12 @@ class TestSpawnArgv:
             )
 
         assert captured["target"] is run_mlx_vlm_server
-        assert captured["argv"] == [
+        argv = list(captured["argv"])
+        # The per-spawn credential is asserted by `TestSpawnApiKey`; strip it
+        # here so the rest of the argv is pinned verbatim.
+        key_at = argv.index("--api-key")
+        del argv[key_at : key_at + 2]
+        assert argv == [
             "mlx_vlm.server",
             "--model",
             str(model_dir),
@@ -1107,6 +1112,108 @@ class TestSpawnArgv:
             MLX_Engine._spawn_child(model_path=model_dir, alias="erudi-x", port=9087)
 
         assert "MLX_VLM_THINKING_START_TOKEN" not in os.environ
+
+
+def _spawn_mlx_child(tmp_path):
+    """Run `_spawn_child` with `mp.Process` stubbed; return (handle, argv)."""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir(exist_ok=True)
+    captured: dict = {}
+
+    def _fake_process(*, target, args, daemon):
+        captured["argv"] = list(args[0])
+        return MagicMock(pid=4321)
+
+    with patch("src.engines.mlx_engine.mp.Process", side_effect=_fake_process):
+        handle = MLX_Engine._spawn_child(model_path=model_dir, alias="erudi-x", port=9087)
+    return handle, captured["argv"]
+
+
+@pytest.mark.unit
+class TestSpawnApiKey:
+    """mlx_vlm.server must not be left open to everything on the loopback.
+
+    Spawned without `--api-key`, mlx_vlm.server authenticates NOTHING: any
+    caller that can reach 127.0.0.1 -- another local process, or a web page
+    the user has open, since a browser can POST across origins to a loopback
+    port -- can run its own inference on the loaded model. mlx-vlm's own
+    `--api-key` guard covers every route it registers, `/health` included
+    (`TestMlxVlmApiKeyGuard` pins that upstream fact). These tests pin the
+    same spawn contract `TestSpawnHardeningFlags` pins for llama-server.
+    """
+
+    def test_api_key_flag_carries_a_non_empty_secret(self, tmp_path):
+        """`--api-key` is mlx-vlm's own flag; an empty value would leave the
+        env var unset and the server unauthenticated, so the value itself is
+        asserted, not just the flag."""
+        _handle, argv = _spawn_mlx_child(tmp_path)
+        assert "--api-key" in argv
+        key = argv[argv.index("--api-key") + 1]
+        assert isinstance(key, str) and len(key) >= 32
+
+    def test_each_spawn_gets_a_different_key(self, tmp_path):
+        """Per-spawn generation bounds a disclosure to the life of one child:
+        swapping models (or a crash-respawn) invalidates a scraped key."""
+        _h1, first = _spawn_mlx_child(tmp_path)
+        _h2, second = _spawn_mlx_child(tmp_path)
+        assert first[first.index("--api-key") + 1] != second[second.index("--api-key") + 1]
+
+    def test_handle_exposes_the_key_to_the_callers_that_need_it(self, tmp_path):
+        """The readiness probe and the ChatOpenAI client both reach the child
+        only through the spawn handle; a key kept local to `_spawn_child`
+        would lock Erudi out of its own server."""
+        handle, argv = _spawn_mlx_child(tmp_path)
+        assert handle["api_key"] == argv[argv.index("--api-key") + 1]
+
+    def test_the_key_never_reaches_the_logs(self, tmp_path, caplog):
+        """Backend logs are written to a world-readable temp file and shipped
+        in bug reports; a key printed there outlives the process that used it."""
+        import logging
+
+        with caplog.at_level(logging.DEBUG):
+            handle, _argv = _spawn_mlx_child(tmp_path)
+        key = handle["api_key"]
+        assert key
+        for record in caplog.records:
+            assert key not in record.getMessage()
+
+
+@pytest.mark.unit
+class TestMlxVlmApiKeyGuard:
+    """The upstream fact the MLX key relies on, pinned against the installed mlx-vlm.
+
+    `MLX_Engine` passes `--api-key` and nothing else: it is mlx-vlm's own guard
+    (`_require_management_api_key`, a dependency of the router every inference
+    route is registered on) that turns the key into 401s. If an mlx-vlm bump
+    ever moved `/v1/chat/completions` or `/health` off that router, the key
+    would guard nothing and this test is what says so. Skips where mlx-vlm is
+    not installed (Linux CI).
+    """
+
+    ENV = "MLX_VLM_SERVER_API_KEY"
+
+    @pytest.fixture
+    def client(self, monkeypatch):
+        pytest.importorskip("mlx_vlm.server.app")
+        from fastapi.testclient import TestClient
+        from mlx_vlm.server.app import app
+
+        monkeypatch.setenv(self.ENV, "s3cret-token")
+        # No lifespan (no model is loaded); with the key a request reaches the
+        # route and fails there in whatever way mlx-vlm sees fit -- anything
+        # but 401 is the proof that the guard, not the route, was the gate.
+        return TestClient(app, raise_server_exceptions=False)
+
+    def test_chat_completions_requires_the_key(self, client):
+        body = {"model": "x", "messages": [{"role": "user", "content": "ping"}]}
+        assert client.post("/v1/chat/completions", json=body).status_code == 401
+        headers = {"Authorization": "Bearer s3cret-token"}
+        assert client.post("/v1/chat/completions", json=body, headers=headers).status_code != 401
+
+    def test_health_requires_the_key(self, client):
+        assert client.get("/health").status_code == 401
+        headers = {"Authorization": "Bearer s3cret-token"}
+        assert client.get("/health", headers=headers).status_code != 401
 
 
 @pytest.mark.unit
@@ -1202,9 +1309,52 @@ class TestSubprocessReal:
                 llm_local_path=str(mlx_test_model_path),
             )
             assert model["proc"].is_alive(), "subprocess died right after spawn"
-            r = requests.get(f"{model['base_url']}/health", timeout=5)
+            r = requests.get(
+                f"{model['base_url']}/health",
+                timeout=5,
+                headers={"Authorization": f"Bearer {model['api_key']}"},
+            )
             assert r.status_code == 200
             assert tokenizer == {"type": "remote", "provider": "mlx-vlm-server"}
+        finally:
+            MLX_Engine.cleanup()
+
+    def test_child_refuses_unauthenticated_requests_and_still_chats(self, mlx_test_model_path):
+        """The real child, with the engine's own handle: mlx-vlm's `--api-key`
+        guard rejects an unauthenticated (or wrongly keyed) chat request and
+        `/health` with 401, while the backend's probe (already passed inside
+        `get_model_and_tokenizer`) and the ChatOpenAI client, which read the
+        key from the handle, still drive the model."""
+        import requests
+
+        try:
+            model, _ = MLX_Engine.get_model_and_tokenizer(
+                llm_id="qwen-test",
+                llm_local_path=str(mlx_test_model_path),
+            )
+            base_url = model["base_url"]
+            chat_body = {
+                "model": model["model_path"],
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 1,
+                "stream": False,
+            }
+            r = requests.post(f"{base_url}/v1/chat/completions", json=chat_body, timeout=10)
+            assert r.status_code == 401, r.text
+            assert r.headers.get("WWW-Authenticate") == "Bearer"
+            r = requests.get(f"{base_url}/health", timeout=5)
+            assert r.status_code == 401
+            r = requests.post(
+                f"{base_url}/v1/chat/completions",
+                json=chat_body,
+                timeout=10,
+                headers={"Authorization": "Bearer not-the-key"},
+            )
+            assert r.status_code == 401
+
+            chat = _build_real_mlx_chat_model("qwen-test", mlx_test_model_path, max_tokens=8)
+            reply = chat.invoke("Say hi.")
+            assert isinstance(reply.content, str) and reply.content.strip()
         finally:
             MLX_Engine.cleanup()
 
