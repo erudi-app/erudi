@@ -8,5 +8,5 @@ export const conversationPath = (id) => `/erudi/conversations/${id}`;
 /** Path to the app settings page. */
 export const SETTINGS_PATH = "/erudi/settings";
 
-/** The Diagnostics panel, a section of the settings page (the bug button). */
-export const DIAGNOSTICS_PATH = `${SETTINGS_PATH}#diagnostics`;
+/** Path to the diagnostics page (the bug button at the bottom of the rail). */
+export const DIAGNOSTICS_PATH = "/erudi/diagnostics";

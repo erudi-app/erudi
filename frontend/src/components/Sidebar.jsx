@@ -39,6 +39,7 @@ export default function Sidebar({
   const isArenaActive = location.pathname === "/erudi/arena";
   const isKnowledgeBaseActive = location.pathname === "/erudi/attach_knowledge_base";
   const isSettingsActive = location.pathname === SETTINGS_PATH;
+  const isDiagnosticsActive = location.pathname === DIAGNOSTICS_PATH;
 
   return (
     <div
@@ -170,15 +171,22 @@ export default function Sidebar({
         />
       </Link>
       {!isDownloading && (
-        // Reporting a bug starts with the Diagnostics panel in Settings: it
-        // shows the user what to send, lets them copy it, and takes them to the
-        // issue form or the contact page from there.
+        // Reporting a bug starts on the Diagnostics page: it shows the user
+        // what to send, lets them copy it, and takes them to the issue form or
+        // the contact page from there. A destination like the others, so it
+        // highlights like the others.
         <Link
           to={DIAGNOSTICS_PATH}
           aria-label={t("common:nav.reportBug")}
-          className="w-full flex justify-center items-center py-5 border-l-4 border-transparent mb-4"
+          className={`w-full flex justify-center items-center py-5 border-l-4 mb-4 ${
+            isDiagnosticsActive ? "border-green-500" : "border-transparent"
+          }`}
         >
-          <Bug className="w-5 h-5 transition-colors duration-200 text-gray-400 hover:text-red-400" />
+          <Bug
+            className={`w-5 h-5 transition-colors duration-200 ${
+              isDiagnosticsActive ? "text-green-400" : "text-gray-400 hover:text-green-400"
+            }`}
+          />
         </Link>
       )}
     </div>

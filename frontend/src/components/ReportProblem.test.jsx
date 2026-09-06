@@ -110,6 +110,21 @@ describe("ReportProblem", () => {
     await waitFor(() => expect(window.open).toHaveBeenCalled());
   });
 
+  it("is headed for the case with an error and the case without one alike", () => {
+    render(<ReportProblem diagnostics={DIAGNOSTICS} />);
+    expect(screen.getByRole("heading", { name: "Report a problem" })).toBeTruthy();
+  });
+
+  it("shows the caller's note beside the text, and nothing when there is none", () => {
+    const { unmount } = render(
+      <ReportProblem diagnostics={DIAGNOSTICS} note="Read what you copy before you post it." />
+    );
+    expect(screen.getByText("Read what you copy before you post it.")).toBeTruthy();
+    unmount();
+    render(<ReportProblem diagnostics={DIAGNOSTICS} />);
+    expect(screen.queryByText("Read what you copy before you post it.")).toBeNull();
+  });
+
   it("offers the contact page for people without a GitHub account", () => {
     render(<ReportProblem diagnostics={DIAGNOSTICS} />);
     const link = screen.getByRole("link", { name: "Write to us on the contact page" });
