@@ -150,8 +150,10 @@ describe("DiagnosticsPanel — backend down", () => {
 
   it("still offers a copyable report and the GitHub route", async () => {
     render(<DiagnosticsPanel />);
+    // The textarea exists from the first render; its text fills in once the
+    // three sources have settled, so wait for the content, not the element.
     const area = await screen.findByLabelText("Diagnostics to copy");
-    expect(area.value).toContain("Erudi 1.0.0");
+    await waitFor(() => expect(area.value).toContain("Erudi 1.0.0"));
     expect(area.value).toContain("backend did not answer");
     expect(screen.getByRole("button", { name: "Report on GitHub" })).toBeTruthy();
   });
