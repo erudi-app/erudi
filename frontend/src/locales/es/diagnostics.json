@@ -30,6 +30,10 @@
     "title": "El backend no respondió",
     "body": "Falta su parte de este informe. Abajo está lo que la propia aplicación sabe, y suele bastar para describir un backend que no arranca."
   },
+  "appLogUnavailable": {
+    "title": "No se pudo leer el registro de la aplicación",
+    "body": "Lo que haya registrado falta en esta lista, así que una lista vacía no significa que no haya pasado nada. Abrir la carpeta de registros sigue llevándote al archivo."
+  },
   "loading": "Leyendo el diagnóstico…",
   "openLogFolder": "Abrir la carpeta de registros",
   "report": {

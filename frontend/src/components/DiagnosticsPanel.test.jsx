@@ -59,13 +59,17 @@ beforeEach(() => {
   // A record of the main process's own: shown whether or not the backend
   // answers. (An echo of the backend's stdout would be dropped while the
   // backend answers, since backend.log holds the same record.)
-  appLogTail = vi.fn().mockResolvedValue([
-    {
-      timestamp: "2026-09-05T09:00:00.000Z",
-      level: "WARNING",
-      message: "[main] WARN slow boot",
-    },
-  ]);
+  // The IPC answers {ok, records}: an unreadable log is not an empty one.
+  appLogTail = vi.fn().mockResolvedValue({
+    ok: true,
+    records: [
+      {
+        timestamp: "2026-09-05T09:00:00.000Z",
+        level: "WARNING",
+        message: "[main] WARN slow boot",
+      },
+    ],
+  });
   revealLog = vi.fn().mockResolvedValue({ success: true });
   window.diagnosticsAPI = {
     getAppInfo: vi.fn().mockResolvedValue({
@@ -203,7 +207,7 @@ describe("DiagnosticsPanel — backend down", () => {
 describe("DiagnosticsPanel — nothing recorded", () => {
   beforeEach(() => {
     getMock.mockResolvedValue({ ...BACKEND, recent_errors: [] });
-    appLogTail.mockResolvedValue([]);
+    appLogTail.mockResolvedValue({ ok: true, records: [] });
   });
 
   it("says so in one quiet line, with nothing else in the errors area", async () => {
@@ -269,6 +273,29 @@ describe("DiagnosticsPanel — a source that does not answer", () => {
     render(<DiagnosticsPanel />);
     await waitFor(() => expect(screen.getByText("MLX_Engine")).toBeTruthy());
     await waitFor(() => expect(warnings().some((m) => /app log/i.test(m))).toBe(true));
+  });
+
+  it("says the app log is missing instead of claiming nothing was recorded", async () => {
+    // The failure that made this necessary: main answered [] for a read it
+    // could not make, and the page showed the check mark that means all is
+    // well -- at the exact moment the app could not tell.
+    getMock.mockResolvedValue({ ...BACKEND, recent_errors: [] });
+    appLogTail.mockResolvedValue({ ok: false, records: [], reason: "EACCES" });
+
+    render(<DiagnosticsPanel />);
+
+    expect(await screen.findByText("The app log could not be read")).toBeTruthy();
+    expect(screen.queryByText("No warning or error recorded.")).toBeNull();
+    await waitFor(() => expect(warnings().some((m) => /app log/i.test(m))).toBe(true));
+  });
+
+  it("still lists the sources that did answer", async () => {
+    appLogTail.mockResolvedValue({ ok: false, records: [], reason: "EACCES" });
+
+    render(<DiagnosticsPanel />);
+
+    expect(await screen.findByText("The app log could not be read")).toBeTruthy();
+    expect(screen.getByText(/engine refused to start/)).toBeTruthy();
   });
 
   it("records a refused reveal instead of leaving the click silent", async () => {

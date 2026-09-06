@@ -30,6 +30,10 @@
     "title": "The backend did not answer",
     "body": "Its part of this report is missing. What the app itself knows is below, and that is usually enough to describe a backend that will not start."
   },
+  "appLogUnavailable": {
+    "title": "The app log could not be read",
+    "body": "Anything it recorded is missing from this list, so an empty list here does not mean nothing happened. Open log folder still takes you to the file."
+  },
   "loading": "Reading diagnostics…",
   "openLogFolder": "Open log folder",
   "report": {

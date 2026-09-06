@@ -56,6 +56,9 @@ export default function DiagnosticsPanel() {
   const [backend, setBackend] = useState(null);
   const [app, setApp] = useState(null);
   const [appLog, setAppLog] = useState([]);
+  // The app log is a source like the backend is: when it cannot be read, the
+  // page says so rather than counting it as "nothing was recorded".
+  const [appLogFailed, setAppLogFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -66,7 +69,10 @@ export default function DiagnosticsPanel() {
       const [backendResult, appResult, logResult] = await Promise.allSettled([
         apiClient.get("/diagnostics/"),
         window.diagnosticsAPI?.getAppInfo?.() ?? Promise.resolve(null),
-        window.diagnosticsAPI?.appLogTail?.(DISPLAY_LIMIT) ?? Promise.resolve([]),
+        // No bridge at all (a browser) is not a failed read: there is simply
+        // no app log on this side.
+        window.diagnosticsAPI?.appLogTail?.(DISPLAY_LIMIT) ??
+          Promise.resolve({ ok: true, records: [] }),
       ]);
       if (cancelled) return;
 
@@ -82,12 +88,16 @@ export default function DiagnosticsPanel() {
         // makes this page the next thing to debug, with nothing to go on.
         log.warn("The app process did not answer the environment request", appResult.reason);
       }
-      if (logResult.status === "fulfilled" && Array.isArray(logResult.value)) {
-        setAppLog(logResult.value);
+      // `{ok, records}`: an unreadable log and a log with nothing in it are
+      // different answers, and only the second one means all is well.
+      const logValue = logResult.status === "fulfilled" ? logResult.value : null;
+      if (logValue?.ok && Array.isArray(logValue.records)) {
+        setAppLog(logValue.records);
       } else {
+        setAppLogFailed(true);
         log.warn(
           "The app log could not be read",
-          logResult.status === "rejected" ? logResult.reason : logResult.value
+          logResult.status === "rejected" ? logResult.reason : logValue
         );
       }
       setLoading(false);
@@ -216,11 +226,23 @@ export default function DiagnosticsPanel() {
           <h3 className="text-[13px] font-semibold text-[var(--ink)] mb-2">
             {t("diagnostics:recentErrors.title")}
           </h3>
+          {appLogFailed && (
+            <div className="mb-2 rounded-lg border border-[var(--line)] bg-[var(--canvas)] p-3">
+              <p className="text-[13px] font-semibold text-[var(--ink)]">
+                {t("diagnostics:appLogUnavailable.title")}
+              </p>
+              <p className="text-[12px] text-[var(--ink-dim)] mt-1 leading-relaxed">
+                {t("diagnostics:appLogUnavailable.body")}
+              </p>
+            </div>
+          )}
           {entries.length === 0 ? (
             // Nothing recorded, nothing to do: one line and a check mark, so
             // the page reads as "all is well" rather than as a form to fill.
-            // Not before the sources answered: the mark would be a guess.
-            !loading && (
+            // Not before the sources answered: the mark would be a guess, and
+            // not when one of them could not be read at all.
+            !loading &&
+            !appLogFailed && (
               <p className="flex items-center gap-2 text-[12px] text-[var(--ink-dim)]">
                 <CircleCheck className="w-3.5 h-3.5 shrink-0 text-[var(--fit-good)]" />
                 <span>{t("diagnostics:recentErrors.empty")}</span>

@@ -30,6 +30,10 @@
     "title": "Le backend n'a pas répondu",
     "body": "Sa part de ce rapport manque. Ce que l'application sait d'elle-même figure ci-dessous, et cela suffit généralement à décrire un backend qui refuse de démarrer."
   },
+  "appLogUnavailable": {
+    "title": "Le journal de l'application n'a pas pu être lu",
+    "body": "Ce qu'il a enregistré manque à cette liste : une liste vide ne veut donc pas dire qu'il ne s'est rien passé. Ouvrir le dossier des journaux mène toujours au fichier."
+  },
   "loading": "Lecture du diagnostic…",
   "openLogFolder": "Ouvrir le dossier des logs",
   "report": {
