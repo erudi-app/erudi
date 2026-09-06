@@ -48,7 +48,8 @@ let appLogTail;
 beforeEach(() => {
   installStorage();
   resetSessionErrors();
-  appLogTail = vi.fn().mockResolvedValue([]);
+  // The IPC answers {ok, records}: an unreadable log is not an empty one.
+  appLogTail = vi.fn().mockResolvedValue({ ok: true, records: [] });
   window.diagnosticsAPI = { appLogTail };
   getMock.mockReset();
   getMock.mockResolvedValue({ recent_errors: [] });
@@ -161,14 +162,38 @@ describe("useBugCounter", () => {
   it("degrades to the app log alone when the backend does not answer", async () => {
     getMock.mockRejectedValue(new Error("backend unreachable"));
     const future = new Date(Date.now() + 60_000).toISOString();
-    appLogTail = vi
-      .fn()
-      .mockResolvedValue([
+    appLogTail = vi.fn().mockResolvedValue({
+      ok: true,
+      records: [
         { timestamp: future, level: "ERROR", message: "renderer:uncaught something broke" },
-      ]);
+      ],
+    });
     window.diagnosticsAPI = { appLogTail };
     const { result } = renderHook(() => useBugCounter({ pollMs: 20 }));
     await waitFor(() => expect(result.current.count).toBe(1));
+  });
+
+  it("keeps the count it had when the app log cannot be read", async () => {
+    // Dropping to zero would say the errors went away; the Diagnostics page
+    // is where an unreadable log is reported, and a badge must not invent
+    // good news on its own.
+    const future = new Date(Date.now() + 60_000).toISOString();
+    const record = {
+      timestamp: future,
+      level: "ERROR",
+      message: "renderer:uncaught something broke",
+    };
+    appLogTail = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: true, records: [record] })
+      .mockResolvedValue({ ok: false, records: [], reason: "EACCES" });
+    window.diagnosticsAPI = { appLogTail };
+
+    const { result } = renderHook(() => useBugCounter({ pollMs: 20 }));
+
+    await waitFor(() => expect(result.current.count).toBe(1));
+    await waitFor(() => expect(appLogTail.mock.calls.length).toBeGreaterThanOrEqual(3));
+    expect(result.current.count).toBe(1);
   });
 
   it("stops polling after unmount", async () => {

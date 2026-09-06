@@ -86,34 +86,50 @@ export default function SettingsPage() {
   const autoUpdateEnabled = settings?.auto_update_enabled ?? true;
   const inferenceBackend = settings?.inference_backend ?? "auto";
 
+  // A failed settings write has exactly one owner: `useUserSettings` logs it
+  // where the request is made, with the payload and the error. These handlers
+  // catch to keep the rejection from escaping, and add nothing -- a second
+  // record of the same failure is noise on the Diagnostics page, and the pair
+  // reads as two defects.
   const handleWebSearchToggle = async (next) => {
     try {
       await updateSettings({ web_search_enabled: next });
-    } catch (error) {
-      log.error("Failed to update the web search setting", error);
+    } catch {
+      // Already recorded by the hook.
     }
   };
 
   const handleAutoUpdateToggle = async (next) => {
     try {
       await updateSettings({ auto_update_enabled: next });
-      // Main holds electron-updater and has no database: without this it would
-      // keep checking after the user said no.
-      notifyAutoUpdatePreference(next);
-    } catch (error) {
-      log.error("Failed to update the automatic update setting", error);
+    } catch {
+      // Already recorded by the hook; main must not be told of a preference
+      // that did not persist.
+      return;
     }
+    // Main holds electron-updater and has no database: without this it would
+    // keep checking after the user said no.
+    notifyAutoUpdatePreference(next);
   };
 
   const handleInferenceBackendChange = async (event) => {
     const next = event.target.value;
     try {
       await updateSettings({ inference_backend: next });
+    } catch {
+      // Already recorded by the hook. Restarting for a preference that was
+      // not saved would only lose the user's conversation state.
+      return;
+    }
+    try {
       // The engine is chosen once per boot, so the new preference only takes
       // effect after the backend comes back up.
       await window.backendAPI?.restartBackend?.();
     } catch (error) {
-      log.error("Failed to update the inference engine setting", error);
+      // A distinct failure with a distinct consequence: the choice IS saved,
+      // and it applies at the next launch. Reporting it as a failed setting
+      // sent people looking for a defect in the wrong place.
+      log.error("The inference engine was saved but the backend did not restart", error);
     }
   };
 
@@ -123,8 +139,8 @@ export default function SettingsPage() {
     await setAppLanguage(next);
     try {
       await updateSettings({ language: next });
-    } catch (error) {
-      log.error("Failed to persist the language setting", error);
+    } catch {
+      // Already recorded by the hook.
     }
   };
 

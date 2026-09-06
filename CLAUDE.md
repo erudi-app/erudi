@@ -188,6 +188,7 @@ inference; only the release QA pass on real hardware does.
 ## Logs
 
 - Backend: `os.tmpdir()/erudi-backend.log`, written by `frontend/src/main.js` — that is `/tmp` on Linux, `%TEMP%` on Windows, and `$TMPDIR` (a per-user folder under `/var/folders/…`, NOT `/tmp`) on macOS. Backend's own logger writes to `backend/logs/backend.log`.
+- MLX inference child: `logs/mlx-child-<port>.log` beside `backend.log` (`src/engines/mlx_child_log.py`). The `mlx_vlm.server` child has no pipe the parent can drain, so it redirects its own stdout/stderr there; the parent quotes the tail in every crash report. Two files per port, rolled at 2 MB, deleted on an orderly stop. See `docs/logging.md`.
 - Frontend (production): electron-log default location.
 
 ## Conflict with the global CLAUDE.md

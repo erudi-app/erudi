@@ -92,7 +92,8 @@ describe("useBugCounter does not feed its own poll failures back into its count"
     // what a real relaunch of the reader would see in the file.
     const appLogTail = vi.fn().mockImplementation(async () => {
       const text = sendSpy.mock.calls.map(([entry]) => rendererLogLine(entry)).join("\n");
-      return parseAppLogRecords(text);
+      // The handler's own shape: {ok, records}.
+      return { ok: true, records: parseAppLogRecords(text) };
     });
     window.diagnosticsAPI = { appLogTail };
 
@@ -130,7 +131,7 @@ describe("useBugCounter does not feed its own poll failures back into its count"
     // "Request failed, retrying..." lines ARE real WARNING records (visible,
     // by design -- WARNING is never filtered), but WARNING never counts
     // either, so no ERROR/CRITICAL ever reaches this fixture.
-    const lastResult = await appLogTail.mock.results.at(-1).value;
+    const lastResult = (await appLogTail.mock.results.at(-1).value).records;
     expect(lastResult.some((r) => r.message.includes("api.failure"))).toBe(false);
     expect(lastResult.every((r) => r.level === "WARNING")).toBe(true);
 

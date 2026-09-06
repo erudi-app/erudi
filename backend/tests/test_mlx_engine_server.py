@@ -42,6 +42,7 @@ Run examples:
 from __future__ import annotations
 
 import json
+import logging
 import socket as _stdlib_socket
 import time
 from pathlib import Path
@@ -235,6 +236,103 @@ class TestTerminateProcess:
     def test_none_proc_is_safe(self):
         """Passing None must not crash (mirrors cpu_engine.py:228-229)."""
         MLX_Engine._terminate_process(None)  # no exception
+
+
+@pytest.mark.unit
+class TestChildLifecycleLogging:
+    """What the engine records about its child, and where those records land.
+
+    Every line here goes through the ``erudi`` logger: the root logger has no
+    handler in this app, so a record written there reaches neither
+    ``backend.log`` nor the Diagnostics page (docs/logging.md).
+    """
+
+    @staticmethod
+    def _erudi_records(caplog):
+        return [r for r in caplog.records if r.name.startswith("erudi")]
+
+    def test_orderly_stop_is_info(self, caplog):
+        proc = MagicMock()
+        proc.is_alive.side_effect = [True, False]
+        proc.exitcode = -15
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            MLX_Engine._terminate_process(proc)
+        records = [r for r in self._erudi_records(caplog) if "Child terminated" in r.getMessage()]
+        assert records, "the exit code was not recorded on the erudi logger"
+        assert records[0].levelno == logging.INFO
+
+    def test_sigkill_escalation_is_a_warning(self, caplog):
+        proc = MagicMock()
+        proc.is_alive.side_effect = [True, True, False]
+        proc.exitcode = -9
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            MLX_Engine._terminate_process(proc)
+        records = [r for r in self._erudi_records(caplog) if "Child terminated" in r.getMessage()]
+        assert records and records[0].levelno == logging.WARNING
+        assert "SIGKILL" in records[0].getMessage()
+
+    def test_a_child_that_died_on_its_own_is_a_warning(self, caplog):
+        """A nonzero exit code from a child nobody asked to stop is the only
+        trace of its death; INFO would keep it off the Diagnostics page."""
+        proc = MagicMock()
+        proc.is_alive.return_value = False
+        proc.exitcode = 1
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            MLX_Engine._terminate_process(proc)
+        records = [r for r in self._erudi_records(caplog) if "Child terminated" in r.getMessage()]
+        assert records and records[0].levelno == logging.WARNING
+        assert "exitcode=1" in records[0].getMessage()
+
+    def test_a_child_that_exited_cleanly_is_info(self, caplog):
+        proc = MagicMock()
+        proc.is_alive.return_value = False
+        proc.exitcode = 0
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            MLX_Engine._terminate_process(proc)
+        records = [r for r in self._erudi_records(caplog) if "Child terminated" in r.getMessage()]
+        assert records and records[0].levelno == logging.INFO
+
+    def test_hardware_probe_failure_reaches_the_erudi_logger(self, caplog, monkeypatch):
+        """`_detect_apple_silicon_chip` falls back to None; the reason must be
+        readable in backend.log, not written to a handler-less root logger."""
+        import subprocess as _subprocess
+
+        def _boom(*args, **kwargs):
+            raise _subprocess.SubprocessError("system_profiler is not here")
+
+        monkeypatch.setattr("src.engines.mlx_engine.subprocess.run", _boom)
+        with caplog.at_level(logging.WARNING, logger="erudi"):
+            assert MLX_Engine._detect_apple_silicon_chip() is None
+        assert any(
+            "Failed to detect Apple Silicon chip" in r.getMessage()
+            for r in self._erudi_records(caplog)
+        )
+
+    def test_vision_detection_failure_names_the_error(self, caplog, tmp_path):
+        """The verdict is permissive (None) either way, so the record is what
+        distinguishes an absent config from a corrupt one."""
+        with caplog.at_level(logging.WARNING, logger="erudi"):
+            assert MLX_Engine.model_supports_vision(tmp_path / "nope") is None
+        messages = [r.getMessage() for r in self._erudi_records(caplog)]
+        assert any("vision detection failed" in m for m in messages)
+        assert any("Error" in m or "Exception" in m for m in messages)
+
+    def test_spawn_failure_names_the_model_and_the_port(self, tmp_path):
+        """`mp.Process.start()` can fail before a child exists (process or fd
+        limit). A bare OSError there says nothing about what was spawned."""
+        from src.core.exceptions import EngineException
+
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        proc = MagicMock()
+        proc.start.side_effect = OSError("[Errno 35] Resource temporarily unavailable")
+        with patch("src.engines.mlx_engine.mp.Process", return_value=proc):
+            with pytest.raises(EngineException) as excinfo:
+                MLX_Engine._spawn_child(model_path=model_dir, alias="erudi-x", port=9087)
+        message = excinfo.value.message
+        assert str(model_dir) in message
+        assert "9087" in message
+        assert "mlx-vlm" in message or "mlx_vlm" in message
 
 
 @pytest.mark.unit
@@ -1357,6 +1455,44 @@ class TestSubprocessReal:
             assert isinstance(reply.content, str) and reply.content.strip()
         finally:
             MLX_Engine.cleanup()
+
+    def test_real_child_writes_its_own_log_and_never_its_key(self, mlx_test_model_path):
+        """The real mlx-vlm child, with the real argv: what it prints must land
+        in its per-spawn file (that file is the whole crash report), and the
+        `--api-key` it was spawned with must not -- the file is quoted in bug
+        reports, and a leaked key outlives the process that used it."""
+        from src.engines import mlx_child_log
+
+        try:
+            model, _ = MLX_Engine.get_model_and_tokenizer(
+                llm_id="qwen-test",
+                llm_local_path=str(mlx_test_model_path),
+            )
+            proc = model["proc"]
+            log_path = MLX_Engine._child_log_path_of(proc)
+            assert log_path, "the spawn captured no output file"
+            assert Path(log_path).name == f"mlx-child-{model['port']}.log"
+
+            captured = Path(log_path).read_text(encoding="utf-8", errors="replace")
+            assert captured.strip(), "the child wrote nothing to its log"
+            assert model["api_key"] not in captured
+            # And the same file is what a crash report would quote.
+            assert mlx_child_log.read_child_log_tail(log_path)
+            assert model["api_key"] not in MLX_Engine._read_child_output(proc)
+        finally:
+            MLX_Engine.cleanup()
+
+    def test_an_orderly_cleanup_leaves_no_child_log_behind(self, mlx_test_model_path):
+        model, _ = MLX_Engine.get_model_and_tokenizer(
+            llm_id="qwen-test",
+            llm_local_path=str(mlx_test_model_path),
+        )
+        log_path = MLX_Engine._child_log_path_of(model["proc"])
+        assert log_path and Path(log_path).exists()
+
+        MLX_Engine.cleanup()
+
+        assert not Path(log_path).exists()
 
     def test_cleanup_kills_subprocess_and_frees_port(self, mlx_test_model_path):
         model, _ = MLX_Engine.get_model_and_tokenizer(

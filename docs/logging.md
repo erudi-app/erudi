@@ -7,7 +7,7 @@ from the click in the UI down to the backend work it triggered.
 
 | File | Written by | Contents |
 |------|------------|----------|
-| `backend.log` | Backend (FastAPI process) | Every HTTP request (method, path, status, duration), model generation lifecycle, knowledge-base ingestion phases, RAG searches |
+| `backend.log` | Backend (FastAPI process) | Every HTTP request (method, path, status, duration), model generation lifecycle, knowledge-base ingestion phases, RAG searches, and the warnings and failures of the libraries the backend runs on |
 | `erudi-backend.log` | Electron main process | Backend stdout/stderr (launcher lifecycle events), every UI interaction from the renderer — clicks, drops, pastes, committed input values — and every uncaught renderer error, persisted via IPC |
 
 ### Where to find them
@@ -73,7 +73,8 @@ two files carry, without leaving the app:
   never filtered this way. Each remaining row shows its timestamp, level,
   source, request id when it has one, and how many times an identical error
   repeated. When nothing was recorded, the area says so in one line and asks
-  nothing.
+  nothing — but only when all three sources answered: a source that could not
+  be read is reported as missing, never counted as silence.
 - **A counter on the bug icon itself**: the sidebar badges the icon with how
   many of those same (already-filtered) records are `ERROR`/`CRITICAL` and
   newer than the later of app launch and the last time this page was opened;
@@ -131,6 +132,92 @@ answer, the backend half of the report is reported as missing rather than
 silently left empty, and the app's own version, platform, log path and errors
 are still shown — which is usually enough to describe a backend that will not
 start.
+
+## The inference child's own log
+
+Inference runs in a child process, and what that child prints is the only
+account of a model that would not load or a server that died mid-answer.
+
+`llama-server` (CPU and NVIDIA) is a subprocess whose merged output the backend
+drains as it comes: nothing of it is written to a file of its own, and its last
+lines travel inside the backend's records.
+
+`mlx_vlm.server` (Apple Silicon) is a *process*, not a subprocess — the backend
+has no pipe to it — so the child redirects its own standard output and error,
+including everything MLX and Metal write from native code, into a file beside
+`backend.log`:
+
+| File | Where |
+|------|-------|
+| `mlx-child-<port>.log` | Development: `backend/logs/` · Packaged app: next to `backend.log` (the table at the top of this page) |
+
+- One file per spawn, named after the port that child serves. The previous
+  spawn's file is kept as `mlx-child-<port>.log.1`; older ones are removed, so
+  a port never holds more than two.
+- Once the live file passes 2 MB it is copied to `.1` and emptied in place, so
+  a talkative server cannot fill the disk. In place, because the child is
+  writing to that file as it happens.
+- Stopping a model — switching to another one, the idle reap, quitting — deletes
+  both files. A child that died on its own keeps them: that output is the whole
+  account of the death.
+- A report quotes only the child it is about. Ports are reused, so a new child
+  can inherit the previous one's file as `mlx-child-<port>.log.1`; that older
+  file is read only when it belongs to the running child, so two crashes on one
+  port never read as one.
+
+The backend quotes the tail of that file in the record it writes when the child
+crashes, fails its readiness probe, or is found dead by a later request — so
+the child's last words appear on the **Diagnostics** page and in a copied
+report, without anyone having to find the file.
+
+## What the libraries say
+
+The backend runs on other people's code, and when that code has something to
+report it says so through its own logger: `pgserver` quoting the postmaster's
+log after a failed start, Alembic explaining a refused migration, uvicorn's
+`Application startup failed`, `huggingface_hub` on a download it had to give
+up on.
+
+Those records go to `backend.log` too, in the same format as Erudi's own, so
+they appear on the **Diagnostics** page and in a copied report alongside the
+app's — a failure whose cause is in a library is no longer a failure with no
+explanation.
+
+Two deliberate limits:
+
+- **`WARNING` and above only.** A library's `INFO` (Alembic's per-revision
+  lines, transfer progress, uvicorn's startup chatter) reports no defect, is
+  never shown on the Diagnostics page, and every line of it shortens the
+  history rotation keeps of the records that do matter. `ERUDI_LOG_LEVEL`
+  makes *Erudi* more verbose; it does not open this floor.
+- **Nothing of it reaches standard output.** Only the file is shared: the
+  backend's stdout is the launcher's event channel, and a library writing
+  into it would break the app's startup.
+
+## The embedded database's own log
+
+The bundled PostgreSQL writes everything it has to say — WAL replay after an
+unclean shutdown, a corrupt page, a full disk, the `FATAL` that stopped a boot
+— to a single file inside its data directory:
+
+| File | Where |
+|------|-------|
+| `log` | Development: `backend/data/postgres/log` · Packaged app: `<data dir>/postgres/log`, beside the cluster (macOS: `~/Library/Application Support/erudi/backend/prod/data/postgres/`) |
+
+Erudi's own records say what the app asked the cluster to do; that file is the
+only place the server's answer is written. So when starting or joining the
+cluster fails, the backend attaches the last 40 lines of it to the failure —
+they travel inside the single `ERROR` the startup writes to `backend.log`, and
+therefore appear on the **Diagnostics** page and in a copied report. Only a
+window at the end of the file is read: nothing rotates it, and it grows for the
+life of the cluster.
+
+PostgreSQL writes the statement that failed into that log, and exactly one
+statement in Erudi carries a secret — the one that sets the database password
+at every start. That statement is excluded from the server's log for as long as
+it runs, and any password literal quoted from the file is replaced by
+`[redacted]` before it can reach a record. Two layers, because a password must
+not depend on one setting being right.
 
 ## Uncaught errors in the app window
 
@@ -208,8 +295,9 @@ silent branch that would hide a real failure gets a record at the level above.
 
 A parent logs the failures of its children. The backend logs an inference
 child that exits with its pid, port, exit code and the tail of its output
-(`llama-server` is drained by `ChildOutputDrainer`; `mlx_vlm.server` has no
-pipe and is reported by exit code). The Electron main process logs the
+(`llama-server` is drained by `ChildOutputDrainer`; `mlx_vlm.server` captures
+itself — see [The inference child's own log](#the-inference-childs-own-log)).
+The Electron main process logs the
 backend's exit (`ERROR` unless main asked it to stop), a spawn that failed,
 every `startup_error` it receives, and what no `catch` sees: an uncaught
 exception or unhandled rejection in the main process, a renderer or Chromium

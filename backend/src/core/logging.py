@@ -8,6 +8,9 @@ This module provides a centralized logging system with:
   can be correlated on a single timeline.
 - A per-request id (``[be-xxxxxxxx]``) injected into every line via
   ``src.core.request_context`` (set by the request-logging middleware).
+- Other libraries' records (``pgserver``, ``alembic``, ``uvicorn.error``,
+  ``huggingface_hub``, ...) bridged from the root logger into the same file at
+  ``WARNING`` and above, in the same format -- see :class:`RootFileBridge`.
 - Log level driven by the ``ERUDI_LOG_LEVEL`` environment variable
   (default ``INFO``; invalid values fall back to ``INFO``).
 
@@ -80,6 +83,16 @@ from src.launcher import ensure_runtime_paths_initialized
 
 DEFAULT_LOG_LEVEL = logging.INFO
 LOG_FILE_NAME = "backend.log"
+APP_LOGGER_NAME = "erudi"
+
+# Level at which another library's records are kept. WARNING, not the app's
+# own level: a third-party INFO stream (Alembic's per-revision lines, uvicorn's
+# startup chatter, huggingface_hub's transfer progress) says nothing about a
+# defect, the Diagnostics page shows WARNING and above only, and every INFO
+# line written here shortens the history rotation keeps of the records that do
+# matter. Deliberately fixed, so ERUDI_LOG_LEVEL=DEBUG makes ERUDI verbose
+# without letting a library flood the file the user is about to send.
+ROOT_BRIDGE_LEVEL = logging.WARNING
 LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
 # `%(asctime)s.%(msecs)03dZ` + gmtime converter = UTC ISO-8601 with ms.
 FILE_LOG_FORMAT = (
@@ -186,9 +199,73 @@ class CustomFormatter(logging.Formatter):
 
 
 # ----------------------------
+# Another library's records
+# ----------------------------
+class RootFileBridge(logging.Handler):
+    """Forward records logged by other libraries into ``backend.log``.
+
+    Handlers hang off the ``erudi`` logger, so a record that does not carry
+    that name used to reach no file at all: ``pgserver`` quoting the
+    postmaster's log after a failed start, Alembic explaining a refused
+    migration, uvicorn's ``Application startup failed``, huggingface_hub's
+    warnings -- all of it went to the stdlib's ``lastResort`` handler on
+    stderr. That reaches the app log at best, never ``backend.log``, and so
+    never the Diagnostics page.
+
+    This handler sits on the ROOT logger, which every library propagates to,
+    and hands what reaches it to the file handler the app already owns.
+    Forwarding rather than a second ``RotatingFileHandler`` on the same path:
+    two rotating handlers over one file rotate over each other -- one renames
+    the file the other is still writing into -- and a log that loses records
+    while rotating is exactly what this is meant to prevent. It also means one
+    formatter, so a third-party record is written in the same shape as ours
+    and the Diagnostics reader parses it like any other.
+
+    The console handler is deliberately NOT bridged: the backend's stdout is
+    the newline-delimited JSON channel ``run.py`` and the Electron main
+    process parse, and a library writing into it would break the launcher.
+
+    Records already carrying the app's own name are dropped here: they reached
+    the file through the ``erudi`` logger's own handlers before propagating to
+    root, and a record must land exactly once.
+    """
+
+    def __init__(self, target: logging.Handler, app_logger_name: str = APP_LOGGER_NAME) -> None:
+        super().__init__(level=ROOT_BRIDGE_LEVEL)
+        self._target = target
+        self._app_name = app_logger_name
+        self._app_prefix = f"{app_logger_name}."
+
+    def emit(self, record: logging.LogRecord) -> None:
+        """Hand the record to the file handler, unless the app already wrote it."""
+        if record.name == self._app_name or record.name.startswith(self._app_prefix):
+            return
+        # `handle` (not `emit`) so the target's own level, filters -- the
+        # request-id injection among them -- and formatter all apply.
+        self._target.handle(record)
+
+
+def _attach_root_file_bridge(file_handler: logging.Handler) -> RootFileBridge:
+    """Put exactly one bridge on the root logger, pointing at the live file handler.
+
+    Idempotent: a bridge left by an earlier ``configure_logger`` is removed
+    first, so a reconfiguration never stacks bridges or leaves one pointing at
+    a file handler that has since been closed.
+    """
+    root = logging.getLogger()
+    for handler in list(root.handlers):
+        if isinstance(handler, RootFileBridge):
+            root.removeHandler(handler)
+            handler.close()
+    bridge = RootFileBridge(file_handler)
+    root.addHandler(bridge)
+    return bridge
+
+
+# ----------------------------
 # Logger setup
 # ----------------------------
-def configure_logger(name: str = "erudi") -> logging.Logger:
+def configure_logger(name: str = APP_LOGGER_NAME) -> logging.Logger:
     """(Re)apply handlers, level, formatters and filters from the environment.
 
     Reads ERUDI_LOG_LEVEL (default INFO) and applies it to the logger and to
@@ -236,6 +313,12 @@ def configure_logger(name: str = "erudi") -> logging.Logger:
     fh.setFormatter(utc_formatter(FILE_LOG_FORMAT))
     fh.addFilter(_REQUEST_ID_FILTER)
     logger.addHandler(fh)
+
+    # Other libraries log to their own names, which reach the root logger and
+    # nothing else. Bridge root to this file handler -- and only to it -- so
+    # their warnings and failures land in backend.log too.
+    if name == APP_LOGGER_NAME:
+        _attach_root_file_bridge(fh)
 
     return logger
 

@@ -177,6 +177,7 @@ a = Analysis(
         "src.engines.base_llama_cpp_engine",
         "src.engines.mlx_engine",
         "src.engines._mlx_vlm_server_runner",  # picklable target for mp.Process spawning mlx_vlm.server
+        "src.engines.mlx_child_log",  # the child redirects its own stdout/stderr through it
         "mlx_vlm.server",  # imported lazily inside the runner (uvicorn loads "mlx_vlm.server:app")
         "mlx_vlm.server.app",  # the FastAPI app object uvicorn imports by string
         "mlx_vlm.server.cli",  # main() entrypoint the runner calls

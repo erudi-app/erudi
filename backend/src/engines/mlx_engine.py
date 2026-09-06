@@ -32,6 +32,13 @@ Architecture:
     │      → wait_port_closed → super().cleanup()                   │
     └───────────────────────────────────────────────────────────────┘
 
+Where the child's output goes:
+    An `mp.Process` has no output pipe, so the child redirects its own stdout
+    and stderr into `logs/mlx-child-<port>.log` (`mlx_child_log`, wired in
+    `_mlx_vlm_server_runner`). `_read_child_output` quotes the tail of that
+    file in every crash report and probe timeout, exactly where the llama-cpp
+    engines quote their drainer.
+
 Why multiprocessing instead of subprocess.Popen([sys.executable, "-m", ...])?
     In a PyInstaller frozen build, `sys.executable` is the launcher binary,
     not a Python interpreter, so the `-m` flag is a no-op. `mp.spawn`
@@ -82,7 +89,6 @@ Warning:
 
 from __future__ import annotations
 
-import logging
 import multiprocessing as mp
 import os
 import platform
@@ -94,8 +100,10 @@ from typing import Any, Dict, Optional, Union
 
 from src.engines.base_chat_server_engine import BaseChatServerEngine
 from src.engines._mlx_vlm_server_runner import run_mlx_vlm_server
+from src.engines import mlx_child_log as child_log
 from src.core.logging import logger
 from src.core.exceptions import (
+    EngineException,
     FileSystemException,
     HardwareException,
 )
@@ -116,10 +124,24 @@ class MLX_Engine(BaseChatServerEngine):
     # gemma4 module and generates cleanly, so its entry was removed.
     KNOWN_BROKEN = frozenset()
 
+    # Where the spawn stored the child's own log file, on the process object.
+    # The llama-cpp engines keep their drainer the same way, and for the same
+    # reason: the lifetime is the child's.
+    _CHILD_LOG_ATTR = "erudi_child_log_path"
+
+    # When this child was spawned. Ports are reused and a crashed child keeps
+    # its file, so this is what tells one spawn's rolled output from the dead
+    # predecessor's -- see `mlx_child_log.read_child_log_tail`.
+    _CHILD_LOG_STARTED_ATTR = "erudi_child_log_started_at"
+
+    # How much of the tail a crash message quotes. mlx-vlm's startup banner and
+    # per-request lines are long; the reason it died is in the last lines.
+    _CHILD_OUTPUT_TAIL_CHARS = child_log.DEFAULT_TAIL_CHARS
+
     # ======================= SUBPROCESS HTTP SERVER (mlx_vlm.server) =======================
     #
     # Inference goes through a subprocess `mlx_vlm.server` (OpenAI-compatible HTTP),
-    # spawned via `multiprocessing.Process(target=run_mlx_vlm_server, args=([argv],))`.
+    # spawned via `mp.Process(target=run_mlx_vlm_server, args=(argv, log_path))`.
     # mlx-vlm is a superset of mlx-lm: it serves plain text models through the same
     # endpoint, carries its own tool-calling parser (no mlx_lm.server EOS-flush drop,
     # so agentic tool use works on Apple Silicon), and accepts image input. The
@@ -230,7 +252,7 @@ class MLX_Engine(BaseChatServerEngine):
         try:
             from mlx_vlm.tool_parsers import _infer_tool_parser
         except Exception:
-            logging.warning(
+            logger.warning(
                 f"[MLX_Engine] wire tool detection unavailable (mlx_vlm import failed) "
                 f"for {llm_local_path}"
             )
@@ -238,7 +260,7 @@ class MLX_Engine(BaseChatServerEngine):
         try:
             tokenizer = cls._load_capability_tokenizer(llm_local_path)
         except Exception:
-            logging.warning(
+            logger.warning(
                 f"[MLX_Engine] wire tool detection: could not load a tokenizer "
                 f"for {llm_local_path}"
             )
@@ -247,18 +269,18 @@ class MLX_Engine(BaseChatServerEngine):
             template = getattr(tokenizer, "chat_template", None)
             parser = _infer_tool_parser(template)
         except Exception:
-            logging.warning(
+            logger.warning(
                 f"[MLX_Engine] wire tool detection: parser inference failed "
                 f"for {llm_local_path}"
             )
             return None
         if parser is None:
-            logging.info(
+            logger.info(
                 f"[MLX_Engine] wire tools NOT verified for {llm_local_path}: "
                 f"chat template matches no mlx-vlm tool parser"
             )
             return False
-        logging.info(
+        logger.info(
             f"[MLX_Engine] wire tools verified for {llm_local_path}: "
             f"mlx-vlm inferred parser {parser}"
         )
@@ -280,8 +302,14 @@ class MLX_Engine(BaseChatServerEngine):
             model_dir = cls._resolve_model_artifact(llm_local_path)
             config = json.loads((model_dir / "config.json").read_text(encoding="utf-8"))
             return config_declares_vision(config)
-        except Exception:
-            logging.warning(f"[MLX_Engine] vision detection failed for {llm_local_path}")
+        except Exception as exc:
+            # Permissive fallback (the model stays usable, vision unverified):
+            # a WARNING, with what went wrong -- an absent config and a corrupt
+            # one are the same verdict here but not the same defect.
+            logger.warning(
+                f"[MLX_Engine] vision detection failed for {llm_local_path}: "
+                f"{type(exc).__name__}: {exc}"
+            )
             return None
 
     @classmethod
@@ -311,6 +339,22 @@ class MLX_Engine(BaseChatServerEngine):
         # route it registers, `/health` included, so `_probe_ready` sends it
         # from the handle on both probe stages.
         api_key = secrets.token_urlsafe(32)
+        # Before the roll below, so a file the PREVIOUS child on this port left
+        # behind is older than this mark and cannot be read as ours.
+        started_at = time.time()
+        # The child captures its own output into this file (an mp.Process has
+        # no pipe to drain); the path is resolved HERE because a frozen child
+        # re-executes the binary with uninitialized runtime paths. Best
+        # effort: a log directory we cannot write costs the tail, not the
+        # model.
+        try:
+            log_path: Optional[str] = str(child_log.prepare_child_log(port))
+        except OSError as exc:
+            logger.warning(
+                f"[MLX_Engine] Cannot capture the {cls._server_name} child's output "
+                f"on port {port}: {type(exc).__name__}: {exc}"
+            )
+            log_path = None
         argv = [
             "mlx_vlm.server",
             "--model",
@@ -339,11 +383,32 @@ class MLX_Engine(BaseChatServerEngine):
             "--api-key",
             api_key,
         ]
-        proc = mp.Process(target=run_mlx_vlm_server, args=(argv,), daemon=False)
-        proc.start()
+        proc = mp.Process(target=run_mlx_vlm_server, args=(argv, log_path), daemon=False)
+        try:
+            proc.start()
+        except Exception as exc:
+            # Spawning can fail before the child exists at all: a process or
+            # file-descriptor limit, a sandbox that refuses the fork, a
+            # freeze whose bootstrap cannot re-exec the binary. Named here,
+            # because a bare OSError from start() says nothing about what was
+            # being spawned -- the same reason the llama-server Popen is
+            # wrapped in base_llama_cpp_engine.py.
+            raise EngineException(
+                message=(
+                    f"Could not start the {cls._server_name} child for model "
+                    f"{model_path} on port {port}: {exc}"
+                ),
+                trace=f"{type(exc).__name__}: {exc}",
+            ) from exc
+        # Carried on the process object, exactly like the llama-cpp drainer:
+        # its lifetime is then the child's, with no registry to clean up and
+        # no chance of a recycled pid handing out another child's output.
+        if log_path:
+            setattr(proc, cls._CHILD_LOG_ATTR, log_path)
+        setattr(proc, cls._CHILD_LOG_STARTED_ATTR, started_at)
         logger.info(
             f"[MLX_Engine] Spawned mlx_vlm.server child: pid={proc.pid}, "
-            f"port={port}, model={model_path}"
+            f"port={port}, model={model_path}, output={log_path or 'not captured'}"
         )
         return {
             "pid": proc.pid,
@@ -365,6 +430,12 @@ class MLX_Engine(BaseChatServerEngine):
         Accepts `None` (no-op) and `MagicMock`-like proxies for testability.
         Mirrors the bounded-time semantics of cpu_engine.py:226-240, but uses
         `mp.Process` API (`terminate` = SIGTERM, `kill` = SIGKILL).
+
+        This is the ONLY place an mlx-vlm child's exit code is ever recorded,
+        so the level says what happened: `INFO` for an orderly stop (a model
+        swap, the idle reap), `WARNING` when the child had to be SIGKILLed or
+        had already died on its own with a nonzero code -- the two shapes a
+        maintainer wants to see on the Diagnostics page.
         """
         if not proc:
             return
@@ -376,18 +447,62 @@ class MLX_Engine(BaseChatServerEngine):
                     proc.kill()
                     proc.join(timeout=2)
                     outcome = "killed (SIGKILL after SIGTERM timeout)"
+                    degraded = True
                 else:
                     outcome = "terminated (SIGTERM)"
+                    degraded = False
             else:
                 outcome = "already exited"
-            logger.info(
+                exitcode = getattr(proc, "exitcode", None)
+                degraded = isinstance(exitcode, int) and exitcode != 0
+            record = logger.warning if degraded else logger.info
+            record(
                 f"[MLX_Engine] Child terminated: {outcome}, "
                 f"exitcode={getattr(proc, 'exitcode', None)}"
             )
+            # An orderly stop leaves nothing behind. A child that died on its
+            # own keeps its file: that output is the only account of the
+            # death, and the crash report is read after this call.
+            path = cls._child_log_path_of(proc)
+            if path is not None and not degraded:
+                child_log.discard_child_log(path)
         except Exception:
             # Best-effort cleanup; never let teardown errors mask the real
             # failure that triggered termination in the first place.
             pass
+
+    @classmethod
+    def _child_log_path_of(cls, proc: Any) -> Optional[str]:
+        """The file this child captured its output into, when there is one.
+
+        Defensive about the type: `MagicMock` proxies answer any attribute
+        with another mock, and a path that is not a string would turn a crash
+        report into a second crash.
+        """
+        path = getattr(proc, cls._CHILD_LOG_ATTR, None) if proc is not None else None
+        return path if isinstance(path, str) and path else None
+
+    @classmethod
+    def _read_child_output(cls, proc: Any) -> str:
+        """Tail of the child's own stdout+stderr file (#361 for llama-server).
+
+        The child redirects its descriptors into a per-spawn file at startup
+        (`mlx_child_log`), because an `mp.Process` gives the parent no pipe to
+        drain. Works whether or not the child has exited, so a probe timeout
+        quotes what the server was doing and a crash quotes why it stopped.
+        """
+        path = cls._child_log_path_of(proc)
+        if path is None:
+            return "No child output was captured."
+        started_at = getattr(proc, cls._CHILD_LOG_STARTED_ATTR, None)
+        tail = child_log.read_child_log_tail(
+            path,
+            max_chars=cls._CHILD_OUTPUT_TAIL_CHARS,
+            since=started_at if isinstance(started_at, (int, float)) else None,
+        )
+        if not tail:
+            return "The child produced no output."
+        return f"Child output (last {len(tail)} chars, from {path}):\n{tail}"
 
     @classmethod
     def _proc_is_alive(cls, proc: Any) -> bool:
@@ -557,7 +672,7 @@ class MLX_Engine(BaseChatServerEngine):
             return None
 
         except Exception as e:
-            logging.warning(f"Failed to detect Apple Silicon chip: {e}")
+            logger.warning(f"Failed to detect Apple Silicon chip: {e}")
             return None
 
     @classmethod
@@ -571,7 +686,8 @@ class MLX_Engine(BaseChatServerEngine):
         try:
             import torch
         except ImportError as e:
-            logging.warning(f"Optional hardware detection dependency missing: {e}")
+            logger.warning(f"Optional hardware detection dependency missing: {e}")
+            return False
 
         try:
             return torch.backends.mps.is_available()
@@ -615,7 +731,7 @@ class MLX_Engine(BaseChatServerEngine):
                 import psutil
                 import cpuinfo
             except ImportError as e:
-                logging.warning(f"Optional hardware detection dependency missing: {e}")
+                logger.warning(f"Optional hardware detection dependency missing: {e}")
 
             # Detect chip model
             chip_model = cls._detect_apple_silicon_chip()
@@ -698,13 +814,13 @@ class MLX_Engine(BaseChatServerEngine):
                 "timestamp": time.time(),
             }
 
-            logging.info(
+            logger.info(
                 f"MLX hardware detected: {chip_model}, {gpu_cores} GPU cores, {total_memory_gb:.1f}GB unified memory"
             )
             return hardware_info
 
         except Exception as e:
-            logging.exception(f"MLX hardware detection failed: {e}")
+            logger.exception(f"MLX hardware detection failed: {e}")
             raise HardwareException("Failed to detect Apple Silicon hardware", trace=str(e))
 
     @classmethod
@@ -729,7 +845,7 @@ class MLX_Engine(BaseChatServerEngine):
             ...     print("MPS device ready")
         """
         if not cls._mps_available():
-            logging.warning("MPS not available, skipping GPU warm-up")
+            logger.warning("MPS not available, skipping GPU warm-up")
             return False
 
         try:
@@ -737,9 +853,9 @@ class MLX_Engine(BaseChatServerEngine):
             try:
                 import torch
             except ImportError as e:
-                logging.warning(f"Optional hardware detection dependency missing: {e}")
+                logger.warning(f"Optional hardware detection dependency missing: {e}")
 
-            logging.info(f"Warming up MPS device for {duration_seconds}s...")
+            logger.info(f"Warming up MPS device for {duration_seconds}s...")
             start_time = time.time()
 
             # Create tensors on MPS device
@@ -755,11 +871,11 @@ class MLX_Engine(BaseChatServerEngine):
                 # Small sleep to prevent CPU overload
                 time.sleep(0.05)
 
-            logging.info("MPS warm-up completed successfully")
+            logger.info("MPS warm-up completed successfully")
             return True
 
         except Exception as e:
-            logging.exception(f"MPS warm-up failed: {e}")
+            logger.exception(f"MPS warm-up failed: {e}")
             return False
 
     @classmethod
@@ -920,13 +1036,13 @@ class MLX_Engine(BaseChatServerEngine):
                 "performance_breakdown": performance_breakdown,
             }
 
-            logging.info(
+            logger.info(
                 f"Performance evaluation: Inference={inference_score:.1f}/100 ({inference_label})"
             )
             return eval_result
 
         except Exception as e:
-            logging.exception(f"Performance evaluation failed: {e}")
+            logger.exception(f"Performance evaluation failed: {e}")
             raise HardwareException("Failed to evaluate Apple Silicon performance", trace=str(e))
 
     @classmethod

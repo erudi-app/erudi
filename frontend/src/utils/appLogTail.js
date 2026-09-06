@@ -122,6 +122,28 @@ export function parseAppLogRecords(text, limit = DEFAULT_LIMIT) {
  * @returns {string} Decoded window.
  */
 export function readTailSync(filePath, maxBytes = DEFAULT_TAIL_BYTES) {
+  try {
+    return readTailStrict(filePath, maxBytes);
+  } catch {
+    // A missing, locked or rotating log is not an error here: the caller shows
+    // what it can. `readTailStrict` is for the caller that must say so.
+    return "";
+  }
+}
+
+/**
+ * Same window as {@link readTailSync}, but a read that fails throws.
+ *
+ * The difference matters exactly once: the Diagnostics panel must not show
+ * "no warning or error recorded" — the words that tell someone all is well —
+ * when the truth is that the log could not be read at all.
+ *
+ * @param {string} filePath - Absolute path to read.
+ * @param {number} maxBytes - Size of the window.
+ * @returns {string} Decoded window.
+ * @throws {Error} Whatever `fs` raised.
+ */
+export function readTailStrict(filePath, maxBytes = DEFAULT_TAIL_BYTES) {
   let handle = null;
   try {
     const { size } = fs.statSync(filePath);
@@ -135,10 +157,6 @@ export function readTailSync(filePath, maxBytes = DEFAULT_TAIL_BYTES) {
     if (start === 0) return text;
     const cut = text.indexOf("\n");
     return cut === -1 ? "" : text.slice(cut + 1);
-  } catch {
-    // A missing, locked or rotating log is not an error here: the panel shows
-    // what it can and says the rest is unavailable.
-    return "";
   } finally {
     if (handle !== null) {
       try {
@@ -158,4 +176,26 @@ export function readTailSync(filePath, maxBytes = DEFAULT_TAIL_BYTES) {
  */
 export function readAppLogTail(filePath, limit = DEFAULT_LIMIT) {
   return parseAppLogRecords(readTailSync(filePath), limit);
+}
+
+/**
+ * The same records, plus whether the log could be read at all.
+ *
+ * This is the shape the `diagnostics:appLogTail` IPC answers with. An empty
+ * list and an unreadable file are two different facts, and the panel shows a
+ * reassuring "no warning or error recorded" for the first: answering `[]` for
+ * both made a failed read look like a healthy app.
+ *
+ * @param {string} filePath - Absolute path to `erudi-backend.log`.
+ * @param {number} limit - Maximum records to return.
+ * @returns {{ok: boolean, records: Array, reason?: string}} `ok` is false only
+ *   when the file could not be read; a readable file with no levelled record
+ *   is `{ok: true, records: []}`.
+ */
+export function readAppLogTailResult(filePath, limit = DEFAULT_LIMIT) {
+  try {
+    return { ok: true, records: parseAppLogRecords(readTailStrict(filePath), limit) };
+  } catch (error) {
+    return { ok: false, records: [], reason: String(error?.message ?? error) };
+  }
 }

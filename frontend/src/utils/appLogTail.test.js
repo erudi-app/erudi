@@ -16,6 +16,7 @@ import {
   parseAppLogRecords,
   readTailSync,
   readAppLogTail,
+  readAppLogTailResult,
   MAX_MESSAGE_CHARS,
 } from "./appLogTail";
 
@@ -152,5 +153,41 @@ describe("readAppLogTail", () => {
 
   it("returns nothing for a missing file", () => {
     expect(readAppLogTail(join(dir, "nope.log"))).toEqual([]);
+  });
+});
+
+/**
+ * The IPC answers `{ok, records}` because "nothing was recorded" and "the log
+ * could not be read" are different facts, and the panel shows a reassuring
+ * check mark for the first one.
+ */
+describe("readAppLogTailResult", () => {
+  it("reports a readable log with its records", () => {
+    const file = join(dir, "app.log");
+    writeFileSync(file, [line("App ready."), line("Backend stdout: [ERROR] boom"), ""].join("\n"));
+
+    const result = readAppLogTailResult(file);
+
+    expect(result.ok).toBe(true);
+    expect(result.records.map((r) => r.level)).toEqual(["ERROR"]);
+  });
+
+  it("reports an empty log as readable, not as a failure", () => {
+    const file = join(dir, "app.log");
+    writeFileSync(file, "");
+
+    expect(readAppLogTailResult(file)).toEqual({ ok: true, records: [] });
+  });
+
+  it("reports a log it could not read, with the reason", () => {
+    const result = readAppLogTailResult(join(dir, "nope.log"));
+
+    expect(result.ok).toBe(false);
+    expect(result.records).toEqual([]);
+    expect(result.reason).toMatch(/nope\.log/);
+  });
+
+  it("reports a directory in place of the log as a failure", () => {
+    expect(readAppLogTailResult(dir).ok).toBe(false);
   });
 });

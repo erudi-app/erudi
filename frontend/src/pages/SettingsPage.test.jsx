@@ -244,6 +244,82 @@ describe("SettingsPage inference engine", () => {
   });
 });
 
+/**
+ * One failure, one record. The settings hook logs the failed PUT where the
+ * request is made; the page adding its own turned every failed write into two
+ * entries on the Diagnostics page, reading as two defects. What the page does
+ * own is the restart, whose failure means something else entirely.
+ */
+describe("SettingsPage — how a failure is reported", () => {
+  let errors;
+
+  beforeEach(() => {
+    errors = vi.spyOn(console, "error").mockImplementation(() => {});
+  });
+
+  afterEach(() => {
+    errors.mockRestore();
+  });
+
+  const messages = () => errors.mock.calls.map((call) => String(call[0]));
+
+  it("leaves a failed setting to its single owner, the hook", async () => {
+    putMock.mockRejectedValue(new Error("backend is down"));
+    renderPage();
+    const select = await screen.findByLabelText("Inference engine");
+
+    fireEvent.change(select, { target: { value: "cpu" } });
+
+    await waitFor(() => expect(putMock).toHaveBeenCalled());
+    await waitFor(() => expect(messages().length).toBe(1));
+    expect(messages()[0]).toMatch(/user settings/i);
+  });
+
+  it("does not restart the backend for a preference that was not saved", async () => {
+    putMock.mockRejectedValue(new Error("backend is down"));
+    window.backendAPI = { restartBackend: vi.fn().mockResolvedValue(undefined) };
+    renderPage();
+    const select = await screen.findByLabelText("Inference engine");
+
+    fireEvent.change(select, { target: { value: "cpu" } });
+
+    await waitFor(() => expect(putMock).toHaveBeenCalled());
+    expect(window.backendAPI.restartBackend).not.toHaveBeenCalled();
+    delete window.backendAPI;
+  });
+
+  it("reports a failed restart as a failed restart, not as a failed setting", async () => {
+    window.backendAPI = {
+      restartBackend: vi.fn().mockRejectedValue(new Error("spawn refused")),
+    };
+    renderPage();
+    const select = await screen.findByLabelText("Inference engine");
+
+    fireEvent.change(select, { target: { value: "cpu" } });
+
+    await waitFor(() => expect(window.backendAPI.restartBackend).toHaveBeenCalled());
+    await waitFor(() => expect(messages().length).toBe(1));
+    expect(messages()[0]).toMatch(/restart/i);
+    // The choice IS saved: saying "failed setting" sends people to the wrong
+    // place entirely.
+    expect(messages()[0]).toMatch(/saved/i);
+    delete window.backendAPI;
+  });
+
+  it("only tells main about an automatic-update choice that persisted", async () => {
+    putMock.mockRejectedValue(new Error("backend is down"));
+    window.updaterAPI = { setAutoUpdateEnabled: vi.fn() };
+    renderPage();
+    const toggle = await screen.findByLabelText("Automatic updates");
+
+    fireEvent.click(toggle);
+
+    await waitFor(() => expect(putMock).toHaveBeenCalled());
+    expect(window.updaterAPI.setAutoUpdateEnabled).not.toHaveBeenCalled();
+    expect(messages().length).toBe(1);
+  });
+});
+
 describe("SettingsPage", () => {
   it("renders the sidebar", () => {
     renderPage();

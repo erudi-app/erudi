@@ -240,3 +240,56 @@ class TestKbModeLogging:
         assert any(
             "Turn mode: agentic KB" in r.message and "kb_id=7" in r.message for r in caplog.records
         )
+
+
+# ============ Every record goes through the project logger ============
+
+
+@pytest.mark.unit
+class TestNoRootLoggerCalls:
+    """``logging.info(...)`` on the ROOT logger is not how this app logs.
+
+    The root logger carries a bridge into ``backend.log`` so that another
+    LIBRARY's warnings are not lost (``RootFileBridge``), but it is a floor
+    for code we do not own, not a second way to log:
+
+    * it keeps ``WARNING`` and above, so a root ``INFO`` -- the lifecycle
+      records the app writes on purpose -- disappears entirely, and
+    * the root logger's own level is ``WARNING``, so those calls are dropped
+      before any handler sees them.
+
+    Records written there also lose the ``erudi`` name the readers key on.
+    This scan is the enforcement: every log call in ``src/`` goes through a
+    ``logger`` obtained from ``src.core.logging``.
+    """
+
+    LOG_METHODS = {"debug", "info", "warning", "error", "exception", "critical", "log"}
+
+    def _root_log_calls(self) -> list[str]:
+        import ast
+        from pathlib import Path
+
+        src = Path(__file__).resolve().parents[1] / "src"
+        offenders: list[str] = []
+        for path in sorted(src.rglob("*.py")):
+            tree = ast.parse(path.read_text(encoding="utf-8"), filename=str(path))
+            for node in ast.walk(tree):
+                if not isinstance(node, ast.Call):
+                    continue
+                func = node.func
+                if (
+                    isinstance(func, ast.Attribute)
+                    and func.attr in self.LOG_METHODS
+                    and isinstance(func.value, ast.Name)
+                    and func.value.id == "logging"
+                ):
+                    where = f"{path.relative_to(src.parent)}:{node.lineno}"
+                    offenders.append(f"{where} logging.{func.attr}")
+        return offenders
+
+    def test_no_module_logs_through_the_root_logger(self):
+        offenders = self._root_log_calls()
+        assert not offenders, (
+            "these records never reach backend.log -- use "
+            "`from src.core.logging import logger`:\n" + "\n".join(offenders)
+        )

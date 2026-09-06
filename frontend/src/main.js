@@ -18,7 +18,7 @@ const { classifyStderrLine } = require("./utils/backendStderr");
 const { shouldRetrySpawn } = require("./utils/backendRetry");
 const { buildBackendSpawnOptions, buildBackendEnv } = require("./utils/backendSpawn");
 const { gracefulShutdown } = require("./utils/backendShutdown");
-const { readAppLogTail } = require("./utils/appLogTail");
+const { readAppLogTailResult } = require("./utils/appLogTail");
 const { describeProcessGone, formatMainRecord } = require("./utils/mainLog");
 const { createBackendStartTracker, requestStop } = require("./utils/backendStartTracker");
 
@@ -839,14 +839,18 @@ ipcMain.handle("app:getInfo", () => ({
 
 // Last WARNING/ERROR records of the app log, parsed by the same rules the
 // backend applies to its own file (src/utils/appLogTail.js).
+//
+// Answers `{ok, records}`, never a bare list: a log that could not be read and
+// a log with nothing in it are different facts, and the panel says "no warning
+// or error recorded" for the second. Reporting the first as the second told
+// the user all was well precisely when the app could not tell.
 ipcMain.handle("diagnostics:appLogTail", (_event, limit) => {
-  try {
-    const count = Number.isInteger(limit) && limit > 0 && limit <= 500 ? limit : undefined;
-    return readAppLogTail(logFile, count);
-  } catch (error) {
-    logWarn("Could not read the app log tail for the Diagnostics panel", error);
-    return [];
+  const count = Number.isInteger(limit) && limit > 0 && limit <= 500 ? limit : undefined;
+  const result = readAppLogTailResult(logFile, count);
+  if (!result.ok) {
+    logWarn(`Could not read the app log tail for the Diagnostics panel: ${result.reason}`);
   }
+  return result;
 });
 
 /**

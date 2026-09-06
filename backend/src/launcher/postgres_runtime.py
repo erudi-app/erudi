@@ -135,6 +135,97 @@ _pg_server_mod.pg_ctl = _console_isolated(_pg_server_mod.pg_ctl)
 _pg_server_mod.initdb = _console_isolated(_pg_server_mod.initdb)
 
 
+# pgserver starts the postmaster with ``pg_ctl -l <pgdata>/log``
+# (postgres_server.py:41,159), and `logging_collector` stays off, so the
+# server's ENTIRE stderr -- WAL replay progress, a corrupt page, "could not
+# write: No space left on device", the FATAL that stopped the boot -- is that
+# one file. It is the only account of why the database did not come up: our
+# own records say what WE asked for, never what Postgres answered.
+POSTMASTER_LOG_NAME = "log"
+
+# Lines quoted from it, and a hard cap on the text, so one runaway line cannot
+# dominate the record the Diagnostics page shows.
+POSTMASTER_LOG_TAIL_LINES = 40
+POSTMASTER_LOG_TAIL_CHARS = 4000
+
+# Nothing rotates that file: it grows for the life of the cluster. Read a
+# window from its end rather than the whole thing -- quoting 40 lines must not
+# load megabytes at the moment the app is already failing to start.
+POSTMASTER_LOG_WINDOW_BYTES = 64 * 1024
+
+# ``PASSWORD '<literal>'`` in any statement PostgreSQL echoed into its log.
+# `log_min_error_statement` defaults to ERROR, so a REFUSED
+# ``ALTER ROLE ... PASSWORD '<clear>'`` (see `_enforce_password_auth`) is
+# written there verbatim -- and this file is quoted into backend.log, the
+# Diagnostics page, and whatever a user pastes into a public issue. That
+# statement is silenced at the source; this is the second layer, because a
+# password must not depend on one setting being right.
+_LOGGED_PASSWORD = re.compile(
+    r"(?i)\bPASSWORD\s+('(?:[^']|'')*'|\"(?:[^\"]|\"\")*\")",
+)
+
+
+def _redact_passwords(text: str) -> str:
+    """Replace every ``PASSWORD '<literal>'`` value with a marker."""
+    return _LOGGED_PASSWORD.sub("PASSWORD '[redacted]'", text)
+
+
+def postmaster_log_tail(data_dir: Path | str, max_lines: int = POSTMASTER_LOG_TAIL_LINES) -> str:
+    """The embedded postmaster's own last lines, or ``""`` when it wrote none.
+
+    Reads a bounded window from the end of the file (the log is unbounded),
+    drops the partial line that window starts on, and redacts any password
+    literal PostgreSQL echoed from a failing statement.
+
+    Decoded defensively: Postgres writes its messages in the server encoding
+    and in the operating system's language, so a byte that is not UTF-8 must
+    cost a character, never the whole diagnostic. Never raises -- an absent or
+    unreadable file simply has nothing to say.
+    """
+    log_file = Path(data_dir) / POSTMASTER_LOG_NAME
+    try:
+        size = log_file.stat().st_size
+        start = max(0, size - POSTMASTER_LOG_WINDOW_BYTES)
+        with log_file.open("rb") as handle:
+            if start:
+                handle.seek(start)
+            raw = handle.read(POSTMASTER_LOG_WINDOW_BYTES)
+    except OSError:
+        return ""
+    text = raw.decode("utf-8", errors="replace")
+    if start:
+        # The window landed mid-line; that fragment belongs to a line whose
+        # beginning was not read.
+        _, _, text = text.partition("\n")
+    lines = [line for line in text.splitlines() if line.strip()]
+    tail = _redact_passwords("\n".join(lines[-max_lines:]))
+    return tail[-POSTMASTER_LOG_TAIL_CHARS:] if len(tail) > POSTMASTER_LOG_TAIL_CHARS else tail
+
+
+def _attach_postmaster_log(exc: BaseException, data_dir: Path) -> None:
+    """Carry the postmaster's last words along with the exception.
+
+    A note (PEP 678) rather than a new exception: the failure paths propagate
+    ``subprocess.TimeoutExpired`` and ``AssertionError`` on purpose (the
+    watchdog and the launcher recognise them), and a note travels inside the
+    traceback the lifespan already writes to ``backend.log`` at ERROR. The
+    cause therefore reaches the Diagnostics page with the failure it explains,
+    the same way a dead inference child's output does.
+    """
+    tail = postmaster_log_tail(data_dir)
+    log_file = Path(data_dir) / POSTMASTER_LOG_NAME
+    note = (
+        f"Embedded PostgreSQL log ({log_file}):\n{tail}"
+        if tail
+        else f"The embedded PostgreSQL log ({log_file}) is empty or unreadable."
+    )
+    try:
+        exc.add_note(note)
+    except Exception:
+        # A diagnostic must never be what turns a failure into a crash.
+        pass
+
+
 def _prune_stale_handle_pids(data_dir: Path) -> None:
     """Drop dead pids from pgserver's per-cluster refcount registry.
 
@@ -174,7 +265,11 @@ def _recover_corrupt_pgdata(data_dir: Path) -> None:
         return  # a real, initialized cluster — never touch it
     try:
         entries = list(data_dir.iterdir())
-    except OSError:
+    except OSError as exc:
+        # Unreadable data dir: initdb is about to fail on the same directory,
+        # and this is the first and only hint of why (a permissions change, a
+        # dismounted volume, a synced folder gone read-only).
+        logger.warning(f"Could not inspect the Postgres data dir {data_dir}: {exc}")
         return
     if not entries:
         return  # empty — pgserver will initdb into it cleanly
@@ -323,12 +418,17 @@ def _connect_admin_rekeying(admin_uri: str, data_dir: Path) -> psycopg.Connectio
     except psycopg.OperationalError as exc:
         if not _is_password_failure(exc):
             raise
+        refusal = exc
     hba_file = data_dir / "pg_hba.conf"
     _write_pg_hba(hba_file, _relax_pg_hba(hba_file.read_text(encoding="utf-8")))
     _pg_server_mod.pg_ctl(["reload"], pgdata=data_dir)
+    # `exc_info` explicitly (the except block is over, so `True` would find
+    # nothing): the postmaster's own refusal is what says WHICH role and rule
+    # rejected us, and this is the only record of a recovery nobody asked for.
     logger.warning(
         "Embedded PostgreSQL refused the cluster password (password file regenerated?); "
-        "re-keying the cluster with the new secret"
+        "re-keying the cluster with the new secret",
+        exc_info=refusal,
     )
     return psycopg.connect(admin_uri, autocommit=True)
 
@@ -351,11 +451,25 @@ def _enforce_password_auth(admin_uri: str, data_dir: Path, password: str) -> Non
         # scram-sha-256 is the default since PostgreSQL 14 (bundled: 16); pin
         # it for the session anyway so the stored verifier can never be md5.
         conn.execute("SET password_encryption = 'scram-sha-256'")
-        conn.execute(
-            sql.SQL("ALTER ROLE {} PASSWORD {}").format(
-                sql.Identifier(ROLE_NAME), sql.Literal(password)
+        # `log_min_error_statement` defaults to ERROR, which makes PostgreSQL
+        # echo the statement that failed into its own log -- and the next
+        # statement is the only one in this app that carries a secret in
+        # clear. That log is read back on a failed start and quoted into
+        # backend.log and the Diagnostics page, so a refused ALTER ROLE would
+        # publish the cluster password. Silenced for this session only (the
+        # connection is closed a few lines below) and restored right after, so
+        # nothing else stops being logged. `SET`, not `SET LOCAL`: the
+        # connection is autocommit, where a LOCAL setting dies with the
+        # implicit transaction of the very statement that set it.
+        conn.execute("SET log_min_error_statement = 'panic'")
+        try:
+            conn.execute(
+                sql.SQL("ALTER ROLE {} PASSWORD {}").format(
+                    sql.Identifier(ROLE_NAME), sql.Literal(password)
+                )
             )
-        )
+        finally:
+            conn.execute("RESET log_min_error_statement")
         hba_file = data_dir / "pg_hba.conf"
         before = hba_file.read_text(encoding="utf-8")
         after = harden_pg_hba(before)
@@ -432,12 +546,16 @@ def _get_server_with_recovery(data_dir: Path):
     """
     try:
         return pgserver.get_server(str(data_dir))
-    except (subprocess.TimeoutExpired, AssertionError):
+    except (subprocess.TimeoutExpired, AssertionError) as exc:
+        # With the exception: `TimeoutExpired` and `AssertionError` are two
+        # different stories about the same symptom, and only the traceback
+        # says which one this was.
         logger.warning(
             "pgserver reported the postmaster not ready yet (pg_ctl's "
             "hardcoded 10s timeout, or its no-wait already-running fast "
             "path); it is likely still WAL crash-recovering in the "
-            "background - waiting for it to finish before retrying"
+            "background - waiting for it to finish before retrying",
+            exc_info=exc,
         )
         if _wait_for_postmaster_ready(data_dir, RECOVERY_WAIT_SECONDS):
             # pgserver caches the instance in _instances BEFORE starting the
@@ -459,32 +577,44 @@ def start_postgres(data_dir: Path | str) -> PostgresHandle:
 
     Idempotent: safe to call on an already-initialized data dir or while the
     cluster is already running (pgserver refcounts users of the data dir).
+
+    Every failure below -- the postmaster that never came up, an admin
+    connection refused, a database or an extension that could not be created
+    -- leaves with the postmaster's own last lines attached
+    (:func:`_attach_postmaster_log`), because the reason is in the server's
+    log and nowhere else.
     """
     data_dir = Path(data_dir)
-    data_dir.mkdir(parents=True, exist_ok=True)
-    _prune_stale_handle_pids(data_dir)
-    _recover_corrupt_pgdata(data_dir)
+    try:
+        data_dir.mkdir(parents=True, exist_ok=True)
+        _prune_stale_handle_pids(data_dir)
+        _recover_corrupt_pgdata(data_dir)
 
-    server = _get_server_with_recovery(data_dir)
-    # After initdb (the secret file must not pre-exist in PGDATA) and before
-    # any other connection: the URLs handed out below all carry the password.
-    password = _ensure_cluster_password(data_dir)
-    admin_uri = _uri_with_password(server.get_uri(), password)
-    _enforce_password_auth(admin_uri, data_dir, password)
+        server = _get_server_with_recovery(data_dir)
+        # After initdb (the secret file must not pre-exist in PGDATA) and before
+        # any other connection: the URLs handed out below all carry the password.
+        password = _ensure_cluster_password(data_dir)
+        admin_uri = _uri_with_password(server.get_uri(), password)
+        _enforce_password_auth(admin_uri, data_dir, password)
 
-    # CREATE DATABASE has no IF NOT EXISTS → guard on pg_database.
-    # DB_NAME is an internal constant, never user input.
-    with psycopg.connect(admin_uri, autocommit=True) as conn:
-        exists = conn.execute("SELECT 1 FROM pg_database WHERE datname = %s", (DB_NAME,)).fetchone()
-        if not exists:
-            conn.execute(f'CREATE DATABASE "{DB_NAME}"')
+        # CREATE DATABASE has no IF NOT EXISTS → guard on pg_database.
+        # DB_NAME is an internal constant, never user input.
+        with psycopg.connect(admin_uri, autocommit=True) as conn:
+            exists = conn.execute(
+                "SELECT 1 FROM pg_database WHERE datname = %s", (DB_NAME,)
+            ).fetchone()
+            if not exists:
+                conn.execute(f'CREATE DATABASE "{DB_NAME}"')
 
-    psycopg_url = _uri_for_db(admin_uri, DB_NAME)
+        psycopg_url = _uri_for_db(admin_uri, DB_NAME)
 
-    # pgvector extensions are per-database → create inside `erudi`, not the
-    # admin DB probed above.
-    with psycopg.connect(psycopg_url, autocommit=True) as conn:
-        conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+        # pgvector extensions are per-database → create inside `erudi`, not the
+        # admin DB probed above.
+        with psycopg.connect(psycopg_url, autocommit=True) as conn:
+            conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
+    except BaseException as exc:
+        _attach_postmaster_log(exc, data_dir)
+        raise
 
     sqlalchemy_url = psycopg_url.replace("postgresql://", "postgresql+psycopg://", 1)
     logger.info(f"Embedded PostgreSQL ready (data_dir={data_dir})")
@@ -498,5 +628,9 @@ def start_postgres(data_dir: Path | str) -> PostgresHandle:
 
 def stop_postgres(handle: PostgresHandle) -> None:
     """Stop the embedded cluster explicitly (deterministic shutdown order)."""
+    # Announced before the call: pgserver's cleanup() stops the postmaster
+    # (pg_ctl stop, then a kill), and a shutdown that hangs or throws there
+    # would otherwise leave the log ending on the last thing the app did.
+    logger.info(f"Stopping the embedded PostgreSQL cluster (data_dir={handle.data_dir})")
     handle.server.cleanup()
     logger.info("Embedded PostgreSQL stopped")

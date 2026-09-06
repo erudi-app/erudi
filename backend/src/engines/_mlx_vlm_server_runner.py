@@ -43,9 +43,21 @@ static evidence for the first drop was incomplete:
     (`embed_tokens.as_linear`, no `lm_head` parameter), so the gemma3_text
     quantized-head blind spot has no analogue there.
 
+Output capture
+--------------
+An `mp.Process` gives the parent no pipe to drain, so the child captures
+itself: `run_mlx_vlm_server` redirects its stdout and stderr into the
+per-spawn file the parent resolved (`mlx_child_log`) before anything else
+runs. mlx-vlm's `logging.basicConfig`, uvicorn's handlers and every native
+write from mlx/Metal then land there, and `MLX_Engine._read_child_output`
+quotes its tail in a crash report -- the same diagnostic `llama-server` gets
+from its drainer. The three patches below report a failure to apply into that
+same file: each compensates for a defect the user meets head-on, so an
+mlx-vlm bump that moves what they patch must not pass unnoticed.
+
 Contract
 --------
-`run_mlx_vlm_server(argv)` replaces `sys.argv` with the supplied list and calls
+`run_mlx_vlm_server(argv, log_path)` replaces `sys.argv` with the supplied list and calls
 the real `mlx_vlm.server.cli.main()`. The first element of `argv` is the
 conventional program name; the rest are the CLI flags that mlx-vlm's argparse
 expects (`--model`, `--host`, `--port`, `--log-level`, ...). `main()` parses
@@ -58,7 +70,9 @@ exiting only when the child process is terminated by the parent.
 
 from __future__ import annotations
 
-from typing import List
+from typing import List, Optional
+
+from src.engines.mlx_child_log import child_warning, redirect_stdio_to
 
 
 def _patch_gemma3_tied_lm_head_quant() -> bool:
@@ -309,13 +323,18 @@ def _import_mlx_vlm_server_main():
     return _main
 
 
-def run_mlx_vlm_server(argv: List[str]) -> None:
+def run_mlx_vlm_server(argv: List[str], log_path: Optional[str] = None) -> None:
     """Child-process entry: set `sys.argv = argv` then run `mlx_vlm.server`'s main().
 
     Args:
         argv: Full argument vector. `argv[0]` is the program name
             (conventionally ``"mlx_vlm.server"``); the rest are CLI flags
             consumed by argparse inside `main()`.
+        log_path: File this child sends its stdout and stderr to, resolved by
+            the parent (only the parent knows the log directory -- see
+            ``mlx_child_log.prepare_child_log``). ``None`` leaves the
+            descriptors inherited from the backend, which is what unit tests
+            and any caller without a writable log directory get.
 
     Returns:
         None. This call blocks for the lifetime of the HTTP server.
@@ -323,16 +342,48 @@ def run_mlx_vlm_server(argv: List[str]) -> None:
     import sys
 
     sys.argv = list(argv)
+    if log_path:
+        try:
+            # Before anything else: mlx-vlm's `logging.basicConfig` and
+            # uvicorn's handlers bind to whatever `sys.stderr` is when they
+            # run, and a model that fails to load does so during `main()`.
+            redirect_stdio_to(log_path)
+        except Exception as exc:
+            # Capture is a diagnostic, never a precondition. A child that
+            # cannot open its log file still serves inference; it just has no
+            # last words. Reported on the inherited stderr, which the Electron
+            # main process writes to the app log.
+            print(f"[WARNING] mlx-vlm child output capture disabled: {exc}", file=sys.stderr)
     # Applied in-child before the server loads any model so quantized
     # tied-embeddings Gemma3 checkpoints (270m/1b text-only via the native
     # gemma3_text route, and multimodal gemma3) load cleanly on 0.6.13 (#273).
-    _patch_gemma3_tied_lm_head_quant()
+    # Each patch fixes a defect the user would otherwise meet head-on, so a
+    # patch that did not apply is recorded rather than silently tolerated --
+    # the record lands in the captured file, which the parent quotes.
+    _record_unapplied_patch("_patch_gemma3_tied_lm_head_quant", _patch_gemma3_tied_lm_head_quant())
     # Register Gemma's <end_of_turn> as a stop token so generation halts at the
     # end of the answer instead of streaming the literal token + garbage (#249).
-    _patch_gemma_end_of_turn_stop()
+    _record_unapplied_patch("_patch_gemma_end_of_turn_stop", _patch_gemma_end_of_turn_stop())
     # Applied in-child before the server starts so every ThinkingStreamState it
     # builds keeps reasoning inline in delta.content (#90) — see the patch's
     # docstring for why 0.6.13 offers no configuration path for this.
-    _patch_inline_thinking()
+    _record_unapplied_patch("_patch_inline_thinking", _patch_inline_thinking())
     main = _import_mlx_vlm_server_main()
     main()
+
+
+def _record_unapplied_patch(name: str, applied: bool) -> None:
+    """Warn (in the child's own log) when a monkeypatch could not be applied.
+
+    Every patch above compensates for a pinned-mlx-vlm defect with a visible
+    consequence: a quantized Gemma3 checkpoint that refuses to load, a Gemma
+    answer that runs past ``<end_of_turn>``, reasoning routed to a field
+    ChatOpenAI drops. Each returns ``False`` when its target module or class
+    is not where it expects it -- an mlx-vlm bump, typically. Unrecorded, that
+    ships a degraded product with nothing to explain it.
+    """
+    if not applied:
+        child_warning(
+            f"{name} did not apply: the mlx-vlm internals it patches moved. "
+            f"The defect it works around is back."
+        )

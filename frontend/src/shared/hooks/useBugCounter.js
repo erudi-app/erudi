@@ -24,7 +24,9 @@ import { getSessionErrors, subscribeSessionErrors } from "../../utils/errorCaptu
  *   - The backend log and the app log only change between polls of >= 60s
  *     (`pollMs`) -- one `apiClient.get("/diagnostics/")` (same call
  *     DiagnosticsPanel makes, so an unreachable backend degrades exactly the
- *     way that page already does) and one `diagnosticsAPI.appLogTail` call.
+ *     way that page already does) and one `diagnosticsAPI.appLogTail` call,
+ *     which answers `{ok, records}` -- a log it could not read leaves the
+ *     count as it was instead of clearing the badge.
  *     This is the "gentle poll" the feature asks for; ConnectionStatus
  *     already polls health every 15s for a different purpose, so this stays
  *     independent and much slower.
@@ -76,13 +78,19 @@ export default function useBugCounter({ pollMs = BUG_COUNTER_POLL_MS } = {}) {
       // set this flag and would still count once, like any other failure.
       const [backendResult, logResult] = await Promise.allSettled([
         apiClient.get("/diagnostics/", { silentFailure: true }),
-        window.diagnosticsAPI?.appLogTail?.(APP_LOG_TAIL_LIMIT) ?? Promise.resolve([]),
+        window.diagnosticsAPI?.appLogTail?.(APP_LOG_TAIL_LIMIT) ??
+          Promise.resolve({ ok: true, records: [] }),
       ]);
 
       if (cancelled) return;
       if (backendResult.status === "fulfilled") setBackend(backendResult.value);
-      if (logResult.status === "fulfilled" && Array.isArray(logResult.value)) {
-        setAppLog(logResult.value);
+      // `{ok, records}`: a log that could not be read leaves the previous
+      // count standing rather than dropping the badge to zero, which would
+      // read as "the errors went away". The panel is where the failure is
+      // reported; a silent badge must not invent good news.
+      const logValue = logResult.status === "fulfilled" ? logResult.value : null;
+      if (logValue?.ok && Array.isArray(logValue.records)) {
+        setAppLog(logValue.records);
       }
     }
 
