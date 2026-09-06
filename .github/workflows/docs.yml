@@ -1,4 +1,7 @@
-# Publishes the mkdocs site to GitHub Pages (https://erudi-app.github.io/erudi/).
+# Publishes the documentation site to GitHub Pages (https://erudi-app.github.io/erudi/).
+# Built with Zensical (docs/requirements.txt) reading mkdocs.yml directly —
+# Material for MkDocs reaches end of life on 2026-11-05 and Zensical is its
+# maintained successor.
 #
 # Pull requests only build — with --strict, so a broken link or a mkdocstrings
 # path that no longer exists fails the check instead of shipping a 404. The
@@ -46,7 +49,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r docs/requirements.txt
       - name: Build (strict)
-        run: mkdocs build --strict --site-dir site
+        run: zensical build --strict
       - uses: actions/upload-pages-artifact@v5
         if: github.event_name != 'pull_request'
         with:

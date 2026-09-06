@@ -23,8 +23,8 @@ types-python-dateutil==2.9.0.20241206
 
 # Docs
 mkdocs==1.6.1
-mkdocs-material==9.7.7  # keep in sync with docs/requirements.txt
-mkdocstrings[python]==0.27.0
+zensical==0.0.59  # keep in sync with docs/requirements.txt
+mkdocstrings[python]==1.0.6
 pyyaml>=6.0
 
 # Builds
