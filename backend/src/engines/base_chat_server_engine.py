@@ -367,7 +367,7 @@ class BaseChatServerEngine(BaseEngine):
                     f"last err: {last_err}; {cls._describe_child(proc, port)}, "
                     f"model {model_field}). If another process bound the port "
                     f"between pick and spawn, the request may be hitting the wrong "
-                    f"server — check `lsof -i :{port}`."
+                    f"server - check `lsof -i :{port}`."
                 ),
                 trace=cls._read_child_output(proc) if proc is not None else None,
             )
