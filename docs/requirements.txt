@@ -4,7 +4,7 @@ mkdocs==1.6.1
 mkdocs-material==9.7.7
 mkdocstrings[python]==0.27.0
 mkdocstrings-python==1.13.0
-griffe==2.0.2
+griffe==2.2.0
 # 11.0 fixes the ReDoS in the caret/tilde/betterem/magiclink inline processors.
 # mkdocs-material caps pymdown-extensions per minor, so it has to move with it.
 pymdown-extensions==11.0.2
