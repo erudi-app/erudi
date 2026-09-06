@@ -56,7 +56,9 @@ export default function App() {
       const unsubscribe = bridge.onBackendEvent((evt) => {
         if (cancelled) return;
         if (isStartupError(evt)) {
-          log.warn("Backend startup error", evt);
+          // The main process wrote the ERROR record for this event (it owns
+          // the backend's lifecycle); this side only notes the screen change.
+          log.info("Backend startup error received; showing the error screen", evt);
           setBackendError(describeBackendError(evt));
           return;
         }
@@ -81,7 +83,10 @@ export default function App() {
           if (info.port) setBackendPort(info.port);
           if (info.ready) setIsBackendReady(true);
         })
-        .catch(() => {});
+        .catch((error) => {
+          // The events still arrive; only the catch-up read is lost.
+          log.warn("Could not read the backend state from the main process", error);
+        });
 
       return () => {
         cancelled = true;
@@ -129,7 +134,9 @@ export default function App() {
     setIsBackendReady(false);
     setPhase(null);
     // Actually re-spawn the backend (not just re-poll) when the bridge exists.
-    window.backendAPI?.restartBackend?.().catch(() => {});
+    window.backendAPI?.restartBackend?.().catch((error) => {
+      log.error("The backend restart the user asked for did not happen", error);
+    });
     setRetryNonce((n) => n + 1);
   }, []);
 

@@ -106,6 +106,11 @@ export function KnowledgeBaseProvider({ children }) {
           if (data.status === "completed") {
             callbacksRef.current.onComplete?.();
           } else {
+            // The backend logged the traceback under this job; this side
+            // records that the assistant the user asked for was not built.
+            log.error(`Knowledge base job failed for assistant ${assistantId}`, {
+              error: data.error_message || null,
+            });
             const errorMsg =
               data.error_message || t("knowledgeBase:creation.errors.failedUnexpectedly");
             setErrorMessage(errorMsg);
@@ -113,7 +118,7 @@ export function KnowledgeBaseProvider({ children }) {
           }
         }
       } catch (err) {
-        log.error("Status check error:", err);
+        log.error(`Status check failed for assistant ${assistantId}; polling stopped`, err);
         clearInterval(intervalRef.current);
         setIsCreating(false);
         setShowSpinner(false);

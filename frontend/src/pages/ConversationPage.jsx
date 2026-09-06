@@ -137,7 +137,13 @@ export default function ConversationPage() {
           const paths = [...m.content.matchAll(/\[image_path:([^\]]+)\]/g)].map((x) => x[1]);
           const images = (
             await Promise.all(
-              paths.map((p) => window.fsAPI.readImageAsDataURL(p).catch(() => null))
+              paths.map((p) =>
+                window.fsAPI.readImageAsDataURL(p).catch((error) => {
+                  // The message renders without this image: degraded, named.
+                  log.warn(`Could not reload the image attachment ${p}`, error);
+                  return null;
+                })
+              )
             )
           ).filter(Boolean);
           return { ...m, images };
@@ -398,6 +404,7 @@ export default function ConversationPage() {
           let answerText = ""; // accumulated answer bubble text
           const traceEvents = []; // ordered thinking / tool_call / tool_result
           let gotFirstEvent = false;
+          let parseWarned = false;
           let sawError = false;
           let sawDone = false;
 
@@ -431,6 +438,12 @@ export default function ConversationPage() {
                 // (getDisplayContent / bubbleClass detect the sentinel substring).
                 // The backend error text is already sentinel-prefixed.
                 sawError = true;
+                // The backend has the traceback; this side records that the
+                // turn failed, on which conversation, and the engine's reason.
+                log.error(`Generation failed for conversation ${id}`, {
+                  code: evt.code || null,
+                  raw: evt.raw || null,
+                });
                 answerText = evt.text || `${ERROR_SENTINEL} ${t("chat:errors.generationFailed")}`;
                 // The engine identified WHY it failed (a card the bundled CUDA
                 // build cannot drive, a driver too old, VRAM exhaustion): raise
@@ -458,7 +471,12 @@ export default function ConversationPage() {
             try {
               evt = JSON.parse(line);
             } catch (parseError) {
-              log.error("Failed to parse NDJSON line", parseError);
+              // The line is skipped and the stream goes on: degraded, once
+              // per turn so a garbled stream cannot flood the log.
+              if (!parseWarned) {
+                parseWarned = true;
+                log.warn(`Skipping an unparseable stream line (${line.length} chars)`, parseError);
+              }
               return;
             }
             handleEvent(evt);

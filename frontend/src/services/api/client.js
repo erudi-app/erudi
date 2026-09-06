@@ -120,13 +120,31 @@ export async function tracedFetch(url, options = {}) {
     return response;
   } catch (error) {
     if (isNetworkLevelError(error)) reportNetworkFailure();
-    log.error("api.failure", {
+    // A caller that aborted its own request (the arena's Stop button) got
+    // what it asked for: that is an INFO, not a failure.
+    const write = error?.name === "AbortError" ? log.info : log.error;
+    write("api.failure", {
       rid,
+      method: options.method || "GET",
+      path: pathForLog(url),
       error: error.message,
       duration_ms: Date.now() - startedAt,
     });
     throw error;
   }
+}
+
+/**
+ * The level of a request that ended with `status`, per docs/logging.md: a
+ * 5xx (or no status at all: network, timeout) is a failure the user needed
+ * and did not get; a 4xx is the backend refusing something that legitimately
+ * is not there or not allowed, which the backend logs itself at INFO and
+ * which must not fill the Diagnostics panel from this side either.
+ * @param {number|undefined} status - HTTP status, or undefined when none came back.
+ * @returns {"error"|"info"} The logger method to use.
+ */
+function failureLevel(status) {
+  return typeof status === "number" && status < 500 ? "info" : "error";
 }
 
 /**
@@ -282,7 +300,13 @@ class APIClient {
       if (error.name === "AbortError") {
         const timeoutError = new Error(i18n.t("errors:api.timeout"));
         timeoutError.code = "TIMEOUT";
-        log.error("api.failure", { rid, error: "Request timeout", duration_ms: durationMs });
+        log.error("api.failure", {
+          rid,
+          method,
+          path: endpoint,
+          error: "Request timeout",
+          duration_ms: durationMs,
+        });
         throw timeoutError;
       }
 
@@ -301,8 +325,10 @@ class APIClient {
       // network is fine, and reporting each attempt would flicker the pill.
       if (isNetworkLevelError(error)) reportNetworkFailure();
 
-      log.error("api.failure", {
+      log[failureLevel(error.status)]("api.failure", {
         rid,
+        method,
+        path: endpoint,
         error: error.message,
         status: error.status,
         duration_ms: durationMs,

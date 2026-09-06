@@ -64,7 +64,8 @@ export default function ChatPage() {
         const data = await apiClient.get("/user_settings/");
         if (!cancelled) setWebSearch(Boolean(data?.web_search_enabled));
       } catch (error) {
-        log.error("Failed to fetch the global web search default", error);
+        // The backend applies its own default: degraded, not failed.
+        log.warn("Failed to fetch the global web search default", error);
       }
     })();
     return () => {
@@ -112,7 +113,7 @@ export default function ChatPage() {
         }
       })
       .catch((err) => {
-        log.error("Erreur lors du fetch des modèles:", err);
+        log.error("Failed to fetch the local models", err);
         setErrorMessage(
           t("chat:errors.loadModels", { error: err.message || t("chat:errors.network") })
         );

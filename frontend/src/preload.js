@@ -14,12 +14,11 @@ contextBridge.exposeInMainWorld("electron", {
   },
   getFilePath: (file) => {
     if (webUtils?.getPathForFile) {
-      const path = webUtils.getPathForFile(file);
-      console.log("webUtils.getPathForFile returned:", path);
-      return path;
+      return webUtils.getPathForFile(file);
     }
-
-    console.log("Falling back to file.path:", file.path);
+    // Older Electron: the renderer-side property. Not logged here -- the
+    // preload has no bridge to the log file, and the path lands in the
+    // renderer's own records anyway.
     return file.path;
   },
 });

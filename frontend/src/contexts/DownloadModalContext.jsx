@@ -196,6 +196,11 @@ export function DownloadModalProvider({ children }) {
             scheduleDismiss(CANCELLED_DISMISS_MS);
             callbacksRef.current.onError?.(DOWNLOAD_CANCELLED);
           } else {
+            // The backend logged the traceback under this job; this side
+            // records that the download the user started did not happen.
+            log.error(`Download job ${id} failed with status "${data.status}"`, {
+              error: data.error_message || null,
+            });
             const errorMsg = data.error_message || t("downloads:errors.failedUnexpectedly");
             setErrorMessage(errorMsg);
             revealPanel();
@@ -203,7 +208,7 @@ export function DownloadModalProvider({ children }) {
           }
         }
       } catch (err) {
-        log.error("Status check error:", err);
+        log.error(`Status check failed for download job ${id}; polling stopped`, err);
         clearInterval(intervalRef.current);
         setIsDownloading(false);
         const errorMsg = t("downloads:errors.pollFailed");
