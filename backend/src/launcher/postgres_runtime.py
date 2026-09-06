@@ -278,6 +278,61 @@ def harden_pg_hba(text: str) -> str:
     return _TRUSTED_HOST_RULE.sub(r"\g<rule>scram-sha-256\g<rest>", text)
 
 
+# The same rule shape with the hardened method: the inverse of the above.
+_SCRAM_HOST_RULE = re.compile(
+    r"^(?P<rule>[ \t]*host\w*[ \t]+\S+[ \t]+\S+[ \t]+\S+[ \t]+)scram-sha-256(?P<rest>[ \t]*(?:#.*)?)$",
+    re.MULTILINE,
+)
+
+
+def _relax_pg_hba(text: str) -> str:
+    """Inverse of ``harden_pg_hba``: ``scram-sha-256`` host rules back to ``trust``.
+
+    Only used to re-key a cluster whose password file is gone (see
+    ``_connect_admin_rekeying``); same byte-for-byte guarantees, idempotent.
+    """
+    return _SCRAM_HOST_RULE.sub(r"\g<rule>trust\g<rest>", text)
+
+
+def _write_pg_hba(hba_file: Path, text: str) -> None:
+    """Atomic replace so the postmaster never reads a half-written file."""
+    tmp_file = hba_file.with_name(hba_file.name + ".erudi-tmp")
+    tmp_file.write_text(text, encoding="utf-8")
+    os.replace(tmp_file, hba_file)
+
+
+def _is_password_failure(exc: psycopg.OperationalError) -> bool:
+    return "password authentication failed" in str(exc)
+
+
+def _connect_admin_rekeying(admin_uri: str, data_dir: Path) -> psycopg.Connection:
+    """Open the admin connection, re-keying the cluster if its secret was lost.
+
+    On Windows (host connections only) a ``pg_hba.conf`` already on SCRAM plus
+    a deleted ``erudi_db_password`` means the freshly generated secret is one
+    the role does not have: every connection is refused and, without this,
+    every later boot too. When the FIRST connection fails on password
+    authentication, the host rules are relaxed back to ``trust``, the
+    postmaster is reloaded through ``pg_ctl reload`` (no connection is
+    possible yet), and the connection is retried once -- the caller then sets
+    the new password and re-hardens the file as on any boot. Any other
+    ``OperationalError``, and a second password failure, propagate.
+    """
+    try:
+        return psycopg.connect(admin_uri, autocommit=True)
+    except psycopg.OperationalError as exc:
+        if not _is_password_failure(exc):
+            raise
+    hba_file = data_dir / "pg_hba.conf"
+    _write_pg_hba(hba_file, _relax_pg_hba(hba_file.read_text(encoding="utf-8")))
+    _pg_server_mod.pg_ctl(["reload"], pgdata=data_dir)
+    logger.warning(
+        "Embedded PostgreSQL refused the cluster password (password file regenerated?); "
+        "re-keying the cluster with the new secret"
+    )
+    return psycopg.connect(admin_uri, autocommit=True)
+
+
 def _enforce_password_auth(admin_uri: str, data_dir: Path, password: str) -> None:
     """Set the role password and require it on every host connection.
 
@@ -289,9 +344,10 @@ def _enforce_password_auth(admin_uri: str, data_dir: Path, password: str) -> Non
     is idempotent; the ``pg_hba.conf`` rewrite only touches the file (and
     reloads the postmaster) when a ``trust`` host rule is still present, which
     also covers a cluster left running by a previous process (pgserver
-    refcounts it): ``pg_reload_conf()`` is enough, no restart.
+    refcounts it): ``pg_reload_conf()`` is enough, no restart. A lost password
+    file is recovered by ``_connect_admin_rekeying`` before any of this runs.
     """
-    with psycopg.connect(admin_uri, autocommit=True) as conn:
+    with _connect_admin_rekeying(admin_uri, data_dir) as conn:
         # scram-sha-256 is the default since PostgreSQL 14 (bundled: 16); pin
         # it for the session anyway so the stored verifier can never be md5.
         conn.execute("SET password_encryption = 'scram-sha-256'")
@@ -304,9 +360,7 @@ def _enforce_password_auth(admin_uri: str, data_dir: Path, password: str) -> Non
         before = hba_file.read_text(encoding="utf-8")
         after = harden_pg_hba(before)
         if after != before:
-            tmp_file = hba_file.with_name(hba_file.name + ".erudi-tmp")
-            tmp_file.write_text(after, encoding="utf-8")
-            os.replace(tmp_file, hba_file)
+            _write_pg_hba(hba_file, after)
             conn.execute("SELECT pg_reload_conf()")
             logger.info("Embedded PostgreSQL host connections now require the cluster password")
 

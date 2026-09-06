@@ -23,8 +23,10 @@ from src.launcher import postgres_runtime
 from src.launcher.postgres_runtime import (
     PASSWORD_FILE_NAME,
     _console_isolated,
+    _enforce_password_auth,
     _ensure_cluster_password,
     _recover_corrupt_pgdata,
+    _relax_pg_hba,
     _uri_with_password,
     harden_pg_hba,
     start_postgres,
@@ -235,6 +237,134 @@ class TestPgHbaHardening:
     def test_other_methods_are_left_alone(self):
         text_in = "host all all 127.0.0.1/32 md5\nhost all all ::1/128 reject\n"
         assert harden_pg_hba(text_in) == text_in
+
+
+class TestPgHbaRelax:
+    """Pure inverse of harden_pg_hba, used to re-key a cluster whose secret is lost."""
+
+    @pytest.mark.unit
+    def test_relax_is_the_inverse_of_harden(self):
+        hardened = harden_pg_hba(TestPgHbaHardening.INITDB_TRUST)
+        assert _relax_pg_hba(hardened) == TestPgHbaHardening.INITDB_TRUST
+
+    @pytest.mark.unit
+    def test_relax_leaves_local_rules_and_other_methods_alone(self):
+        text_in = "local all all scram-sha-256\nhost all all 127.0.0.1/32 md5 # keep\n"
+        assert _relax_pg_hba(text_in) == text_in
+
+    @pytest.mark.unit
+    def test_relax_is_idempotent(self):
+        assert _relax_pg_hba(TestPgHbaHardening.INITDB_TRUST) == TestPgHbaHardening.INITDB_TRUST
+
+
+class _FakeConn:
+    """Records executed statements; usable as a context manager like psycopg."""
+
+    def __init__(self, log):
+        self._log = log
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *exc):
+        return False
+
+    def execute(self, query, *args):
+        self._log.append(("sql", str(query)))
+        return self
+
+
+class TestLostPasswordRecovery:
+    """A deleted erudi_db_password on a SCRAM-hardened cluster must self-heal.
+
+    Pure-unit with mocks: psycopg.connect raises the auth failure once, then the
+    normal path runs. The expected sequence is relax pg_hba -> pg_ctl reload
+    (no connection possible) -> reconnect -> ALTER ROLE -> re-harden -> reload.
+    """
+
+    AUTH_ERROR = 'connection failed: FATAL:  password authentication failed for user "postgres"'
+
+    @pytest.fixture
+    def hardened_dir(self, tmp_path):
+        (tmp_path / "pg_hba.conf").write_text(harden_pg_hba(TestPgHbaHardening.INITDB_TRUST))
+        return tmp_path
+
+    @pytest.mark.unit
+    def test_auth_failure_relaxes_reloads_and_rekeys(self, hardened_dir, monkeypatch):
+        events = []
+        attempts = {"n": 0}
+
+        def fake_connect(uri, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise psycopg.OperationalError(self.AUTH_ERROR)
+            # By the time the retry connects, the file must already be trust.
+            hba = (hardened_dir / "pg_hba.conf").read_text()
+            events.append(("connect", "trust" in hba and "scram-sha-256" not in hba))
+            return _FakeConn(events)
+
+        def fake_pg_ctl(args, pgdata=None, **kwargs):
+            events.append(("pg_ctl", tuple(args), pgdata))
+            return ""
+
+        monkeypatch.setattr(postgres_runtime.psycopg, "connect", fake_connect)
+        monkeypatch.setattr(postgres_runtime._pg_server_mod, "pg_ctl", fake_pg_ctl)
+
+        _enforce_password_auth(
+            "postgresql://postgres:new@127.0.0.1:1/postgres", hardened_dir, "new"
+        )
+
+        assert attempts["n"] == 2
+        # relax -> reload without a connection -> reconnect on trust
+        assert events[0] == ("pg_ctl", ("reload",), hardened_dir)
+        assert events[1] == ("connect", True)
+        sql_text = " ".join(event[1] for event in events if event[0] == "sql")
+        assert "ALTER ROLE" in sql_text and "pg_reload_conf" in sql_text
+        # ...and the normal path re-hardened the file afterwards.
+        final = (hardened_dir / "pg_hba.conf").read_text()
+        assert final == harden_pg_hba(TestPgHbaHardening.INITDB_TRUST)
+
+    @pytest.mark.unit
+    def test_other_operational_errors_are_not_retried(self, hardened_dir, monkeypatch):
+        attempts = {"n": 0}
+
+        def fake_connect(uri, **kwargs):
+            attempts["n"] += 1
+            raise psycopg.OperationalError("connection refused")
+
+        reloads = []
+        monkeypatch.setattr(postgres_runtime.psycopg, "connect", fake_connect)
+        monkeypatch.setattr(
+            postgres_runtime._pg_server_mod, "pg_ctl", lambda *a, **k: reloads.append(a)
+        )
+
+        with pytest.raises(psycopg.OperationalError, match="connection refused"):
+            _enforce_password_auth(
+                "postgresql://postgres:x@127.0.0.1:1/postgres", hardened_dir, "x"
+            )
+
+        assert attempts["n"] == 1
+        assert reloads == []
+        # The file was not touched either.
+        assert (hardened_dir / "pg_hba.conf").read_text() == harden_pg_hba(
+            TestPgHbaHardening.INITDB_TRUST
+        )
+
+    @pytest.mark.unit
+    def test_auth_failure_that_persists_after_rekey_propagates(self, hardened_dir, monkeypatch):
+        # One recovery attempt only: if trust + reload still does not let us
+        # in, the error is real and must surface.
+        monkeypatch.setattr(
+            postgres_runtime.psycopg,
+            "connect",
+            lambda uri, **kw: (_ for _ in ()).throw(psycopg.OperationalError(self.AUTH_ERROR)),
+        )
+        monkeypatch.setattr(postgres_runtime._pg_server_mod, "pg_ctl", lambda *a, **k: "")
+
+        with pytest.raises(psycopg.OperationalError, match="password authentication failed"):
+            _enforce_password_auth(
+                "postgresql://postgres:x@127.0.0.1:1/postgres", hardened_dir, "x"
+            )
 
 
 class TestClusterPasswordFile:
