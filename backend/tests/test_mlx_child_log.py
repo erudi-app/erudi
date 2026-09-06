@@ -83,6 +83,42 @@ class TestRollChildLog:
         assert not second.exists()
         assert Path(f"{first}.1").read_text(encoding="utf-8") == "previous spawn"
 
+    def test_rolling_a_file_that_is_open_copies_and_truncates(self, tmp_path):
+        """The live file is the one the child writes through descriptors 1 and
+        2. Renaming it works on POSIX and is REFUSED on Windows, where a file
+        with open handles cannot be renamed -- which disabled the size cap
+        there silently. `copytruncate` needs no rename, so the same code holds
+        the cap on every platform.
+        """
+        path = tmp_path / "mlx-child-27300.log"
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            os.write(fd, b"the first megabyte\n")
+
+            child_log.roll_open_log(path, fd=fd)
+
+            assert Path(f"{path}.1").read_text(encoding="utf-8") == "the first megabyte\n"
+            assert path.stat().st_size == 0  # same file, same descriptor
+            # And the descriptor still writes into it, at the new end (O_APPEND
+            # means no sparse hole where the old bytes were).
+            os.write(fd, b"and then some more\n")
+            assert path.read_text(encoding="utf-8") == "and then some more\n"
+        finally:
+            os.close(fd)
+
+    def test_rolling_an_open_file_keeps_only_the_last_two(self, tmp_path):
+        path = tmp_path / "mlx-child-27300.log"
+        fd = os.open(str(path), os.O_WRONLY | os.O_CREAT | os.O_APPEND, 0o600)
+        try:
+            for text in (b"one\n", b"two\n", b"three\n"):
+                os.write(fd, text)
+                child_log.roll_open_log(path, fd=fd)
+        finally:
+            os.close(fd)
+
+        assert Path(f"{path}.1").read_text(encoding="utf-8") == "three\n"
+        assert not Path(f"{path}.2").exists()
+
     def test_discard_removes_every_file_of_that_port(self, tmp_path):
         path = tmp_path / "mlx-child-27300.log"
         path.write_text("live", encoding="utf-8")

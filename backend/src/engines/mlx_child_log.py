@@ -41,8 +41,10 @@ Layout and lifetime
 One file per spawn, named after the port the child serves
 (``mlx-child-<port>.log`` in the log directory `runtime_paths` resolves). Each
 spawn rolls the previous file to ``.1`` and drops what falls off, so a port
-keeps at most :data:`KEEP_PER_PORT` files; a size guard rolls the same way
-while the child runs, so a chatty server cannot fill the disk. An orderly stop
+keeps at most :data:`KEEP_PER_PORT` files; a size guard keeps the live file
+under :data:`MAX_CHILD_LOG_BYTES` the same way while the child runs -- by
+copying it aside and truncating it, since the child holds it open -- so a
+chatty server cannot fill the disk. An orderly stop
 deletes the files; a child that died on its own keeps them, because that is
 the only account of the death there is.
 
@@ -54,6 +56,7 @@ the pickled argv, and neither `mlx_vlm.server.cli` nor uvicorn ever prints it
 from __future__ import annotations
 
 import os
+import shutil
 import sys
 import threading
 import time
@@ -172,9 +175,13 @@ def read_child_log_tail(
 def _belongs_to_spawn(path: Path, since: Optional[float]) -> bool:
     """Whether ``path`` was last written after the spawn at ``since`` began.
 
-    A rename preserves the modification time, so the file a new spawn rolls
-    aside still carries the dead child's last write -- which is exactly what
-    tells the two apart.
+    That is what tells the two ways a ``.1`` comes to exist apart. A dead
+    child's file is set aside by the next spawn with a rename
+    (:func:`roll_child_log`), and a rename does not touch the modification
+    time, so it still carries that child's last write -- older than the spawn
+    that inherited it. This child's own roll (:func:`roll_open_log`) copies
+    bytes into a new file, so the copy is stamped as it happens -- inside the
+    spawn, and kept.
     """
     if since is None:
         return True
@@ -254,31 +261,57 @@ def _bind_stdio(path: Path) -> None:
     finally:
         os.close(handle)
     # Line buffering: a child killed mid-load must not take its last lines
-    # away in an 8 KiB block buffer. `closefd=False` keeps 1 and 2 alive when
-    # a wrapper is replaced by the next roll.
+    # away in an 8 KiB block buffer. `closefd=False` so these wrappers never
+    # close the descriptors they borrow.
     sys.stdout = open(1, "w", buffering=1, encoding="utf-8", errors="replace", closefd=False)
     sys.stderr = open(2, "w", buffering=1, encoding="utf-8", errors="replace", closefd=False)
 
 
-def _size_guard(path: Path, max_bytes: int, check_interval: float, keep: int) -> None:
-    """Roll ``path`` whenever it outgrows ``max_bytes`` (daemon thread).
+def roll_open_log(path: Union[str, Path], fd: int = 1, keep: int = KEEP_PER_PORT) -> None:
+    """Roll a file the caller is HOLDING OPEN, without renaming it.
 
-    Rolling is a rename plus a fresh open: descriptors 1 and 2 keep writing
-    into the renamed file until they are pointed at the new one, so no line is
-    lost in between.
+    This is what `logrotate` calls ``copytruncate``, and it exists for exactly
+    this situation. The child writes through descriptors 1 and 2; renaming that
+    file works on POSIX but not on Windows, which refuses to rename a file with
+    open handles -- so the rename-and-reopen dance silently disabled the size
+    cap there, and would do the same for any future child using this helper.
+    Copying the bytes aside and truncating through the descriptor that is
+    already bound needs no rename and no second `dup2`, and behaves the same
+    everywhere.
+
+    The trade: a line written between the copy and the truncate is lost. That
+    is `copytruncate`'s known cost and the right one here -- this is a size cap
+    on a diagnostic file, not an audit trail.
+
+    The already-rolled ``.1``, ``.2`` ... files are closed, so those are moved
+    with a plain rename. Truncation goes through ``fd``, which was opened
+    ``O_APPEND``: every later write still lands at the (new) end of the file,
+    with no sparse hole where the old bytes were.
     """
+    path = Path(path)
+    if keep > 1:
+        Path(f"{path}.{keep - 1}").unlink(missing_ok=True)
+        for index in range(keep - 2, 0, -1):
+            source = Path(f"{path}.{index}")
+            if source.exists():
+                os.replace(source, f"{path}.{index + 1}")
+        shutil.copyfile(path, f"{path}.1")
+    os.ftruncate(fd, 0)
+
+
+def _size_guard(path: Path, max_bytes: int, check_interval: float, keep: int) -> None:
+    """Roll ``path`` whenever it outgrows ``max_bytes`` (daemon thread)."""
     while True:
         time.sleep(check_interval)
         try:
             if path.stat().st_size <= max_bytes:
                 continue
-            roll_child_log(path, keep=keep)
-            _bind_stdio(path)
+            roll_open_log(path, fd=1, keep=keep)
         except OSError as exc:
-            # Windows refuses to rename an open file; MLX only ever runs on
-            # Apple Silicon, so this costs the cap and nothing else. Recorded
-            # once and then given up on: retrying every interval would fill
-            # the very file it failed to bound.
+            # The cap is best effort: a file that cannot be copied or truncated
+            # costs the bound and nothing else. Recorded once and then given up
+            # on, because retrying every interval would fill the very file it
+            # failed to bound.
             child_warning(f"child log size cap disabled: {type(exc).__name__}: {exc}")
             return
 

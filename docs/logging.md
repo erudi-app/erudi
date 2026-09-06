@@ -132,8 +132,9 @@ including everything MLX and Metal write from native code, into a file beside
 - One file per spawn, named after the port that child serves. The previous
   spawn's file is kept as `mlx-child-<port>.log.1`; older ones are removed, so
   a port never holds more than two.
-- The live file rolls the same way once it passes 2 MB, so a talkative server
-  cannot fill the disk.
+- Once the live file passes 2 MB it is copied to `.1` and emptied in place, so
+  a talkative server cannot fill the disk. In place, because the child is
+  writing to that file as it happens.
 - Stopping a model — switching to another one, the idle reap, quitting — deletes
   both files. A child that died on its own keeps them: that output is the whole
   account of the death.
