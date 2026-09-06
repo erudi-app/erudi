@@ -23,6 +23,7 @@ import pgserver
 from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from src.core.logging import logger
+from src.core.logutils import truncate_for_log
 from src.core.subprocess_flags import hidden_console_creationflags
 
 # Number of most-recent snapshots to retain; older ones are pruned.
@@ -100,6 +101,21 @@ def backup_database(psycopg_url: str, data_dir: Path | str, label: str) -> Path:
     return dump_path
 
 
+def describe_dump_failure(exc: subprocess.CalledProcessError) -> str:
+    """Why pg_dump failed, in one loggable line, without its command line.
+
+    ``CalledProcessError.__str__`` repeats the whole argv, which carries the
+    ``--dbname`` conninfo: no password (that travels in ``PGPASSWORD``, see
+    :func:`_dump_target`) but a socket path and a user name that say nothing
+    about the failure. What does say something is ``stderr`` -- "could not
+    connect", "No space left on device", "permission denied" -- which the run
+    captures and, until now, threw away.
+    """
+    stderr = (getattr(exc, "stderr", None) or "").strip()
+    reason = stderr.splitlines()[-1] if stderr else "no output on stderr"
+    return f"pg_dump exited {exc.returncode}: {truncate_for_log(reason)}"
+
+
 def _prune(out_dir: Path) -> None:
     dumps = sorted(
         out_dir.glob("erudi-*.dump"),
@@ -109,5 +125,8 @@ def _prune(out_dir: Path) -> None:
     for stale in dumps[KEEP_BACKUPS:]:
         try:
             stale.unlink()
-        except OSError:
-            pass
+        except OSError as exc:
+            # The snapshot itself succeeded, so this is not a failure of the
+            # backup -- but a retention that silently stops retaining fills
+            # the user's disk with dumps nobody asked for.
+            logger.warning(f"Could not remove the stale database snapshot {stale}: {exc}")

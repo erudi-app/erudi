@@ -16,6 +16,8 @@ A fresh (empty) database simply runs ``upgrade head`` from zero.
 
 from __future__ import annotations
 
+import subprocess
+
 from alembic import command
 from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
@@ -24,7 +26,7 @@ from sqlalchemy import create_engine, inspect
 
 from src.core.config import ROOT_DIR
 from src.core.logging import logger
-from src.database.backup import backup_database
+from src.database.backup import backup_database, describe_dump_failure
 from src.launcher.postgres_runtime import PostgresHandle
 
 # The root revision (see alembic/versions/…_baseline_schema.py). A pre-Alembic
@@ -90,9 +92,18 @@ def run_migrations(handle: PostgresHandle) -> None:
         if has_business_tables and current != head:
             try:
                 backup_database(handle.psycopg_url, handle.data_dir, label=current or "unknown")
-            except Exception:
+            except subprocess.CalledProcessError as exc:
                 # A failed snapshot must NOT silently proceed into a (possibly
-                # destructive) migration with no safety net.
+                # destructive) migration with no safety net. pg_dump's own
+                # stderr is the reason; its argv is not, and repeating it (as
+                # `exc_info` would, through CalledProcessError.__str__) puts a
+                # connection string in a file meant to be pasted into an issue.
+                logger.error(
+                    f"Pre-migration backup failed - aborting migration. "
+                    f"{describe_dump_failure(exc)}"
+                )
+                raise
+            except Exception:
                 logger.error("Pre-migration backup failed - aborting migration", exc_info=True)
                 raise
 

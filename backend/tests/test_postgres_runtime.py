@@ -8,11 +8,14 @@ Covers:
   anti-B1 rule (create_tables must not rely on an imported-by-value engine).
 """
 
+import logging
 import platform
 import re
 import stat
 import subprocess
 import sys
+from pathlib import Path
+from types import SimpleNamespace
 
 import psycopg
 import pytest
@@ -325,6 +328,30 @@ class TestLostPasswordRecovery:
         assert final == harden_pg_hba(TestPgHbaHardening.INITDB_TRUST)
 
     @pytest.mark.unit
+    def test_the_rekey_record_carries_the_refusal(self, hardened_dir, monkeypatch, caplog):
+        """A recovery nobody asked for gets one record, and the postmaster's
+        refusal is what names the role and the rule that rejected us."""
+        attempts = {"n": 0}
+
+        def fake_connect(uri, **kwargs):
+            attempts["n"] += 1
+            if attempts["n"] == 1:
+                raise psycopg.OperationalError(self.AUTH_ERROR)
+            return _FakeConn([])
+
+        monkeypatch.setattr(postgres_runtime.psycopg, "connect", fake_connect)
+        monkeypatch.setattr(postgres_runtime._pg_server_mod, "pg_ctl", lambda *a, **k: "")
+
+        with caplog.at_level(logging.WARNING, logger="erudi"):
+            _enforce_password_auth(
+                "postgresql://postgres:new@127.0.0.1:1/postgres", hardened_dir, "new"
+            )
+
+        rekey = [r for r in caplog.records if "re-keying the cluster" in r.getMessage()]
+        assert rekey, "the re-key was not recorded"
+        assert rekey[0].exc_info is not None, "the record does not carry the refusal"
+
+    @pytest.mark.unit
     def test_other_operational_errors_are_not_retried(self, hardened_dir, monkeypatch):
         attempts = {"n": 0}
 
@@ -512,6 +539,115 @@ class TestCorruptPgdataRecovery:
     def test_recover_noop_on_empty_dir(self, tmp_path):
         _recover_corrupt_pgdata(tmp_path)  # must not raise
         assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.unit
+    def test_an_unreadable_data_dir_is_recorded(self, tmp_path, monkeypatch, caplog):
+        """initdb is about to fail on the same directory; this warning is the
+        only hint of why (permissions, a dismounted volume, a synced folder
+        gone read-only)."""
+
+        def _refuse(self):
+            raise PermissionError("[Errno 13] Permission denied")
+
+        monkeypatch.setattr(Path, "iterdir", _refuse)
+        with caplog.at_level(logging.WARNING, logger="erudi"):
+            _recover_corrupt_pgdata(tmp_path)
+        assert any(
+            "Could not inspect the Postgres data dir" in r.getMessage() for r in caplog.records
+        )
+
+
+class TestPostmasterLog:
+    """The postmaster's own words, which nothing used to read.
+
+    pgserver starts the server with ``pg_ctl -l <pgdata>/log`` and leaves
+    `logging_collector` off, so that ONE file holds every line Postgres wrote:
+    WAL replay, a corrupt page, a full disk, the FATAL that stopped the boot.
+    Our records say what Erudi asked for; only this says what Postgres
+    answered.
+    """
+
+    @pytest.mark.unit
+    def test_returns_the_last_lines(self, tmp_path):
+        (tmp_path / "log").write_text(
+            "\n".join(f"LOG:  line {i}" for i in range(200)), encoding="utf-8"
+        )
+
+        tail = postgres_runtime.postmaster_log_tail(tmp_path, max_lines=40)
+
+        assert tail.count("\n") == 39
+        assert "line 199" in tail
+        assert "line 159" not in tail
+
+    @pytest.mark.unit
+    def test_is_empty_when_there_is_no_log(self, tmp_path):
+        assert postgres_runtime.postmaster_log_tail(tmp_path) == ""
+
+    @pytest.mark.unit
+    def test_decodes_defensively(self, tmp_path):
+        """Postgres writes in the server encoding and the OS language: a byte
+        that is not UTF-8 costs a character, never the diagnostic."""
+        (tmp_path / "log").write_bytes(b"FATAL:  base de donn\xe9es corrompue\n")
+
+        tail = postgres_runtime.postmaster_log_tail(tmp_path)
+
+        assert tail.startswith("FATAL:")
+        assert "corrompue" in tail
+
+    @pytest.mark.unit
+    def test_is_bounded(self, tmp_path):
+        (tmp_path / "log").write_text("x" * 50_000, encoding="utf-8")
+        assert len(postgres_runtime.postmaster_log_tail(tmp_path)) <= 4000
+
+    @pytest.mark.unit
+    def test_a_failed_start_carries_the_postmaster_log(self, tmp_path, monkeypatch):
+        """The lifespan writes one ERROR with the traceback; the note travels
+        inside it, so the cause reaches backend.log and the Diagnostics page
+        with the failure it explains."""
+        (tmp_path / "PG_VERSION").write_text("16\n")  # a real cluster, not a half-init
+        (tmp_path / "log").write_text(
+            "LOG:  database system was not properly shut down\n"
+            "FATAL:  could not write to file: No space left on device\n",
+            encoding="utf-8",
+        )
+        boom = subprocess.TimeoutExpired(cmd="pg_ctl", timeout=10)
+        monkeypatch.setattr(
+            postgres_runtime,
+            "_get_server_with_recovery",
+            lambda data_dir: (_ for _ in ()).throw(boom),
+        )
+
+        with pytest.raises(subprocess.TimeoutExpired) as excinfo:
+            start_postgres(tmp_path)
+
+        notes = "\n".join(getattr(excinfo.value, "__notes__", []))
+        assert "No space left on device" in notes
+        assert str(tmp_path / "log") in notes
+
+    @pytest.mark.unit
+    def test_a_failed_start_says_so_even_with_no_postmaster_log(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(
+            postgres_runtime,
+            "_get_server_with_recovery",
+            lambda data_dir: (_ for _ in ()).throw(AssertionError()),
+        )
+
+        with pytest.raises(AssertionError) as excinfo:
+            start_postgres(tmp_path)
+
+        notes = "\n".join(getattr(excinfo.value, "__notes__", []))
+        assert "empty or unreadable" in notes
+
+    @pytest.mark.unit
+    def test_stopping_the_cluster_is_announced_before_it_can_hang(self, caplog):
+        handle = SimpleNamespace(server=SimpleNamespace(cleanup=lambda: None), data_dir="/tmp/pg")
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            stop_postgres(handle)
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("Stopping the embedded PostgreSQL cluster" in m for m in messages)
+        assert any("Embedded PostgreSQL stopped" in m for m in messages)
 
     @pytest.mark.integration
     def test_start_postgres_recovers_from_missing_pg_version(self, tmp_path_factory):

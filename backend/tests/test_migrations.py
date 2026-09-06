@@ -10,11 +10,19 @@ These spin their OWN throwaway pgserver cluster because they mutate the schema
    the baseline's CREATE TABLEs (which would collide) and must keep the data.
 """
 
+import logging
+import subprocess
+
 import pytest
 from alembic import command
 from sqlalchemy import create_engine, inspect, text
 
-from src.database.backup import _dump_target, backup_database, backups_dir_for
+from src.database.backup import (
+    _dump_target,
+    backup_database,
+    backups_dir_for,
+    describe_dump_failure,
+)
 from src.database.core import Base
 from src.database.migrations import (
     BASELINE_REVISION,
@@ -247,6 +255,86 @@ def test_dump_target_keeps_the_password_out_of_the_command_line():
     assert "s3cr-_et" not in conninfo
     assert "dbname=erudi" in conninfo and "host=127.0.0.1" in conninfo and "port=5433" in conninfo
     assert env["PGPASSWORD"] == "s3cr-_et"
+
+
+@pytest.mark.unit
+def test_a_failed_pg_dump_is_described_by_its_stderr(tmp_path):
+    """The run captures stderr and used to throw it away, leaving a record
+    that said a backup failed and nothing about why. Runs the real pg_dump
+    against a port nothing listens on."""
+    with pytest.raises(subprocess.CalledProcessError) as excinfo:
+        backup_database("postgresql://postgres:s3cret@127.0.0.1:1/erudi", tmp_path, label="x")
+
+    described = describe_dump_failure(excinfo.value)
+    assert "pg_dump exited" in described
+    assert "no output on stderr" not in described  # the reason, not a shrug
+    # ...and nothing of the command line, which carries the connection string.
+    assert "s3cret" not in described
+    assert "--dbname" not in described
+
+
+@pytest.mark.unit
+def test_describe_dump_failure_survives_a_silent_pg_dump():
+    exc = subprocess.CalledProcessError(returncode=2, cmd=["pg_dump", "--dbname", "host=/tmp/x"])
+    described = describe_dump_failure(exc)
+    assert "pg_dump exited 2" in described
+    assert "/tmp/x" not in described
+
+
+@pytest.mark.integration
+def test_a_failed_backup_aborts_the_migration_without_logging_the_command(
+    fresh_cluster, monkeypatch, caplog
+):
+    """The abort is the safety net (never migrate with no snapshot); the record
+    of it lands in a file people paste into public issues, so it carries
+    pg_dump's reason and not its argv."""
+    engine = create_engine(fresh_cluster.sqlalchemy_url)
+    try:
+        Base.metadata.create_all(bind=engine)  # a pre-Alembic database
+    finally:
+        engine.dispose()
+
+    failure = subprocess.CalledProcessError(
+        returncode=1,
+        cmd=["pg_dump", "--dbname", "user=postgres host=/tmp/erudi-pg-secret"],
+        stderr="pg_dump: error: connection to server failed: No such file or directory\n",
+    )
+
+    def _fail(*args, **kwargs):
+        raise failure
+
+    monkeypatch.setattr("src.database.migrations.backup_database", _fail)
+
+    with caplog.at_level(logging.ERROR, logger="erudi"):
+        with pytest.raises(subprocess.CalledProcessError):
+            run_migrations(fresh_cluster)
+
+    records = [r for r in caplog.records if "Pre-migration backup failed" in r.getMessage()]
+    assert records, "the aborted migration left no record"
+    text = records[0].getMessage()
+    assert "connection to server failed" in text
+    assert "/tmp/erudi-pg-secret" not in text
+    assert records[0].exc_info is None  # the traceback would repeat the argv
+
+
+@pytest.mark.unit
+def test_pruning_a_snapshot_it_cannot_delete_is_recorded(tmp_path, monkeypatch, caplog):
+    """Retention that silently stops retaining fills the user's disk."""
+    from pathlib import Path as _Path
+
+    from src.database import backup as backup_module
+
+    for index in range(backup_module.KEEP_BACKUPS + 1):
+        (tmp_path / f"erudi-{index}.dump").write_text("x")
+
+    def _refuse(self):
+        raise PermissionError("[Errno 13] Permission denied")
+
+    monkeypatch.setattr(_Path, "unlink", _refuse)
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        backup_module._prune(tmp_path)
+
+    assert any("stale database snapshot" in r.getMessage() for r in caplog.records)
 
 
 @pytest.mark.unit

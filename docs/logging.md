@@ -141,6 +141,22 @@ crashes, fails its readiness probe, or is found dead by a later request — so
 the child's last words appear on the **Diagnostics** page and in a copied
 report, without anyone having to find the file.
 
+## The embedded database's own log
+
+The bundled PostgreSQL writes everything it has to say — WAL replay after an
+unclean shutdown, a corrupt page, a full disk, the `FATAL` that stopped a boot
+— to a single file inside its data directory:
+
+| File | Where |
+|------|-------|
+| `log` | Development: `backend/data/postgres/log` · Packaged app: `<data dir>/postgres/log`, beside the cluster (macOS: `~/Library/Application Support/erudi/backend/prod/data/postgres/`) |
+
+Erudi's own records say what the app asked the cluster to do; that file is the
+only place the server's answer is written. So when starting or joining the
+cluster fails, the backend attaches the last 40 lines of it to the failure —
+they travel inside the single `ERROR` the startup writes to `backend.log`, and
+therefore appear on the **Diagnostics** page and in a copied report.
+
 ## Uncaught errors in the app window
 
 An exception that escapes a React render, an uncaught `window.onerror`, and an
