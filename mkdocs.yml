@@ -1,3 +1,6 @@
+# Built by Zensical (see docs/requirements.txt), not by mkdocs-material.
+# Zensical reads this file natively — `theme.name: material` selects its
+# built-in Material-compatible theme, not the mkdocs-material package.
 site_name: Erudi Documentation
 site_url: https://erudi-app.github.io/erudi/
 repo_url: https://github.com/erudi-app/erudi
