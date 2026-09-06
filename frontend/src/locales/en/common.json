@@ -54,6 +54,8 @@
     "knowledgeBase": "Knowledge Base",
     "settings": "Settings",
     "reportBug": "Report a bug",
+    "reportBugWithCount_one": "Report a bug ({{count}} new error)",
+    "reportBugWithCount_other": "Report a bug ({{count}} new errors)",
     "toggleModelsSidebar": "Toggle models sidebar",
     "toggleChatSidebar": "Toggle chat sidebar"
   },

@@ -54,6 +54,8 @@
     "knowledgeBase": "Base de conocimiento",
     "settings": "Ajustes",
     "reportBug": "Informar de un error",
+    "reportBugWithCount_one": "Informar de un error ({{count}} error nuevo)",
+    "reportBugWithCount_other": "Informar de un error ({{count}} errores nuevos)",
     "toggleModelsSidebar": "Mostrar u ocultar el panel de modelos",
     "toggleChatSidebar": "Mostrar u ocultar el panel de chat"
   },
