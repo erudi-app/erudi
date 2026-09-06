@@ -126,7 +126,7 @@ def parse_records(
 
     # `split("\n")`, never `splitlines()`. A record boundary is a newline and
     # nothing else, but `splitlines()` also breaks on \r, \v, \f, \x1c-\x1e,
-    # \x85,   and   -- any of which can sit inside a logged prompt,
+    # \x85, \u2028 and \u2029 -- any of which can sit inside a logged prompt,
     # because Erudi logs content at INFO deliberately. Splitting there would
     # let the tail of an INFO message be re-read as a fresh record header and
     # promoted into the panel at whatever level it claims, defeating the filter
