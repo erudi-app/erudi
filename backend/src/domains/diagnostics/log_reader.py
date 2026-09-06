@@ -55,7 +55,20 @@ RECORD_RE = re.compile(
 
 
 def read_tail(path: Path, max_bytes: int = DEFAULT_TAIL_BYTES) -> str:
-    """Return at most the last ``max_bytes`` of ``path`` as text.
+    """Return at most the last ``max_bytes`` of ``path`` as newline-normalised text.
+
+    The file is opened in binary so the window can be a byte offset, which means
+    no newline translation happens on the way in. ``logging``'s ``FileHandler``
+    opens in text mode, so on Windows every record really is terminated with
+    CRLF, and every parsed record would otherwise carry a trailing ``\\r`` into
+    the panel and into the text a user pastes into an issue. ``\\r\\n`` is
+    therefore collapsed to ``\\n`` here, so the reader's contract is the same
+    text on every OS.
+
+    A lone ``\\r`` is left alone. No writer we have ends a line with one; a bare
+    carriage return in a log file is progress-bar output captured mid-line, and
+    turning it into a newline would split one record into several and invent
+    continuation lines that were never written.
 
     The first line of the window is dropped when the window does not start at
     the beginning of the file, because a byte offset lands mid-line.
@@ -65,7 +78,12 @@ def read_tail(path: Path, max_bytes: int = DEFAULT_TAIL_BYTES) -> str:
         max_bytes: Size of the window to read from the end of the file.
 
     Returns:
-        str: The decoded window, or "" when the file cannot be read.
+        str: The decoded, newline-normalised window, or "" when the file cannot
+        be read. It is a bound, not a length: the returned string is shorter
+        than ``max_bytes`` whenever the partial first line is dropped, whenever
+        the window contains multi-byte characters, and on Windows by one
+        character per line, because the window is sized in bytes before any of
+        that happens.
     """
     try:
         with open(path, "rb") as handle:
@@ -77,7 +95,7 @@ def read_tail(path: Path, max_bytes: int = DEFAULT_TAIL_BYTES) -> str:
     except OSError:
         return ""
 
-    text = window.decode("utf-8", errors="replace")
+    text = window.decode("utf-8", errors="replace").replace("\r\n", "\n")
     if start > 0:
         # The window began mid-line; that fragment belongs to a record whose
         # header we did not read.
@@ -106,7 +124,21 @@ def parse_records(
     current: Optional[Dict[str, Any]] = None
     keeping = False
 
-    for line in text.splitlines():
+    # `split("\n")`, never `splitlines()`. A record boundary is a newline and
+    # nothing else, but `splitlines()` also breaks on \r, \v, \f, \x1c-\x1e,
+    # \x85,   and   -- any of which can sit inside a logged prompt,
+    # because Erudi logs content at INFO deliberately. Splitting there would
+    # let the tail of an INFO message be re-read as a fresh record header and
+    # promoted into the panel at whatever level it claims, defeating the filter
+    # this module exists to enforce. `read_tail` has already normalised CRLF.
+    lines = text.split("\n")
+    if lines and lines[-1] == "":
+        # A well-formed log file ends with a record terminator, and `split`
+        # turns that final newline into a trailing empty element. It is the
+        # terminator, not a blank line, so it must not become a continuation.
+        lines.pop()
+
+    for line in lines:
         match = RECORD_RE.match(line)
         if match:
             level = match.group("level")

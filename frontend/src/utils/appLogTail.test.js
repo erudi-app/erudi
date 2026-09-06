@@ -103,6 +103,11 @@ describe("parseAppLogRecords", () => {
     expect(record.message.length).toBeLessThanOrEqual(MAX_MESSAGE_CHARS + 32);
   });
 
+  it("treats the file's final newline as a terminator, not a blank line", () => {
+    const [record] = parseAppLogRecords(`${line("Backend stdout: [ERROR] boom")}\n`);
+    expect(record.message).toBe("Backend stdout: [ERROR] boom");
+  });
+
   it("survives null and empty input", () => {
     expect(parseAppLogRecords(null)).toEqual([]);
     expect(parseAppLogRecords("")).toEqual([]);

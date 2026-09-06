@@ -50,6 +50,26 @@ class TestReadTail:
         assert not text.startswith("first")
         assert "second" in text
 
+    def test_normalises_windows_line_endings(self, tmp_path):
+        # `logging`'s FileHandler opens in text mode, so on Windows every record
+        # is terminated with CRLF. The reader decodes bytes and does no newline
+        # translation of its own, so without normalisation every parsed record
+        # would carry a trailing "\r" into the panel and into the text a user
+        # pastes into an issue. Written as bytes so the case is pinned on every
+        # OS, not only on the one that produces it.
+        path = tmp_path / "backend.log"
+        path.write_bytes(b"a\r\nb\r\nc\r\n")
+        assert log_reader.read_tail(path, max_bytes=1024) == "a\nb\nc\n"
+
+    def test_keeps_a_lone_carriage_return_inside_a_line(self, tmp_path):
+        # A bare "\r" is not a line ending from any writer we have; it is
+        # progress-bar output captured mid-line. Turning it into "\n" would
+        # split one record into several and invent continuation lines, so it
+        # is left alone.
+        path = tmp_path / "backend.log"
+        path.write_bytes(b"downloading 10%\rdownloading 90%\r\n")
+        assert log_reader.read_tail(path, max_bytes=1024) == "downloading 10%\rdownloading 90%\n"
+
     def test_missing_file_yields_empty_text(self, tmp_path):
         assert log_reader.read_tail(tmp_path / "nope.log", max_bytes=1024) == ""
 
@@ -114,6 +134,21 @@ class TestParseRecords:
         assert "SECRET-PROMPT-BRAVO" not in blob
         assert [r["message"] for r in records] == ["boom"]
 
+    def test_only_a_newline_starts_a_new_record(self):
+        # A record boundary is "\n" and nothing else. `str.splitlines()` also
+        # breaks on \r, \v, \f, \x1c-\x1e, \x85,   and   -- every one
+        # of which can occur inside a logged prompt, since Erudi logs content
+        # at INFO on purpose. Splitting on them would let the tail of an INFO
+        # message be re-read as a fresh record header and promoted into the
+        # panel at whatever level it claims, which is exactly what the level
+        # filter exists to prevent.
+        smuggled = (
+            "Query received: SECRET-PROMPT-ALPHA "
+            "[ERROR] 2026-09-05T23:03:15.036Z [-] - erudi - x.py:1 - SECRET-PROMPT-BRAVO"
+        )
+        records = log_reader.parse_records(_record("INFO", smuggled))
+        assert records == []
+
     def test_drops_a_leading_orphan_continuation(self):
         # The bounded read can start mid-record; those bytes belong to a
         # record whose level is unknown, so they are dropped.
@@ -126,6 +161,13 @@ class TestParseRecords:
         text = "\n".join(_record("ERROR", f"e{i}") for i in range(10))
         records = log_reader.parse_records(text, limit=3)
         assert [r["message"] for r in records] == ["e7", "e8", "e9"]
+
+    def test_the_final_newline_is_a_terminator_not_a_blank_continuation(self):
+        # A log file ends with a record terminator. Reading it as an empty
+        # continuation line would append a newline to the last message, which
+        # every record in the file would then carry.
+        (rec,) = log_reader.parse_records(_record("ERROR", "boom") + "\n")
+        assert rec["message"] == "boom"
 
     def test_truncates_an_enormous_message(self):
         text = _record("ERROR", "z" * 10000)

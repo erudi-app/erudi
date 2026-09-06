@@ -70,7 +70,19 @@ export function parseAppLogRecords(text, limit = DEFAULT_LIMIT) {
   const records = [];
   let current = null;
 
-  for (const line of String(text ?? "").split("\n")) {
+  // `split("\n")`, never a regex that also breaks on other separators: a
+  // record boundary is a newline and nothing else, and the app log carries
+  // user content. `log()` writes "\n" explicitly and the backend's stdout is
+  // already split on /\r?\n/ and trimmed before it gets here, so this file
+  // never contains CRLF the way the backend's own log does on Windows.
+  const lines = String(text ?? "").split("\n");
+  if (lines.length && lines[lines.length - 1] === "") {
+    // The file's final newline is a terminator, not a blank line; leaving it
+    // in would append a newline to the last record's message.
+    lines.pop();
+  }
+
+  for (const line of lines) {
     const match = RECORD_RE.exec(line);
     if (match) {
       const level = detectLevel(match[2]);
