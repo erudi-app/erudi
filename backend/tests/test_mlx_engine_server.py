@@ -1456,6 +1456,44 @@ class TestSubprocessReal:
         finally:
             MLX_Engine.cleanup()
 
+    def test_real_child_writes_its_own_log_and_never_its_key(self, mlx_test_model_path):
+        """The real mlx-vlm child, with the real argv: what it prints must land
+        in its per-spawn file (that file is the whole crash report), and the
+        `--api-key` it was spawned with must not -- the file is quoted in bug
+        reports, and a leaked key outlives the process that used it."""
+        from src.engines import mlx_child_log
+
+        try:
+            model, _ = MLX_Engine.get_model_and_tokenizer(
+                llm_id="qwen-test",
+                llm_local_path=str(mlx_test_model_path),
+            )
+            proc = model["proc"]
+            log_path = MLX_Engine._child_log_path_of(proc)
+            assert log_path, "the spawn captured no output file"
+            assert Path(log_path).name == f"mlx-child-{model['port']}.log"
+
+            captured = Path(log_path).read_text(encoding="utf-8", errors="replace")
+            assert captured.strip(), "the child wrote nothing to its log"
+            assert model["api_key"] not in captured
+            # And the same file is what a crash report would quote.
+            assert mlx_child_log.read_child_log_tail(log_path)
+            assert model["api_key"] not in MLX_Engine._read_child_output(proc)
+        finally:
+            MLX_Engine.cleanup()
+
+    def test_an_orderly_cleanup_leaves_no_child_log_behind(self, mlx_test_model_path):
+        model, _ = MLX_Engine.get_model_and_tokenizer(
+            llm_id="qwen-test",
+            llm_local_path=str(mlx_test_model_path),
+        )
+        log_path = MLX_Engine._child_log_path_of(model["proc"])
+        assert log_path and Path(log_path).exists()
+
+        MLX_Engine.cleanup()
+
+        assert not Path(log_path).exists()
+
     def test_cleanup_kills_subprocess_and_frees_port(self, mlx_test_model_path):
         model, _ = MLX_Engine.get_model_and_tokenizer(
             llm_id="qwen-test",

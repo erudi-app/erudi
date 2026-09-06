@@ -314,6 +314,7 @@ _hidden_macos = [
     "mlx",
     "mlx_vlm",
     "src.engines._mlx_vlm_server_runner",  # picklable mp.Process target
+    "src.engines.mlx_child_log",  # the child redirects its own stdout/stderr through it
     "mlx_vlm.server",           # uvicorn loads "mlx_vlm.server:app"
 ]
 

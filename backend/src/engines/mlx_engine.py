@@ -32,6 +32,13 @@ Architecture:
     │      → wait_port_closed → super().cleanup()                   │
     └───────────────────────────────────────────────────────────────┘
 
+Where the child's output goes:
+    An `mp.Process` has no output pipe, so the child redirects its own stdout
+    and stderr into `logs/mlx-child-<port>.log` (`mlx_child_log`, wired in
+    `_mlx_vlm_server_runner`). `_read_child_output` quotes the tail of that
+    file in every crash report and probe timeout, exactly where the llama-cpp
+    engines quote their drainer.
+
 Why multiprocessing instead of subprocess.Popen([sys.executable, "-m", ...])?
     In a PyInstaller frozen build, `sys.executable` is the launcher binary,
     not a Python interpreter, so the `-m` flag is a no-op. `mp.spawn`
@@ -93,6 +100,7 @@ from typing import Any, Dict, Optional, Union
 
 from src.engines.base_chat_server_engine import BaseChatServerEngine
 from src.engines._mlx_vlm_server_runner import run_mlx_vlm_server
+from src.engines import mlx_child_log as child_log
 from src.core.logging import logger
 from src.core.exceptions import (
     EngineException,
@@ -115,6 +123,15 @@ class MLX_Engine(BaseChatServerEngine):
     # mlx-vlm 0.6.13 during the #273 hardware pass — loads via the native
     # gemma4 module and generates cleanly, so its entry was removed.
     KNOWN_BROKEN = frozenset()
+
+    # Where the spawn stored the child's own log file, on the process object.
+    # The llama-cpp engines keep their drainer the same way, and for the same
+    # reason: the lifetime is the child's.
+    _CHILD_LOG_ATTR = "erudi_child_log_path"
+
+    # How much of the tail a crash message quotes. mlx-vlm's startup banner and
+    # per-request lines are long; the reason it died is in the last lines.
+    _CHILD_OUTPUT_TAIL_CHARS = child_log.DEFAULT_TAIL_CHARS
 
     # ======================= SUBPROCESS HTTP SERVER (mlx_vlm.server) =======================
     #
@@ -317,6 +334,19 @@ class MLX_Engine(BaseChatServerEngine):
         # route it registers, `/health` included, so `_probe_ready` sends it
         # from the handle on both probe stages.
         api_key = secrets.token_urlsafe(32)
+        # The child captures its own output into this file (an mp.Process has
+        # no pipe to drain); the path is resolved HERE because a frozen child
+        # re-executes the binary with uninitialized runtime paths. Best
+        # effort: a log directory we cannot write costs the tail, not the
+        # model.
+        try:
+            log_path: Optional[str] = str(child_log.prepare_child_log(port))
+        except OSError as exc:
+            logger.warning(
+                f"[MLX_Engine] Cannot capture the {cls._server_name} child's output "
+                f"on port {port}: {type(exc).__name__}: {exc}"
+            )
+            log_path = None
         argv = [
             "mlx_vlm.server",
             "--model",
@@ -345,7 +375,7 @@ class MLX_Engine(BaseChatServerEngine):
             "--api-key",
             api_key,
         ]
-        proc = mp.Process(target=run_mlx_vlm_server, args=(argv,), daemon=False)
+        proc = mp.Process(target=run_mlx_vlm_server, args=(argv, log_path), daemon=False)
         try:
             proc.start()
         except Exception as exc:
@@ -362,9 +392,14 @@ class MLX_Engine(BaseChatServerEngine):
                 ),
                 trace=f"{type(exc).__name__}: {exc}",
             ) from exc
+        # Carried on the process object, exactly like the llama-cpp drainer:
+        # its lifetime is then the child's, with no registry to clean up and
+        # no chance of a recycled pid handing out another child's output.
+        if log_path:
+            setattr(proc, cls._CHILD_LOG_ATTR, log_path)
         logger.info(
             f"[MLX_Engine] Spawned mlx_vlm.server child: pid={proc.pid}, "
-            f"port={port}, model={model_path}"
+            f"port={port}, model={model_path}, output={log_path or 'not captured'}"
         )
         return {
             "pid": proc.pid,
@@ -416,10 +451,44 @@ class MLX_Engine(BaseChatServerEngine):
                 f"[MLX_Engine] Child terminated: {outcome}, "
                 f"exitcode={getattr(proc, 'exitcode', None)}"
             )
+            # An orderly stop leaves nothing behind. A child that died on its
+            # own keeps its file: that output is the only account of the
+            # death, and the crash report is read after this call.
+            path = cls._child_log_path_of(proc)
+            if path is not None and not degraded:
+                child_log.discard_child_log(path)
         except Exception:
             # Best-effort cleanup; never let teardown errors mask the real
             # failure that triggered termination in the first place.
             pass
+
+    @classmethod
+    def _child_log_path_of(cls, proc: Any) -> Optional[str]:
+        """The file this child captured its output into, when there is one.
+
+        Defensive about the type: `MagicMock` proxies answer any attribute
+        with another mock, and a path that is not a string would turn a crash
+        report into a second crash.
+        """
+        path = getattr(proc, cls._CHILD_LOG_ATTR, None) if proc is not None else None
+        return path if isinstance(path, str) and path else None
+
+    @classmethod
+    def _read_child_output(cls, proc: Any) -> str:
+        """Tail of the child's own stdout+stderr file (#361 for llama-server).
+
+        The child redirects its descriptors into a per-spawn file at startup
+        (`mlx_child_log`), because an `mp.Process` gives the parent no pipe to
+        drain. Works whether or not the child has exited, so a probe timeout
+        quotes what the server was doing and a crash quotes why it stopped.
+        """
+        path = cls._child_log_path_of(proc)
+        if path is None:
+            return "No child output was captured."
+        tail = child_log.read_child_log_tail(path, max_chars=cls._CHILD_OUTPUT_TAIL_CHARS)
+        if not tail:
+            return "The child produced no output."
+        return f"Child output (last {len(tail)} chars, from {path}):\n{tail}"
 
     @classmethod
     def _proc_is_alive(cls, proc: Any) -> bool:

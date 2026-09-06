@@ -109,6 +109,38 @@ silently left empty, and the app's own version, platform, log path and errors
 are still shown — which is usually enough to describe a backend that will not
 start.
 
+## The inference child's own log
+
+Inference runs in a child process, and what that child prints is the only
+account of a model that would not load or a server that died mid-answer.
+
+`llama-server` (CPU and NVIDIA) is a subprocess whose merged output the backend
+drains as it comes: nothing of it is written to a file of its own, and its last
+lines travel inside the backend's records.
+
+`mlx_vlm.server` (Apple Silicon) is a *process*, not a subprocess — the backend
+has no pipe to it — so the child redirects its own standard output and error,
+including everything MLX and Metal write from native code, into a file beside
+`backend.log`:
+
+| File | Where |
+|------|-------|
+| `mlx-child-<port>.log` | Development: `backend/logs/` · Packaged app: next to `backend.log` (the table at the top of this page) |
+
+- One file per spawn, named after the port that child serves. The previous
+  spawn's file is kept as `mlx-child-<port>.log.1`; older ones are removed, so
+  a port never holds more than two.
+- The live file rolls the same way once it passes 2 MB, so a talkative server
+  cannot fill the disk.
+- Stopping a model — switching to another one, the idle reap, quitting — deletes
+  both files. A child that died on its own keeps them: that output is the whole
+  account of the death.
+
+The backend quotes the tail of that file in the record it writes when the child
+crashes, fails its readiness probe, or is found dead by a later request — so
+the child's last words appear on the **Diagnostics** page and in a copied
+report, without anyone having to find the file.
+
 ## Uncaught errors in the app window
 
 An exception that escapes a React render, an uncaught `window.onerror`, and an
@@ -185,8 +217,9 @@ silent branch that would hide a real failure gets a record at the level above.
 
 A parent logs the failures of its children. The backend logs an inference
 child that exits with its pid, port, exit code and the tail of its output
-(`llama-server` is drained by `ChildOutputDrainer`; `mlx_vlm.server` has no
-pipe and is reported by exit code). The Electron main process logs the
+(`llama-server` is drained by `ChildOutputDrainer`; `mlx_vlm.server` captures
+itself — see [The inference child's own log](#the-inference-childs-own-log)).
+The Electron main process logs the
 backend's exit (`ERROR` unless main asked it to stop), a spawn that failed,
 every `startup_error` it receives, and what no `catch` sees: an uncaught
 exception or unhandled rejection in the main process, a renderer or Chromium
