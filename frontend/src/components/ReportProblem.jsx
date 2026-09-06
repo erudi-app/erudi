@@ -49,15 +49,17 @@ export function buildIssueUrl(prefill = {}) {
  * button, the GitHub form and the contact-page fallback.
  *
  * Reused wherever the app has to hand a problem back to the user — the
- * Diagnostics panel, the error-boundary screen, and any modal that wants to
+ * Diagnostics page, the error-boundary screen, and any modal that wants to
  * offer the same route out.
  *
  * @param {object} props - Component props.
  * @param {string} props.diagnostics - Plain text the user copies and pastes.
  * @param {object} [props.prefill] - Values for the issue form's text fields.
+ * @param {string} [props.note] - A caution shown under the text, when what it
+ *   holds deserves one (the Diagnostics page quotes log lines).
  * @returns {JSX.Element} The block.
  */
-export default function ReportProblem({ diagnostics, prefill }) {
+export default function ReportProblem({ diagnostics, prefill, note }) {
   const { t } = useTranslation();
   const [copied, setCopied] = useState(false);
 
@@ -94,6 +96,8 @@ export default function ReportProblem({ diagnostics, prefill }) {
         rows={8}
         className="w-full font-mono text-[11px] leading-relaxed rounded-lg border border-[var(--line)] bg-[var(--canvas)] text-[var(--ink-dim)] p-3 custom-scroll resize-y"
       />
+
+      {note && <p className="text-[12px] text-[var(--ink-faint)] leading-relaxed">{note}</p>}
 
       <p className="text-[12px] text-[var(--ink-faint)] leading-relaxed">
         {t("diagnostics:report.instruction")}
@@ -143,4 +147,5 @@ ReportProblem.propTypes = {
     hardware: PropTypes.string,
     model: PropTypes.string,
   }),
+  note: PropTypes.string,
 };

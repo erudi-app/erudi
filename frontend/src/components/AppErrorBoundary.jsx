@@ -14,7 +14,7 @@ import { recordSessionError } from "../utils/errorCapture";
  * Without a boundary that is a white window and no trace in either log file.
  * This one records the error through the same path the global handlers use,
  * so it lands in `erudi-backend.log` and in the session buffer the Diagnostics
- * panel reads, and it offers the user the shared report block plus a reload.
+ * page reads, and it offers the user the shared report block plus a reload.
  *
  * A class component because that is the only way to declare a boundary.
  * `withTranslation` supplies `t`, since hooks are unavailable here.

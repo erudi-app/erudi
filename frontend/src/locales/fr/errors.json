@@ -2,8 +2,8 @@
   "backend": {
     "defaultTitle": "Le backend n'a pas pu démarrer",
     "footerWithCode": "Code d'erreur : {{code}} · {{message}}",
-    "checkLogsAt": "Consultez les journaux dans {{path}} et contactez-nous.",
-    "checkLogs": "Consultez les journaux du backend et contactez-nous.",
+    "checkLogsAt": "Consultez les logs dans {{path}} et contactez-nous.",
+    "checkLogs": "Consultez les logs du backend et contactez-nous.",
     "codes": {
       "portInUse": {
         "title": "Port déjà utilisé",
@@ -18,17 +18,17 @@
       "portTimeout": {
         "title": "Le backend n'a pas démarré à temps",
         "detail": "Le serveur local n'a pas démarré dans le délai imparti.",
-        "hint": "Relancez Erudi. Si le problème se répète, consultez le fichier journal du backend."
+        "hint": "Relancez Erudi. Si le problème se répète, consultez les logs du backend."
       },
       "crashBeforeReady": {
         "title": "Le backend a planté au démarrage",
         "detail": "Le serveur local s'est arrêté avant d'être prêt.",
-        "hint": "Relancez Erudi ; si le problème persiste, consultez le fichier journal du backend."
+        "hint": "Relancez Erudi ; si le problème persiste, consultez les logs du backend."
       },
       "importError": {
         "title": "Le backend n'a pas pu se charger",
         "detail": "Un composant indispensable du backend n'a pas pu être chargé.",
-        "hint": "Réinstallez ou mettez à jour Erudi, puis consultez le fichier journal du backend."
+        "hint": "Réinstallez ou mettez à jour Erudi, puis consultez les logs du backend."
       },
       "dataPrepError": {
         "title": "Impossible de préparer les données de l'application",
@@ -38,7 +38,7 @@
       "databaseError": {
         "title": "Erreur de base de données",
         "detail": "La base de données locale d'Erudi n'a pas pu démarrer.",
-        "hint": "Relancez Erudi ; si le problème persiste, consultez le fichier journal du backend."
+        "hint": "Relancez Erudi ; si le problème persiste, consultez les logs du backend."
       },
       "cudaRuntimeError": {
         "title": "Erreur d'exécution GPU",
@@ -48,7 +48,7 @@
       "missingDependency": {
         "title": "Dépendance système manquante",
         "detail": "Une bibliothèque système nécessaire à Erudi est manquante.",
-        "hint": "Réinstallez Erudi, puis consultez le fichier journal du backend."
+        "hint": "Réinstallez Erudi, puis consultez les logs du backend."
       },
       "backendNotFound": {
         "title": "Backend introuvable",
@@ -58,12 +58,12 @@
       "backendStartupFailed": {
         "title": "Le backend n'a pas pu démarrer",
         "detail": "Le serveur local n'a pas pu démarrer après plusieurs tentatives.",
-        "hint": "Relancez Erudi ; si le problème persiste, consultez le fichier journal du backend."
+        "hint": "Relancez Erudi ; si le problème persiste, consultez les logs du backend."
       },
       "backendExitError": {
         "title": "Le backend s'est arrêté de façon inattendue",
         "detail": "Le processus du serveur local s'est terminé avec une erreur.",
-        "hint": "Relancez Erudi ; si le problème persiste, consultez le fichier journal du backend."
+        "hint": "Relancez Erudi ; si le problème persiste, consultez les logs du backend."
       },
       "backendSpawnFailed": {
         "title": "Le backend n'a pas pu être lancé",
@@ -73,7 +73,7 @@
       "unexpectedError": {
         "title": "Erreur de démarrage inattendue",
         "detail": "Un problème est survenu au démarrage d'Erudi.",
-        "hint": "Relancez Erudi, puis consultez le fichier journal du backend."
+        "hint": "Relancez Erudi, puis consultez les logs du backend."
       },
       "pollingError": {
         "title": "Le backend a été perdu de vue",
@@ -83,12 +83,12 @@
       "backendUnreachable": {
         "title": "Impossible de joindre le backend",
         "detail": "Le serveur local d'Erudi ne répond pas.",
-        "hint": "Relancez Erudi ; si le problème persiste, consultez le fichier journal du backend."
+        "hint": "Relancez Erudi ; si le problème persiste, consultez les logs du backend."
       },
       "unknown": {
         "title": "Le backend n'a pas pu démarrer",
         "detail": "Le serveur local d'Erudi n'a pas démarré.",
-        "hint": "Relancez Erudi ; si le problème persiste, consultez le fichier journal du backend."
+        "hint": "Relancez Erudi ; si le problème persiste, consultez les logs du backend."
       }
     }
   },
