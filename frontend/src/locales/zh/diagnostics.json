@@ -15,8 +15,6 @@
     "model": "内存中的模型",
     "python": "后端 Python",
     "database": "数据库",
-    "appLog": "应用日志",
-    "backendLog": "后端日志",
     "none": "无",
     "unknown": "未知"
   },
@@ -37,8 +35,9 @@
   "report": {
     "heading": "报告问题",
     "textareaLabel": "待复制的诊断信息",
-    "privacyNote": "由于没有任何内容离开你的机器，日志可能包含你的对话文本和文档名称。公开发布前请先读一遍你复制的内容。",
     "instruction": "要报告你注意到的情况，请复制这些内容，打开问题报告表单，粘贴到 Logs 字段。描述发生了什么，如果有截图请一并附上。",
+    "copyFullReport": "复制完整报告",
+    "pasteHint": "将报告粘贴到问题报告表单的 Logs 字段中。",
     "github": "在 GitHub 上报告",
     "contactPrefix": "没有 GitHub 账号？",
     "contactLink": "通过联系页面写信给我们",

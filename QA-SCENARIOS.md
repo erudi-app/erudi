@@ -194,15 +194,16 @@ one check.*
 - [ ] When I use **Clear All Data**, then the app comes back in English on the next boot (settings deleted; the backend default wins).
 
 **Diagnostics page**
-- [ ] When I open Diagnostics (the bug icon in the left rail) with the backend running, then the page shows my Erudi version, operating system, inference engine, CPU/GPU, the model in memory (or none), the backend's Python version, the database state, and the absolute path of both log files.
+- [ ] When I open Diagnostics (the bug icon in the left rail) with the backend running, then the page shows my Erudi version, operating system, inference engine, CPU/GPU, the model in memory (or none), the backend's Python version and the database state — no log-file paths are listed on screen, and there is no text preview of the report.
 - [ ] When the backend has recorded warnings or errors, then they are listed newest last with their timestamp, level, source and request id, and an identical error repeated many times appears **once** with a repeat count.
-- [ ] When I read the recent-errors list, then no ordinary activity line appears — only `WARNING` and above — and the report block says logs can contain conversation content.
-- [ ] When nothing was recorded, then the recent-errors area shows a check mark and **No warning or error recorded.** and nothing else; **Open log folder**, the copy block, **Report on GitHub** and the contact link are still there, headed **Report a problem**.
-- [ ] When I click **Copy**, then the button confirms *Copied* and the clipboard holds the whole summary plus the error list as plain text.
+- [ ] When I read the recent-errors list, then no ordinary activity line appears — only `WARNING` and above.
+- [ ] When there is at least one recent error, then a one-line hint says to paste the report into the bug form's Logs field, and a single **Copy the full report** button appears alongside **Report on GitHub** and the contact link, all headed **Report a problem**.
+- [ ] When nothing was recorded, then the recent-errors area shows a check mark and **No warning or error recorded.** and nothing else; there is no copy button and no line about pasting a report, but **Open log folder**, **Report on GitHub** and the contact link are still there, headed **Report a problem**.
+- [ ] When I click **Copy the full report**, then the button confirms *Copied* and the clipboard holds the setup summary plus the error list as plain text — including the absolute path of both log files, even though neither is shown on screen.
 - [ ] When I click **Report on GitHub**, then my browser opens this repository's bug report form with **Erudi version**, **Operating system**, **Hardware** and **Model** already filled in, and pasting into the **Logs** field gives the text I just copied. *(Dropdown prefill is unverified upstream: if **Operating system** arrives empty, that is the known gap — every other field must be filled.)*
 - [ ] When I click **Open log folder**, then the file manager opens with `backend.log` selected.
 - [ ] When I use the **contact page** link instead, then `erudi.app/contact` opens in my browser and the copy tells me to include everything above plus my screenshots.
-- [ ] When I kill the backend (or launch with the port blocked) and open the page, then it says **the backend did not answer**, still shows my version, platform and app log path, still lists the app-side errors, and still offers Copy and Report — it does **not** go blank.
+- [ ] When I kill the backend (or launch with the port blocked) and open the page, then it says **the backend did not answer**, still shows my version and platform, still lists the app-side errors, and still offers **Copy the full report** (when there is something to report) and **Report on GitHub** — it does **not** go blank.
 - [ ] When I click the **bug icon** in the left rail, then I land on the Diagnostics page, the icon is highlighted like the other destinations, and Settings shows no diagnostics of its own — no web page opens.
 
 ## Shared chrome (sidebar, connection, downloads)

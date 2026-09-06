@@ -54,8 +54,12 @@ describe("DiagnosticsPage", () => {
     expect(screen.getByTestId("sidebar")).toBeTruthy();
     expect(screen.getByRole("heading", { level: 1, name: "Diagnostics" })).toBeTruthy();
     expect(await screen.findByText("MLX_Engine")).toBeTruthy();
-    expect(screen.getByLabelText("Diagnostics to copy")).toBeTruthy();
+    // The lighter Diagnostics rendering has no text preview, and this mock
+    // has no recent errors, so there is nothing to copy either.
+    expect(screen.queryByLabelText("Diagnostics to copy")).toBeNull();
+    expect(screen.queryByRole("button", { name: /copy/i })).toBeNull();
     expect(screen.getByRole("button", { name: "Open log folder" })).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Report on GitHub" })).toBeTruthy();
   });
 
   it("wears the bug icon in its heading, not a stethoscope", () => {
