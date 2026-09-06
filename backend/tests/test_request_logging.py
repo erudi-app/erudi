@@ -40,6 +40,26 @@ def _build_app() -> FastAPI:
     async def boom():
         raise RuntimeError("intentional test crash")
 
+    @app.get("/missing")
+    async def missing():
+        from src.core.exceptions import ModelNotFoundException
+
+        raise ModelNotFoundException("ghost")
+
+    @app.get("/engine-down")
+    async def engine_down():
+        from src.core.exceptions import EngineException
+
+        raise EngineException("engine died", trace="child said no")
+
+    @app.get("/stream-crash")
+    async def stream_crash():
+        async def gen():
+            yield "first chunk\n"
+            raise RuntimeError("crash mid-stream")
+
+        return StreamingResponse(gen(), media_type="text/plain")
+
     @app.get("/stream")
     async def stream():
         async def gen():
@@ -197,10 +217,36 @@ def test_unhandled_exception_returns_structured_500(logging_client, caplog):
     # request-logging middleware's send wrapper).
     assert response.headers.get("X-Request-ID") == "rid-boom"
 
+    # Exactly ONE defect record for one crash: the fallback handler's, with the
+    # traceback and the request id. The middleware's line for the crashed
+    # request is the access line, at the access line's level.
     error_records = [rec for rec in caplog.records if rec.levelno == logging.ERROR]
-    assert error_records
-    assert any(rec.request_id == "rid-boom" for rec in error_records)
-    assert any(rec.exc_info for rec in error_records)  # traceback captured
+    assert len(error_records) == 1
+    assert error_records[0].request_id == "rid-boom"
+    assert error_records[0].exc_info  # traceback captured
+    access = [rec for rec in caplog.records if rec.getMessage().startswith("HTTP ")]
+    assert len(access) == 1
+    assert access[0].levelno == logging.INFO
+    assert "HTTP GET /boom -> 500 in " in access[0].getMessage()
+    assert "(unhandled exception)" in access[0].getMessage()
+
+
+@pytest.mark.unit
+def test_crash_inside_a_streaming_body_is_logged_once_with_traceback(logging_client, caplog):
+    """The response has started, so no error body can be sent -- but the
+    crash must still leave one ERROR record with its traceback."""
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        try:
+            logging_client.get("/stream-crash", headers={"X-Request-ID": "rid-stream"})
+        except Exception:
+            # The test client re-raises what the server re-raised; the
+            # assertion is about the log, not the transport.
+            pass
+    error_records = [rec for rec in caplog.records if rec.levelno == logging.ERROR]
+    assert len(error_records) == 1
+    assert error_records[0].request_id == "rid-stream"
+    assert error_records[0].exc_info
+    assert "crash mid-stream" in error_records[0].getMessage()
 
 
 # ---------------------------------------------------------------------------
@@ -274,24 +320,67 @@ def test_streaming_request_logs_exactly_once(logging_client, caplog):
 # ---------------------------------------------------------------------------
 
 
-@pytest.mark.unit
-def test_client_error_exceptions_log_at_warning(caplog):
-    from src.core.exceptions import ModelNotFoundException
-
-    with caplog.at_level(logging.WARNING, logger="erudi"):
-        ModelNotFoundException("ghost-model")  # constructing logs
-    assert caplog.records
-    assert all(rec.levelno == logging.WARNING for rec in caplog.records)
+def _exception_records(caplog):
+    """Every record that is not an access line: the handler's own record(s)."""
+    return [rec for rec in caplog.records if not rec.getMessage().startswith("HTTP ")]
 
 
 @pytest.mark.unit
-def test_server_error_exceptions_log_at_error(caplog):
-    from src.core.exceptions import EngineException
+def test_constructing_an_exception_logs_nothing(caplog):
+    """The record belongs to whoever handles the exception, not to the raise
+    site: an exception that is caught and recovered from must leave no
+    ERROR behind, and a request must not get its record split in two."""
+    from src.core.exceptions import EngineException, ModelNotFoundException
 
-    with caplog.at_level(logging.WARNING, logger="erudi"):
-        EngineException("engine died")
-    assert caplog.records
-    assert any(rec.levelno == logging.ERROR for rec in caplog.records)
+    with caplog.at_level(logging.DEBUG, logger="erudi"):
+        ModelNotFoundException("ghost-model")
+        EngineException("engine died", trace="child said no")
+    assert caplog.records == []
+
+
+@pytest.mark.unit
+def test_client_error_logs_one_info_record_with_the_request(logging_client, caplog):
+    """A 404 is the expected outcome of asking for something that is not
+    there: one INFO record naming the request, and nothing at WARNING or
+    above, so the Diagnostics panel stays free of normal traffic."""
+    with caplog.at_level(logging.DEBUG, logger="erudi"):
+        response = logging_client.get("/missing", headers={"X-Request-ID": "rid-404"})
+    assert response.status_code == 404
+
+    records = _exception_records(caplog)
+    assert len(records) == 1
+    (record,) = records
+    assert record.levelno == logging.INFO
+    assert record.getMessage() == "GET /missing -> 404 MODEL_NOT_FOUND: Model 'ghost' not found"
+    assert record.request_id == "rid-404"
+    assert all(rec.levelno < logging.WARNING for rec in caplog.records)
+
+
+@pytest.mark.unit
+def test_server_error_logs_one_error_record_with_trace_and_traceback(logging_client, caplog):
+    """A 500-class business exception: exactly one ERROR record, carrying the
+    method, path, status, code, message, the raiser's trace and the traceback."""
+    with caplog.at_level(logging.DEBUG, logger="erudi"):
+        response = logging_client.get("/engine-down", headers={"X-Request-ID": "rid-500"})
+    assert response.status_code == 500
+
+    errors = [rec for rec in caplog.records if rec.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    (record,) = errors
+    message = record.getMessage()
+    assert message.startswith("GET /engine-down -> 500 LLM_ENGINE_FAILURE: engine died")
+    assert "- Trace: child said no" in message
+    assert record.request_id == "rid-500"
+    assert record.exc_info and record.exc_info[1] is not None
+
+
+@pytest.mark.unit
+def test_query_string_stays_out_of_the_exception_record(logging_client, caplog):
+    """The path identifies the route; a query can carry a search term."""
+    with caplog.at_level(logging.DEBUG, logger="erudi"):
+        logging_client.get("/missing?query=SECRET-SEARCH-TERM")
+    (record,) = _exception_records(caplog)
+    assert "SECRET-SEARCH-TERM" not in record.getMessage()
 
 
 @pytest.mark.unit

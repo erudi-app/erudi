@@ -27,7 +27,8 @@ Exception Hierarchy:
 
 Fonctionnalités:
 - Structured exception hierarchy with status codes
-- Automatic error logging via structured logger
+- One log record per failed request, written by the handler (INFO below 500,
+  ERROR with traceback at 500 and above -- see docs/logging.md)
 - FastAPI integration with JSON response handlers
 - Custom Erudi error codes for client diagnostics
 - Consistent error messages with remediation hints
@@ -68,7 +69,8 @@ Best Practices:
     - Include clear error messages with remediation hints
     - Use trace parameter to include original error context
     - Let exceptions bubble up to FastAPI exception handler
-    - Log at appropriate levels (ERROR for exceptions)
+    - Do not log at the raise site: the handler writes the request's record;
+      an ``except`` that catches and recovers logs its own outcome
 
 Exception Categories:
     **Resource Not Found (404):**
@@ -107,6 +109,8 @@ See Also:
 
 """
 
+import logging
+
 from fastapi import Request
 from fastapi.responses import JSONResponse
 from fastapi import status
@@ -129,6 +133,9 @@ class AppBaseException(Exception):
         detail: Optional structured payload surfaced verbatim in the JSON
             response so a client can render a decision UI (e.g. the dependent
             KB assistants of a base model targeted for deletion). None omits it.
+        trace: Optional context the raiser attached (the wrapped error's text,
+            a child's captured output). Logged with the record, never sent to
+            the client.
 
     """
 
@@ -157,19 +164,19 @@ class AppBaseException(Exception):
             reporting instruction is appended to a payload that domain code
             also logs, matches on and shows in three other languages.
 
-            All errors are logged via the structured logger. Severity follows
-            the HTTP class: WARNING for client errors (< 500), ERROR for
-            server errors (>= 500).
+            Constructing an exception logs nothing. The record is written
+            where the exception is handled: by
+            :func:`app_base_exception_handler` when it ends a request (one
+            record with the method, path, status, code, message and trace),
+            or by the ``except`` block that catches and recovers from it
+            elsewhere. See docs/logging.md.
 
         """
         self.message = message
         self.status_code = status_code
         self.erudi_code = erudi_code or "INTERNAL_SERVER_ERROR"
         self.detail = detail
-        log = logger.error if status_code >= 500 else logger.warning
-        log(
-            f"- Status Code: {status_code}\n- Erudi Custom Code: {erudi_code}\n- Message: {message}\n- Trace: {trace}"
-        )
+        self.trace = trace
         super().__init__(message)
 
     def __repr__(self):
@@ -793,11 +800,31 @@ class HardwareException(AppBaseException):
         )
 
 
+def log_level_for_status(status_code: int) -> int:
+    """The log level of a request that ends with ``status_code``.
+
+    ``ERROR`` at 500 and above: the operation the user asked for did not
+    happen and a maintainer needs the record. ``INFO`` below 500: a 404 for a
+    model deleted a moment ago, a 409 on a guarded delete or a 422 on a
+    rejected input is the expected outcome of asking for something that
+    legitimately is not there or not allowed, not a defect. The Diagnostics
+    panel shows WARNING and above, so a client error logged any higher would
+    fill a page meant for bug reports with normal traffic.
+    """
+    return logging.ERROR if status_code >= 500 else logging.INFO
+
+
 async def app_base_exception_handler(request: Request, exc: AppBaseException):
     """Global exception handler for AppBaseException and subclasses.
 
     Converts application exceptions into structured JSON responses with
-    appropriate HTTP status codes. Logs request details for debugging.
+    appropriate HTTP status codes, and writes the request's single log
+    record -- method, path, status, Erudi code, message, and the trace the
+    raiser attached -- at the level :func:`log_level_for_status` gives. A
+    5xx record also carries the traceback (``exc_info``), which includes the
+    wrapped exception when the raiser chained one. The query string is left
+    out: it can carry a search term, and the path is what identifies the
+    route.
 
     Args:
         request: Incoming FastAPI request object.
@@ -815,8 +842,13 @@ async def app_base_exception_handler(request: Request, exc: AppBaseException):
             app.add_exception_handler(AppBaseException, app_base_exception_handler)
 
     """
-    log = logger.error if exc.status_code >= 500 else logger.warning
-    log(f"- Path: {request.url}")
+    level = log_level_for_status(exc.status_code)
+    record = (
+        f"{request.method} {request.url.path} -> {exc.status_code} {exc.erudi_code}: {exc.message}"
+    )
+    if exc.trace:
+        record = f"{record}\n- Trace: {exc.trace}"
+    logger.log(level, record, exc_info=exc if level >= logging.ERROR else None)
     error: dict = {
         "type": exc.erudi_code,
         "message": exc.message,
