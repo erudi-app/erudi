@@ -119,6 +119,7 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I delete the conversation I'm viewing, then it's removed and I'm redirected to `/erudi/chat`; deleting a different one keeps me in place.
 - [ ] When I quit and relaunch and reopen the conversation, then its full history is intact.
 - [ ] When generation **fails** or the connection **drops** mid-reply, then a red error message shows and any partial reply is kept.
+- [ ] When an answer contains a **markdown image pointing at a web address** (ask the model to reply with exactly `![logo](https://example.com/logo.png)`), then no picture is fetched or shown — at most a broken-image placeholder — because the window loads no remote images, so no site learns my address from an answer on screen.
 - [ ] When the conversation's assigned model was **deleted**, then the conversation survives with no model assigned: sending is **blocked**, the header model picker shows a red "Please select a model" attention state, and **explicitly picking** an installed model unblocks sending (no auto-fallback).
 
 ## Arena — `/erudi/arena`
@@ -165,6 +166,10 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I flip the Web Search toggle, then the change **persists across an app relaunch**.
 - [ ] When the global toggle is on and I start a **new** conversation, then that conversation's own Web search toggle starts **on** (inheritance at creation; the conversation owns it afterwards).
 
+**Automatic updates**
+- [ ] When I open Settings on a fresh install, then the **Automatic updates** toggle is **on** and the copy says the request goes to this project's GitHub releases and carries nothing but my version and platform.
+- [ ] When I turn Automatic updates **off** and relaunch, then it is still off and `erudi-backend.log` says `Updater: automatic updates are turned off; no check will run` — with it on, the same file says `checking now, then every 4 hours` instead.
+
 **Inference engine**
 
 *Everything in this block needs a Windows or Linux machine with an NVIDIA GPU — on
@@ -189,15 +194,16 @@ one check.*
 - [ ] When I use **Clear All Data**, then the app comes back in English on the next boot (settings deleted; the backend default wins).
 
 **Diagnostics page**
-- [ ] When I open Diagnostics (the bug icon in the left rail) with the backend running, then the page shows my Erudi version, operating system, inference engine, CPU/GPU, the model in memory (or none), the backend's Python version, the database state, and the absolute path of both log files.
+- [ ] When I open Diagnostics (the bug icon in the left rail) with the backend running, then the page shows my Erudi version, operating system, inference engine, CPU/GPU, the model in memory (or none), the backend's Python version and the database state — no log-file paths are listed on screen, and there is no text preview of the report.
 - [ ] When the backend has recorded warnings or errors, then they are listed newest last with their timestamp, level, source and request id, and an identical error repeated many times appears **once** with a repeat count.
-- [ ] When I read the recent-errors list, then no ordinary activity line appears — only `WARNING` and above — and the report block says logs can contain conversation content.
-- [ ] When nothing was recorded, then the recent-errors area shows a check mark and **No warning or error recorded.** and nothing else; **Open log folder**, the copy block, **Report on GitHub** and the contact link are still there, headed **Report a problem**.
-- [ ] When I click **Copy**, then the button confirms *Copied* and the clipboard holds the whole summary plus the error list as plain text.
+- [ ] When I read the recent-errors list, then no ordinary activity line appears — only `WARNING` and above.
+- [ ] When there is at least one recent error, then a one-line hint says to paste the report into the bug form's Logs field, and a single **Copy the full report** button appears alongside **Report on GitHub** and the contact link, all headed **Report a problem**.
+- [ ] When nothing was recorded, then the recent-errors area shows a check mark and **No warning or error recorded.** and nothing else; there is no copy button and no line about pasting a report, but **Open log folder**, **Report on GitHub** and the contact link are still there, headed **Report a problem**.
+- [ ] When I click **Copy the full report**, then the button confirms *Copied* and the clipboard holds the setup summary plus the error list as plain text — including the absolute path of both log files, even though neither is shown on screen.
 - [ ] When I click **Report on GitHub**, then my browser opens this repository's bug report form with **Erudi version**, **Operating system**, **Hardware** and **Model** already filled in, and pasting into the **Logs** field gives the text I just copied. *(Dropdown prefill is unverified upstream: if **Operating system** arrives empty, that is the known gap — every other field must be filled.)*
 - [ ] When I click **Open log folder**, then the file manager opens with `backend.log` selected.
 - [ ] When I use the **contact page** link instead, then `erudi.app/contact` opens in my browser and the copy tells me to include everything above plus my screenshots.
-- [ ] When I kill the backend (or launch with the port blocked) and open the page, then it says **the backend did not answer**, still shows my version, platform and app log path, still lists the app-side errors, and still offers Copy and Report — it does **not** go blank.
+- [ ] When I kill the backend (or launch with the port blocked) and open the page, then it says **the backend did not answer**, still shows my version and platform, still lists the app-side errors, and still offers **Copy the full report** (when there is something to report) and **Report on GitHub** — it does **not** go blank.
 - [ ] When I click the **bug icon** in the left rail, then I land on the Diagnostics page, the icon is highlighted like the other destinations, and Settings shows no diagnostics of its own — no web page opens.
 
 ## Shared chrome (sidebar, connection, downloads)
@@ -218,16 +224,37 @@ one check.*
 - [ ] When the app runs on **macOS or Windows**, then the Chromium renderer processes run **sandboxed** (no `--no-sandbox` in the renderer process arguments — check the process list); on Linux the flag is expected (user-namespace workaround).
 - [ ] When the backend logs a request with a foreign Origin or Host, then the request id correlation (`X-Request-ID`) still works for allowed requests (tracing survives the tightening).
 
-### The inference child requires a key (Windows and Linux)
+### The inference child requires a key (all platforms)
 
-*`llama-server` is spawned with a per-process `--api-key`, and with `--no-slots` and `--no-webui`. The first scenario is the one that matters most in the whole pass: if the key wiring is wrong, **every** GGUF model load fails at readiness rather than degrading quietly, so run it before anything else on those platforms. Not applicable on Apple Silicon, where `mlx_vlm.server` has no such option — see the privacy page's known gaps.*
+*Every inference child is spawned with a per-process `--api-key`: `llama-server` on Windows and Linux (also with `--no-slots` and `--no-webui`), `mlx_vlm.server` on Apple Silicon. The first scenario is the one that matters most in the whole pass: if the key wiring is wrong, **every** model load fails at readiness rather than degrading quietly, so run it before anything else.*
 
-- [ ] When I download a GGUF model and send it a message, then the answer streams normally (proof the backend authenticates itself to its own child; a broken key shows up as a readiness timeout at load, never as a bad answer).
+- [ ] When I download a model and send it a message, then the answer streams normally (proof the backend authenticates itself to its own child; a broken key shows up as a readiness timeout at load, never as a bad answer).
+
+**Windows and Linux (`llama-server`)**
+
 - [ ] When a model is loaded and I find the child's port in `%TEMP%\erudi-backend.log` (or `/tmp/erudi-backend.log`), then an **unauthenticated** request to it is refused: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:<port>/v1/chat/completions -d '{"model":"x","messages":[]}'` answers **401**.
 - [ ] When I request `http://127.0.0.1:<port>/slots` on that same port, then it does **not** return the prompts of in-flight requests (the endpoint is disabled; a 404 or an error is the expected outcome, never a JSON list of slots carrying prompt text).
 - [ ] When I open `http://127.0.0.1:<port>/` in a browser, then llama.cpp's bundled web interface does **not** load.
 - [ ] When I unload the model and load it again, then the child's key has **changed** — grep the process arguments (`ps aux | grep llama-server` on macOS/Linux, Task Manager details on Windows) before and after; the two values must differ, which is what makes a leaked key worthless.
 - [ ] When I read `%TEMP%\erudi-backend.log` after a load, then the key appears **nowhere** in it.
+
+**Apple Silicon (`mlx_vlm.server`)**
+
+*The child is an `mp.Process` of the backend: its arguments travel by pickle, not on a command line, so `ps` shows neither the `--api-key` flag nor the value, and `ps -E` does not show the `MLX_VLM_SERVER_API_KEY` variable either (the child sets it after start). Find the port with `lsof -nP -iTCP:27300-27399 -sTCP:LISTEN` or in `$TMPDIR/erudi-backend.log` (`Spawned mlx_vlm.server child: pid=..., port=...`).*
+
+- [ ] When a model is loaded, then an **unauthenticated** chat request to the child is refused: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:<port>/v1/chat/completions -H 'Content-Type: application/json' -d '{"model":"x","messages":[]}'` answers **401**, and `curl -si http://127.0.0.1:<port>/v1/chat/completions -d '{}'` shows `WWW-Authenticate: Bearer`.
+- [ ] When I request `http://127.0.0.1:<port>/health` without a key, then it answers **401** too — and the app keeps chatting normally, which proves the backend's own probe presents the key.
+- [ ] When I send the same chat request with a made-up key (`-H 'Authorization: Bearer nope'`), then it is still **401**.
+- [ ] When I grep `$TMPDIR/erudi-backend.log` and `~/Library/Logs/erudi/backend.log` for `api-key`, `api_key`, `MLX_VLM_SERVER_API_KEY` and `Bearer`, then no line carries a key value (the key exists only in the backend's and the child's memory; that it changes on every load is pinned by the unit tests in `backend/tests/test_mlx_engine_server.py`, `TestSpawnApiKey`, and cannot be observed from outside the processes).
+
+### The embedded database requires a password (Windows)
+
+*On Windows the embedded PostgreSQL listens on a loopback TCP port (there are no Unix sockets), so the per-cluster password is the only thing between the database and any other program running under the user's account. On macOS and Linux the cluster opens no port at all, so the first three scenarios do not apply there; the last one does.*
+
+- [ ] When the app is running and I find the database port in `%LOCALAPPDATA%\erudi\backend\prod\data\postgres\postmaster.pid` (fourth line), then connecting **without a password** is refused: `psql -h 127.0.0.1 -p <port> -U postgres -d erudi -c "select 1"` (any client will do) fails with a password error, and connecting with a **wrong** password fails with `password authentication failed`.
+- [ ] When I connect with the password read from `%LOCALAPPDATA%\erudi\backend\prod\data\postgres\erudi_db_password` (`set PGPASSWORD=<value>` first), then the same command succeeds — proof that the app's own credential works and nothing else does.
+- [ ] When I quit and relaunch the app, then it boots, migrates and chats normally (the password is set and enforced on **every** start, and a second start on the same data folder changes nothing) — and the log contains neither the password nor a connection URL carrying it.
+- [ ] When I open the data folder, then `postgres\erudi_db_password` exists, contains a single random value, and `postgres\pg_hba.conf` has **no** `host … trust` line left (every `host` rule reads `scram-sha-256`; the `local` lines stay `trust`).
 
 ## Non-functional (boot, offline, persistence, updates, errors)
 
@@ -249,6 +276,7 @@ older) for the "too old" verdict, and an NVIDIA machine kept on a driver older t
 say which hardware was missing. The rest run on any machine.*
 
 - [ ] *(any machine, NVIDIA GPU that works)* When I launch the app on a supported card and driver, then **no** graphics-card dialog appears — a healthy machine is never nagged. (`backend.log` shows `CUDA pre-flight ok: ...`.)
+- [ ] *(NVIDIA machine with the driver only — no CUDA toolkit installed)* When I send a chat message, then it answers on the graphics card (`backend.log` shows `Engine chosen: <CUDA_Engine>` and no processor swap line) — the installer carries the CUDA runtime, so the driver is the only prerequisite. An RTX 50-series card counts double here: it is the newest generation the build carries native code for.
 - [ ] *(needs a pre-Maxwell card — likely NOT RUN)* When I launch the app on a card below compute capability 5.0, then once the app has loaded a dialog says the card is too old for GPU mode, names the card and its capability, and states that no driver update changes it.
 - [ ] *(needs an old driver — likely NOT RUN)* When I launch the app on a supported card with a driver older than the 570 family, then the dialog says the **driver** is too old, names the CUDA version needed and the one installed, and says updating the driver is the fix.
 - [ ] When that dialog is open, then the app behind it is fully usable — it is a decision, not an error screen, and it never replaces the loading screen.
@@ -313,6 +341,7 @@ tool path explicitly — a working chat proves nothing about it.*
 **Updates & first run**
 - [ ] When I run a **packaged** build and a newer release is published, then a banner shows "downloading…", then "ready — restart to install", and it installs on click or next quit.
 - [ ] When a release is still a **draft**, then my installed build is **not** offered that update.
+- [ ] When **Automatic updates** is off in Settings and a newer release is published, then no banner appears, nothing is downloaded and quitting installs nothing; turning the toggle back on starts a check at once — the "downloading…" banner appears without a relaunch.
 - [ ] When I do a **fresh install**, then the Welcome dialog shows once, the catalog seeds instantly from the bundled snapshot (then refreshes in the background), and the machine readout renders (even if hardware profiling falls back).
 - [ ] When the app quits, then the backend and its inference child processes are stopped (none left orphaned).
 

@@ -58,9 +58,10 @@ two files carry, without leaving the app:
 
 - **Your setup**: the Erudi version, the operating system and architecture, the
   selected inference engine, the CPU and GPU (with VRAM and compute capability
-  on NVIDIA), the model held in memory, the backend's Python version, the state
-  of the embedded database, and the absolute path of both log files on this
-  machine.
+  on NVIDIA), the model held in memory, the backend's Python version, and the
+  state of the embedded database. The absolute path of both log files is not
+  listed on screen — **Open log folder** is how you get to them — but it still
+  travels in the copied report below, for whoever triages the issue.
 - **Recent errors**: the last 200 records at `WARNING` or above, merged from
   three sources and sorted on one timeline — `backend.log`,
   `erudi-backend.log`, and the errors this window caught itself. Each row shows
@@ -68,11 +69,14 @@ two files carry, without leaving the app:
   an identical error repeated. When nothing was recorded, the area says so in
   one line and asks nothing.
 - **Open log folder**, which reveals `backend.log` in the file manager.
-- **Report a problem**: the whole summary as plain text, a *Copy* button, a
-  button that opens this repository's bug report form with the version,
-  operating system, hardware and model already filled in, and the contact page
-  for reporters without a GitHub account. The block is there in both states,
-  for whatever the reporter saw that the logs did not.
+- **Report a problem**: a button that opens this repository's bug report form
+  with the version, operating system, hardware and model already filled in,
+  and the contact page for reporters without a GitHub account — both there in
+  either state. When there is at least one recent error, a *Copy the full
+  report* button also appears; it copies the setup summary above and the error
+  list, including the log paths, as plain text to paste into the form's
+  **Logs** field. When nothing was recorded there is nothing to copy, so the
+  button is not offered.
 
 Two properties of that list are deliberate.
 

@@ -15,8 +15,6 @@
     "model": "Modelo en memoria",
     "python": "Python del backend",
     "database": "Base de datos",
-    "appLog": "Registro de la aplicación",
-    "backendLog": "Registro del backend",
     "none": "Ninguno",
     "unknown": "Desconocido"
   },
@@ -37,8 +35,9 @@
   "report": {
     "heading": "Informar de un problema",
     "textareaLabel": "Diagnóstico para copiar",
-    "privacyNote": "Los registros pueden contener el texto de tus conversaciones y los nombres de tus documentos, porque nada sale de tu equipo. Lee lo que copies antes de publicarlo.",
     "instruction": "Para informar de algo que hayas notado, copia esto, abre el formulario de informe de errores y pégalo en el campo Logs. Describe qué ocurrió y añade una captura de pantalla si tienes alguna.",
+    "copyFullReport": "Copiar el informe completo",
+    "pasteHint": "Pega el informe en el campo Logs del formulario de errores.",
     "github": "Informar en GitHub",
     "contactPrefix": "¿No tienes cuenta de GitHub?",
     "contactLink": "Escríbenos desde la página de contacto",

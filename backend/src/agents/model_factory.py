@@ -110,11 +110,11 @@ def build_chat_model(
     )
     return ChatOpenAI(
         base_url=f"{handle['base_url']}/v1",
-        # llama.cpp children are spawned with a per-spawn `--api-key` so nothing
-        # else on the loopback interface can drive them, and the handle is the
-        # only place that key lives. MLX (mlx_vlm.server has no such option)
-        # carries none and keeps the literal: an empty api_key would make the
-        # OpenAI client fall back to reading OPENAI_API_KEY from the environment.
+        # Every inference child (llama-server, mlx_vlm.server) is spawned with a
+        # per-spawn `--api-key` so nothing else on the loopback interface can
+        # drive it, and the handle is the only place that key lives. A handle
+        # without one keeps the literal: an empty api_key would make the OpenAI
+        # client fall back to reading OPENAI_API_KEY from the environment.
         # Deliberately absent from the log line above.
         api_key=handle.get("api_key") or "not-needed",
         model=model_field,

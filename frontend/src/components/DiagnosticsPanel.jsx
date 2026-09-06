@@ -191,11 +191,6 @@ export default function DiagnosticsPanel() {
           />
           <Row label={t("diagnostics:environment.python")} value={environment?.python_version} />
           <Row label={t("diagnostics:environment.database")} value={environment?.db} />
-          <Row label={t("diagnostics:environment.appLog")} value={app?.appLogPath} />
-          <Row
-            label={t("diagnostics:environment.backendLog")}
-            value={environment?.backend_log_path}
-          />
         </div>
 
         <div>
@@ -243,12 +238,14 @@ export default function DiagnosticsPanel() {
           {t("diagnostics:openLogFolder")}
         </button>
 
-        {/* The log caution sits with the copy block: it is about what the
-            text quotes, and it applies whether or not anything was listed. */}
+        {/* The lighter rendering: no text preview (the configuration and the
+            errors are already listed above), and the copy button only earns
+            its place when there is something recorded to copy. */}
         <ReportProblem
           diagnostics={diagnostics}
           prefill={prefill}
-          note={t("diagnostics:report.privacyNote")}
+          preview={false}
+          hasErrors={entries.length > 0}
         />
       </div>
     </section>

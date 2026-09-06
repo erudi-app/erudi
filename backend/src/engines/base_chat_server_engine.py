@@ -312,13 +312,14 @@ class BaseChatServerEngine(BaseEngine):
         `_payload_model_value(handle)`: llama-cpp returns the alias, MLX returns
         the preloaded model path mlx_vlm.server resolves with `get_cached_model`).
 
-        `api_key` is the child's own credential, minted at spawn: llama-server
-        is started with `--api-key` so nothing else on the loopback interface
-        can drive it, and the probe would otherwise get a 401 from a perfectly
-        healthy server. `/health` stays public in llama-server, so the header is
-        redundant on stage 1, but sending it uniformly keeps the two calls
-        symmetric. MLX has no key (mlx_vlm.server has no such option), passes
-        None, and sends no header at all.
+        `api_key` is the child's own credential, minted at spawn: both
+        llama-server and mlx_vlm.server are started with `--api-key` so nothing
+        else on the loopback interface can drive them, and the probe would
+        otherwise get a 401 from a perfectly healthy server. `/health` stays
+        public in llama-server, so the header is redundant on its stage 1;
+        mlx_vlm.server gates `/health` behind the key, so there it is required.
+        Sending it uniformly keeps the two calls symmetric. Without a key
+        (`None`) no header is sent at all.
         """
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
         port = base_url.rsplit(":", 1)[-1]

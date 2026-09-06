@@ -65,9 +65,9 @@ Base = declarative_base()
 def _sanitize_url_for_log(sqlalchemy_url: str) -> str:
     """Credential-free rendering of a DB URL for log lines.
 
-    The embedded pgserver URL normally carries no password, but sanitize
-    defensively anyway: the password (if any) is masked, never printed.
-    Never raises — an unparseable URL degrades to a placeholder.
+    The embedded cluster URL carries the per-cluster password (#462): it is
+    masked here and never printed. Never raises — an unparseable URL degrades
+    to a placeholder.
     """
     try:
         return make_url(sqlalchemy_url).render_as_string(hide_password=True)

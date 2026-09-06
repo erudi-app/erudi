@@ -20,12 +20,35 @@ import subprocess
 from pathlib import Path
 
 import pgserver
+from psycopg.conninfo import conninfo_to_dict, make_conninfo
 
 from src.core.logging import logger
 from src.core.subprocess_flags import hidden_console_creationflags
 
 # Number of most-recent snapshots to retain; older ones are pruned.
 KEEP_BACKUPS = 3
+
+
+def _dump_target(psycopg_url: str) -> tuple[str, dict[str, str]]:
+    """Split the cluster URL into a password-free conninfo and the child env.
+
+    ``pg_dump`` receives ``--dbname`` on its command line, which the process
+    list shows to every process of the user and which ``CalledProcessError``
+    repeats in the log on failure. The per-cluster password (#462) therefore
+    travels through ``PGPASSWORD`` in the child's environment instead; both
+    the Unix-socket and the loopback-TCP URI forms are handled by psycopg's
+    parser.
+    """
+    params = conninfo_to_dict(psycopg_url)
+    password = params.pop("password", None)
+    env = dict(os.environ)
+    # The child authenticates with exactly what the URL says: an inherited
+    # PGPASSWORD (GitHub's Windows runners export one for their own PostgreSQL)
+    # must neither leak into the dump nor mask a URL without a password.
+    env.pop("PGPASSWORD", None)
+    if password:
+        env["PGPASSWORD"] = password
+    return make_conninfo(**params), env
 
 
 def _pg_dump_bin() -> Path:
@@ -52,19 +75,21 @@ def backup_database(psycopg_url: str, data_dir: Path | str, label: str) -> Path:
     out_dir = backups_dir_for(data_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     dump_path = out_dir / f"erudi-{label}.dump"
+    conninfo, env = _dump_target(psycopg_url)
 
     subprocess.run(
         [
             str(_pg_dump_bin()),
             "--format=custom",
             "--dbname",
-            psycopg_url,
+            conninfo,
             "--file",
             str(dump_path),
         ],
         check=True,
         capture_output=True,
         text=True,
+        env=env,
         # pg_dump is a console exe; keep it from flashing a terminal window
         # at boot on Windows (#175). No-op (0) on POSIX.
         creationflags=hidden_console_creationflags(),
