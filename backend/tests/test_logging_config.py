@@ -4,12 +4,15 @@ Covers src.core.logging (formatters, filter, level resolution, stable file
 name) and src.core.request_context (id generation and defaults).
 """
 
+import io
 import logging
 import os
 import re
+import sys
 import time
 from logging.handlers import RotatingFileHandler
 from pathlib import Path
+from types import SimpleNamespace
 
 import pytest
 
@@ -197,6 +200,153 @@ def test_log_file_name_is_stable_with_rotation(restore_logging):
 def test_noisy_third_party_loggers_are_silenced():
     for name in ("httpx", "httpcore", "huggingface_hub", "uvicorn.access"):
         assert logging.getLogger(name).level >= logging.WARNING
+
+
+# ---------------------------------------------------------------------------
+# Another library's records reach backend.log (root bridge)
+# ---------------------------------------------------------------------------
+
+
+@pytest.fixture
+def log_file(tmp_path, monkeypatch, restore_logging):
+    """Reconfigure the app logger onto a throwaway backend.log and yield it.
+
+    ``restore_logging`` puts the real configuration back afterwards, bridge
+    included, so no other test inherits this file.
+    """
+    monkeypatch.setattr(
+        "src.core.logging.ensure_runtime_paths_initialized",
+        lambda: SimpleNamespace(log_dir=tmp_path),
+    )
+    configure_logger()
+    yield tmp_path / LOG_FILE_NAME
+
+
+def _flush_handlers():
+    for handler in logging.getLogger("erudi").handlers + logging.getLogger().handlers:
+        handler.flush()
+
+
+@pytest.mark.unit
+def test_a_library_error_reaches_the_file(log_file):
+    """pgserver dumps the whole postgres log at ERROR when a start fails. It
+    logs to its own name, which carries no handler: until the root bridge,
+    that record -- the only account of why the database did not come up --
+    reached stderr and nothing else."""
+    logging.getLogger("pgserver").error("Failed to start server. postgres said: FATAL")
+    _flush_handlers()
+
+    written = log_file.read_text(encoding="utf-8")
+    assert written.count("Failed to start server") == 1
+    assert "[ERROR]" in written
+    assert "pgserver" in written
+
+
+@pytest.mark.unit
+def test_an_app_record_still_lands_exactly_once(log_file):
+    """The app logger propagates to root, where the bridge now sits: without
+    the name check, every Erudi record would be written to the file twice."""
+    logging.getLogger("erudi").error("a single record")
+    logging.getLogger("erudi.domains.llms").error("a single child record")
+    _flush_handlers()
+
+    written = log_file.read_text(encoding="utf-8")
+    assert written.count("a single record") == 1
+    assert written.count("a single child record") == 1
+
+
+@pytest.mark.unit
+def test_a_library_info_line_is_not_kept(log_file):
+    """A library's INFO says nothing about a defect, is never shown on the
+    Diagnostics page, and would shorten the history rotation keeps."""
+    logging.getLogger("alembic.runtime.migration").info("Running upgrade abc -> def")
+    _flush_handlers()
+
+    assert "Running upgrade" not in log_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_nothing_new_reaches_stdout(log_file):
+    """Stdout is the launcher's JSON event channel that the Electron main
+    process parses: only the file handler is bridged, never the console one.
+
+    Asserted on the console handler's own stream rather than through pytest's
+    capture, which owns stdout during a test and would answer for itself.
+    """
+    console = next(
+        h
+        for h in logging.getLogger("erudi").handlers
+        if isinstance(h, logging.StreamHandler) and not isinstance(h, RotatingFileHandler)
+    )
+    console.stream = io.StringIO()
+
+    logging.getLogger("erudi").warning("an erudi line")  # proves the stream IS live
+    logging.getLogger("pgserver").error("a library line")
+    _flush_handlers()
+
+    on_stdout = console.stream.getvalue()
+    assert "an erudi line" in on_stdout
+    assert "a library line" not in on_stdout
+    # ...and the library line did reach the file, so this is not a silence.
+    assert "a library line" in log_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_the_bridge_writes_only_through_the_file_handler(log_file):
+    """Nothing on the root logger may write to a console: a library line on
+    stdout would land in the middle of the launcher's JSON events."""
+    from src.core.logging import RootFileBridge
+
+    for handler in logging.getLogger().handlers:
+        assert not (
+            isinstance(handler, logging.StreamHandler)
+            and not isinstance(handler, RotatingFileHandler)
+            and getattr(handler, "stream", None) in (sys.stdout, sys.stderr)
+        ), handler
+    bridge = next(h for h in logging.getLogger().handlers if isinstance(h, RootFileBridge))
+    assert isinstance(bridge._target, RotatingFileHandler)
+    assert bridge.level == logging.WARNING
+
+
+@pytest.mark.unit
+def test_the_bridge_is_attached_once(log_file):
+    from src.core.logging import RootFileBridge
+
+    configure_logger()
+    configure_logger()
+
+    bridges = [h for h in logging.getLogger().handlers if isinstance(h, RootFileBridge)]
+    assert len(bridges) == 1
+
+
+@pytest.mark.unit
+def test_a_multi_line_library_record_parses_as_one_record(log_file):
+    """pgserver's failure record embeds the postmaster's whole log. The
+    Diagnostics reader must read that as ONE record with its continuation
+    lines -- like a traceback -- and no inner line may pass for a header of
+    its own."""
+    from src.domains.diagnostics import log_reader
+
+    logging.getLogger("pgserver").error(
+        "Failed to start server. Showing contents of postgres server log:\n"
+        "LOG:  database system was not properly shut down\n"
+        "FATAL:  could not write to file: No space left on device\n"
+        "[ERROR] not a header either"
+    )
+    _flush_handlers()
+
+    records = log_reader.parse_records(log_reader.read_tail(log_file))
+
+    matching = [r for r in records if "Failed to start server" in r["message"]]
+    assert len(matching) == 1, [r["message"] for r in records]
+    record = matching[0]
+    assert record["level"] == "ERROR"
+    # The header names the library, in the shape RECORD_RE expects.
+    assert "- pgserver - " in log_file.read_text(encoding="utf-8")
+    assert "No space left on device" in record["message"]
+    assert "[ERROR] not a header either" in record["message"]
+    # ...and the inner lines invented no records of their own.
+    assert not [r for r in records if r["message"].startswith("not a header either")]
 
 
 # ---------------------------------------------------------------------------

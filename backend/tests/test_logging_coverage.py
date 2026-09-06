@@ -247,15 +247,20 @@ class TestKbModeLogging:
 
 @pytest.mark.unit
 class TestNoRootLoggerCalls:
-    """``logging.info(...)`` on the ROOT logger writes nowhere the app reads.
+    """``logging.info(...)`` on the ROOT logger is not how this app logs.
 
-    ``configure_logger`` attaches the console and ``backend.log`` handlers to
-    the ``erudi`` logger only, and nothing calls ``logging.basicConfig``. A
-    module that logs through the ``logging`` module itself therefore drops its
-    INFO records entirely and sends WARNING/ERROR to the stdlib's
-    ``lastResort`` handler on stderr -- out of ``backend.log``, and out of the
-    Diagnostics page with it. This scan is the enforcement: every log call in
-    ``src/`` goes through a ``logger`` obtained from ``src.core.logging``.
+    The root logger carries a bridge into ``backend.log`` so that another
+    LIBRARY's warnings are not lost (``RootFileBridge``), but it is a floor
+    for code we do not own, not a second way to log:
+
+    * it keeps ``WARNING`` and above, so a root ``INFO`` -- the lifecycle
+      records the app writes on purpose -- disappears entirely, and
+    * the root logger's own level is ``WARNING``, so those calls are dropped
+      before any handler sees them.
+
+    Records written there also lose the ``erudi`` name the readers key on.
+    This scan is the enforcement: every log call in ``src/`` goes through a
+    ``logger`` obtained from ``src.core.logging``.
     """
 
     LOG_METHODS = {"debug", "info", "warning", "error", "exception", "critical", "log"}

@@ -7,7 +7,7 @@ from the click in the UI down to the backend work it triggered.
 
 | File | Written by | Contents |
 |------|------------|----------|
-| `backend.log` | Backend (FastAPI process) | Every HTTP request (method, path, status, duration), model generation lifecycle, knowledge-base ingestion phases, RAG searches |
+| `backend.log` | Backend (FastAPI process) | Every HTTP request (method, path, status, duration), model generation lifecycle, knowledge-base ingestion phases, RAG searches, and the warnings and failures of the libraries the backend runs on |
 | `erudi-backend.log` | Electron main process | Backend stdout/stderr (launcher lifecycle events), every UI interaction from the renderer — clicks, drops, pastes, committed input values — and every uncaught renderer error, persisted via IPC |
 
 ### Where to find them
@@ -140,6 +140,30 @@ The backend quotes the tail of that file in the record it writes when the child
 crashes, fails its readiness probe, or is found dead by a later request — so
 the child's last words appear on the **Diagnostics** page and in a copied
 report, without anyone having to find the file.
+
+## What the libraries say
+
+The backend runs on other people's code, and when that code has something to
+report it says so through its own logger: `pgserver` quoting the postmaster's
+log after a failed start, Alembic explaining a refused migration, uvicorn's
+`Application startup failed`, `huggingface_hub` on a download it had to give
+up on.
+
+Those records go to `backend.log` too, in the same format as Erudi's own, so
+they appear on the **Diagnostics** page and in a copied report alongside the
+app's — a failure whose cause is in a library is no longer a failure with no
+explanation.
+
+Two deliberate limits:
+
+- **`WARNING` and above only.** A library's `INFO` (Alembic's per-revision
+  lines, transfer progress, uvicorn's startup chatter) reports no defect, is
+  never shown on the Diagnostics page, and every line of it shortens the
+  history rotation keeps of the records that do matter. `ERUDI_LOG_LEVEL`
+  makes *Erudi* more verbose; it does not open this floor.
+- **Nothing of it reaches standard output.** Only the file is shared: the
+  backend's stdout is the launcher's event channel, and a library writing
+  into it would break the app's startup.
 
 ## The embedded database's own log
 
