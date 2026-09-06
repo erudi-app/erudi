@@ -2,8 +2,8 @@
 # Pinned to the versions the site was last built and reviewed with.
 mkdocs==1.6.1
 mkdocs-material==9.7.7
-mkdocstrings[python]==0.27.0
-mkdocstrings-python==1.13.0
+mkdocstrings[python]==1.0.6
+mkdocstrings-python==2.0.8
 griffe==2.2.0
 # 11.0 fixes the ReDoS in the caret/tilde/betterem/magiclink inline processors.
 # mkdocs-material caps pymdown-extensions per minor, so it has to move with it.
