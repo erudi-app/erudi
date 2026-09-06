@@ -14,13 +14,15 @@ INFO. Showing them in a panel whose whole purpose is to be copied into a public
 issue would turn a deliberate local-logging decision into a leak, so the filter
 is a privacy property of this feature and its test is written as one.
 
-A log *record* is not a log *line*. ``AppBaseException`` writes a header line
-followed by three continuation lines carrying the status code, the error code
-and the message. A record therefore starts at a line matching ``RECORD_RE`` and
-absorbs every following line that does not. Continuations inherit the level of
-their header: those under a kept record are kept, those under a filtered record
-are dropped, and continuations with no header at all -- the top of a window that
-started mid-record -- are dropped too, because their level is unknown.
+A log *record* is not a log *line*. A traceback (every 5xx and every crash is
+logged with one), the trace a raiser attached to an ``AppBaseException``, and
+the tail of a dead inference child all follow their header line as
+continuation lines. A record therefore starts at a line matching ``RECORD_RE``
+and absorbs every following line that does not. Continuations inherit the level
+of their header: those under a kept record are kept, those under a filtered
+record are dropped, and continuations with no header at all -- the top of a
+window that started mid-record -- are dropped too, because their level is
+unknown.
 """
 
 from __future__ import annotations
