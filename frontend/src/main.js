@@ -232,9 +232,15 @@ const startRealBackend = () => {
         const devPort = process.env.BACKEND_PORT || "27182";
         log(`Dev mode using port: ${devPort}`);
 
-        for (let i = 0; i < 10; i++) {
+        // A cold or unclean pgserver start replays its WAL before the backend
+        // can answer: ~26 s measured on Windows (#276), where each refused
+        // fetch fails in milliseconds and the old 10 x 1 s window gave up in
+        // ~10 s. A time-based deadline keeps the window honest whatever the
+        // per-attempt cost (instant refusal or 2 s abort).
+        const deadline = Date.now() + 90_000;
+        for (let i = 0; Date.now() < deadline; i++) {
           try {
-            log(`Dev backend health check attempt ${i + 1}/10`);
+            log(`Dev backend health check attempt ${i + 1}`);
             const controller = new AbortController();
             const timeoutId = setTimeout(() => controller.abort(), 2000);
 
