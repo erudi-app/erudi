@@ -48,8 +48,16 @@
       "tooLarge": "Cette image est trop volumineuse (20 Mo max).",
       "tooMany_one": "Vous pouvez joindre jusqu'à {{count}} image avec ce modèle.",
       "tooMany_other": "Vous pouvez joindre jusqu'à {{count}} images avec ce modèle.",
-      "unreadable": "Cette image n'a pas pu être lue. Essayez un autre fichier."
-    }
+      "unreadable": "Cette image n'a pas pu être lue. Essayez un autre fichier.",
+      "unsupportedDocument": "Ce type de fichier n'est pas pris en charge. Utilisez PDF, Word, Excel, CSV, texte ou Markdown.",
+      "documentTooLarge": "Ce fichier est trop volumineux (50 Mo maximum).",
+      "tooManyFiles_one": "Vous pouvez joindre jusqu'a {{count}} fichier a la fois.",
+      "tooManyFiles_other": "Vous pouvez joindre jusqu'a {{count}} fichiers a la fois.",
+      "noFilePath": "Cet element n'a pas de fichier sur le disque, il ne peut pas etre joint."
+    },
+    "attachFile": "Joindre un fichier",
+    "attachFileHint": "Joindre un document ou un dossier (ou glisser-deposer)",
+    "removeFile": "Retirer le fichier"
   },
   "message": {
     "firstReplyHint": "La première réponse peut prendre un peu plus de temps pendant le chargement du modèle en mémoire...",

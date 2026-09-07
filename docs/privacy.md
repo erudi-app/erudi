@@ -18,6 +18,8 @@ Tokenizers are loaded from disk with `local_files_only=True` ([mlx_engine.py](ht
 
 Documents you attach to a knowledge base are read in place and never copied; only their text chunks and embeddings are stored, in the embedded database ([services.py](https://github.com/erudi-app/erudi/blob/main/backend/src/domains/knowledge_base/services.py#L304-L327)).
 
+A document or folder you attach to a single question is read in place too, by the backend running on this computer: the question carries the file's path, never its bytes, and no upload happens ([attachment_utils.py](https://github.com/erudi-app/erudi/blob/main/backend/src/utils/attachment_utils.py)). The extracted text is used for that one turn; the conversation stores only the file's path, not its content.
+
 Hugging Face's own client telemetry is disabled by the launcher before anything is imported: `HF_HUB_DISABLE_TELEMETRY=1` ([run.py](https://github.com/erudi-app/erudi/blob/main/backend/run.py#L156)). No analytics or crash-reporting library is present in the code; the list of what we searched for is at the end of this page.
 
 The connection indicator in the corner of the window costs nothing to anybody. It reads whether this machine is on a network from the operating system — `navigator.onLine` and the `online` / `offline` events — and corrects that with the requests the app already makes on your behalf: one that dies on the wire says more than a link light does ([networkStatus.js](https://github.com/erudi-app/erudi/blob/main/frontend/src/utils/networkStatus.js#L1-L35), [client.js](https://github.com/erudi-app/erudi/blob/main/frontend/src/services/api/client.js#L31-L44)). Nothing is sent to find out, so no one learns when your machine is running Erudi.

@@ -3,6 +3,7 @@ import { tracedFetch } from "./api/client";
 export async function askArena({
   question,
   images = [],
+  attachments = [],
   llmId,
   temperature,
   topP,
@@ -12,8 +13,9 @@ export async function askArena({
   signal,
   onStreamChunk,
 }) {
-  // Image-only asks are valid vision-model turns (#136 C).
-  if (!question.trim() && images.length === 0) {
+  // Image-only asks are valid vision-model turns (#136 C); document-only asks
+  // are valid "what does this say?" turns (#492).
+  if (!question.trim() && images.length === 0 && attachments.length === 0) {
     throw new Error("Question is empty");
   }
 
@@ -23,6 +25,7 @@ export async function askArena({
     body: JSON.stringify({
       question: question,
       images: images,
+      attachments: attachments,
       temperature: temperature,
       top_p: topP,
       max_new_tokens: maxNewTokens,

@@ -65,7 +65,45 @@ Request body (`ConversationQuery`):
 | `question` | string | required |
 | `images` | list of strings | base64 data-URL images attached to the question (vision models) |
 | `image_paths` | list of strings | local paths parallel to `images`, empty string when unavailable |
+| `attachments` | list of strings | local paths of documents, or of folders of documents, attached to this question |
 | `temperature`, `top_p`, `max_new_tokens`, `custom_prompt` | optional | per-turn overrides of the conversation's settings |
+
+### Attached documents
+
+`attachments` carries filesystem paths, not bytes: the backend runs on the same machine as the
+files, so nothing is uploaded. Each path is read through the same `DocumentReader` the Knowledge
+Base uses (`.pdf`, `.docx`, `.xlsx`, `.csv`, `.txt`, `.md`), and a path that names a directory is
+walked - the folder itself and one level below it, hidden entries skipped - for those extensions.
+Up to 50 files are read per question.
+
+The extracted text is injected into the user turn ahead of the question, one delimited block per
+file:
+
+```
+[Attached file: report.pdf]
+Revenue grew steadily during the first quarter.
+[End of attached file]
+
+What does it say?
+```
+
+The total is capped at 24 000 characters per question (`ATTACHMENT_CHAR_BUDGET` in
+`src/utils/attachment_utils.py`, roughly 6 000 tokens). A block that overflows the remaining budget
+is cut and ends with `[truncated: file too large to include fully]`.
+
+A file that cannot be read never fails the turn: its block says so in the model's view, and the
+answer opens with an italic notice naming the file and why - unsupported type, missing file, no
+extractable text (Erudi bundles no OCR tier, so images and scanned PDFs land here), or an extractor
+failure. Truncated files are named in the same notice.
+
+Both marker paths are percent-encoded when stored — `%` as `%25`, then `]` as `%5D` — so a path
+holding a closing bracket cannot end its own marker; the renderer decodes them in
+`frontend/src/utils/messageContent.js`.
+
+What the conversation *stores* is only a `[file_path:/abs/path]` marker per attachment, next to the
+`[image_path:...]` markers images use. The extracted text rides the live turn and is never persisted
+as message content, so a reloaded conversation shows which documents a turn carried without dragging
+their contents through history forever.
 
 ### Event types
 

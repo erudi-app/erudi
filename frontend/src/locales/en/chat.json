@@ -48,8 +48,16 @@
       "tooLarge": "That image is too large (max 20 MB).",
       "tooMany_one": "You can attach up to {{count}} image with this model.",
       "tooMany_other": "You can attach up to {{count}} images with this model.",
-      "unreadable": "That image could not be read. Try another file."
-    }
+      "unreadable": "That image could not be read. Try another file.",
+      "unsupportedDocument": "That file type isn't supported. Use PDF, Word, Excel, CSV, text or Markdown.",
+      "documentTooLarge": "That file is too large (max 50 MB).",
+      "tooManyFiles_one": "You can attach up to {{count}} file at a time.",
+      "tooManyFiles_other": "You can attach up to {{count}} files at a time.",
+      "noFilePath": "That item has no file on disk, so it can't be attached."
+    },
+    "attachFile": "Attach file",
+    "attachFileHint": "Attach a document or folder (or drag and drop)",
+    "removeFile": "Remove file"
   },
   "message": {
     "firstReplyHint": "First response may take a bit longer while loading the model into memory...",

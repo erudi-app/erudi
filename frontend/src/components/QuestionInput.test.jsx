@@ -57,7 +57,7 @@ describe("QuestionInput pasted-image persistence (#136)", () => {
 
     // Sent with the persisted real path in the parallel imagePaths array.
     expect(onSend).toHaveBeenCalledTimes(1);
-    expect(onSend).toHaveBeenCalledWith("", [dataUrl], [FAKE_PATH]);
+    expect(onSend).toHaveBeenCalledWith("", [dataUrl], [FAKE_PATH], []);
   });
 
   it("does not persist a file-origin image (it already has a real path)", async () => {
@@ -75,7 +75,8 @@ describe("QuestionInput pasted-image persistence (#136)", () => {
     expect(onSend).toHaveBeenCalledWith(
       "",
       [expect.stringMatching(/^data:image\/png;base64,/)],
-      ["C:\\photos\\cat.png"]
+      ["C:\\photos\\cat.png"],
+      []
     );
   });
 

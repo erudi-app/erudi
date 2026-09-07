@@ -24,6 +24,11 @@ from fastapi.concurrency import run_in_threadpool
 from src.core.logging import logger
 from src.core.logutils import truncate_for_log
 from src.utils.prompt_utils import get_prompting_strategy
+from src.utils.attachment_utils import (
+    build_attachment_notice,
+    prepend_attachment_block,
+    resolve_attachments,
+)
 from src.utils.kb_utils import KbExcerpt, retrieve_kb_excerpts
 from src.agents.kb_mode import plan_turn
 from src.agents.runner import AgentRunner, GenParams, IMAGES_IGNORED_NOTICE
@@ -112,7 +117,7 @@ class ArenaService:
         Generation/model-load failures are NOT raised here — the runner yields the
         ``[ERROR_MESSAGE_SYSTEM]`` sentinel inline (unified with conversation).
         """
-        if not payload.question.strip() and not payload.images:
+        if not payload.question.strip() and not payload.images and not payload.attachments:
             raise InvalidInputException("question")
 
         start_s = time.perf_counter()
@@ -122,6 +127,8 @@ class ArenaService:
         if payload.images:
             total_b64_chars = sum(len(url) for url in payload.images)
             image_note = f", images={len(payload.images)} ({total_b64_chars} base64 chars)"
+        if payload.attachments:
+            image_note += f", attachments={len(payload.attachments)}"
         logger.info(
             f"Arena query started for LLM {llm_id}{image_note}: "
             f"{truncate_for_log(payload.question, 2000)}"
@@ -165,13 +172,23 @@ class ArenaService:
         # instead of silently dropping the attachment.
         supports_vision = await run_in_threadpool(detect_supports_vision, llm.link)
 
+        # Documents attached to this question (#492): the same resolver the
+        # conversation uses, so both paths read files exactly once, the same way.
+        attachments = await run_in_threadpool(resolve_attachments, payload.attachments)
+
         response = ""
         if payload.images and supports_vision is not True:
             response += IMAGES_IGNORED_NOTICE
             yield IMAGES_IGNORED_NOTICE
+        attachment_notice = build_attachment_notice(attachments)
+        if attachment_notice:
+            response += attachment_notice
+            yield attachment_notice
         async for token in self.runner.astream_text(
             llm=llm,
-            user_message=self._build_user_message(payload.question, payload.images),
+            user_message=self._build_user_message(
+                prepend_attachment_block(attachments.block, payload.question), payload.images
+            ),
             system_prompt=plan.system_prompt,
             params=params,
             thread_id=None,

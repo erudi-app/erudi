@@ -408,6 +408,11 @@ Chunk defaults live in `backend/src/ingestion/chunking.py`
 The `query:` and `passage:` prefixes required by the e5 model family are mandatory and
 applied by `E5Embeddings`; skipping them silently degrades retrieval.
 
+`DocumentReader` has a second caller: `backend/src/utils/attachment_utils.py`, which turns the
+documents and folders attached to a single chat or arena question into delimited text blocks for
+that turn. It stops at the reader — no chunking, no embedding, no storage — so the app keeps exactly
+one document parser.
+
 ### Retrieval
 
 `rag.kb_chunks` carries both a dense HNSW index (cosine over 384-dim embeddings) and a

@@ -28,8 +28,9 @@ class ArenaQueryPayload(BaseModel):
 
     Attributes:
         question: The question/prompt to send to the model (trimmed; may be empty
-            only when images are attached).
+            only when images or documents are attached).
         images: Optional base64 data-URL images attached to the question (vision models).
+        attachments: Local filesystem paths of documents/folders attached to the question.
         temperature: Sampling temperature (0.0=deterministic, 2.0=creative, default=0.1).
         top_p: Nucleus sampling threshold (0.0-1.0, default=0.5).
         max_new_tokens: Maximum tokens to generate (1-8192, default=1024).
@@ -49,6 +50,13 @@ class ArenaQueryPayload(BaseModel):
     images: Optional[List[str]] = Field(
         default=None,
         description="Optional base64 data-URL images attached to the question (vision models)",
+    )
+    attachments: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Local filesystem paths of documents (or folders of documents) attached "
+            "to the question; read on this machine, never uploaded (#492)"
+        ),
     )
     # None = "use the model's own defaults" (#388), resolved by the service from
     # the Llm row (captured generation_config, else the neutral constants);
@@ -76,20 +84,21 @@ class ArenaQueryPayload(BaseModel):
     )
 
     @model_validator(mode="after")
-    def validate_question_or_images(self):
-        """Ensure the turn carries text or at least one image.
+    def validate_question_or_attachments(self):
+        """Ensure the turn carries text, at least one image, or a document.
 
         Image-only asks are valid vision-model turns (mirrors conversations,
-        #136 C); a fully empty ask is still rejected.
+        #136 C) and a document-only ask is a valid "what does this say?" turn
+        (#492); a fully empty ask is still rejected.
 
         Returns:
             The payload with a trimmed question.
 
         Raises:
-            ValueError: If question is empty/whitespace and no images are attached.
+            ValueError: If question is empty/whitespace and nothing is attached.
         """
         self.question = self.question.strip()
-        if not self.question and not self.images:
+        if not self.question and not self.images and not self.attachments:
             raise ValueError("Question cannot be empty or whitespace")
         return self
 

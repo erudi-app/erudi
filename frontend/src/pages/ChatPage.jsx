@@ -191,7 +191,7 @@ export default function ChatPage() {
   };
 
   const handleAsk = useCallback(
-    async (question, images = [], imagePaths = []) => {
+    async (question, images = [], imagePaths = [], attachmentPaths = []) => {
       const llm = models.find((m) => m.name === selectedModel);
       if (!llm || hasMissingWeights(llm)) {
         log.error("Selected model not found or has no weights on disk");
@@ -224,6 +224,7 @@ export default function ChatPage() {
             initialQuestion: question,
             initialImages: images,
             initialImagePaths: imagePaths,
+            initialAttachments: attachmentPaths,
             initialSettings: settings,
             initialCustomPrompt: customPrompt,
           },

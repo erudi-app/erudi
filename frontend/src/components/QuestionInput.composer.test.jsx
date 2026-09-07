@@ -39,7 +39,7 @@ describe("QuestionInput keyboard send", () => {
     fireEvent.change(textarea, { target: { value: "  hello there  " } });
     fireEvent.keyDown(textarea, { key: "Enter" });
 
-    expect(onSend).toHaveBeenCalledWith("hello there", [], []);
+    expect(onSend).toHaveBeenCalledWith("hello there", [], [], []);
     expect(textarea.value).toBe("");
   });
 
@@ -181,7 +181,7 @@ describe("QuestionInput pasted image without a persistence bridge", () => {
     await screen.findByAltText("attachment 1");
 
     fireEvent.click(screen.getByLabelText("Send"));
-    expect(onSend).toHaveBeenCalledWith("", [expect.stringMatching(/^data:image\/png/)], [""]);
+    expect(onSend).toHaveBeenCalledWith("", [expect.stringMatching(/^data:image\/png/)], [""], []);
   });
 
   it("attaches with an empty path when the persistence call throws", async () => {
@@ -198,6 +198,6 @@ describe("QuestionInput pasted image without a persistence bridge", () => {
     await waitFor(() => expect(window.imageAPI.savePasted).toHaveBeenCalled());
 
     fireEvent.click(screen.getByLabelText("Send"));
-    expect(onSend).toHaveBeenCalledWith("", [expect.stringMatching(/^data:image\/png/)], [""]);
+    expect(onSend).toHaveBeenCalledWith("", [expect.stringMatching(/^data:image\/png/)], [""], []);
   });
 });

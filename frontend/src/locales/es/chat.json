@@ -48,8 +48,16 @@
       "tooLarge": "Esa imagen es demasiado grande (máx. 20 MB).",
       "tooMany_one": "Puedes adjuntar hasta {{count}} imagen con este modelo.",
       "tooMany_other": "Puedes adjuntar hasta {{count}} imágenes con este modelo.",
-      "unreadable": "No se pudo leer esa imagen. Prueba con otro archivo."
-    }
+      "unreadable": "No se pudo leer esa imagen. Prueba con otro archivo.",
+      "unsupportedDocument": "Ese tipo de archivo no es compatible. Usa PDF, Word, Excel, CSV, texto o Markdown.",
+      "documentTooLarge": "Ese archivo es demasiado grande (maximo 50 MB).",
+      "tooManyFiles_one": "Puedes adjuntar hasta {{count}} archivo a la vez.",
+      "tooManyFiles_other": "Puedes adjuntar hasta {{count}} archivos a la vez.",
+      "noFilePath": "Ese elemento no tiene un archivo en el disco, asi que no se puede adjuntar."
+    },
+    "attachFile": "Adjuntar archivo",
+    "attachFileHint": "Adjunta un documento o una carpeta (o arrastra y suelta)",
+    "removeFile": "Quitar archivo"
   },
   "message": {
     "firstReplyHint": "La primera respuesta puede tardar un poco más mientras el modelo se carga en memoria...",

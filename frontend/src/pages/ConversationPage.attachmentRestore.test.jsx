@@ -3,10 +3,9 @@ import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, waitFor, act } from "@testing-library/react";
 
-// #136 — once a pasted image is persisted, it is stored with a normal
-// [image_path:...] marker (same shape a file attachment produces). On reload the
-// page restores it from disk via window.fsAPI.readImageAsDataURL and renders it
-// as a thumbnail, exactly like any path-attached image.
+// #492 — an attached document is persisted as a [file_path:...] marker, not as
+// its extracted text. On reload the page turns each marker back into a named
+// chip, so a revisited conversation still shows what the turn carried.
 
 const { tracedFetchMock, navigateMock, locationMock } = vi.hoisted(() => ({
   tracedFetchMock: vi.fn(),
@@ -37,12 +36,13 @@ vi.mock("../components/modals/CustomizePromptModal", () => ({ default: () => nul
 import ConversationPage from "./ConversationPage.jsx";
 import apiClient from "../services/api/client";
 
-const PASTED_PATH = "C:\\Users\\me\\AppData\\Local\\erudi\\pasted-images\\paste-1.png";
-const RESTORED_DATA_URL = "data:image/png;base64,UkVTVE9SRUQ=";
-
-// A persisted pasted image carries a bare path marker, no [image] fallback.
 const messages = [
-  { id: 101, sender: "user", content: `[image_path:${PASTED_PATH}] Describe this`, starred: false },
+  {
+    id: 101,
+    sender: "user",
+    content: "What does it say? [file_path:/Users/me/docs/report.pdf]",
+    starred: false,
+  },
 ];
 
 const conversationDetail = {
@@ -56,7 +56,6 @@ const conversationDetail = {
 
 beforeEach(() => {
   Element.prototype.scrollTo = () => {};
-  window.fsAPI = { readImageAsDataURL: vi.fn(async () => RESTORED_DATA_URL) };
   apiClient.get.mockReset();
   apiClient.get.mockImplementation(async () => messages);
   tracedFetchMock.mockReset();
@@ -69,18 +68,27 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
-  delete window.fsAPI;
 });
 
-describe("ConversationPage image restore with an encoded path", () => {
-  it("reads back the DECODED path when the marker carries ] or %", async () => {
-    // The backend percent-encodes "]" and "%" so they cannot end the marker;
-    // the page must hand fsAPI the real path, not the encoded one.
+describe("ConversationPage attachment restore (#492)", () => {
+  it("renders a stored [file_path:...] marker as a named chip, not as text", async () => {
+    render(<ConversationPage />);
+    await waitFor(() => expect(apiClient.get).toHaveBeenCalled());
+    await act(async () => {});
+
+    // The file name shows as a chip...
+    expect(await screen.findByText("report.pdf")).toBeTruthy();
+    // ...and the raw marker never leaks into the readable text.
+    expect(screen.queryByText(/file_path/)).toBeNull();
+    expect(screen.getByText("What does it say?")).toBeTruthy();
+  });
+
+  it("shows the real name when the stored path carries ] or %", async () => {
     apiClient.get.mockImplementation(async () => [
       {
-        id: 202,
+        id: 102,
         sender: "user",
-        content: "Describe this [image_path:/photos/[2026%5D 100%25/shot.png]",
+        content: "Read it [file_path:/docs/[2026%5D 100%25/report v2%5D.pdf]",
         starred: false,
       },
     ]);
@@ -89,24 +97,7 @@ describe("ConversationPage image restore with an encoded path", () => {
     await waitFor(() => expect(apiClient.get).toHaveBeenCalled());
     await act(async () => {});
 
-    await waitFor(() =>
-      expect(window.fsAPI.readImageAsDataURL).toHaveBeenCalledWith("/photos/[2026] 100%/shot.png")
-    );
-  });
-});
-
-describe("ConversationPage pasted-image restore (#136)", () => {
-  it("restores a persisted [image_path:...] marker as an image thumbnail", async () => {
-    render(<ConversationPage />);
-    await waitFor(() => expect(apiClient.get).toHaveBeenCalled());
-    await act(async () => {});
-
-    // The stored path was read back from disk...
-    await waitFor(() => expect(window.fsAPI.readImageAsDataURL).toHaveBeenCalledWith(PASTED_PATH));
-
-    // ...and rendered as a normal image thumbnail (not a bare placeholder).
-    const img = await screen.findByAltText("attachment 1");
-    expect(img.getAttribute("src")).toBe(RESTORED_DATA_URL);
-    expect(screen.queryByText(/image attachment/)).toBeNull();
+    expect(await screen.findByText("report v2].pdf")).toBeTruthy();
+    expect(screen.getByText("Read it")).toBeTruthy();
   });
 });

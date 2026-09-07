@@ -6,12 +6,13 @@ import QuestionInput from "../components/QuestionInput";
 import { askArena } from "../services/arenaService.js";
 import { canAttachImages, maxImagesForModel } from "../utils/modelCapabilities";
 import { defaultsFor } from "../utils/samplingDefaults";
-import { Trash, Plus, Square } from "lucide-react";
+import { FileText, Trash, Plus, Square } from "lucide-react";
 import HeaderBar from "../components/HeaderBar";
 import CustomizePromptModal from "../components/modals/CustomizePromptModal";
 import MarkdownRenderer from "../components/MarkdownRenderer";
 import apiClient from "../services/api/client";
 import { createLogger } from "../utils/logger";
+import { baseName } from "../utils/messageContent";
 
 const MAX_PANELS = 4;
 
@@ -89,8 +90,11 @@ export default function ArenaPage() {
   const handleCustomizePrompt = (panelId, show) =>
     setPanels((prev) => prev.map((p) => (p.id === panelId ? { ...p, showPromptModal: show } : p)));
 
-  const handleAsk = async (inputValue, images = []) => {
-    if (!inputValue.trim() && images.length === 0) {
+  // The arena keeps no history, so it has no use for the images' filesystem
+  // paths (they exist to rehydrate a reloaded conversation); documents are
+  // sent by path because the backend is the one that reads them (#492).
+  const handleAsk = async (inputValue, images = [], _imagePaths = [], attachmentPaths = []) => {
+    if (!inputValue.trim() && images.length === 0 && attachmentPaths.length === 0) {
       return;
     }
     if (flushIntervalRef.current) {
@@ -103,7 +107,14 @@ export default function ArenaPage() {
       ...panel,
       messages: [
         ...panel.messages,
-        { role: "user", content: inputValue, images },
+        {
+          role: "user",
+          content: inputValue,
+          images,
+          // Attached documents (#492): the arena keeps no history, so their
+          // names live for this session only, like the image thumbnails.
+          attachmentNames: attachmentPaths.map(baseName),
+        },
         { role: "llm", content: "" },
       ],
     }));
@@ -167,6 +178,7 @@ export default function ArenaPage() {
       askArena({
         question: inputValue,
         images,
+        attachments: attachmentPaths,
         llmId: llm.id,
         temperature: panel.temperature,
         topP: panel.topP,
@@ -350,6 +362,19 @@ export default function ArenaPage() {
                           alt={t("arena:panel.attachmentAlt", { index: i + 1 })}
                           className="max-h-48 rounded-lg border border-emerald-200/20"
                         />
+                      ))}
+                    </div>
+                  )}
+                  {msg.attachmentNames?.length > 0 && (
+                    <div className="flex flex-wrap gap-2">
+                      {msg.attachmentNames.map((name, i) => (
+                        <span
+                          key={`${name}-${i}`}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-200/20 px-2 py-0.5 text-xs text-white/80"
+                        >
+                          <FileText className="h-3.5 w-3.5 shrink-0" />
+                          <span className="truncate max-w-[12rem]">{name}</span>
+                        </span>
                       ))}
                     </div>
                   )}

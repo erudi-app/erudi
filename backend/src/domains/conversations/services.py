@@ -37,6 +37,11 @@ from src.domains.conversations.schemas import ConversationQuery
 from src.entities.Conversation import Conversation
 from src.entities.Llm import Llm
 from src.core.exceptions import ModelNotFoundException
+from src.utils.attachment_utils import (
+    build_attachment_notice,
+    prepend_attachment_block,
+    resolve_attachments,
+)
 from src.utils.kb_utils import KbExcerpt, retrieve_kb_excerpts
 from src.utils.prompt_utils import get_prompting_strategy
 
@@ -301,6 +306,8 @@ class ConversationService:
         if payload.images:
             total_b64_chars = sum(len(url) for url in payload.images)
             image_note = f", images={len(payload.images)} ({total_b64_chars} base64 chars)"
+        if payload.attachments:
+            image_note += f", attachments={len(payload.attachments)}"
         logger.info(
             f"Processing query for conversation {conversation_id}{image_note}: "
             f"{truncate_for_log(payload.question, 2000)}"
@@ -344,12 +351,21 @@ class ConversationService:
             )
 
         try:
-            user_message = self._build_user_message(payload.question, payload.images)
+            # Documents attached to this question (#492): read on this machine
+            # through the KB's DocumentReader and injected as delimited blocks
+            # ahead of the user's words. Blocking parsing -> threadpool.
+            attachments = await run_in_threadpool(resolve_attachments, payload.attachments)
+            user_message = self._build_user_message(
+                prepend_attachment_block(attachments.block, payload.question), payload.images
+            )
             await run_in_threadpool(
                 self._persist_user_message,
                 conversation_id,
                 self._user_display_content(
-                    payload.question, payload.images, payload.image_paths or []
+                    payload.question,
+                    payload.images,
+                    payload.image_paths or [],
+                    attachments.paths,
                 ),
             )
 
@@ -387,6 +403,14 @@ class ConversationService:
             if payload.images and supports_vision is not True:
                 assistant_response += IMAGES_IGNORED_NOTICE
                 yield _ndjson({"t": "answer", "text": IMAGES_IGNORED_NOTICE})
+
+            # Same contract for documents (#492): a file the reader could not
+            # turn into text, or text cut to fit the budget, is named up front
+            # rather than dropped in silence. Persisted with the answer.
+            attachment_notice = build_attachment_notice(attachments)
+            if attachment_notice:
+                assistant_response += attachment_notice
+                yield _ndjson({"t": "answer", "text": attachment_notice})
 
             async for event in self.runner.astream_text(
                 llm=llm,
@@ -529,18 +553,41 @@ class ConversationService:
         ]
 
     @staticmethod
-    def _user_display_content(question: str, images, image_paths=None) -> str:
+    def _encode_marker_path(path: str) -> str:
+        """Percent-encode what would break a ``[...]`` marker.
+
+        The frontend parses these markers with a bracket-delimited regex, so a
+        path holding ``]`` (perfectly legal on every platform) would end its own
+        marker and leak the rest into the readable text. ``%`` is encoded FIRST
+        so decoding is unambiguous: a literal ``%5D`` in a path survives the
+        round trip as ``%255D``.
+        """
+        return path.replace("%", "%25").replace("]", "%5D")
+
+    @staticmethod
+    def _user_display_content(
+        question: str, images, image_paths=None, attachment_paths=None
+    ) -> str:
         """Short text persisted in the Message table: the question plus one
-        marker per attachment. When a local filesystem path is known it is stored
-        as ``[image_path:/abs/path]`` so the frontend can reload the file on
-        revisit. Falls back to ``[image]`` for clipboard/unknown-origin images."""
-        if not images:
-            return question
-        paths = list(image_paths or [])
+        marker per attachment. When a local filesystem path is known an image is
+        stored as ``[image_path:/abs/path]`` so the frontend can reload the file
+        on revisit. Falls back to ``[image]`` for clipboard/unknown-origin
+        images. Documents are stored as ``[file_path:/abs/path]`` (#492): the
+        extracted text rides the live turn only, so a reloaded conversation
+        shows WHAT was attached without carrying the whole document forever.
+
+        Both marker paths are percent-encoded by ``_encode_marker_path``; the
+        frontend decodes them in ``messageContent.js``."""
         markers = []
-        for i in range(len(images)):
+        encode = ConversationService._encode_marker_path
+        paths = list(image_paths or [])
+        for i in range(len(images or [])):
             p = paths[i] if i < len(paths) else ""
-            markers.append(f"[image_path:{p}]" if p else "[image]")
+            markers.append(f"[image_path:{encode(p)}]" if p else "[image]")
+        for p in attachment_paths or []:
+            markers.append(f"[file_path:{encode(p)}]")
+        if not markers:
+            return question
         marker_str = " ".join(markers)
         return f"{question} {marker_str}".strip() if question.strip() else marker_str
 
