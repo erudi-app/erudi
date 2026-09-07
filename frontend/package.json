@@ -1,7 +1,7 @@
 {
   "name": "erudi",
   "productName": "erudi",
-  "version": "1.0.0",
+  "version": "1.1.0",
   "description": "Erudi is a modern, windows desktop application designed to query and fine-tune models locally, on a no-code friendly-user interface and with your own data.",
   "main": ".webpack/main",
   "scripts": {
