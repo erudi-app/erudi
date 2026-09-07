@@ -72,6 +72,29 @@ afterEach(() => {
   delete window.fsAPI;
 });
 
+describe("ConversationPage image restore with an encoded path", () => {
+  it("reads back the DECODED path when the marker carries ] or %", async () => {
+    // The backend percent-encodes "]" and "%" so they cannot end the marker;
+    // the page must hand fsAPI the real path, not the encoded one.
+    apiClient.get.mockImplementation(async () => [
+      {
+        id: 202,
+        sender: "user",
+        content: "Describe this [image_path:/photos/[2026%5D 100%25/shot.png]",
+        starred: false,
+      },
+    ]);
+
+    render(<ConversationPage />);
+    await waitFor(() => expect(apiClient.get).toHaveBeenCalled());
+    await act(async () => {});
+
+    await waitFor(() =>
+      expect(window.fsAPI.readImageAsDataURL).toHaveBeenCalledWith("/photos/[2026] 100%/shot.png")
+    );
+  });
+});
+
 describe("ConversationPage pasted-image restore (#136)", () => {
   it("restores a persisted [image_path:...] marker as an image thumbnail", async () => {
     render(<ConversationPage />);

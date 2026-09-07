@@ -696,6 +696,25 @@ class TestConversationService:
             == "hi [image_path:/p.png] [file_path:/a.txt]"
         )
 
+    def test_marker_paths_encode_the_closing_bracket(self):
+        """A real path can hold ``]`` and ``%``. Markers are parsed on the
+        frontend with a bracket-delimited regex, so both are percent-encoded
+        here (``%`` first, so decoding is unambiguous) and the marker stays a
+        single unambiguous token."""
+        content = ConversationService._user_display_content(
+            "look",
+            ["x"],
+            ["/docs/[2026] 100%/photo.png"],
+            ["/docs/[2026] 100%/report.pdf"],
+        )
+        assert content == (
+            "look [image_path:/docs/[2026%5D 100%25/photo.png] "
+            "[file_path:/docs/[2026%5D 100%25/report.pdf]"
+        )
+        # Nothing between the marker prefix and its closing bracket can end it
+        # early any more.
+        assert content.count("]") == 2
+
     async def test_query_stream_injects_attachment_blocks_and_marker(
         self, test_db_session, mock_llm, monkeypatch, tmp_path
     ):

@@ -82,4 +82,22 @@ describe("ConversationPage attachment restore (#492)", () => {
     expect(screen.queryByText(/file_path/)).toBeNull();
     expect(screen.getByText("What does it say?")).toBeTruthy();
   });
+
+  it("shows the real name when the stored path carries ] or %", async () => {
+    apiClient.get.mockImplementation(async () => [
+      {
+        id: 102,
+        sender: "user",
+        content: "Read it [file_path:/docs/[2026%5D 100%25/report v2%5D.pdf]",
+        starred: false,
+      },
+    ]);
+
+    render(<ConversationPage />);
+    await waitFor(() => expect(apiClient.get).toHaveBeenCalled());
+    await act(async () => {});
+
+    expect(await screen.findByText("report v2].pdf")).toBeTruthy();
+    expect(screen.getByText("Read it")).toBeTruthy();
+  });
 });

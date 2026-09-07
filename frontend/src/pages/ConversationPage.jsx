@@ -17,7 +17,12 @@ import { createLogger } from "../utils/logger";
 import { conversationPath } from "../utils/routes";
 import { canAttachImages, maxImagesForModel } from "../utils/modelCapabilities";
 import { defaultsFor, hasNoPublisherRecommendation } from "../utils/samplingDefaults";
-import { baseName, getAttachmentNames, getDisplayContent } from "../utils/messageContent";
+import {
+  baseName,
+  getAttachmentNames,
+  getDisplayContent,
+  getImagePaths,
+} from "../utils/messageContent";
 
 const log = createLogger("ConversationPage");
 
@@ -134,7 +139,9 @@ export default function ConversationPage() {
       const restored = await Promise.all(
         messages.map(async (m) => {
           if (m.images !== undefined || !/\[image_path:[^\]]+\]/.test(m.content)) return m;
-          const paths = [...m.content.matchAll(/\[image_path:([^\]]+)\]/g)].map((x) => x[1]);
+          // Marker paths are percent-encoded by the backend; decode before
+          // touching the filesystem.
+          const paths = getImagePaths(m.content);
           const images = (
             await Promise.all(
               paths.map((p) =>

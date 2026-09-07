@@ -96,6 +96,10 @@ answer opens with an italic notice naming the file and why - unsupported type, m
 extractable text (Erudi bundles no OCR tier, so images and scanned PDFs land here), or an extractor
 failure. Truncated files are named in the same notice.
 
+Both marker paths are percent-encoded when stored — `%` as `%25`, then `]` as `%5D` — so a path
+holding a closing bracket cannot end its own marker; the renderer decodes them in
+`frontend/src/utils/messageContent.js`.
+
 What the conversation *stores* is only a `[file_path:/abs/path]` marker per attachment, next to the
 `[image_path:...]` markers images use. The extracted text rides the live turn and is never persisted
 as message content, so a reloaded conversation shows which documents a turn carried without dragging

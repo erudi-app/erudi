@@ -7,6 +7,11 @@
  * thumbnails, chips or placeholders, never as text. Error messages carry the
  * [ERROR_MESSAGE_SYSTEM] sentinel displayed as a ❌ prefix.
  *
+ * Marker paths are percent-encoded by the backend (`_encode_marker_path` in
+ * backend/src/domains/conversations/services.py): "%" as %25 and "]" as %5D, so
+ * a path holding a closing bracket cannot end its own marker. Every reader of a
+ * marker path here goes through decodeMarkerPath.
+ *
  * Single source of truth used by BOTH the chat display and the
  * copy-to-clipboard action, so copying yields exactly what the user sees
  * (#136).
@@ -23,6 +28,37 @@ export function getDisplayContent(content) {
     .replace(/\[image_path:[^\]]*\]/g, "")
     .replace(/\[file_path:[^\]]*\]/g, "")
     .trim();
+}
+
+/**
+ * Turn a stored marker path back into the real filesystem path.
+ *
+ * The order matters and mirrors the backend's encoding order in reverse: %5D
+ * first, then %25. A path that really contains "%5D" was stored as "%255D", and
+ * the first pass cannot match inside it, so it survives intact.
+ *
+ * @param {string} path - Path as written inside a marker.
+ * @returns {string} The real path.
+ */
+export function decodeMarkerPath(path) {
+  return String(path || "")
+    .replace(/%5D/g, "]")
+    .replace(/%25/g, "%");
+}
+
+/**
+ * Real filesystem paths of the images a stored user message carries.
+ *
+ * Bare [image] markers (clipboard images with no file origin) yield nothing:
+ * there is no path to reload them from.
+ *
+ * @param {string} content - Raw message content as stored.
+ * @returns {string[]} The image paths, decoded, in order.
+ */
+export function getImagePaths(content) {
+  return [...String(content || "").matchAll(/\[image_path:([^\]]+)\]/g)].map((match) =>
+    decodeMarkerPath(match[1])
+  );
 }
 
 /**
@@ -47,6 +83,6 @@ export function baseName(path) {
  */
 export function getAttachmentNames(content) {
   return [...String(content || "").matchAll(/\[file_path:([^\]]+)\]/g)].map((match) =>
-    baseName(match[1])
+    baseName(decodeMarkerPath(match[1]))
   );
 }

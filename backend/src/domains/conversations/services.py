@@ -553,6 +553,18 @@ class ConversationService:
         ]
 
     @staticmethod
+    def _encode_marker_path(path: str) -> str:
+        """Percent-encode what would break a ``[...]`` marker.
+
+        The frontend parses these markers with a bracket-delimited regex, so a
+        path holding ``]`` (perfectly legal on every platform) would end its own
+        marker and leak the rest into the readable text. ``%`` is encoded FIRST
+        so decoding is unambiguous: a literal ``%5D`` in a path survives the
+        round trip as ``%255D``.
+        """
+        return path.replace("%", "%25").replace("]", "%5D")
+
+    @staticmethod
     def _user_display_content(
         question: str, images, image_paths=None, attachment_paths=None
     ) -> str:
@@ -562,14 +574,18 @@ class ConversationService:
         on revisit. Falls back to ``[image]`` for clipboard/unknown-origin
         images. Documents are stored as ``[file_path:/abs/path]`` (#492): the
         extracted text rides the live turn only, so a reloaded conversation
-        shows WHAT was attached without carrying the whole document forever."""
+        shows WHAT was attached without carrying the whole document forever.
+
+        Both marker paths are percent-encoded by ``_encode_marker_path``; the
+        frontend decodes them in ``messageContent.js``."""
         markers = []
+        encode = ConversationService._encode_marker_path
         paths = list(image_paths or [])
         for i in range(len(images or [])):
             p = paths[i] if i < len(paths) else ""
-            markers.append(f"[image_path:{p}]" if p else "[image]")
+            markers.append(f"[image_path:{encode(p)}]" if p else "[image]")
         for p in attachment_paths or []:
-            markers.append(f"[file_path:{p}]")
+            markers.append(f"[file_path:{encode(p)}]")
         if not markers:
             return question
         marker_str = " ".join(markers)
