@@ -678,6 +678,89 @@ class TestConversationService:
         assert ConversationService._user_display_content("hi", ["x"]) == "hi [image]"
         assert ConversationService._user_display_content("", ["x", "y"]) == "[image] [image]"
 
+    def test_user_display_content_records_attached_documents(self):
+        """#492 - a document attachment persists as a compact [file_path:...]
+        marker, so a reloaded conversation shows what was attached without
+        re-storing the extracted text."""
+        assert (
+            ConversationService._user_display_content("hi", None, None, ["/docs/report.pdf"])
+            == "hi [file_path:/docs/report.pdf]"
+        )
+        assert (
+            ConversationService._user_display_content("", None, None, ["/a.txt", "/b.md"])
+            == "[file_path:/a.txt] [file_path:/b.md]"
+        )
+        # Images and documents coexist on the same turn.
+        assert (
+            ConversationService._user_display_content("hi", ["x"], ["/p.png"], ["/a.txt"])
+            == "hi [image_path:/p.png] [file_path:/a.txt]"
+        )
+
+    async def test_query_stream_injects_attachment_blocks_and_marker(
+        self, test_db_session, mock_llm, monkeypatch, tmp_path
+    ):
+        """#492 - the model turn carries the delimited attachment block ahead of
+        the question, and the persisted user message carries only the marker."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(agent_runner, "build_chat_model", _fake_chat_model("It is a report."))
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+
+        doc = tmp_path / "report.txt"
+        doc.write_text("Revenue grew by twelve percent.", encoding="utf-8")
+
+        captured = {}
+        original = service.runner.astream_text
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        monkeypatch.setattr(service.runner, "astream_text", spy)
+
+        payload = ConversationQuery(question="What does it say?", attachments=[str(doc)])
+        result = [t async for t in service.query_and_respond_stream(conversation.id, payload)]
+
+        assert _answer_text(result) == "It is a report."
+        user_message = captured["user_message"]
+        assert "[Attached file: report.txt]" in user_message
+        assert "Revenue grew by twelve percent." in user_message
+        assert "[End of attached file]" in user_message
+        # The question stays last, after the attachment blocks.
+        assert user_message.index("[End of attached file]") < user_message.index(
+            "What does it say?"
+        )
+
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[0].sender == "user"
+        assert messages[0].content == f"What does it say? [file_path:{doc}]"
+        # The extracted text is NOT persisted as visible content.
+        assert "Revenue grew" not in messages[0].content
+
+    async def test_query_stream_reports_an_unreadable_attachment(
+        self, test_db_session, mock_llm, monkeypatch, tmp_path
+    ):
+        """#492 - a file the reader cannot parse is named in the answer instead
+        of failing the turn."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(agent_runner, "build_chat_model", _fake_chat_model("Answer."))
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+
+        bad = tmp_path / "archive.zip"
+        bad.write_bytes(b"PK\x03\x04")
+
+        payload = ConversationQuery(question="Read this", attachments=[str(bad)])
+        result = [t async for t in service.query_and_respond_stream(conversation.id, payload)]
+
+        answer = _answer_text(result)
+        assert "archive.zip" in answer
+        assert answer.endswith("Answer.")
+
     def test_build_user_message_shape(self):
         assert ConversationService._build_user_message("hi", None) == "hi"
         msg = ConversationService._build_user_message("hi", ["data:image/png;base64,AAA"])

@@ -125,7 +125,7 @@ class TestConversationServiceGaps:
 
     async def test_query_stream_degrades_when_conversation_missing(self, test_db_session):
         service = ConversationService(test_db_session)
-        payload = SimpleNamespace(question="hello", images=None)
+        payload = SimpleNamespace(question="hello", images=None, attachments=None)
         events = [chunk async for chunk in service.query_and_respond_stream(987654, payload)]
         assert any('"error"' in e and ERROR_MESSAGE in e for e in events)
         assert '"done"' in events[-1]

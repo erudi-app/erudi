@@ -92,7 +92,8 @@ backend/src/
 ├── ingestion/           KB pipeline: DocumentReader façade + *Extractor backends, cleaning,
 │                        3-pass chunking (e5 tokenizer), E5Embeddings, vector_store (rag.kb_chunks)
 ├── launcher/            runtime_paths.py (packaged vs. dev paths), postgres_runtime.py (embedded cluster)
-└── utils/               kb_utils (hybrid retrieval façade), prompt_utils, hf_model_metadata
+└── utils/               kb_utils (hybrid retrieval façade), attachment_utils (per-question
+                         file/folder attachments), prompt_utils, hf_model_metadata
 ```
 
 Routers mounted under `/erudi` (in `core/api.py:register_routers`): `llms`, `hardware`, `arena`, `knowledge_base`, `conversations`, `user_settings`, `startup` (from `domains/`) plus `health` (from `core/health.py`, not a domain). Fine-tuning was removed as dead code (#99) — there is no `training` router and no `file_processor`. The frontend hits `http://127.0.0.1:27182/erudi/...` (see `frontend/src/config/api.js`).

@@ -273,6 +273,9 @@ class ConversationQuery(BaseModel):
 
     Attributes:
         question: User message/query to send to LLM.
+        images: Optional base64 data-URL images attached to the question (vision models).
+        image_paths: Local filesystem path of each image, parallel to ``images``.
+        attachments: Local filesystem paths of documents/folders attached to the question.
         temperature: Optional temperature override for this query only.
         top_p: Optional top_p override for this query only.
         max_new_tokens: Optional max_tokens override for this query only.
@@ -295,6 +298,13 @@ class ConversationQuery(BaseModel):
     image_paths: Optional[List[str]] = Field(
         default=None,
         description="Local filesystem paths for each image (parallel to images, empty string when unavailable)",
+    )
+    attachments: Optional[List[str]] = Field(
+        default=None,
+        description=(
+            "Local filesystem paths of documents (or folders of documents) attached "
+            "to the question; read on this machine, never uploaded (#492)"
+        ),
     )
     temperature: Optional[float] = None
     top_p: Optional[float] = None

@@ -7,7 +7,7 @@ import QuestionInput from "../components/QuestionInput";
 import HeaderBar from "../components/HeaderBar";
 import CustomizePromptModal from "../components/modals/CustomizePromptModal";
 import EngineFailureModal from "../components/modals/EngineFailureModal";
-import { Copy, Check, Star } from "lucide-react";
+import { Copy, Check, FileText, Star } from "lucide-react";
 import TypingIndicator from "../components/TypingIndicator";
 import MarkdownRenderer from "../components/MarkdownRenderer";
 import TraceStrip from "../components/TraceStrip";
@@ -17,7 +17,7 @@ import { createLogger } from "../utils/logger";
 import { conversationPath } from "../utils/routes";
 import { canAttachImages, maxImagesForModel } from "../utils/modelCapabilities";
 import { defaultsFor, hasNoPublisherRecommendation } from "../utils/samplingDefaults";
-import { getDisplayContent } from "../utils/messageContent";
+import { baseName, getAttachmentNames, getDisplayContent } from "../utils/messageContent";
 
 const log = createLogger("ConversationPage");
 
@@ -288,7 +288,8 @@ export default function ConversationPage() {
       images = [],
       explicitSettings = null,
       explicitCustomPrompt = null,
-      imagePaths = []
+      imagePaths = [],
+      attachmentPaths = []
     ) => {
       const settingsToUse = explicitSettings || settings;
       const customPromptToUse = explicitCustomPrompt !== null ? explicitCustomPrompt : customPrompt;
@@ -310,6 +311,9 @@ export default function ConversationPage() {
         sender: "user",
         content: question,
         images,
+        // Names of the documents attached to this turn (#492): shown as chips
+        // right away; after a reload they come back from the stored markers.
+        attachmentNames: attachmentPaths.map(baseName),
         local: true,
       };
 
@@ -383,6 +387,7 @@ export default function ConversationPage() {
             question,
             images,
             image_paths: imagePaths,
+            attachments: attachmentPaths,
             temperature: settingsToUse.temperature,
             top_p: settingsToUse.topP,
             max_new_tokens: settingsToUse.maxTokens,
@@ -573,8 +578,15 @@ export default function ConversationPage() {
   );
 
   const handleAsk = useCallback(
-    async (question, images = [], imagePaths = []) => {
-      return handleAskWithParams(question, images, settings, customPrompt, imagePaths);
+    async (question, images = [], imagePaths = [], attachmentPaths = []) => {
+      return handleAskWithParams(
+        question,
+        images,
+        settings,
+        customPrompt,
+        imagePaths,
+        attachmentPaths
+      );
     },
     [handleAskWithParams, settings, customPrompt]
   );
@@ -671,7 +683,8 @@ export default function ConversationPage() {
           location.state.initialImages || [],
           settingsToUse,
           customPromptToUse,
-          location.state.initialImagePaths || []
+          location.state.initialImagePaths || [],
+          location.state.initialAttachments || []
         );
         navigate(location.pathname, { replace: true, state: {} });
       } else if (!location.state || !location.state.initialQuestion) {
@@ -907,6 +920,16 @@ export default function ConversationPage() {
               // separate from the text bubble. `displayText` is the readable
               // text with internal attachment markers stripped.
               const hasImages = isUser && msg.images?.length > 0;
+              // Attached documents (#492): the live turn carries their names,
+              // a reloaded one recovers them from the stored [file_path:...]
+              // markers. Either way only names are shown - the extracted text
+              // was a one-turn ingredient, never persisted content.
+              const attachmentNames = isUser
+                ? msg.attachmentNames?.length
+                  ? msg.attachmentNames
+                  : getAttachmentNames(msg.content)
+                : [];
+              const hasAttachments = attachmentNames.length > 0;
               const displayText = getDisplayContent(msg.content);
 
               return (
@@ -935,9 +958,24 @@ export default function ConversationPage() {
                     </div>
                   )}
 
-                  {/* Text bubble. Skipped for an image-only user message so no
-                      empty bubble shows beneath the picture. */}
-                  {(!hasImages || displayText || showTypingIndicator) && (
+                  {/* Attached documents: a chip per file, above the bubble. */}
+                  {hasAttachments && (
+                    <div className="mb-2 flex w-fit max-w-[75%] flex-wrap gap-2">
+                      {attachmentNames.map((name, i) => (
+                        <span
+                          key={`${name}-${i}`}
+                          className="inline-flex items-center gap-1.5 rounded-lg border border-[var(--line)] px-2 py-0.5 text-xs text-[var(--ink-faint)]"
+                        >
+                          <FileText className="h-3.5 w-3.5 shrink-0" />
+                          <span className="truncate max-w-[16rem]">{name}</span>
+                        </span>
+                      ))}
+                    </div>
+                  )}
+
+                  {/* Text bubble. Skipped for an attachment-only user message so
+                      no empty bubble shows beneath the picture or the chips. */}
+                  {((!hasImages && !hasAttachments) || displayText || showTypingIndicator) && (
                     <div
                       className={`break-words w-fit max-w-[75%] p-4 rounded-2xl overflow-wrap break-word ${bubbleClass}`}
                     >

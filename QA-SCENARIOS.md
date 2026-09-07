@@ -114,6 +114,15 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I reload a conversation whose image was **pasted from the clipboard**, then it shows an "image attachment" placeholder, not the image *(clipboard images aren't restorable yet — see #136)*.
 - [ ] When an attached image's original file was **moved/deleted**, then that image quietly shows nothing on reload (no broken-image artifact).
 
+**Attached documents (#492)**
+- [ ] When I drag a `.pdf`, `.docx`, `.xlsx`, `.csv`, `.txt` or `.md` file onto the composer (or pick it with the attach button), then a chip with its name appears, and asking "what does it say?" produces an answer grounded in that file's content.
+- [ ] When the model has **no vision support**, then documents still attach and are still read (only images are refused).
+- [ ] When I drop a **folder**, then its supported files - those directly inside it and those one level below - are attached, and the answer covers them.
+- [ ] When I attach a file the app cannot read (a `.zip`, a **scanned PDF**, an image), then the turn still completes and the answer opens with an italic notice naming the file and why it could not be read.
+- [ ] When I attach a document far larger than the per-question budget, then the answer opens with a notice saying the content was shortened, and the model still answers on what it received.
+- [ ] When I reload the conversation, then each attached document shows as a **named chip** on its turn, and no `[file_path:...]` marker ever appears in the readable text or in what the copy button copies.
+- [ ] When I remove a chip before sending, then that file is not attached.
+
 **Edge cases & errors**
 - [ ] When I hover a message, then copy and star controls appear; a starred message stays starred after reload and is fed back as context on later turns.
 - [ ] When I delete the conversation I'm viewing, then it's removed and I'm redirected to `/erudi/chat`; deleting a different one keeps me in place.
@@ -137,6 +146,7 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When a panel's model **errors**, then that panel shows "[Erreur]" in red while the others still resolve.
 - [ ] When a panel's model has a **KB attached**, then KB context is auto-injected for that panel (no toggle).
 - [ ] When I attach an **image** in Arena, then attaching is allowed as soon as **any** panel's model is vision-capable; vision panels use the image for that turn (Arena is stateless — the image lives for this turn only), and a non-vision panel answers text-only with a notice that the images were ignored.
+- [ ] When I attach a **document** in Arena, then it attaches whatever the panels' models are (documents need no vision support), every panel receives its text for that turn, and the chips show on the sent question.
 - [ ] When a generation is running, then settings/model pickers are disabled; there is **no stop button** — the run must finish.
 - [ ] When I submit an **empty** prompt, then it does not send.
 

@@ -94,6 +94,62 @@ class TestArenaService:
         with pytest.raises(Exception):
             ArenaQueryPayload(question="", temperature=0.5)
 
+    def test_payload_attachment_only_is_valid(self):
+        # A document-only ask ("what does this say?") is a valid turn (#492).
+        payload = ArenaQueryPayload(question="  ", attachments=["/docs/report.pdf"])
+        assert payload.question == ""
+        assert payload.attachments == ["/docs/report.pdf"]
+
+    async def test_query_llm_stream_injects_attachment_blocks(
+        self, test_db_session, mock_llm, monkeypatch, tmp_path
+    ):
+        """#492 - the arena shares the conversation resolver: the model turn
+        carries the delimited attachment block ahead of the question."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(agent_runner, "build_chat_model", _fake_chat_model("It is a report."))
+        service = ArenaService(test_db_session)
+
+        doc = tmp_path / "report.txt"
+        doc.write_text("Revenue grew by twelve percent.", encoding="utf-8")
+
+        captured = {}
+        original = service.runner.astream_text
+
+        def spy(**kwargs):
+            captured.update(kwargs)
+            return original(**kwargs)
+
+        monkeypatch.setattr(service.runner, "astream_text", spy)
+
+        payload = ArenaQueryPayload(question="What does it say?", attachments=[str(doc)])
+        result = [t async for t in service.query_llm_stream(mock_llm.id, payload)]
+
+        assert "".join(result) == "It is a report."
+        user_message = captured["user_message"]
+        assert "[Attached file: report.txt]" in user_message
+        assert "Revenue grew by twelve percent." in user_message
+        assert user_message.index("[End of attached file]") < user_message.index(
+            "What does it say?"
+        )
+
+    async def test_query_llm_stream_reports_an_unreadable_attachment(
+        self, test_db_session, mock_llm, monkeypatch, tmp_path
+    ):
+        """#492 - an unreadable attachment is named in the stream, not fatal."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(agent_runner, "build_chat_model", _fake_chat_model("Answer."))
+        service = ArenaService(test_db_session)
+
+        bad = tmp_path / "archive.zip"
+        bad.write_bytes(b"PK\x03\x04")
+
+        payload = ArenaQueryPayload(question="Read this", attachments=[str(bad)])
+        result = [t async for t in service.query_llm_stream(mock_llm.id, payload)]
+
+        joined = "".join(result)
+        assert "archive.zip" in joined
+        assert joined.endswith("Answer.")
+
     def test_payload_image_only_is_valid(self):
         # An image-only ask (no text) is a legitimate vision-model turn,
         # mirroring conversations (#136 C).

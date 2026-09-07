@@ -48,8 +48,16 @@
       "tooLarge": "该图片过大（最大 20 MB）。",
       "tooMany_one": "使用此模型最多可附加 {{count}} 张图片。",
       "tooMany_other": "使用此模型最多可附加 {{count}} 张图片。",
-      "unreadable": "无法读取该图片。请尝试其他文件。"
-    }
+      "unreadable": "无法读取该图片。请尝试其他文件。",
+      "unsupportedDocument": "不支持该文件类型。请使用 PDF、Word、Excel、CSV、纯文本或 Markdown。",
+      "documentTooLarge": "该文件过大（最大 50 MB）。",
+      "tooManyFiles_one": "每次最多可添加 {{count}} 个文件。",
+      "tooManyFiles_other": "每次最多可添加 {{count}} 个文件。",
+      "noFilePath": "该项目在磁盘上没有对应文件，无法添加。"
+    },
+    "attachFile": "添加文件",
+    "attachFileHint": "添加文档或文件夹（也可拖放）",
+    "removeFile": "移除文件"
   },
   "message": {
     "firstReplyHint": "首次回复可能会稍慢一些，因为模型正在加载到内存中...",

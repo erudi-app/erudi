@@ -26,6 +26,7 @@ Every request, when it happens and the code behind it: **[What leaves your machi
 
 - **A catalog that knows your machine.** Every model card shows whether the model fits — memory *and* the speed you can expect — and the readout gives you a recommended size window. Erudi downloads pre-built MLX and GGUF quantizations; it never converts or quantizes weights on your computer.
 - **A knowledge base on your documents.** Attach `.pdf`, `.docx`, `.xlsx`, `.csv`, `.txt` or `.md` files to a model and get an assistant that searches them before answering, cites the excerpt it used, and says so when the documents do not cover the question.
+- **Documents attached to a single question.** Drop a `.pdf`, `.docx`, `.xlsx`, `.csv`, `.txt`, `.md` file - or a whole folder of them - on the chat or arena input and ask about it right there, no knowledge base to build first. The files are read on your machine and never leave it.
 - **Inference that fits the hardware.** [MLX](https://github.com/ml-explore/mlx) on Apple Silicon, [llama.cpp](https://github.com/ggerganov/llama.cpp) with CUDA on NVIDIA GPUs, llama.cpp on CPU otherwise — picked automatically at launch.
 - **Reasoning and tool calls you can see.** Thinking models stream their reasoning into a strip above the answer; when a model searches your documents or the web, the call and its result are shown there, never mixed into the answer.
 - **Conversations kept on your machine**, restored across restarts, summarized as they grow.
