@@ -50,7 +50,7 @@ jobs:
         env:
           ERUDI_FORCE_CPU: ${{ matrix.force_cpu }}
         run: PYTHONPATH=. python -m src.database.catalog_snapshot
-      - uses: actions/upload-artifact@v4
+      - uses: actions/upload-artifact@v7
         with:
           name: catalog_snapshot_${{ matrix.tag }}
           path: backend/src/database/catalog_snapshot_${{ matrix.tag }}.json
