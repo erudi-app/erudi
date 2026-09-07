@@ -122,6 +122,9 @@ else:
 # build still succeeds — inference simply has no server until a real release bundles
 # it. The CUDA binary also runs CPU inference, so a driverless machine falls back
 # (see BaseLlamaCppEngine._find_llama_server).
+# Runtime DLLs shipped beside llama-server, appended to the TOC after Analysis
+# (see below): empty on mac and whenever the server is absent.
+_llama_runtime_dlls = []
 if IS_WIN or IS_LINUX:
     _llama_flavour = os.environ.get("ERUDI_BUILD_VARIANT", "cuda")
     _os_tag = "win" if IS_WIN else "linux"
@@ -137,9 +140,23 @@ if IS_WIN or IS_LINUX:
         # Ship any runtime DLLs placed beside the server: the Windows CPU build
         # copies the MSVC C++ runtime here so llama-server.exe loads on machines
         # without the VC++ redistributable (#144), and the CUDA build adds
-        # cudart/cublas so the user needs only a driver. No-op on Linux (.so).
-        for _f in llama_bin.glob("*.dll"):
-            datas.append((str(_f), _dest))
+        # cudart/cublas/cublasLt so the user needs only a driver. No-op on
+        # Linux (.so).
+        #
+        # NOT appended to `datas`: PyInstaller reclassifies PE files found in
+        # `datas` as binaries, so these land in `a.binaries` — where the
+        # Windows torch-CUDA strip below removes every name matching
+        # "cublaslt", taking the inference runtime's cublasLt64_12.dll with
+        # torch's. The two DLLs that shipped anyway (cudart, cublas) match no
+        # strip fragment and were also re-collected by the import scan of
+        # llama-server.exe. These files are opaque cargo for the subprocess,
+        # not link targets of the frozen app: they are appended to `a.datas`
+        # AFTER Analysis and after the strip, which copies them verbatim and
+        # keeps them out of both mechanisms. The release workflow's "Verify
+        # the bundled inference binary" step guards the outcome.
+        _llama_runtime_dlls = [
+            (f"{_dest}/{_f.name}", str(_f)) for _f in sorted(llama_bin.glob("*.dll"))
+        ]
     elif os.environ.get("ERUDI_ALLOW_MISSING_INFERENCE_BINARY"):
         # The boot-only merge gate builds the app to prove the backend reaches
         # `ready`; it never compiles llama.cpp, and inference is out of its
@@ -419,6 +436,15 @@ if IS_WIN:
         b for b in a.binaries
         if not any(frag in b[0].replace("\\", "/").lower() for frag in _cuda_fragments)
     ]
+
+# ── llama-server runtime DLLs, verbatim ───────────────────────────────────────
+# Collected next to the compiled server by the build scripts and listed above
+# (see the llama.cpp block for why they must not ride in `datas`): appended
+# here, after Analysis and after the strip, as plain TOC data entries that
+# nothing re-analyses or filters. COLLECT copies them beside llama-server,
+# which is the only place Windows looks when the subprocess loads them.
+for _name, _src in _llama_runtime_dlls:
+    a.datas.append((_name, _src, "DATA"))
 
 pyz = PYZ(a.pure)
 
