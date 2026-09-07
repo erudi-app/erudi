@@ -47,7 +47,7 @@
     "css-loader": "^6.11.0",
     "electron": "^44.2.0",
     "electron-builder": "^26.15.3",
-    "eslint": "^8.57.1",
+    "eslint": "^10.10.0",
     "eslint-config-prettier": "^10.1.8",
     "eslint-plugin-i18next": "^6.1.5",
     "eslint-plugin-react": "^7.37.5",
