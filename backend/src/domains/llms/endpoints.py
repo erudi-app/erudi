@@ -98,7 +98,6 @@ import os
 import shutil
 from pathlib import Path
 from typing import List, Optional
-from datetime import datetime
 
 from fastapi import BackgroundTasks, Depends, APIRouter, status as http_status
 from sqlalchemy.orm import Session
@@ -217,7 +216,6 @@ def _run_download_task(
     try:
         job_obj = session.query(DownloadJobModel).get(job_id)
         job_obj.status = "running"
-        job_obj.updated_at = datetime.utcnow()
         session.commit()
         logger.info(f"Started download job {job_id}")
         asyncio.run(
@@ -280,7 +278,6 @@ def _run_download_task(
                     )
             job_obj.status = "completed"
             job_obj.progress = 100.0
-            job_obj.updated_at = datetime.utcnow()
             session.commit()
 
             # Best-effort enrichment. A failure here leaves the model usable with
@@ -326,7 +323,6 @@ def _run_download_task(
         job_obj = session.query(DownloadJobModel).get(job_id)
         job_obj.status = "failed"
         job_obj.error_message = str(e)
-        job_obj.updated_at = datetime.utcnow()
         session.commit()
     finally:
         session.close()

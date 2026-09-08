@@ -14,7 +14,7 @@ import asyncio
 import shutil
 from unittest.mock import patch, AsyncMock
 from fastapi import status
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 from src.domains.llms.repository import Llm_Repository, Download_Job_Repository
 from src.domains.llms.services import (
@@ -357,7 +357,7 @@ class TestDownload_Job_Repository:
             final_local_model_link="/models/1",
             status="running",
         )
-        old_job.updated_at = datetime.utcnow() - timedelta(
+        old_job.updated_at = datetime.now(timezone.utc) - timedelta(
             minutes=2
         )  # 2 minutes ago (not 120 seconds)
         test_db_session.add(old_job)
@@ -371,7 +371,7 @@ class TestDownload_Job_Repository:
             final_local_model_link="/models/2",
             status="pending",
         )
-        recent_job.updated_at = datetime.utcnow()
+        recent_job.updated_at = datetime.now(timezone.utc)
         test_db_session.add(recent_job)
         test_db_session.commit()
 

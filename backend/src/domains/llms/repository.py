@@ -26,7 +26,7 @@ Example:
 import os
 import shutil
 import time
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
 from sqlalchemy.orm import Session
@@ -323,7 +323,7 @@ class Download_Job_Repository:
             DownloadJobModel if found, None otherwise.
         """
         logger.debug(f"Retrieving most recent active job (max age: {max_age_seconds}s)")
-        cutoff = datetime.utcnow() - timedelta(seconds=max_age_seconds)
+        cutoff = datetime.now(timezone.utc) - timedelta(seconds=max_age_seconds)
 
         return (
             self.db.query(DownloadJobModel)
@@ -389,7 +389,6 @@ class Download_Job_Repository:
         job.status = status
         if error_message:
             job.error_message = error_message
-        job.updated_at = datetime.utcnow()
         self.db.flush()
 
     def update_progress(
@@ -420,7 +419,6 @@ class Download_Job_Repository:
             job.total_time_elapsed = elapsed_seconds
         if eta_seconds is not None:
             job.time_left = eta_seconds
-        job.updated_at = datetime.utcnow()
         self.db.flush()
 
     def mark_completed(self, job: DownloadJobModel) -> None:
@@ -435,7 +433,6 @@ class Download_Job_Repository:
         logger.info(f"Marking job {job.id} as completed")
         job.status = "completed"
         job.progress = 100.0
-        job.updated_at = datetime.utcnow()
         self.db.flush()
 
     def mark_failed(self, job: DownloadJobModel, error_message: str) -> None:
@@ -451,7 +448,6 @@ class Download_Job_Repository:
         logger.error(f"Marking job {job.id} as failed: {error_message}")
         job.status = "failed"
         job.error_message = error_message
-        job.updated_at = datetime.utcnow()
         self.db.flush()
 
     def cleanup_job_files(self, job: DownloadJobModel) -> None:
@@ -590,7 +586,7 @@ def update_db_with_progress(job_tracker, job_id: int, model_id: int) -> None:
             logger.error(f"DB row for job {job_id} or model {model_id} not found")
             return
 
-        start_time = datetime.utcnow()
+        start_time = datetime.now(timezone.utc)
         # Loop until download completes or is cancelled
         while job_tracker.percent < 100.0:
             time.sleep(1)
@@ -600,7 +596,7 @@ def update_db_with_progress(job_tracker, job_id: int, model_id: int) -> None:
                 return
             dbj.total_bytes = job_tracker.total_bytes
             dbj.progress = job_tracker.percent
-            dbj.total_time_elapsed = (datetime.utcnow() - start_time).total_seconds()
+            dbj.total_time_elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
             dbj.time_left = job_tracker.eta_seconds or 0.0
             session.commit()
             logger.debug(f"Job {job_id}: {dbj.progress:.2f}% complete")
