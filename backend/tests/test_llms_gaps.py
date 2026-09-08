@@ -343,10 +343,51 @@ class TestDownloadStatusCleanup:
         cleanup.assert_called_once()
         assert test_db_session.query(Llm).filter(Llm.id == llm.id).count() == 0
 
-    def test_failed_job_with_missing_llm_404(self, client, test_db_session):
+    def test_failed_job_with_missing_llm_is_already_cleaned_up(self, client, test_db_session):
+        """#509: cleanup already ran once (e.g. by cancel_download_job), so a
+        missing LLM row on a terminal job is normal, not an error. Polling it
+        again must keep returning the job, not a permanent 404.
+        """
         job = _add_job(test_db_session, None, status="failed")
-        resp = client.get(f"/erudi/llms/downloads/{job.id}/status")
-        assert resp.status_code == 404
+        with patch.object(Download_Job_Repository, "cleanup_job_files") as cleanup:
+            resp = client.get(f"/erudi/llms/downloads/{job.id}/status")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "failed"
+        cleanup.assert_not_called()
+
+    def test_cancelled_job_with_missing_llm_is_already_cleaned_up(self, client, test_db_session):
+        """#509: cancel_download_job already deletes the temp LLM and cleans up
+        files before the job ever reaches `cancelled`; Postgres then nulls
+        `local_model_id` through the FK's ON DELETE SET NULL. The status
+        endpoint must not treat that as `ModelNotFoundException`.
+        """
+        job = _add_job(test_db_session, None, status="cancelled")
+        with patch.object(Download_Job_Repository, "cleanup_job_files") as cleanup:
+            resp = client.get(f"/erudi/llms/downloads/{job.id}/status")
+        assert resp.status_code == 200
+        assert resp.json()["status"] == "cancelled"
+        cleanup.assert_not_called()
+
+    def test_cancel_then_poll_twice_both_succeed(self, client, test_db_session):
+        """#509 reproduction: cancel a download through the real API, then poll
+        its status endpoint twice. Both polls must succeed with `cancelled`,
+        not 404 `MODEL_NOT_FOUND` / "LLM None" on the second poll.
+        """
+        llm = _add_llm(test_db_session, local=2)
+        job = _add_job(test_db_session, llm.id, status="running")
+
+        with patch.object(Download_Job_Repository, "cleanup_job_files"):
+            cancel_resp = client.post(f"/erudi/llms/downloads/{job.id}/cancel")
+        assert cancel_resp.status_code == 200
+        assert cancel_resp.json()["status"] == "cancelled"
+
+        first = client.get(f"/erudi/llms/downloads/{job.id}/status")
+        second = client.get(f"/erudi/llms/downloads/{job.id}/status")
+
+        assert first.status_code == 200
+        assert first.json()["status"] == "cancelled"
+        assert second.status_code == 200
+        assert second.json()["status"] == "cancelled"
 
     def test_completed_job_marks_llm_ready(self, client, test_db_session):
         llm = _add_llm(test_db_session, local=2)
@@ -406,6 +447,30 @@ class TestDownloadStatusCleanup:
         assert resp.status_code == 200
         cleanup.assert_called_once()
         assert test_db_session.query(Llm).filter(Llm.id == llm.id).count() == 0
+
+    def test_recent_job_completed_writes_once_not_on_every_poll(self, client, test_db_session):
+        """#509: get_download_status_without_jobId's `completed` branch used to
+        write `local=1` on every poll (no guard on the current value), unlike
+        the by-id endpoint. Same idempotency guard, same expectation here.
+        """
+        llm = _add_llm(test_db_session, local=2)
+        job = _add_job(test_db_session, llm.id, status="completed")
+
+        with patch.object(Download_Job_Repository, "get_most_recent_active", return_value=job):
+            with patch.object(
+                Llm_Repository, "update", autospec=True, side_effect=Llm_Repository.update
+            ) as update:
+                first = client.get("/erudi/llms/downloads/status")
+                for _ in range(4):
+                    client.get("/erudi/llms/downloads/status")
+
+        assert first.status_code == 200
+        test_db_session.refresh(llm)
+        assert llm.local == 1
+        assert update.call_count == 1, (
+            f"local=1 written {update.call_count} times across 5 polls; "
+            "the completed branch must be guarded on the current value"
+        )
 
     def test_recent_job_that_turned_completed_marks_ready(self, client, test_db_session):
         llm = _add_llm(test_db_session, local=2)
