@@ -4,7 +4,7 @@ import { Cpu, Globe, Languages, RefreshCw, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
 import ToggleSwitch from "../components/ToggleSwitch";
-import { useUserSettings } from "../shared/hooks/api";
+import { useUserSettings, useAppStartupInfo } from "../shared/hooks/api";
 import { setAppLanguage } from "../i18n";
 import { LANGUAGE_NAMES, SUPPORTED_LANGUAGES } from "../i18n/languages";
 import { notifyAutoUpdatePreference } from "../utils/autoUpdate";
@@ -64,6 +64,25 @@ SettingsCard.propTypes = {
 };
 
 /**
+ * Whether the Inference engine card belongs on this machine (#511).
+ *
+ * The preference only does anything on the CUDA leg -- the backend applies it
+ * at boot only when the running engine is `CUDA_Engine`, so the card is shown
+ * only where that choice is real: a machine currently running the CUDA
+ * engine, or one that a previous choice pinned back to the processor from
+ * CUDA (`backend_type` becomes `"cpu"` in that case too, since it reports the
+ * running engine, not the raw hardware). Without the second half, pinning the
+ * processor on a CUDA machine would strand the user with no way back to
+ * Automatic. On macOS `backend_type` is `"mlx"`, so the card never appears
+ * there, whatever the stored preference. `backendType` is `null`/`undefined`
+ * while `/hardware/app_startup` is still loading or failed to load, and the
+ * card stays hidden in that case too.
+ */
+export function showsInferenceEngineSetting(backendType, inferenceBackend) {
+  return backendType === "cuda" || (backendType === "cpu" && inferenceBackend === "cpu");
+}
+
+/**
  * App-wide settings page (gear icon in the sidebar rail).
  *
  * Sections: the global Web Search default (#310), automatic updates, the
@@ -76,15 +95,24 @@ SettingsCard.propTypes = {
  * to the Electron main process, which owns electron-updater. The inference
  * engine defaults to Automatic (the hardware decides) and can be pinned to the
  * processor for a machine whose graphics card Erudi cannot drive; the backend
- * reads it once per boot, so changing it restarts the engine. The language
- * applies immediately through i18next and is persisted with the other settings.
+ * reads it once per boot, so changing it restarts the engine. This card only
+ * appears on a machine currently running the CUDA engine, or one pinned back
+ * to the processor from CUDA (see `showsInferenceEngineSetting`, #511) --
+ * elsewhere the setting is a no-op the backend ignores, so it stays hidden.
+ * The language applies immediately through i18next and is persisted with the
+ * other settings.
  */
 export default function SettingsPage() {
   const { t, i18n } = useTranslation();
   const { settings, loading, updateSettings } = useUserSettings();
+  const { startupInfo } = useAppStartupInfo();
   const webSearchEnabled = settings?.web_search_enabled ?? false;
   const autoUpdateEnabled = settings?.auto_update_enabled ?? true;
   const inferenceBackend = settings?.inference_backend ?? "auto";
+  const showInferenceEngineSetting = showsInferenceEngineSetting(
+    startupInfo?.backend_type,
+    inferenceBackend
+  );
 
   // A failed settings write has exactly one owner: `useUserSettings` logs it
   // where the request is made, with the payload and the error. These handlers
@@ -187,24 +215,26 @@ export default function SettingsPage() {
             }
           />
 
-          <SettingsCard
-            icon={<Cpu className="w-5 h-5 text-[var(--fit-good)]" />}
-            title={t("settings:inferenceBackend.title")}
-            description={t("settings:inferenceBackend.description")}
-            note={t("settings:inferenceBackend.note")}
-            control={
-              <select
-                aria-label={t("settings:inferenceBackend.selectLabel")}
-                value={inferenceBackend}
-                onChange={handleInferenceBackendChange}
-                disabled={loading}
-                className="text-[13px] rounded-lg border border-[var(--line)] bg-[var(--canvas)] text-[var(--ink)] px-3 py-1.5 focus:outline-none focus:border-[var(--fit-good)] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
-              >
-                <option value="auto">{t("settings:inferenceBackend.auto")}</option>
-                <option value="cpu">{t("settings:inferenceBackend.cpu")}</option>
-              </select>
-            }
-          />
+          {showInferenceEngineSetting && (
+            <SettingsCard
+              icon={<Cpu className="w-5 h-5 text-[var(--fit-good)]" />}
+              title={t("settings:inferenceBackend.title")}
+              description={t("settings:inferenceBackend.description")}
+              note={t("settings:inferenceBackend.note")}
+              control={
+                <select
+                  aria-label={t("settings:inferenceBackend.selectLabel")}
+                  value={inferenceBackend}
+                  onChange={handleInferenceBackendChange}
+                  disabled={loading}
+                  className="text-[13px] rounded-lg border border-[var(--line)] bg-[var(--canvas)] text-[var(--ink)] px-3 py-1.5 focus:outline-none focus:border-[var(--fit-good)] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                  <option value="auto">{t("settings:inferenceBackend.auto")}</option>
+                  <option value="cpu">{t("settings:inferenceBackend.cpu")}</option>
+                </select>
+              }
+            />
+          )}
 
           <SettingsCard
             icon={<Languages className="w-5 h-5 text-[var(--fit-good)]" />}

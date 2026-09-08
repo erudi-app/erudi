@@ -28,8 +28,8 @@
   },
   "inferenceBackend": {
     "title": "Inference engine",
-    "description": "Choose whether Erudi runs models on the graphics card or on the processor. Automatic uses the graphics card whenever this computer has one Erudi can drive.",
-    "note": "Erudi restarts its engine when this changes. The processor is slower but works on every machine.",
+    "description": "Choose whether Erudi runs models on the graphics card or on the processor. Automatic uses the graphics card whenever the driver supports it.",
+    "note": "Erudi restarts its engine when this changes. The processor is slower but sidesteps the graphics card entirely.",
     "selectLabel": "Inference engine",
     "auto": "Automatic",
     "cpu": "Processor only"
