@@ -39,8 +39,11 @@ Priority: MLX > CUDA > CPU
 earliest point where the column is guaranteed to exist — and replaces `CUDA_Engine` with
 `CPU_Engine` when it says `cpu`. Both engines carry `FORMAT_TAG = "gguf"`, so the catalog
 reconciled a moment earlier under CUDA is identical under CPU; the swap changes what runs
-the model, not what the app offers. The preference is inert on Apple Silicon. It is read
-once per boot, so changing it in Settings restarts the backend.
+the model, not what the app offers. The preference is inert on Apple Silicon, so the
+Settings page shows the **Inference engine** card only on a machine currently running the
+CUDA engine, or one already pinned to the processor from CUDA — never on Apple Silicon,
+whatever the stored value. It is read once per boot, so changing it in Settings restarts
+the backend.
 
 The chosen engine is logged at startup (`Engine chosen: ...`).
 
@@ -261,8 +264,9 @@ python -c "import pynvml; pynvml.nvmlInit(); print(pynvml.nvmlDeviceGetCount())"
 - On Windows and Linux, CUDA requires `pynvml` to report at least one device; check the
   driver with `nvidia-smi`.
 - Confirm `ERUDI_FORCE_CPU` is not set in your environment.
-- Check the inference engine in Settings: `Processor only` pins `CPU_Engine` even on a
-  machine with a working GPU. `GET /erudi/user_settings/` reports the stored value.
+- Check the inference engine in Settings (visible only on a machine running or pinned
+  back from the CUDA engine): `Processor only` pins `CPU_Engine` even on a machine with a
+  working GPU. `GET /erudi/user_settings/` reports the stored value.
 
 ### A low score
 
@@ -277,11 +281,14 @@ range.
 No. One backend is selected per session by the detection cascade.
 
 **Can I choose the backend manually?**
-Partly. Settings → Inference engine offers `Automatic` (the hardware decides) and
+Partly, and only on a machine running the CUDA engine (or one already pinned back from
+it) — Settings → Inference engine offers `Automatic` (the hardware decides) and
 `Processor only`, which pins the CPU engine on a machine that would otherwise use its
-NVIDIA GPU. Erudi restarts its engine to apply the change. There is no way to force the
-GPU on hardware where it was not detected, and no way to pick MLX or CUDA specifically.
-`ERUDI_FORCE_CPU=1` remains the developer override and wins over the setting.
+NVIDIA GPU. Erudi restarts its engine to apply the change. macOS has no such setting: the
+Apple silicon engine is the only one there, so the choice would do nothing. There is no
+way to force the GPU on hardware where it was not detected, and no way to pick MLX or
+CUDA specifically. `ERUDI_FORCE_CPU=1` remains the developer override and wins over the
+setting.
 
 **Erudi says my graphics card or driver is too old. What now?**
 Update the NVIDIA driver if the message names a driver version — that is the real fix.

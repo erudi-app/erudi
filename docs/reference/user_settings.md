@@ -7,7 +7,9 @@ inference backend.
 `inference_backend` (`auto` or `cpu`) is the one setting the backend reads outside a
 request: the FastAPI lifespan reads it once per boot, after the migrations, and swaps
 `CUDA_Engine` for `CPU_Engine` when it says `cpu`. Changing it therefore takes effect only
-after a backend restart, which the frontend triggers when the user saves. See
+after a backend restart, which the frontend triggers when the user saves. The value is
+inert everywhere but the CUDA leg, so the Settings page only shows the control on a
+machine running the CUDA engine, or one already pinned back to the processor from it. See
 [Hardware Detection](../guides/hardware.md).
 
 ::: src.domains.user_settings.endpoints

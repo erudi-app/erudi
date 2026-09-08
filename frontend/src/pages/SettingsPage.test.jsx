@@ -18,7 +18,7 @@ vi.mock("../components/Sidebar", () => ({
   default: () => <div data-testid="sidebar" />,
 }));
 
-import SettingsPage from "./SettingsPage";
+import SettingsPage, { showsInferenceEngineSetting } from "./SettingsPage";
 import i18n from "../i18n";
 
 function renderPage() {
@@ -29,12 +29,29 @@ function renderPage() {
   );
 }
 
+/**
+ * Both `/user_settings/` and `/hardware/app_startup` go through the same
+ * mocked `apiClient.get`, so tests that care about `backend_type` route the
+ * mock by URL instead of relying on call order.
+ */
+function mockGetByUrl({ userSettings, appStartup }) {
+  getMock.mockImplementation((url) => {
+    if (url === "/hardware/app_startup") {
+      return Promise.resolve(appStartup);
+    }
+    return Promise.resolve(userSettings);
+  });
+}
+
 beforeEach(() => {
-  getMock.mockResolvedValue({
-    web_search_enabled: false,
-    language: "en",
-    auto_update_enabled: true,
-    inference_backend: "auto",
+  mockGetByUrl({
+    userSettings: {
+      web_search_enabled: false,
+      language: "en",
+      auto_update_enabled: true,
+      inference_backend: "auto",
+    },
+    appStartup: { backend_type: "cuda" },
   });
   putMock.mockResolvedValue({
     web_search_enabled: true,
@@ -121,7 +138,10 @@ describe("SettingsPage", () => {
   });
 
   it("reflects an enabled global setting", async () => {
-    getMock.mockResolvedValue({ web_search_enabled: true });
+    mockGetByUrl({
+      userSettings: { web_search_enabled: true },
+      appStartup: { backend_type: "cuda" },
+    });
     renderPage();
     const toggle = await screen.findByRole("switch", { name: "Web search" });
     await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
@@ -162,10 +182,13 @@ describe("SettingsPage — automatic updates", () => {
   });
 
   it("reflects a refusal that was persisted earlier", async () => {
-    getMock.mockResolvedValue({
-      web_search_enabled: false,
-      language: "en",
-      auto_update_enabled: false,
+    mockGetByUrl({
+      userSettings: {
+        web_search_enabled: false,
+        language: "en",
+        auto_update_enabled: false,
+      },
+      appStartup: { backend_type: "cuda" },
     });
     renderPage();
     const toggle = await screen.findByRole("switch", { name: "Automatic updates" });
@@ -224,11 +247,17 @@ describe("SettingsPage inference engine", () => {
   });
 
   it("reflects a persisted processor preference and switches back", async () => {
-    getMock.mockResolvedValue({
-      web_search_enabled: false,
-      language: "en",
-      auto_update_enabled: true,
-      inference_backend: "cpu",
+    // #511: on a CUDA machine pinned back to the processor, backend_type
+    // reports the running engine ("cpu"), not the raw hardware -- the card
+    // must stay visible so the user has a way back to Automatic.
+    mockGetByUrl({
+      userSettings: {
+        web_search_enabled: false,
+        language: "en",
+        auto_update_enabled: true,
+        inference_backend: "cpu",
+      },
+      appStartup: { backend_type: "cpu" },
     });
     window.backendAPI = { restartBackend: vi.fn().mockResolvedValue(undefined) };
     renderPage();
@@ -241,6 +270,108 @@ describe("SettingsPage inference engine", () => {
       expect(putMock).toHaveBeenCalledWith("/user_settings/", { inference_backend: "auto" })
     );
     delete window.backendAPI;
+  });
+});
+
+/**
+ * #511: the Inference engine card saves a preference the backend only ever
+ * reads on the CUDA leg (`apply_inference_backend_preference` returns
+ * immediately unless the running engine is `CUDA_Engine`). On any other
+ * machine the card was a no-op that still triggered a full backend restart.
+ * It must render only where the choice is real.
+ */
+describe("SettingsPage — Inference engine card visibility (#511)", () => {
+  it("hides the card on macOS (backend_type mlx) and never restarts the backend for it", async () => {
+    window.backendAPI = { restartBackend: vi.fn().mockResolvedValue(undefined) };
+    mockGetByUrl({
+      userSettings: {
+        web_search_enabled: false,
+        language: "en",
+        auto_update_enabled: true,
+        inference_backend: "auto",
+      },
+      appStartup: { backend_type: "mlx" },
+    });
+    renderPage();
+
+    await screen.findByText("Web Search");
+    expect(screen.queryByText("Inference engine")).toBeNull();
+    expect(screen.queryByLabelText("Inference engine", { selector: "select" })).toBeNull();
+    expect(window.backendAPI.restartBackend).not.toHaveBeenCalled();
+    delete window.backendAPI;
+  });
+
+  it("shows the card on a machine running the CUDA engine", async () => {
+    mockGetByUrl({
+      userSettings: {
+        web_search_enabled: false,
+        language: "en",
+        auto_update_enabled: true,
+        inference_backend: "auto",
+      },
+      appStartup: { backend_type: "cuda" },
+    });
+    renderPage();
+
+    expect(await screen.findByLabelText("Inference engine")).toBeTruthy();
+  });
+
+  it("shows the card when pinned to the processor on a machine that runs CUDA (the way back to Automatic)", async () => {
+    mockGetByUrl({
+      userSettings: {
+        web_search_enabled: false,
+        language: "en",
+        auto_update_enabled: true,
+        inference_backend: "cpu",
+      },
+      appStartup: { backend_type: "cpu" },
+    });
+    renderPage();
+
+    expect(await screen.findByLabelText("Inference engine")).toBeTruthy();
+  });
+
+  it("hides the card when backend_type is cpu without a processor pin (never had CUDA)", async () => {
+    mockGetByUrl({
+      userSettings: {
+        web_search_enabled: false,
+        language: "en",
+        auto_update_enabled: true,
+        inference_backend: "auto",
+      },
+      appStartup: { backend_type: "cpu" },
+    });
+    renderPage();
+
+    await screen.findByText("Web Search");
+    expect(screen.queryByText("Inference engine")).toBeNull();
+  });
+});
+
+describe("showsInferenceEngineSetting", () => {
+  it("shows on a CUDA-running machine regardless of the stored preference", () => {
+    expect(showsInferenceEngineSetting("cuda", "auto")).toBe(true);
+    expect(showsInferenceEngineSetting("cuda", "cpu")).toBe(true);
+  });
+
+  it("shows on a CUDA machine pinned back to the processor", () => {
+    expect(showsInferenceEngineSetting("cpu", "cpu")).toBe(true);
+  });
+
+  it("hides on a machine reporting cpu that was never pinned from CUDA", () => {
+    expect(showsInferenceEngineSetting("cpu", "auto")).toBe(false);
+  });
+
+  it("hides on macOS (mlx) whatever the stored preference", () => {
+    expect(showsInferenceEngineSetting("mlx", "auto")).toBe(false);
+    expect(showsInferenceEngineSetting("mlx", "cpu")).toBe(false);
+  });
+
+  it("hides while backend_type is unknown (loading or failed to load)", () => {
+    expect(showsInferenceEngineSetting(null, "auto")).toBe(false);
+    expect(showsInferenceEngineSetting(undefined, "auto")).toBe(false);
+    expect(showsInferenceEngineSetting(null, "cpu")).toBe(false);
+    expect(showsInferenceEngineSetting(undefined, "cpu")).toBe(false);
   });
 });
 

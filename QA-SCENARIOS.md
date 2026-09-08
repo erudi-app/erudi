@@ -182,17 +182,16 @@ screens, the shared chrome, and non-functional behavior.
 
 **Inference engine**
 
-*Everything in this block needs a Windows or Linux machine with an NVIDIA GPU — on
-Apple Silicon the control shows but has nothing to switch, which is itself worth
-one check.*
+*Everything in this block needs a Windows or Linux machine with an NVIDIA GPU —
+the card only appears where the setting does something (#511).*
 
-- [ ] When I open Settings, then an **Inference engine** card offers **Automatic** and **Processor only**, and the note says Erudi restarts its engine when the setting changes.
+- [ ] When I open Settings on the NVIDIA machine, then an **Inference engine** card offers **Automatic** and **Processor only**, and the note says Erudi restarts its engine when the setting changes.
 - [ ] When I open Settings on a fresh install, then the engine is **Automatic**.
 - [ ] *(NVIDIA machine)* When I switch from Automatic to **Processor only**, then the backend restarts and comes back — the app is usable again within the usual boot time, not stuck on the loader.
 - [ ] *(NVIDIA machine)* After that switch, when I send a chat message, then it answers, and `backend.log` shows `Engine chosen: <CUDA_Engine>` followed by the processor swap line — i.e. the model actually runs on the CPU build.
-- [ ] *(NVIDIA machine)* When I relaunch the app, then the setting is still **Processor only** and inference is still on the processor.
+- [ ] *(NVIDIA machine)* When I relaunch the app, then the setting is still **Processor only**, inference is still on the processor, and the **Inference engine** card is still there — it is the only way back to Automatic.
 - [ ] *(NVIDIA machine)* When I switch back to **Automatic** and relaunch, then the GPU is used again — the choice is reversible.
-- [ ] *(Apple Silicon)* When I set **Processor only** on a Mac, then nothing about inference changes — MLX still runs the models (the setting only governs the NVIDIA path).
+- [ ] *(Apple Silicon)* When I open Settings on a Mac, then there is no **Inference engine** card at all — the Apple silicon engine is the only one, so the setting would be a no-op.
 
 **Application language (#385)**
 - [ ] When I open Settings, then an **Application language** card offers English, Français, Español and 中文, each named in its own language.

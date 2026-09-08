@@ -28,8 +28,8 @@
   },
   "inferenceBackend": {
     "title": "Moteur d'inférence",
-    "description": "Choisissez si Erudi fait tourner les modèles sur la carte graphique ou sur le processeur. Automatique utilise la carte graphique dès que cet ordinateur en a une qu'Erudi sait piloter.",
-    "note": "Erudi redémarre son moteur quand ce réglage change. Le processeur est plus lent mais fonctionne sur toutes les machines.",
+    "description": "Choisissez si Erudi fait tourner les modèles sur la carte graphique ou sur le processeur. Automatique utilise la carte graphique dès que le pilote le permet.",
+    "note": "Erudi redémarre son moteur quand ce réglage change. Le processeur est plus lent, mais contourne entièrement la carte graphique.",
     "selectLabel": "Moteur d'inférence",
     "auto": "Automatique",
     "cpu": "Processeur uniquement"
