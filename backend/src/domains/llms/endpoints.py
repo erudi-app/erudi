@@ -998,7 +998,7 @@ def get_download_status_by_jobId(
 
     Raises:
         DownloadJobNotFoundException: If job_id not found.
-        ModelNotFoundException: If associated LLM missing.
+        ModelNotFoundException: If a completed job's associated LLM is missing.
         DatabaseException: If status fetch fails.
 
     Example:
@@ -1010,21 +1010,23 @@ def get_download_status_by_jobId(
         if not job:
             raise DownloadJobNotFoundException(job_id)
 
-        # Handle failed/cancelled jobs: cleanup temp files and LLM entry
+        # Handle failed/cancelled jobs: cleanup temp files and LLM entry.
+        # `cancel_download_job` already deletes the temp LLM (and Postgres
+        # nulls local_model_id through the FK) before the job reaches
+        # `cancelled`, so a missing row here is the common case, not an
+        # error - only run cleanup when there is still something to clean.
         if job.status in ["failed", "cancelled"]:
             llm = llm_repo.get_by_id(job.local_model_id)
-            if not llm:
-                raise ModelNotFoundException(f"LLM {job.local_model_id}")
+            if llm:
+                # Delete temp LLM entry
+                llm_repo.delete(llm)
 
-            # Delete temp LLM entry
-            llm_repo.delete(llm)
+                # Clean up temp files using repository method
+                job_repo.cleanup_job_files(job)
 
-            # Clean up temp files using repository method
-            job_repo.cleanup_job_files(job)
-
-            db.commit()
-            db.refresh(job)
-            logger.info(f"Cleaned up {job.status} download job {job_id}")
+                db.commit()
+                db.refresh(job)
+                logger.info(f"Cleaned up {job.status} download job {job_id}")
 
         # Handle completed jobs: mark LLM as ready, ONCE.
         #
@@ -1080,7 +1082,7 @@ def get_download_status_without_jobId(
 
     Raises:
         DownloadJobNotFoundException: If no active job found in last 60 seconds.
-        ModelNotFoundException: If LLM missing.
+        ModelNotFoundException: If a completed job's associated LLM is missing.
         DatabaseException: If status fetch fails.
 
     Example:
@@ -1093,31 +1095,32 @@ def get_download_status_without_jobId(
         if not job:
             raise DownloadJobNotFoundException("recent active")
 
-        # Handle failed jobs: cleanup temp files and LLM entry
+        # Handle failed jobs: cleanup temp files and LLM entry. Same
+        # already-cleaned-up guard as get_download_status_by_jobId - see #509.
         if job.status == "failed":
             llm = llm_repo.get_by_id(job.local_model_id)
-            if not llm:
-                raise ModelNotFoundException(f"LLM {job.local_model_id}")
+            if llm:
+                # Delete temp LLM entry
+                llm_repo.delete(llm)
 
-            # Delete temp LLM entry
-            llm_repo.delete(llm)
+                # Clean up temp files using repository method
+                job_repo.cleanup_job_files(job)
 
-            # Clean up temp files using repository method
-            job_repo.cleanup_job_files(job)
+                db.commit()
+                db.refresh(job)
+                logger.info(f"Cleaned up failed download job {job.id}")
 
-            db.commit()
-            db.refresh(job)
-            logger.info(f"Cleaned up failed download job {job.id}")
-
-        # Handle completed jobs: mark LLM as ready
+        # Handle completed jobs: mark LLM as ready, ONCE. Same idempotency
+        # guard as get_download_status_by_jobId - see the comment there.
         elif job.status == "completed":
             llm = llm_repo.get_by_id(job.local_model_id)
             if not llm:
                 raise ModelNotFoundException(f"LLM {job.local_model_id}")
-            llm_repo.update(llm, local=1)
-            db.commit()
-            db.refresh(llm)
-            logger.info(f"Marked LLM {llm.id} as ready (download job {job.id} completed)")
+            if llm.local != 1:
+                llm_repo.update(llm, local=1)
+                db.commit()
+                db.refresh(llm)
+                logger.info(f"Marked LLM {llm.id} as ready (download job {job.id} completed)")
 
         return job
 
