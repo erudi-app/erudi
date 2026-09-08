@@ -692,6 +692,17 @@ class TestAssertRunnable:
         monkeypatch.setattr(config, "LLM_Engine", SimpleNamespace(is_runnable=lambda link: True))
         llm_services._assert_runnable("org/fine-quant")
 
+    def test_nemotron_v1_quant_is_rejected_on_mlx(self, monkeypatch):
+        """#506: the download gate refuses a Nemotron-NAS v1 quant up front
+        because MLX_Engine.KNOWN_BROKEN lists it -- its tokenizer_config.json
+        declares the abstract PreTrainedTokenizer, which transformers cannot
+        instantiate."""
+        from src.engines.mlx_engine import MLX_Engine
+
+        monkeypatch.setattr(config, "LLM_Engine", MLX_Engine)
+        with pytest.raises(UnsupportedPlatformException):
+            llm_services._assert_runnable("mlx-community/Llama-3_3-Nemotron-Super-49B-v1-mlx-4bit")
+
 
 class _FakeFs:
     """HfFileSystem stand-in: writes a small file for every requested path."""

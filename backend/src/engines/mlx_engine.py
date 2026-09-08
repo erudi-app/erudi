@@ -118,11 +118,25 @@ class MLX_Engine(BaseChatServerEngine):
     # searching filter="mlx" (any author), so no hand-maintained mapping is needed.
     FORMAT_TAG = "mlx"
 
-    # Stored links that download but crash at load. Empty since the 0.6.13 bump:
+    # Stored links that download but crash at load.
     # gemma-4 E2B (the 0.6.2 140-weight ValueError) was re-probed on real
     # mlx-vlm 0.6.13 during the #273 hardware pass — loads via the native
     # gemma4 module and generates cleanly, so its entry was removed.
-    KNOWN_BROKEN = frozenset()
+    KNOWN_BROKEN = frozenset(
+        {
+            # multi_modality/vision.py (DeepSeek-VL v1) hard-imports cv2,
+            # which the macOS PyInstaller build does not bundle (#512).
+            "mlx-community/deepseek-vl-1.3b-chat-4bit",
+            "mlx-community/deepseek-vl-1.3b-chat-8bit",
+            "mlx-community/deepseek-vl-7b-chat-4bit",
+            "mlx-community/deepseek-vl-7b-chat-8bit",
+            # tokenizer_config.json declares the abstract PreTrainedTokenizer,
+            # which transformers cannot instantiate (#506). The v1_5 sibling
+            # declares PreTrainedTokenizerFast and stays runnable.
+            "mlx-community/Llama-3_3-Nemotron-Super-49B-v1-mlx-4bit",
+            "mlx-community/Llama-3_3-Nemotron-Super-49B-v1-mlx-6bit",
+        }
+    )
 
     # Where the spawn stored the child's own log file, on the process object.
     # The llama-cpp engines keep their drainer the same way, and for the same
