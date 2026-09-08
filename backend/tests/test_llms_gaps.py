@@ -11,11 +11,13 @@ mapping.
 
 from __future__ import annotations
 
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
+from sqlalchemy import text
 
 from src.core import config
 from src.core.exceptions import (
@@ -53,6 +55,84 @@ def _add_job(db, llm_id, status="running", **overrides):
     db.add(job)
     db.commit()
     return job
+
+
+# =====================================================================
+# INTEGRATION - download job timestamps are true UTC instants (#505)
+# =====================================================================
+
+
+@pytest.mark.integration
+class TestDownloadJobUpdatedAtUTC:
+    """#505: `DownloadJobModel.updated_at` is `DateTime(timezone=True)` with
+    `onupdate=func.now()`. The repository used to override that with the
+    deprecated naive `datetime.utcnow()`. PostgreSQL reads an incoming naive
+    value assigned to a `timestamptz` column as wall-clock time IN THE
+    SESSION'S TIME ZONE, then converts it to UTC for storage -- so the stored
+    instant drifted from the real one by the session zone's offset (about 1-2h
+    behind in Europe/Paris). CI always runs in UTC, where the naive value and
+    the true UTC instant coincide and the bug is invisible, so these tests
+    force a non-UTC session time zone to make the drift observable.
+    """
+
+    def test_update_status_stamps_a_true_utc_instant(self, test_db_session):
+        test_db_session.execute(text("SET TIME ZONE 'Europe/Paris'"))
+        repo = Download_Job_Repository(test_db_session)
+        job = _add_job(test_db_session, None, status="pending")
+
+        repo.update_status(job, "running")
+        test_db_session.commit()
+        test_db_session.refresh(job)
+
+        now = datetime.now(timezone.utc)
+        assert job.updated_at.tzinfo is not None
+        assert abs(job.updated_at - now) < timedelta(seconds=30)
+
+    def test_update_progress_stamps_a_true_utc_instant(self, test_db_session):
+        test_db_session.execute(text("SET TIME ZONE 'Europe/Paris'"))
+        repo = Download_Job_Repository(test_db_session)
+        job = _add_job(test_db_session, None, status="running")
+
+        repo.update_progress(job, progress=50.0)
+        test_db_session.commit()
+        test_db_session.refresh(job)
+
+        now = datetime.now(timezone.utc)
+        assert job.updated_at.tzinfo is not None
+        assert abs(job.updated_at - now) < timedelta(seconds=30)
+
+    def test_get_most_recent_active_finds_a_job_updated_now_in_non_utc_session(
+        self, test_db_session
+    ):
+        """The `get_most_recent_active` cutoff used to be built from a naive
+        `datetime.utcnow()` too, compared against the `timestamptz` column.
+        In a zone WEST of UTC (negative offset -- America/Los_Angeles is
+        UTC-7/-8), PostgreSQL casts that naive cutoff as if it were local
+        wall-clock time in that zone and converts it to UTC, which pushes the
+        cutoff several hours INTO THE FUTURE relative to the real "now". A
+        job updated a heartbeat ago then fails the `updated_at >= cutoff`
+        filter and the call wrongly returns None instead of the active job.
+        (A zone EAST of UTC, like Europe/Paris, shifts the cutoff further
+        into the past instead, which only widens the window -- it would not
+        make this assertion fail, hence the choice of a western zone here.)
+
+        `updated_at` is stamped here via raw SQL `now()`, not through the
+        repository, so this only exercises the cutoff computation -- the
+        write-path bug that stamps `updated_at` itself is covered above.
+        """
+        test_db_session.execute(text("SET TIME ZONE 'America/Los_Angeles'"))
+        repo = Download_Job_Repository(test_db_session)
+        job = _add_job(test_db_session, None, status="running")
+        test_db_session.execute(
+            text("UPDATE download_jobs SET updated_at = now() WHERE id = :id"),
+            {"id": job.id},
+        )
+        test_db_session.commit()
+
+        result = repo.get_most_recent_active(max_age_seconds=60)
+
+        assert result is not None
+        assert result.id == job.id
 
 
 # =====================================================================

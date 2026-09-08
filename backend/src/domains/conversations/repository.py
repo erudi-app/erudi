@@ -3,7 +3,7 @@ Repository layer for conversation domain.
 Handles all database operations.
 """
 
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
@@ -266,7 +266,7 @@ class ConversationRepository:
         """
         try:
             conversation = self.get_conversation_by_id(conversation_id)
-            conversation.updated_at = datetime.utcnow()
+            conversation.updated_at = datetime.now(timezone.utc)
             self.db.flush()  # Flush update, no commit
         except ConversationNotFoundException:
             raise
