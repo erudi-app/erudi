@@ -50,9 +50,8 @@ export default function KnowledgeBasePage() {
   const [description, setDescription] = useState("");
   const [paths, setPaths] = useState([]);
   const [models, setModels] = useState([]);
-  // Bumped once a submission completes, so ModelLibrary and DragDropArea drop
-  // the state they own (the locked name, the staged file list) along with the
-  // parent's.
+  // Bumped once a submission completes, so DragDropArea drops the staged
+  // file list it owns along with the parent's own state.
   const [formResetKey, setFormResetKey] = useState(0);
 
   // --- Embedding-model gate (#146): the KB needs the e5 model on disk. ---
@@ -159,10 +158,9 @@ export default function KnowledgeBasePage() {
           setPaths([]);
           setModelName("");
           setDescription("");
-          // The file list and the name lock live inside the children, so
-          // clearing the parent state is not enough: bump the key to remount
-          // them, otherwise the form keeps showing files it no longer holds
-          // and a locked-but-empty name field the user cannot type into.
+          // The staged file list lives inside DragDropArea, so clearing the
+          // parent state is not enough: bump the key to remount it, otherwise
+          // the form keeps showing files it no longer holds.
           setFormResetKey((k) => k + 1);
         }, 3000);
       },
@@ -218,7 +216,12 @@ export default function KnowledgeBasePage() {
       if (foundModel) {
         log.log("Setting model from URL parameter", { name: foundModel.name });
         setSelectedModel(foundModel.id);
-        setModelName(foundModel.name);
+        // Update vs create (#317): only a KB assistant's own name is safe to
+        // pre-fill, since the update flow keeps it. A base model's name is
+        // not what the user is submitting here, and pre-filling it let a
+        // name typed but never confirmed submit the base model's name
+        // instead (#510).
+        setModelName(isKbAssistant(foundModel) ? foundModel.name : "");
       } else {
         log.warn("Model not found for parameter", { modelParam });
       }

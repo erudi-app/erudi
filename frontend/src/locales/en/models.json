@@ -79,9 +79,7 @@
     "newNameTitle": "New Model Name",
     "newNameHint": "Choose a name for your model",
     "namePlaceholder": "Enter model name...",
-    "selectFirst": "Select a model first",
-    "cancelUnlock": "Cancel and unlock",
-    "validateLock": "Validate and lock name"
+    "selectFirst": "Select a model first"
   },
   "attachKnowledgeBase": "Attach Knowledge Base",
   "machine": {

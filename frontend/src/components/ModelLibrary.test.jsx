@@ -43,9 +43,14 @@ describe("ModelLibrary", () => {
     expect(screen.getByPlaceholderText("Select a model first").disabled).toBe(true);
   });
 
-  it("locks a trimmed name and unlocks back to editable", () => {
+  it("reports every keystroke to the parent and reflects the modelName prop (#510)", () => {
+    // #510: the name field used to buffer keystrokes locally until a separate
+    // "lock" button was clicked, so a name typed but never locked never
+    // reached the parent's modelName — the value actually submitted. Every
+    // change must reach the parent directly, and the input must render
+    // whatever the parent holds as modelName, not a local echo.
     const onModelNameChange = vi.fn();
-    render(
+    const { rerender } = render(
       <ModelLibrary
         models={models}
         selectedModel="m1"
@@ -54,14 +59,21 @@ describe("ModelLibrary", () => {
       />
     );
     const input = screen.getByPlaceholderText("Enter model name...");
-    const button = screen.getByTitle("Validate and lock name");
-    expect(button.disabled).toBe(true); // empty name cannot be locked
-    fireEvent.change(input, { target: { value: "  my-model  " } });
-    fireEvent.click(button);
-    expect(onModelNameChange).toHaveBeenCalledWith("my-model");
-    expect(input.readOnly).toBe(true);
-    fireEvent.click(screen.getByTitle("Cancel and unlock"));
-    expect(onModelNameChange).toHaveBeenLastCalledWith("");
-    expect(input.readOnly).toBe(false);
+    expect(input.value).toBe("my-model");
+
+    fireEvent.change(input, { target: { value: "my-model-2" } });
+    expect(onModelNameChange).toHaveBeenCalledWith("my-model-2");
+
+    // The input is controlled by the parent's modelName prop: it only shows
+    // the new value once the parent re-renders with it.
+    rerender(
+      <ModelLibrary
+        models={models}
+        selectedModel="m1"
+        modelName="my-model-2"
+        onModelNameChange={onModelNameChange}
+      />
+    );
+    expect(screen.getByPlaceholderText("Enter model name...").value).toBe("my-model-2");
   });
 });

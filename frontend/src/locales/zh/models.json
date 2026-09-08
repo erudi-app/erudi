@@ -79,9 +79,7 @@
     "newNameTitle": "新模型名称",
     "newNameHint": "为您的模型选择一个名称",
     "namePlaceholder": "输入模型名称...",
-    "selectFirst": "请先选择一个模型",
-    "cancelUnlock": "取消并解锁",
-    "validateLock": "确认并锁定名称"
+    "selectFirst": "请先选择一个模型"
   },
   "attachKnowledgeBase": "附加知识库",
   "machine": {
