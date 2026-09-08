@@ -66,4 +66,58 @@ describe("MarkdownRenderer math support (#303)", () => {
     expect(container.querySelector("strong").textContent).toBe("bold");
     expect(container.querySelector("code").textContent).toBe("inline code");
   });
+
+  // French/European currency puts the amount before the sign with a space
+  // ("212,75 $"), which the digit-after-"$" rule alone does not catch — the
+  // character right after the opening "$" is a space, not a digit, so
+  // remark-math pairs the two signs and everything between them renders as
+  // broken inline math (#501).
+  it("does not mangle French currency written before the dollar sign", () => {
+    const { container } = renderMarkdown(
+      "Pour une PME, le **cout d'acquisition client** se situe autour de **212,75 $ par mois par poste** " +
+        "*(source interne)*, tandis que le forfait annuel de 1 500 $ s'applique aux equipes plus larges."
+    );
+
+    expect(container.querySelector(".katex")).toBeNull();
+    expect(container.querySelector("strong")).toBeTruthy();
+    expect(container.textContent).toContain("212,75 $");
+    expect(container.textContent).toContain("1 500 $");
+  });
+
+  it("guards currency per-span, leaving a real formula on the same line rendering as katex", () => {
+    const { container } = renderMarkdown(
+      "Le prix est 12 $ et 15 $ mais la formule $x^2 + 1$ est correcte."
+    );
+
+    expect(container.querySelector(".katex")).toBeTruthy();
+    expect(container.textContent).toContain("12 $ et 15 $");
+  });
+
+  // French typography puts a no-break space before the currency sign, and
+  // models emit it: the ordinary no-break space U+00A0 ("\u00A0") and the
+  // narrow no-break space U+202F ("\u202F"). Neither is an ASCII " ", so both
+  // need their own case alongside the plain-space rule above (#501).
+  it("does not mangle French currency separated from the sign by a no-break space (U+00A0)", () => {
+    const { container } = renderMarkdown(
+      "Pour une PME, le **cout d'acquisition client** se situe autour de **212,75\u00A0$ par mois par poste** " +
+        "*(source interne)*, tandis que le forfait annuel de 1\u00A0500\u00A0$ s'applique aux equipes plus larges."
+    );
+
+    expect(container.querySelector(".katex")).toBeNull();
+    expect(container.querySelector("strong")).toBeTruthy();
+    expect(container.textContent).toContain("212,75\u00A0$");
+    expect(container.textContent).toContain("500\u00A0$");
+  });
+
+  it("does not mangle French currency separated from the sign by a narrow no-break space (U+202F)", () => {
+    const { container } = renderMarkdown(
+      "Pour une PME, le **cout d'acquisition client** se situe autour de **212,75\u202F$ par mois par poste** " +
+        "*(source interne)*, tandis que le forfait annuel de 1\u202F500\u202F$ s'applique aux equipes plus larges."
+    );
+
+    expect(container.querySelector(".katex")).toBeNull();
+    expect(container.querySelector("strong")).toBeTruthy();
+    expect(container.textContent).toContain("212,75\u202F$");
+    expect(container.textContent).toContain("500\u202F$");
+  });
 });
