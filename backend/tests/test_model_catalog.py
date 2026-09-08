@@ -350,11 +350,35 @@ class TestRunnabilityPredicate:
         )
         assert MLX_Engine.is_runnable("mlx-community/broken-quant-4bit") is False
 
-    def test_known_broken_rosters_are_empty(self):
-        # gemma-4 E2B was removed after a real load+generate on mlx-vlm 0.6.13
-        # (#273 hardware pass); llama.cpp never had known-broken quants.
-        assert MLX_Engine.KNOWN_BROKEN == frozenset()
+    def test_llama_cpp_known_broken_roster_is_empty(self):
+        # llama.cpp (CPU/CUDA) never had known-broken quants.
         assert CPU_Engine.KNOWN_BROKEN == frozenset()
+
+    def test_deepseek_vl_v1_and_nemotron_v1_quants_are_not_runnable(self):
+        # DeepSeek-VL v1 (multi_modality/vision.py hard-imports cv2, not
+        # bundled -- #512) and the Nemotron-NAS v1 quants (tokenizer_config.json
+        # declares the abstract PreTrainedTokenizer -- #506) are declared
+        # not runnable on MLX.
+        broken = [
+            "mlx-community/deepseek-vl-1.3b-chat-4bit",
+            "mlx-community/deepseek-vl-1.3b-chat-8bit",
+            "mlx-community/deepseek-vl-7b-chat-4bit",
+            "mlx-community/deepseek-vl-7b-chat-8bit",
+            "mlx-community/Llama-3_3-Nemotron-Super-49B-v1-mlx-4bit",
+            "mlx-community/Llama-3_3-Nemotron-Super-49B-v1-mlx-6bit",
+        ]
+        for link in broken:
+            assert MLX_Engine.is_runnable(link) is False, link
+
+    def test_deepseek_vl2_and_nemotron_v1_5_siblings_stay_runnable(self):
+        # deepseek-vl2 does not hard-import cv2 (#512), and the v1_5 Nemotron
+        # quant declares PreTrainedTokenizerFast, not the abstract base class
+        # (#506) -- neither is affected, so both stay offered.
+        assert MLX_Engine.is_runnable("mlx-community/deepseek-vl2-small-4bit") is True
+        assert (
+            MLX_Engine.is_runnable("mlx-community/Llama-3_3-Nemotron-Super-49B-v1_5-mlx-4Bit")
+            is True
+        )
 
 
 class TestHumanizedNames:
@@ -408,6 +432,18 @@ class TestRunnableExposedInResponse:
         )
         r = LLMResponse(id=2, name="Y", local=0, link="mlx-community/broken-quant-4bit")
         assert r.runnable is False
+
+    def test_deepseek_vl_v1_quant_reports_not_runnable(self, monkeypatch):
+        """#512: DeepSeek-VL v1 quants are declared not runnable on MLX, and
+        the catalog response schema's computed `runnable` field reflects it."""
+        from src.domains.llms.schemas import LLMResponse
+
+        monkeypatch.setattr(config, "LLM_Engine", MLX_Engine)
+        r = LLMResponse(
+            id=4, name="DeepSeek VL 1.3B", local=0, link="mlx-community/deepseek-vl-1.3b-chat-4bit"
+        )
+        assert r.runnable is False
+        assert r.model_dump()["runnable"] is False
 
     def test_downloaded_model_always_runnable(self, monkeypatch):
         from src.domains.llms.schemas import LLMResponse
