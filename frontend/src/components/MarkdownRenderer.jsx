@@ -11,14 +11,17 @@ import "katex/dist/katex.min.css";
 
 // Local models emit inline TeX between single dollars ("$ \frac{14}{2} = 7 $",
 // Qwen3 does this routinely), so single-dollar math stays ENABLED. That default
-// is a currency footgun: remark-math turns "I have $5 and $10" into
-// math("5 and "). This guard runs AFTER remark-math and reverts any inline
-// span whose opening "$" is immediately followed by a digit — the currency
-// signature — back to literal text, using the node's source position to
-// restore the exact original characters. Deliberate trade-off: math that
-// starts with a bare digit right after the dollar ("$3x+1$") stays literal;
-// models pad their math ("$ 3x+1 $") or open with a symbol, both of which
-// render (#303).
+// is a currency footgun with two shapes: US-style puts the amount after the
+// sign ("I have $5 and $10"), French/European style puts it before, with a
+// space ("212,75 $", "1 500 $"). This guard runs AFTER remark-math and reverts
+// an inline span back to literal text, using the node's source position to
+// restore the exact original characters, when EITHER shape is detected: the
+// opening "$" is immediately followed by a digit (US), or the source just
+// before the opening "$", skipping at most one space, ends in a digit
+// (French/European). Deliberate trade-off: math that starts with a bare digit
+// right after the dollar ("$3x+1$") stays literal, and so does math preceded
+// by "<digit><space>$" ("2 $x$") — models pad their math ("$ 3x+1 $") or write
+// it without the leading dollar ("2x"), both of which render (#303, #501).
 function remarkCurrencyGuard() {
   return (tree, file) => {
     const source = String(file);
@@ -30,7 +33,9 @@ function remarkCurrencyGuard() {
             return child;
           }
           const original = source.slice(child.position.start.offset, child.position.end.offset);
-          if (/^\$\d/.test(original)) {
+          const start = child.position.start.offset;
+          const preceding = source.slice(Math.max(0, start - 2), start);
+          if (/^\$\d/.test(original) || /\d ?$/.test(preceding)) {
             return { type: "text", value: original, position: child.position };
           }
           return child;
