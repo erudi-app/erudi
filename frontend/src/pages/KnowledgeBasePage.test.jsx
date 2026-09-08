@@ -67,6 +67,11 @@ vi.mock("../components/ModelLibrary", () => {
         <span data-testid="lib-count">{models.length}</span>
         <button onClick={() => onModelSelect(5)}>PICK_MODEL</button>
         <button onClick={() => onModelNameChange("picked-name")}>SET_NAME</button>
+        <input
+          data-testid="lib-name-input"
+          value={modelName}
+          onChange={(e) => onModelNameChange(e.target.value)}
+        />
         <button onClick={() => onRefresh()}>REFRESH_MODELS</button>
       </div>
     );
@@ -545,5 +550,58 @@ describe("KnowledgeBasePage model list and URL preselection", () => {
 
     fireEvent.click(screen.getByText("REFRESH_MODELS"));
     await waitFor(() => expect(localCalls()).toHaveLength(2));
+  });
+
+  it("does not wipe a typed name when Refresh replaces the models list under an unchanged URL param (#510 regression)", async () => {
+    // #510 follow-up: the URL-param effect used to depend on [searchParams, models],
+    // so every models refresh (the Refresh icon, or the initial load itself) re-ran
+    // it while ?model=... was still in the URL, and setModelName wiped out whatever
+    // the user had since typed. The pre-fill must apply once per distinct model
+    // param value, not on every models replacement.
+    // The refreshed list carries an extra model, so waiting for lib-count to
+    // reach 2 proves the models state (and therefore the URL-param effect
+    // that depends on it) has actually gone through a full update cycle
+    // before the name is checked — not just that the fetch was issued.
+    let fetchCount = 0;
+    modelsResponder = () => {
+      fetchCount += 1;
+      return fetchCount === 1
+        ? [{ id: 7, name: "Mistral" }]
+        : [
+            { id: 7, name: "Mistral" },
+            { id: 8, name: "Qwen" },
+          ];
+    };
+    routerState.params = new URLSearchParams("model=Mistral");
+    render(<KnowledgeBasePage />);
+
+    await waitFor(() => expect(screen.getByTestId("lib-selected").textContent).toBe("7"));
+    expect(screen.getByTestId("lib-name").textContent).toBe("");
+
+    fireEvent.change(screen.getByTestId("lib-name-input"), { target: { value: "typed-name" } });
+    expect(screen.getByTestId("lib-name").textContent).toBe("typed-name");
+
+    fireEvent.click(screen.getByText("REFRESH_MODELS"));
+    await waitFor(() => expect(screen.getByTestId("lib-count").textContent).toBe("2"));
+
+    expect(screen.getByTestId("lib-name").textContent).toBe("typed-name");
+    expect(screen.getByTestId("lib-selected").textContent).toBe("7");
+  });
+
+  it("re-applies the pre-fill when the URL model param changes to a different model", async () => {
+    modelsResponder = () => [
+      { id: 7, name: "Mistral" },
+      { id: 9, name: "Support Helper", is_attached_to_kb: true, kb_id: 3 },
+    ];
+    routerState.params = new URLSearchParams("model=Mistral");
+    const { rerender } = render(<KnowledgeBasePage />);
+    await waitFor(() => expect(screen.getByTestId("lib-selected").textContent).toBe("7"));
+    expect(screen.getByTestId("lib-name").textContent).toBe("");
+
+    routerState.params = new URLSearchParams("model=Support Helper");
+    rerender(<KnowledgeBasePage />);
+
+    await waitFor(() => expect(screen.getByTestId("lib-selected").textContent).toBe("9"));
+    expect(screen.getByTestId("lib-name").textContent).toBe("Support Helper");
   });
 });

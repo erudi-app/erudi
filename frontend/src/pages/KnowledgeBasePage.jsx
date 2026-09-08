@@ -201,30 +201,39 @@ export default function KnowledgeBasePage() {
     fetchModels();
   }, []);
 
+  // Applied once per distinct `model` URL param value, not on every models
+  // replacement: fetchModels() (the initial load, and the Refresh icon) hands
+  // the effect a new `models` array on every call, and re-running the
+  // pre-fill on an unchanged param wiped out a name the user had since typed
+  // (#510 follow-up).
+  const appliedModelParamRef = useRef(null);
+
   // Handle URL parameter for model selection
   useEffect(() => {
     const modelParam = searchParams.get("model");
-    if (modelParam && models.length > 0) {
-      // Find the model by name or id
-      const foundModel = models.find(
-        (model) =>
-          model.name === modelParam ||
-          model.id === modelParam ||
-          model.name.toLowerCase() === modelParam.toLowerCase()
-      );
+    if (!modelParam || models.length === 0) return;
+    if (appliedModelParamRef.current === modelParam) return;
 
-      if (foundModel) {
-        log.log("Setting model from URL parameter", { name: foundModel.name });
-        setSelectedModel(foundModel.id);
-        // Update vs create (#317): only a KB assistant's own name is safe to
-        // pre-fill, since the update flow keeps it. A base model's name is
-        // not what the user is submitting here, and pre-filling it let a
-        // name typed but never confirmed submit the base model's name
-        // instead (#510).
-        setModelName(isKbAssistant(foundModel) ? foundModel.name : "");
-      } else {
-        log.warn("Model not found for parameter", { modelParam });
-      }
+    // Find the model by name or id
+    const foundModel = models.find(
+      (model) =>
+        model.name === modelParam ||
+        model.id === modelParam ||
+        model.name.toLowerCase() === modelParam.toLowerCase()
+    );
+
+    if (foundModel) {
+      appliedModelParamRef.current = modelParam;
+      log.log("Setting model from URL parameter", { name: foundModel.name });
+      setSelectedModel(foundModel.id);
+      // Update vs create (#317): only a KB assistant's own name is safe to
+      // pre-fill, since the update flow keeps it. A base model's name is
+      // not what the user is submitting here, and pre-filling it let a
+      // name typed but never confirmed submit the base model's name
+      // instead (#510).
+      setModelName(isKbAssistant(foundModel) ? foundModel.name : "");
+    } else {
+      log.warn("Model not found for parameter", { modelParam });
     }
   }, [searchParams, models]); // Re-run when searchParams or models change
 
