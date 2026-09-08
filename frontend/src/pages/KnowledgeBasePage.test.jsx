@@ -45,10 +45,12 @@ vi.mock("../components/Sidebar", () => ({ default: () => null }));
 /* eslint-disable react/prop-types -- the stubs below are test doubles; their
    props are pinned by the assertions, not by a PropTypes declaration. */
 
-// Both stubs keep state of their own, exactly like the real components do (the
-// locked name in ModelLibrary, the staged file list in DragDropArea). That is
-// what makes the reset assertions meaningful: clearing the parent's state does
-// not touch theirs, so only a remount drops it.
+// The DragDropArea stub keeps state of its own, exactly like the real
+// component does (the staged file list). That is what makes the reset
+// assertion meaningful: clearing the parent's state does not touch it, so
+// only a remount drops it. ModelLibrary owns no state of its own (#510):
+// every name change goes straight to the parent via onModelNameChange, so
+// the stub does the same instead of buffering a "locked" name locally.
 vi.mock("../components/ModelLibrary", () => {
   const ModelLibraryStub = ({
     models,
@@ -58,22 +60,18 @@ vi.mock("../components/ModelLibrary", () => {
     onModelNameChange,
     onRefresh,
   }) => {
-    const [locked, setLocked] = React.useState(false);
     return (
       <div>
         <span data-testid="lib-selected">{String(selectedModel)}</span>
         <span data-testid="lib-name">{modelName}</span>
         <span data-testid="lib-count">{models.length}</span>
-        <span data-testid="lib-locked">{String(locked)}</span>
         <button onClick={() => onModelSelect(5)}>PICK_MODEL</button>
-        <button
-          onClick={() => {
-            setLocked(true);
-            onModelNameChange("picked-name");
-          }}
-        >
-          SET_NAME
-        </button>
+        <button onClick={() => onModelNameChange("picked-name")}>SET_NAME</button>
+        <input
+          data-testid="lib-name-input"
+          value={modelName}
+          onChange={(e) => onModelNameChange(e.target.value)}
+        />
         <button onClick={() => onRefresh()}>REFRESH_MODELS</button>
       </div>
     );
@@ -281,6 +279,27 @@ describe("KnowledgeBasePage assistant creation", () => {
     });
   });
 
+  it("submits the name exactly as reported via onModelNameChange, with no separate lock step (#510)", async () => {
+    // #510: ModelLibrary used to buffer a typed name locally until a
+    // checkmark button "locked" it, so clicking Create Assistant without
+    // that click submitted the parent's own pre-fill instead — silently
+    // the pre-selected base model's own name. onModelNameChange is now the
+    // only path a name takes from the input to the parent, so what it
+    // reports is exactly what submitTrainForm sends and what the
+    // duplicate-name guard checks, with nothing else able to override it.
+    modelsResponder = () => [{ id: 5, name: "some-other-model" }];
+    render(<KnowledgeBasePage />);
+    await waitFor(() => expect(screen.getByTestId("lib-count").textContent).toBe("1"));
+
+    fireEvent.click(screen.getByText("PICK_MODEL"));
+    fireEvent.click(screen.getByText("SET_NAME")); // calls onModelNameChange("picked-name") directly
+    fireEvent.click(screen.getByText("DROP_FILES"));
+    fireEvent.click(screen.getByText("Create Assistant"));
+
+    expect(openKB).toHaveBeenCalledTimes(1);
+    expect(openKB.mock.calls[0][0]).toMatchObject({ modelName: "picked-name" });
+  });
+
   it("rejects a name already carried by another local model (#317)", async () => {
     modelsResponder = () => [
       { id: 5, name: "Qwen3 4B" },
@@ -355,7 +374,7 @@ describe("KnowledgeBasePage assistant creation", () => {
     expect(screen.getByPlaceholderText("Write a description").value).toBe("");
   });
 
-  it("clears the staged file list and the locked name the children own", async () => {
+  it("clears the staged file list the DragDropArea owns, and the submitted name, on reset", async () => {
     vi.useFakeTimers();
     render(<KnowledgeBasePage />);
     await act(async () => {});
@@ -363,7 +382,7 @@ describe("KnowledgeBasePage assistant creation", () => {
     fireEvent.click(screen.getByText("SET_NAME"));
     fireEvent.click(screen.getByText("DROP_FILES"));
     expect(screen.getByTestId("dd-staged").textContent).toBe("2");
-    expect(screen.getByTestId("lib-locked").textContent).toBe("true");
+    expect(screen.getByTestId("lib-name").textContent).toBe("picked-name");
 
     fireEvent.click(screen.getByText("Create Assistant"));
     act(() => openKB.mock.calls[0][1].onComplete());
@@ -371,11 +390,12 @@ describe("KnowledgeBasePage assistant creation", () => {
       await vi.advanceTimersByTimeAsync(3000);
     });
 
-    // Without the remount the page kept listing files it no longer holds, and
-    // the name field stayed locked but empty, so a second submission failed
-    // with "Please fill in all required fields" under a visible file list.
+    // Without the remount the page kept listing files it no longer holds, so
+    // a second submission failed with "Please fill in all required fields"
+    // under a visible file list. The name comes back to the parent's own
+    // reset state (no child-owned copy left to remount away).
     expect(screen.getByTestId("dd-staged").textContent).toBe("0");
-    expect(screen.getByTestId("lib-locked").textContent).toBe("false");
+    expect(screen.getByTestId("lib-name").textContent).toBe("");
   });
 
   it("routes a creation error into the error modal", async () => {
@@ -464,7 +484,12 @@ describe("KnowledgeBasePage hardware readout", () => {
 });
 
 describe("KnowledgeBasePage model list and URL preselection", () => {
-  it("preselects the model named in the URL, case-insensitively", async () => {
+  it("preselects the model named in the URL, case-insensitively, but leaves a base model's name empty (#510)", async () => {
+    // #510: pre-filling a base model's own name here is what let a name
+    // typed afterwards but never confirmed silently submit as that base
+    // model's name instead. A base model is never itself the name of the
+    // new assistant, so the field the user sees (and can type into) starts
+    // empty even though the model is selected.
     modelsResponder = () => [
       { id: 7, name: "Mistral" },
       { id: 8, name: "Qwen" },
@@ -473,16 +498,30 @@ describe("KnowledgeBasePage model list and URL preselection", () => {
     render(<KnowledgeBasePage />);
 
     await waitFor(() => expect(screen.getByTestId("lib-selected").textContent).toBe("7"));
-    expect(screen.getByTestId("lib-name").textContent).toBe("Mistral");
+    expect(screen.getByTestId("lib-name").textContent).toBe("");
   });
 
-  it("also matches the URL parameter against the model id", async () => {
+  it("also matches the URL parameter against the model id, and still leaves the name empty for a base model", async () => {
     modelsResponder = () => [{ id: "abc", name: "X" }];
     routerState.params = new URLSearchParams("model=abc");
     render(<KnowledgeBasePage />);
 
     await waitFor(() => expect(screen.getByTestId("lib-selected").textContent).toBe("abc"));
-    expect(screen.getByTestId("lib-name").textContent).toBe("X");
+    expect(screen.getByTestId("lib-name").textContent).toBe("");
+  });
+
+  it("pre-fills the name from the URL only when the found model is a KB assistant (#510)", async () => {
+    // The update flow (#317) keeps the assistant's own name, so pre-filling
+    // it here is safe and expected — unlike a base model's name.
+    modelsResponder = () => [
+      { id: 7, name: "Mistral" },
+      { id: 9, name: "Support Helper", is_attached_to_kb: true, kb_id: 3 },
+    ];
+    routerState.params = new URLSearchParams("model=Support Helper");
+    render(<KnowledgeBasePage />);
+
+    await waitFor(() => expect(screen.getByTestId("lib-selected").textContent).toBe("9"));
+    expect(screen.getByTestId("lib-name").textContent).toBe("Support Helper");
   });
 
   it("selects nothing when the URL model is unknown", async () => {
@@ -511,5 +550,58 @@ describe("KnowledgeBasePage model list and URL preselection", () => {
 
     fireEvent.click(screen.getByText("REFRESH_MODELS"));
     await waitFor(() => expect(localCalls()).toHaveLength(2));
+  });
+
+  it("does not wipe a typed name when Refresh replaces the models list under an unchanged URL param (#510 regression)", async () => {
+    // #510 follow-up: the URL-param effect used to depend on [searchParams, models],
+    // so every models refresh (the Refresh icon, or the initial load itself) re-ran
+    // it while ?model=... was still in the URL, and setModelName wiped out whatever
+    // the user had since typed. The pre-fill must apply once per distinct model
+    // param value, not on every models replacement.
+    // The refreshed list carries an extra model, so waiting for lib-count to
+    // reach 2 proves the models state (and therefore the URL-param effect
+    // that depends on it) has actually gone through a full update cycle
+    // before the name is checked — not just that the fetch was issued.
+    let fetchCount = 0;
+    modelsResponder = () => {
+      fetchCount += 1;
+      return fetchCount === 1
+        ? [{ id: 7, name: "Mistral" }]
+        : [
+            { id: 7, name: "Mistral" },
+            { id: 8, name: "Qwen" },
+          ];
+    };
+    routerState.params = new URLSearchParams("model=Mistral");
+    render(<KnowledgeBasePage />);
+
+    await waitFor(() => expect(screen.getByTestId("lib-selected").textContent).toBe("7"));
+    expect(screen.getByTestId("lib-name").textContent).toBe("");
+
+    fireEvent.change(screen.getByTestId("lib-name-input"), { target: { value: "typed-name" } });
+    expect(screen.getByTestId("lib-name").textContent).toBe("typed-name");
+
+    fireEvent.click(screen.getByText("REFRESH_MODELS"));
+    await waitFor(() => expect(screen.getByTestId("lib-count").textContent).toBe("2"));
+
+    expect(screen.getByTestId("lib-name").textContent).toBe("typed-name");
+    expect(screen.getByTestId("lib-selected").textContent).toBe("7");
+  });
+
+  it("re-applies the pre-fill when the URL model param changes to a different model", async () => {
+    modelsResponder = () => [
+      { id: 7, name: "Mistral" },
+      { id: 9, name: "Support Helper", is_attached_to_kb: true, kb_id: 3 },
+    ];
+    routerState.params = new URLSearchParams("model=Mistral");
+    const { rerender } = render(<KnowledgeBasePage />);
+    await waitFor(() => expect(screen.getByTestId("lib-selected").textContent).toBe("7"));
+    expect(screen.getByTestId("lib-name").textContent).toBe("");
+
+    routerState.params = new URLSearchParams("model=Support Helper");
+    rerender(<KnowledgeBasePage />);
+
+    await waitFor(() => expect(screen.getByTestId("lib-selected").textContent).toBe("9"));
+    expect(screen.getByTestId("lib-name").textContent).toBe("Support Helper");
   });
 });

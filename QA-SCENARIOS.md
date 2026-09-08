@@ -155,11 +155,11 @@ screens, the shared chrome, and non-functional behavior.
 **Happy path**
 - [ ] When I open the screen for the **first time** (embedding model not yet installed), then a dialog offers to download the embedding model (multilingual-e5-small) once; accepting downloads it and confirms "the Knowledge Base is ready to use"; declining ("Not now") returns to the Models page *(#146/#157)* and the offer returns on the next visit.
 - [ ] When I open the screen, then I see the KB description, a chat-capabilities rating (my machine's inference label/score), the local-model library, a name field, and a drag-and-drop area.
-- [ ] When I select a base model, type a name and **click Check to lock it**, add supported files (`.pdf`/`.txt`/`.docx`/`.xlsx`/`.csv`/`.md`), and click "Create Assistant" + confirm, then a spinner polls progress.
+- [ ] When I select a base model, type a name, add supported files (`.pdf`/`.txt`/`.docx`/`.xlsx`/`.csv`/`.md`), and click "Create Assistant" + confirm, then a spinner polls progress.
 - [ ] When ingestion completes, then "Data attached to your Assistant successfully!" shows and the form resets.
 
 **Edge cases & errors**
-- [ ] When I leave the assistant name **unlocked** (didn't click Check), or pick no model, or add no files, then "Please fill in all required fields" shows and nothing is sent.
+- [ ] When I leave the assistant name **empty**, or pick no model, or add no files, then "Please fill in all required fields" shows and nothing is sent.
 - [ ] When I add a **supported document** beyond `.pdf`/`.txt` (`.docx`, `.xlsx`, `.csv`, `.md`), then it is accepted; an **unsupported** file (e.g. `.png`, `.zip`) isn't offered by the picker and a dropped one is ignored.
 - [ ] When I add the **same file twice**, then it is de-duplicated.
 - [ ] When I submit a **scanned / image-only PDF** alongside readable files, then it is accepted as *pending vision* (no searchable content yet) and the job completes for the readable ones; a **pending-vision-only** upload fails with "no searchable content" (no OCR tier yet).

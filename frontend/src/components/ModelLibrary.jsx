@@ -1,9 +1,7 @@
-import React, { useState } from "react";
+import React from "react";
 import PropTypes from "prop-types";
 import { useTranslation } from "react-i18next";
-import { RefreshCcw, Check, X } from "lucide-react";
-import { createLogger } from "../utils/logger";
-const log = createLogger("ModelLibrary");
+import { RefreshCcw } from "lucide-react";
 
 /**
  * Model Library component for selecting and managing local models
@@ -35,27 +33,11 @@ export default function ModelLibrary({
   models = [],
   selectedModel,
   onModelSelect,
-  modelName,
+  modelName = "",
   onModelNameChange,
   onRefresh,
 }) {
   const { t } = useTranslation();
-  const [isLocked, setIsLocked] = useState(false);
-  const [localModelName, setLocalModelName] = useState("");
-
-  const handleToggleLock = () => {
-    if (!isLocked && localModelName.trim()) {
-      // Locking: validate the name and send it to parent
-      log.log("Model name locked and validated:", localModelName);
-      setIsLocked(true);
-      onModelNameChange(localModelName.trim());
-    } else {
-      // Unlocking: allow editing again but keep the text in the input
-      setIsLocked(false);
-      onModelNameChange("");
-      // Keep localModelName as is - don't clear it
-    }
-  };
 
   return (
     <div className="flex-1 min-w-[300px] bg-[#2B2B2B] rounded-2xl p-6 text-white shadow-lg flex flex-col gap-4 border border-white/20 border-[0.5px]">
@@ -121,31 +103,14 @@ export default function ModelLibrary({
         </div>
         <div className="flex gap-2">
           <input
-            className={`flex-1 border rounded-lg px-3 py-2 text-sm placeholder-white/40 focus:ring-0 focus:outline-none transition-colors ${
-              isLocked
-                ? "bg-gray-700/50 border-gray-600/50 text-gray-400 cursor-not-allowed"
-                : "bg-[#3A3A3A] border-gray-600/50 text-white focus:border-emerald-400/50 focus:bg-[#404040]"
-            }`}
+            className="flex-1 border rounded-lg px-3 py-2 text-sm placeholder-white/40 focus:ring-0 focus:outline-none transition-colors bg-[#3A3A3A] border-gray-600/50 text-white focus:border-emerald-400/50 focus:bg-[#404040]"
             placeholder={
               selectedModel ? t("models:library.namePlaceholder") : t("models:library.selectFirst")
             }
-            value={isLocked ? modelName : localModelName}
-            onChange={(e) => setLocalModelName(e.target.value)}
-            disabled={!selectedModel || isLocked}
-            readOnly={isLocked}
+            value={modelName}
+            onChange={(e) => onModelNameChange(e.target.value)}
+            disabled={!selectedModel}
           />
-          <button
-            onClick={handleToggleLock}
-            disabled={!selectedModel || (!isLocked && !localModelName.trim())}
-            className={`p-2 rounded-lg transition-colors ${
-              isLocked
-                ? "bg-red-500 hover:bg-red-600 text-white"
-                : "bg-emerald-500 hover:bg-emerald-600 text-white disabled:bg-gray-600 disabled:cursor-not-allowed"
-            }`}
-            title={isLocked ? t("models:library.cancelUnlock") : t("models:library.validateLock")}
-          >
-            {isLocked ? <X className="w-4 h-4" /> : <Check className="w-4 h-4" />}
-          </button>
         </div>
       </div>
     </div>

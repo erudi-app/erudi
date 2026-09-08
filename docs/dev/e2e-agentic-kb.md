@@ -136,7 +136,7 @@ Rule out a capability/plumbing bug before any scenario.
 > **growing across successive snapshots**. Setup identical to PR1 (see below).
 
 - **E-KB1 — Create the KB assistant.** KnowledgeBasePage → pick qwen in `ModelLibrary` →
-  name it (e.g. "Analyste Nimbus") + lock → drop `e2e-kb-doc.md` into `DragDropArea` →
+  name it (e.g. "Analyste Nimbus") → drop `e2e-kb-doc.md` into `DragDropArea` →
   **Create Assistant** → confirm modal → spinner runs then clears → the assistant appears
   in the conversation/arena model pickers.
 - **E-KB2 — Agentic grounding (the heart).** New conversation with the Nimbus assistant →
