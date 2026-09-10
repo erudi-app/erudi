@@ -718,6 +718,19 @@ async def delete_llm(
                 detail=dependents,
             )
 
+        # If this is the model currently in memory, unload it before its files
+        # go. Deleting the weights out from under a live llama-server leaves the
+        # child running on a path that no longer exists, holding the GPU until
+        # the 300s idle sweep happens to notice -- so the one action that should
+        # free the accelerator does not, and Diagnostics keeps reporting a model
+        # the user just deleted (#521). Same lock the idle sweep takes, so this
+        # can never run underneath a generation.
+        engine = config.LLM_Engine
+        if engine is not None and str(getattr(engine, "_model_id", None)) == str(llm.id):
+            async with engine.generation_guard():
+                await asyncio.to_thread(engine.cleanup)
+            logger.info(f"Unloaded model {llm.id} before deleting it")
+
         # Delete files from disk if they exist
         if llm.link and os.path.exists(llm.link):
             shutil.rmtree(llm.link, ignore_errors=True)

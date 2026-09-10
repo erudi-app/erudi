@@ -12,6 +12,7 @@ No real model downloads or network calls occur during tests.
 import pytest
 import asyncio
 import shutil
+import contextlib
 from unittest.mock import patch, AsyncMock
 from fastapi import status
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,28 @@ from src.domains.llms.services import (
 )
 from src.entities.Llm import Llm
 from src.entities.DownloadJob import DownloadJobModel
+
+
+class _FakeEngine:
+    """Stands in for the engine singleton so a delete can be observed.
+
+    Records whether ``cleanup`` ran, and whether it ran while the weights were
+    still on disk -- the ordering is the whole point of #521.
+    """
+
+    def __init__(self, model_id):
+        self._model_id = model_id
+        self.cleanup_calls = 0
+        self.cleaned_before_rmtree = None
+
+    @contextlib.asynccontextmanager
+    async def generation_guard(self):
+        yield
+
+    def cleanup(self):
+        self.cleanup_calls += 1
+        if self.cleaned_before_rmtree is None:
+            self.cleaned_before_rmtree = shutil.rmtree.call_count == 0
 
 
 # ============ Repository Tests - LLM ============
@@ -638,6 +661,53 @@ class TestLLM_Endpoints:
 
         assert response.status_code == status.HTTP_200_OK
         assert mock_rmtree.call_count >= 1
+
+    @patch("os.path.exists")
+    @patch("shutil.rmtree")
+    def test_delete_unloads_the_model_it_is_deleting(
+        self, mock_rmtree, mock_exists, client, test_db_session
+    ):
+        """Deleting the resident model must stop its inference child first.
+
+        Without this, the child keeps running on a path that no longer exists and
+        holds the accelerator until the 300s idle sweep notices (#521).
+        """
+        mock_exists.return_value = True
+
+        llm = Llm(name="Resident", local=1, type="qwen", link="/models/1", param_size=4.0)
+        test_db_session.add(llm)
+        test_db_session.commit()
+        llm_id = llm.id
+
+        engine = _FakeEngine(model_id=str(llm_id))
+        with patch("src.core.config.LLM_Engine", engine):
+            response = client.delete(f"/erudi/llms/{llm_id}")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert engine.cleanup_calls == 1
+        # The unload has to happen while the weights are still there, otherwise
+        # the child is torn down after its files vanished.
+        assert engine.cleaned_before_rmtree is True
+
+    @patch("os.path.exists")
+    @patch("shutil.rmtree")
+    def test_delete_leaves_a_different_loaded_model_alone(
+        self, mock_rmtree, mock_exists, client, test_db_session
+    ):
+        """Deleting model A must not unload model B, which is the one loaded."""
+        mock_exists.return_value = True
+
+        llm = Llm(name="Not Resident", local=1, type="qwen", link="/models/2", param_size=4.0)
+        test_db_session.add(llm)
+        test_db_session.commit()
+        llm_id = llm.id
+
+        engine = _FakeEngine(model_id=str(llm_id + 1000))
+        with patch("src.core.config.LLM_Engine", engine):
+            response = client.delete(f"/erudi/llms/{llm_id}")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert engine.cleanup_calls == 0
 
     def test_delete_kb_assistant_preserves_base_model_files_and_deletes_kb(
         self, client, test_db_session, tmp_path
