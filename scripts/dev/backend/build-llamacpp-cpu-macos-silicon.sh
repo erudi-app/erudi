@@ -77,6 +77,12 @@ echo "[build] Configuring for Apple Silicon CPU backend (arm64)..."
 # - GGML_OPENMP=OFF to skip OpenMP detection and avoid long hangs in feature probes.
 #   AppleClang does not ship libomp by default. This avoids that probe and link noise.
 # - We keep GGML_ACCELERATE=ON to link Accelerate for BLAS.
+# - ggml probes the ARM features of the build machine (dotprod / i8mm / sve / sme)
+#   by compiling and RUNNING a snippet per feature. On Apple Silicon those probes
+#   complete and settle on -mcpu=native+dotprod+i8mm+nosve+nosme. If a future
+#   toolchain hangs or traps in one of them, override that single probe rather
+#   than the whole block, e.g. -DGGML_MACHINE_SUPPORTS_sme=0. Never force a
+#   feature ON: the probe failing means the compiler cannot emit it here.
 #
 # -DCMAKE_INSTALL_RPATH sets @executable_path/../lib so llama-cli finds libllama.dylib at runtime.
 #   This keeps runtime self contained inside backend/artifacts/llama-cpp/cpu.

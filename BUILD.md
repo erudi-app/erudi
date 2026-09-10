@@ -39,8 +39,10 @@ live in `meta/base.txt` and platform/hardware specifics in `meta/*-specs.txt`;
 the entrypoints only compose those.
 
 On Windows and Linux the inference binary (`llama-server`) is compiled from the
-`backend/forks/llama-cpp` submodule before PyInstaller runs, so clone with
-`--recurse-submodules` (or run `git submodule update --init --recursive`).
+`backend/forks/llama-cpp` submodule (upstream `ggml-org/llama.cpp`, pinned to a
+release tag) before PyInstaller runs, so clone with `--recurse-submodules` (or run
+`git submodule update --init --recursive`; a clone predating the move to upstream
+needs `git submodule sync --recursive` first).
 macOS does not need it: inference there goes through MLX, which is a pip
 dependency.
 

@@ -2,6 +2,20 @@
 # with the other. 100 is the width the project has always documented.
 line-length = 100
 
+# Directories ruff never walks into. This has to sit at the TOP level: under
+# `[lint]` it only narrows which files the linter reports on, and `ruff format`
+# does not read it at all -- which is how 220 files of upstream Python inside the
+# llama.cpp submodule (forks/) ended up being linted and reformatted on any
+# machine that has the submodule checked out. CI never noticed: it clones
+# without submodules, so the directory is empty there.
+exclude = [
+    "dist",
+    "build",
+    "venv",
+    ".venv",
+    "forks",
+]
+
 [lint]
 # Rules enforced:
 # F4xx - unused imports
@@ -14,13 +28,4 @@ ignore = [
     "E402",   # module-level import not at top — intentional in some engine files
     "F841",   # local variable assigned but never used — too noisy in except blocks
     "E701",   # multiple statements on one line — intentional in engine dispatch tables
-]
-
-# Exclude generated/build dirs
-exclude = [
-    "dist",
-    "build",
-    "venv",
-    ".venv",
-    "forks",
 ]
