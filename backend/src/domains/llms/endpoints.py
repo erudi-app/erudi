@@ -636,6 +636,28 @@ async def update_llm(
         raise DatabaseException("Failed to update LLM", trace=str(e))
 
 
+async def _unload_if_resident(llm_id: int) -> None:
+    """Stop the inference child when the model being deleted is the loaded one.
+
+    Deleting the model in memory without this leaves its child running: for a
+    base model, on a path that no longer exists; for a KB assistant, on weights
+    that belong to the base and survive. Either way the accelerator stays busy
+    after the one action that should free it, and Diagnostics keeps naming a
+    model the user just deleted, until the 300s idle sweep happens to notice
+    (#521).
+
+    Takes the same lock as that sweep, so it can never land under a generation.
+    Called per delete branch rather than once up front: a delete refused with
+    409 (dependent assistants, no opt-in) must not unload anything.
+    """
+    engine = config.LLM_Engine
+    if engine is None or str(getattr(engine, "_model_id", None)) != str(llm_id):
+        return
+    async with engine.generation_guard():
+        await asyncio.to_thread(engine.cleanup)
+    logger.info(f"Unloaded model {llm_id} before deleting it")
+
+
 @router.delete("/{llm_id}")
 async def delete_llm(
     llm_id: int,
@@ -694,6 +716,7 @@ async def delete_llm(
             # The assistant's conversations survive server-side (llm_id SET NULL).
             from src.entities.KnowledgeBase import KnowledgeBase
 
+            await _unload_if_resident(llm.id)
             kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == llm.kb_id).first()
             if kb:
                 db.delete(kb)
@@ -718,18 +741,9 @@ async def delete_llm(
                 detail=dependents,
             )
 
-        # If this is the model currently in memory, unload it before its files
-        # go. Deleting the weights out from under a live llama-server leaves the
-        # child running on a path that no longer exists, holding the GPU until
-        # the 300s idle sweep happens to notice -- so the one action that should
-        # free the accelerator does not, and Diagnostics keeps reporting a model
-        # the user just deleted (#521). Same lock the idle sweep takes, so this
-        # can never run underneath a generation.
-        engine = config.LLM_Engine
-        if engine is not None and str(getattr(engine, "_model_id", None)) == str(llm.id):
-            async with engine.generation_guard():
-                await asyncio.to_thread(engine.cleanup)
-            logger.info(f"Unloaded model {llm.id} before deleting it")
+        # Unload before the weights go, and only now: the 409 above means the
+        # delete was refused, and a refused delete must leave the engine alone.
+        await _unload_if_resident(llm.id)
 
         # Delete files from disk if they exist
         if llm.link and os.path.exists(llm.link):
