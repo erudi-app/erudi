@@ -56,3 +56,47 @@ describe("WelcomeModal hardware caption matches the score tier (#303)", () => {
     expect(screen.getByText(/Optimized for Smaller Models/)).toBeTruthy();
   });
 });
+
+// The machine readout on the page behind this dialog states the size window the
+// benchmark produced. The dialog used to carry its own hardcoded range, so on a
+// machine whose window was 8-24B the first screen said 8-24B and 1B-12B at once
+// (#523).
+describe("WelcomeModal size window (#523)", () => {
+  const renderWithWindow = (score, min, max) =>
+    render(
+      <WelcomeModal
+        isOpen
+        onClose={() => {}}
+        loading={false}
+        hardwareInfo={{
+          global_inference_score: score,
+          global_inference_label: "Excellent",
+          recommended_param_min: min,
+          recommended_param_max: max,
+        }}
+      />
+    );
+
+  it("states the window the benchmark produced, not a fixed one", () => {
+    renderWithWindow(85, 8, 24);
+
+    expect(screen.getByText(/from 8B to 24B/)).toBeTruthy();
+  });
+
+  it("never contradicts that window with a range of its own", () => {
+    renderWithWindow(85, 8, 24);
+
+    // The tier copy is qualitative: no parameter count may appear outside the
+    // window sentence, or the two can disagree again.
+    expect(screen.queryByText(/1B to 12B/)).toBeNull();
+    expect(screen.queryByText(/Mistral 8B|Gemma 12B/)).toBeNull();
+  });
+
+  it("says nothing about a window when profiling produced none", () => {
+    renderWith(85, "Excellent");
+
+    expect(screen.queryByText(/from .*B to .*B/)).toBeNull();
+    // The tier caption still shows: the dialog degrades, it does not go blank.
+    expect(screen.getByText(/Excellent Hardware/)).toBeTruthy();
+  });
+});

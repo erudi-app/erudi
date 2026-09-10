@@ -74,20 +74,21 @@
     "recommendation": {
       "excellent": {
         "title": "Excellent Hardware! 🚀",
-        "description": "Your system can handle any model from 1B to 12B parameters with ease. We recommend trying the power of Mistral 8B or Gemma 12B for the best experience. We're also working on adding support for much larger models—stay tuned!"
+        "description": "Your system has plenty of headroom. Even the largest models in your range will feel responsive."
       },
       "good": {
         "title": "Good Performance 👍",
-        "description": "Your hardware runs models from 1B to 12B parameters smoothly. Mistral 8B and Gemma 12B are within comfortable reach, and smaller models will feel instant."
+        "description": "Your hardware runs your recommended range smoothly, and smaller models will feel instant."
       },
       "fair": {
         "title": "Fair Performance",
-        "description": "Good news: models like Gemma 4B and smaller will run well on your machine. Larger models such as Mistral 7B will work too, but expect some delays."
+        "description": "Smaller models will run well. The larger end of your range will work too, but expect some delays."
       },
       "limited": {
         "title": "Optimized for Smaller Models 💡",
-        "description": "We recommend starting with our optimized smaller models like Gemma 1B, 2B, or 4B. These models are specifically tuned to deliver real, impressive results even on limited hardware. You can still experiment with larger models, but performance may vary."
-      }
+        "description": "Start with the smaller models tuned for limited hardware; they still give real results. Larger ones will run, but performance may vary."
+      },
+      "window": "Your machine handles models from {{min}}B to {{max}}B comfortably."
     },
     "getStarted": "Get Started"
   },
