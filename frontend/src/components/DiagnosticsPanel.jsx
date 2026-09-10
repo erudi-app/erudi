@@ -6,7 +6,12 @@ import { useTranslation } from "react-i18next";
 import ReportProblem from "./ReportProblem";
 import { apiClient } from "../services/api/client";
 import { getSessionErrors } from "../utils/errorCapture";
-import { buildPrefill, formatDiagnosticsText, mergeRecentErrors } from "../utils/diagnosticsReport";
+import {
+  buildPrefill,
+  formatDiagnosticsText,
+  formatVram,
+  mergeRecentErrors,
+} from "../utils/diagnosticsReport";
 import { createLogger } from "../utils/logger";
 
 const log = createLogger("DiagnosticsPanel");
@@ -197,7 +202,7 @@ export default function DiagnosticsPanel() {
                 ? [
                     environment.cpu_model,
                     environment.gpu_name,
-                    environment.vram_total_gb ? `${environment.vram_total_gb} GB VRAM` : null,
+                    environment.vram_total_gb ? formatVram(environment.vram_total_gb) : null,
                     environment.compute_capability
                       ? `compute ${environment.compute_capability}`
                       : null,

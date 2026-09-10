@@ -154,12 +154,18 @@ export function mergeRecentErrors({
   return limit ? visible.slice(-limit) : visible;
 }
 
+/** "16 GB VRAM", not "15.9287109375 GB VRAM" — the driver reports full precision. */
+export function formatVram(gigabytes) {
+  if (typeof gigabytes !== "number" || !Number.isFinite(gigabytes)) return null;
+  return `${Math.round(gigabytes * 10) / 10} GB VRAM`;
+}
+
 /** "Apple M3 Pro / Apple M3 Pro GPU, 12 GB VRAM, compute 8.9", or null. */
 function hardwareSummary(environment) {
   if (!environment) return null;
   const gpu = [
     environment.gpu_name,
-    environment.vram_total_gb ? `${environment.vram_total_gb} GB VRAM` : null,
+    environment.vram_total_gb ? formatVram(environment.vram_total_gb) : null,
     environment.compute_capability ? `compute ${environment.compute_capability}` : null,
   ]
     .filter(Boolean)
