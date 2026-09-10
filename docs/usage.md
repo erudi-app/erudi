@@ -51,7 +51,9 @@ cd erudi
 git submodule update --init --recursive
 ```
 
-The submodule at `backend/forks/llama-cpp` is required for the CPU and CUDA builds.
+The submodule at `backend/forks/llama-cpp` — upstream `ggml-org/llama.cpp`, pinned
+to a release tag — is required for the CPU and CUDA builds. A clone made before the
+submodule moved to upstream needs `git submodule sync --recursive` first.
 
 ### 2. Set up the backend
 

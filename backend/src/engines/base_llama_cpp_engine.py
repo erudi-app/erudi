@@ -37,53 +37,94 @@ from src.engines.child_output import ChildOutputDrainer
 from src.core.subprocess_flags import hidden_console_creationflags
 
 
-# Mirror of llama.cpp's NATIVE tool-format dispatch, for LOGS ONLY (#298).
+# Mirror of llama.cpp's SPECIALIZED tool-format dispatch, for LOGS ONLY (#298).
 #
-# Provenance: backend/forks/llama-cpp/common/chat.cpp (b6850),
-# common_chat_templates_apply_jinja, lines 2706-2794. Each entry is
-# (format_name, (markers that must ALL appear in the chat template)), in the
-# same order chat.cpp tests them. A template matching none of these still gets
-# structured tool handling: with `--jinja` (which both GGUF engines pass at
-# spawn) llama-server ends the dispatch with the grammar-constrained generic
-# handler — chat.cpp:2793 "Generic fallback" -> common_chat_params_init_generic.
-# That fallback is why this table never gates the wire verdict; it only names
-# which native handler would match, for the detection log.
+# Provenance: backend/forks/llama-cpp/common/chat.cpp (b10883),
+# common_chat_try_specialized_template, lines 1080-1204. Each entry is
+# (format_name, required markers, forbidden markers, any-of markers), in the
+# same order chat.cpp tests them: a template matches when every required marker
+# appears, no forbidden one does, and at least one any-of does (an empty group
+# is vacuously satisfied). The negative and either-or groups are not decoration
+# -- three of these formats are told apart from a sibling by exactly that.
 #
-# Non-ASCII markers (DeepSeek R1's fullwidth bars U+FF5C and low lines U+2581)
-# are written as escapes to keep this source file byte-ASCII.
+# A template matching none of them still gets structured tool handling: with
+# `--jinja` (which both GGUF engines pass at spawn) llama-server hands it to the
+# differential autoparser (chat.cpp:1311-1345), which reads the template and
+# generates a PEG parser for it. That is why this table never gates the wire
+# verdict; it only names which specialized handler would match, for the log.
 LLAMA_NATIVE_TOOL_FORMATS = (
+    # Ministral is Mistral Large 3 minus the [CALL_ID] Mistral Small 3.2 carries.
+    ("ministral_3", ("[SYSTEM_PROMPT]", "[TOOL_CALLS]", "[ARGS]"), ("[CALL_ID]",), ()),
+    ("gpt_oss", ("<|channel|>",), (), ()),  # chat.cpp:1093-1096
+    ("muse_glimmer", ("<atem:function_calls>", "<|eom|>"), (), ()),  # chat.cpp:1099-1102
+    ("functionary_v3_2", (">>>all", ">>>${recipient}"), (), ()),  # chat.cpp:1106-1109
     (
-        "deepseek_v3_1",
-        ("message['prefix'] is defined and message['prefix'] and thinking",),
-    ),  # chat.cpp:2706-2708
-    ("deepseek_r1", ("<\uff5ctool\u2581calls\u2581begin\uff5c>",)),  # chat.cpp:2712-2713
-    ("command_r7b", ("<|END_THINKING|><|START_ACTION|>",)),  # chat.cpp:2717-2718
-    ("granite", ("elif thinking", "<|tool_call|>")),  # chat.cpp:2722-2723
-    ("hermes_2_pro", ("<tool_call>",)),  # chat.cpp:2727-2728
-    ("gpt_oss", ("<|channel|>",)),  # chat.cpp:2732-2733
-    ("seed_oss", ("<seed:think>",)),  # chat.cpp:2737-2738
-    ("nemotron_v2", ("<SPECIAL_10>",)),  # chat.cpp:2742-2743
-    ("apertus", ("<|system_start|>", "<|tools_prefix|>")),  # chat.cpp:2747-2748
-    ("functionary_v3_2", (">>>all",)),  # chat.cpp:2758-2759
-    ("firefunction_v2", (" functools[",)),  # chat.cpp:2763-2764
-    ("functionary_v3_1_llama_3_1", ("<|start_header_id|>", "<function=")),  # chat.cpp:2768-2770
-    ("llama_3_x", ("<|start_header_id|>ipython<|end_header_id|>",)),  # chat.cpp:2774-2776
-    ("magistral", ("[THINK]", "[/THINK]")),  # chat.cpp:2779-2780
-    ("mistral_nemo", ("[TOOL_CALLS]",)),  # chat.cpp:2789-2790
+        "kimi_k2",
+        ("<|tool_calls_section_begin|>", "<|tool_call_begin|>"),
+        (),
+        (),
+    ),  # chat.cpp:1113-1117
+    ("kimi_k3", ("<|open|>", "<|close|>", "<|end_of_msg|>"), (), ()),  # chat.cpp:1120-1124
+    # Cohere2 MoE: <|START_TEXT|> is what separates it from older Command-R.
+    ("cohere2moe", ("<|START_TEXT|>", "<|START_ACTION|>"), (), ()),  # chat.cpp:1129-1133
+    ("lfm2", ("<|tool_list_start|>", "<|tool_list_end|>"), (), ()),  # parsers/lfm2.cpp:5-8
+    # LFM2.5 spells its tool list out instead of using LFM2's markers.
+    ("lfm2_5", ("List of tools: [",), ("<|tool_list_start|>",), ()),  # chat.cpp:1141-1145
+    (
+        "gigachat_v3",
+        ("<|role_sep|>", "<|message_sep|>"),
+        ("<|function_call|>",),
+        (),
+    ),  # chat.cpp:1148-1153
+    (
+        "minimax_m3",
+        ("]<]minimax[>[", "<tool_call>", "<invoke name="),
+        (),
+        (),
+    ),  # chat.cpp:1157-1162
+    # DeepSeek V3.2 names the block function_calls, V4 names it tool_calls.
+    (
+        "deepseek_v3_2",
+        ("dsml_token", "DSML"),
+        (),
+        ("function_calls", "tool_calls"),
+    ),  # chat.cpp:1165-1173
+    ("gemma4", ("'<|tool_call>call:'",), (), ()),  # chat.cpp:1176-1184
+    (
+        "minicpm5",
+        ("Tool usage guidelines:", '<function name="', '<param name="'),
+        (),
+        (),
+    ),  # chat.cpp:1187-1192
+    # Qwen3-Coder, also used by Nemotron Nano 3, Qwen3.5 and StepFun-3.5-Flash.
+    (
+        "qwen3_coder",
+        ("<tool_call>", "<function=", "<parameter="),
+        (),
+        (),
+    ),  # chat.cpp:1196-1201
 )
+
+# What llama.cpp falls back to when no specialized handler matches: it analyses
+# the template and generates a parser from it (chat.cpp:1311-1345).
+LLAMA_AUTOPARSER_FORMAT = "autoparser"
 
 
 def native_tool_format_for_template(template: str) -> str:
-    """Name the llama.cpp native tool handler a template would match (logs only).
+    """Name the llama.cpp tool handler a template would match (logs only).
 
-    First entry of ``LLAMA_NATIVE_TOOL_FORMATS`` whose markers all appear in
-    ``template``, or ``"generic"`` — chat.cpp's own last resort (line 2793) —
-    when none does. Purely informational: the wire verdict never reads this.
+    First entry of ``LLAMA_NATIVE_TOOL_FORMATS`` the template satisfies, or
+    ``"autoparser"`` -- chat.cpp's own last resort -- when none does. Purely
+    informational: the wire verdict never reads this.
     """
-    for format_name, markers in LLAMA_NATIVE_TOOL_FORMATS:
-        if all(marker in template for marker in markers):
+    for format_name, required, forbidden, any_of in LLAMA_NATIVE_TOOL_FORMATS:
+        if any(marker in template for marker in forbidden):
+            continue
+        if any_of and not any(marker in template for marker in any_of):
+            continue
+        if all(marker in template for marker in required):
             return format_name
-    return "generic"
+    return LLAMA_AUTOPARSER_FORMAT
 
 
 class BaseLlamaCppEngine(BaseChatServerEngine):
@@ -263,16 +304,23 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
 
         Both GGUF engines spawn ``llama-server`` with ``--jinja``
         (cpu_engine.py / cuda_engine.py), so llama.cpp's chat dispatch applies:
-        a chat template matched by a native handler gets that handler, and ANY
-        other usable template still gets the grammar-constrained generic tool
-        handler (forks/llama-cpp/common/chat.cpp:2793, "Generic fallback").
-        Structured tool handling is therefore guaranteed whenever the model has
-        a usable chat template at all: template present -> True.
+        a chat template matched by a specialized handler gets that handler, and
+        ANY other usable template is handed to the differential autoparser,
+        which reads it and generates a parser (forks/llama-cpp/common/chat.cpp,
+        common_chat_templates_apply_jinja). Structured tool handling is
+        therefore available whenever the model has a usable chat template at
+        all: template present -> True.
 
-        The mirrored native-format table (``LLAMA_NATIVE_TOOL_FORMATS``) is
-        consulted for the LOG only — which native handler would match — never
-        for the verdict. No template -> False (llama-server would fall back to
-        its legacy non-jinja path); unreadable artifact -> None (unverified).
+        The verdict stays permissive on purpose. The autoparser can refuse a
+        template it cannot analyse, and that surfaces as an error on the request
+        rather than as a capability we could read here. Answering False on a
+        template we merely failed to recognise would disable tools for a model
+        that works, which is the worse failure of the two.
+
+        The mirrored specialized-format table (``LLAMA_NATIVE_TOOL_FORMATS``) is
+        consulted for the LOG only — which handler would match — never for the
+        verdict. No template -> False (llama-server would fall back to its
+        legacy non-jinja path); unreadable artifact -> None (unverified).
         """
         try:
             tokenizer = cls._load_capability_tokenizer(llm_local_path)

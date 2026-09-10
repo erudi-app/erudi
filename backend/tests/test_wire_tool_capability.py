@@ -5,14 +5,14 @@ says the engine's server actually turns the model's tool-call output into a
 structured call the agent executes. That is a per-model wire property (#273
 hardware matrix): on mlx-vlm the server infers a tool parser from chat-template
 markers and a template matching NO parser streams the call as raw text (#295),
-while llama.cpp with ``--jinja`` falls back to a grammar-constrained generic
-handler so any usable template gets structured tool handling.
+while llama.cpp with ``--jinja`` hands an unmatched template to its
+differential autoparser, so any usable template gets structured tool handling.
 
 - MLX: ``compute_wire_tools`` runs mlx-vlm's OWN ``_infer_tool_parser`` on the
   model's chat template -> True iff a parser is returned. Same code the server
   executes, exact by construction for the pinned mlx-vlm.
-- llama.cpp: template loads -> True (native or generic handler); no template ->
-  False; unreadable artifact -> None.
+- llama.cpp: template loads -> True (specialized handler or autoparser); no
+  template -> False; unreadable artifact -> None.
 """
 
 from __future__ import annotations
@@ -172,8 +172,8 @@ class TestMlxComputeWireToolsRealMlxVlm:
 
 class TestLlamaComputeWireTools:
     def test_true_with_a_chat_template(self, monkeypatch):
-        # Any usable template -> True: with --jinja an unmatched template still
-        # gets the grammar-constrained generic handler (chat.cpp:2793).
+        # Any usable template -> True: with --jinja an unmatched template is
+        # still handed to the autoparser, which generates a parser for it.
         monkeypatch.setattr(
             CPU_Engine,
             "_load_capability_tokenizer",
@@ -200,21 +200,51 @@ class TestLlamaComputeWireTools:
 class TestLlamaNativeFormatTable:
     """The mirrored chat.cpp marker table is for LOGS only, never the verdict."""
 
-    def test_hermes_marker_maps_to_native_format(self):
+    def test_table_mirrors_the_dispatch_order(self):
+        from src.engines.base_llama_cpp_engine import LLAMA_NATIVE_TOOL_FORMATS
+
+        # Every entry is (name, required, forbidden, any_of); chat.cpp tests
+        # them in this order, and a required group is never empty.
+        for name, required, forbidden, any_of in LLAMA_NATIVE_TOOL_FORMATS:
+            assert isinstance(name, str) and name
+            assert required, f"{name} would match every template"
+            for group in (required, forbidden, any_of):
+                assert all(isinstance(m, str) and m for m in group)
+
+    def test_qwen3_coder_needs_all_three_markers(self):
         from src.engines.base_llama_cpp_engine import native_tool_format_for_template
 
-        assert native_tool_format_for_template("... <tool_call> ...") == "hermes_2_pro"
+        tpl = "... <tool_call> <function=foo> <parameter=bar> ..."
+        assert native_tool_format_for_template(tpl) == "qwen3_coder"
 
-    def test_llama_3_x_marker(self):
+    def test_a_lone_tool_call_marker_is_not_a_specialized_format(self):
         from src.engines.base_llama_cpp_engine import native_tool_format_for_template
 
-        tpl = "<|start_header_id|>ipython<|end_header_id|> ..."
-        assert native_tool_format_for_template(tpl) == "llama_3_x"
+        # <tool_call> alone matched a native handler before the b10883 dispatch;
+        # it now needs the <function=>/<parameter=> pair to be Qwen3-Coder.
+        assert native_tool_format_for_template("... <tool_call> ...") == "autoparser"
 
-    def test_unmatched_template_falls_back_to_generic(self):
+    def test_forbidden_marker_rules_a_format_out(self):
         from src.engines.base_llama_cpp_engine import native_tool_format_for_template
 
-        assert native_tool_format_for_template(NO_PARSER_TEMPLATE) == "generic"
+        # Mistral Small 3.2 carries [CALL_ID]; Ministral is the one that does not.
+        ministral = "[SYSTEM_PROMPT] [TOOL_CALLS] [ARGS]"
+        assert native_tool_format_for_template(ministral) == "ministral_3"
+        assert native_tool_format_for_template(ministral + " [CALL_ID]") == "autoparser"
+
+    def test_any_of_group_accepts_either_marker(self):
+        from src.engines.base_llama_cpp_engine import native_tool_format_for_template
+
+        base = "dsml_token DSML "
+        assert native_tool_format_for_template(base + "function_calls") == "deepseek_v3_2"
+        assert native_tool_format_for_template(base + "tool_calls") == "deepseek_v3_2"
+        # Neither name present -> the any-of group is not satisfied.
+        assert native_tool_format_for_template(base) == "autoparser"
+
+    def test_unmatched_template_falls_back_to_the_autoparser(self):
+        from src.engines.base_llama_cpp_engine import native_tool_format_for_template
+
+        assert native_tool_format_for_template(NO_PARSER_TEMPLATE) == "autoparser"
 
     def test_generic_never_flips_the_verdict(self, monkeypatch):
         # A template no native handler matches is still wire-capable on llama.

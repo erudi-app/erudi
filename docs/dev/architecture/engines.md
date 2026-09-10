@@ -143,11 +143,23 @@ during a stream. See [Exception Handling](../exceptions.md).
 ## Building llama.cpp
 
 The `llama-server` binary is never committed. `backend/forks/llama-cpp` is a git
-submodule, so a fresh clone needs:
+submodule tracking `ggml-org/llama.cpp` directly, pinned to a release tag, so a
+fresh clone needs:
 
 ```bash
 git submodule update --init --recursive
 ```
+
+A clone made before the submodule moved to upstream still has the old remote
+recorded, and needs one extra command first:
+
+```bash
+git submodule sync --recursive
+```
+
+Bumping the pin is `git -C backend/forks/llama-cpp fetch --tags`, checking out
+the tag, and committing the new pointer. Nothing is patched on top of upstream:
+the build scripts pass every option they need on the cmake command line.
 
 Then build for your platform, from the repository root:
 

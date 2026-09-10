@@ -234,8 +234,9 @@ jobs:
             fi
             # Exit 0 alone is not enough. An empty file with the executable bit
             # set is run by the shell as an empty script and exits 0, so require
-            # the build header llama.cpp actually prints ("version: <build>
-            # (<commit>)", on stderr) before calling this a working binary.
+            # the build header llama.cpp actually prints ("version: <version>
+            # (build <n>, commit <sha>)", on stderr) before calling this a
+            # working binary.
             if ! echo "$out" | grep -q "^version: "; then
               echo "::error::$found exited 0 but printed no llama.cpp build header, so the bundled file is not a working llama-server."
               exit 1
