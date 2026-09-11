@@ -154,12 +154,28 @@ export function mergeRecentErrors({
   return limit ? visible.slice(-limit) : visible;
 }
 
+/**
+ * "16 GB VRAM", not "15.9287109375 GB VRAM": the driver reports full precision.
+ *
+ * Deliberately NOT `i18n/format.js`'s `formatGigabytes`, which is the right
+ * helper everywhere else and the wrong one here. That one is locale aware by
+ * design (`Intl.NumberFormat` plus the translated `common:units.gb`), so on a
+ * French interface it yields "15,9 Go" — and this string goes into the copied
+ * report, which is English in every language on purpose (see the file banner):
+ * it is machine data for whoever triages the issue, not interface copy. The
+ * panel uses this same helper so the screen and the report cannot drift.
+ */
+export function formatVram(gigabytes) {
+  if (typeof gigabytes !== "number" || !Number.isFinite(gigabytes)) return null;
+  return `${Math.round(gigabytes * 10) / 10} GB VRAM`;
+}
+
 /** "Apple M3 Pro / Apple M3 Pro GPU, 12 GB VRAM, compute 8.9", or null. */
 function hardwareSummary(environment) {
   if (!environment) return null;
   const gpu = [
     environment.gpu_name,
-    environment.vram_total_gb ? `${environment.vram_total_gb} GB VRAM` : null,
+    environment.vram_total_gb ? formatVram(environment.vram_total_gb) : null,
     environment.compute_capability ? `compute ${environment.compute_capability}` : null,
   ]
     .filter(Boolean)

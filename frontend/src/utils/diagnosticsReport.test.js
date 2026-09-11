@@ -291,6 +291,20 @@ describe("buildPrefill", () => {
       "AMD Ryzen 7 / NVIDIA RTX 4070, 12 GB VRAM, compute 8.9"
     );
   });
+
+  it("rounds the VRAM the driver reports at full precision", () => {
+    const cuda = {
+      environment: {
+        cpu_model: "AMD Ryzen 7 7700 8-Core Processor",
+        gpu_name: "NVIDIA GeForce RTX 5060 Ti",
+        // What the driver actually hands back.
+        vram_total_gb: 15.9287109375,
+        compute_capability: "12.0",
+      },
+    };
+    expect(buildPrefill({ app: APP, backend: cuda }).hardware).toContain("15.9 GB VRAM");
+    expect(buildPrefill({ app: APP, backend: cuda }).hardware).not.toContain("15.9287109375");
+  });
 });
 
 describe("formatDiagnosticsText", () => {
