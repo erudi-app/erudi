@@ -12,6 +12,7 @@ No real model downloads or network calls occur during tests.
 import pytest
 import asyncio
 import shutil
+import contextlib
 from unittest.mock import patch, AsyncMock
 from fastapi import status
 from datetime import datetime, timedelta, timezone
@@ -23,6 +24,31 @@ from src.domains.llms.services import (
 )
 from src.entities.Llm import Llm
 from src.entities.DownloadJob import DownloadJobModel
+
+
+class _FakeEngine:
+    """Stands in for the engine singleton so a delete can be observed.
+
+    Records whether ``cleanup`` ran, and whether it ran while the weights were
+    still on disk -- the ordering is the whole point of #521.
+    """
+
+    def __init__(self, model_id):
+        self._model_id = model_id
+        self.cleanup_calls = 0
+        self.cleaned_before_rmtree = None
+
+    @contextlib.asynccontextmanager
+    async def generation_guard(self):
+        yield
+
+    def cleanup(self):
+        self.cleanup_calls += 1
+        # Only meaningful when the caller patched rmtree to watch the ordering;
+        # the assistant branch deletes no files, so it leaves this None.
+        calls = getattr(shutil.rmtree, "call_count", None)
+        if self.cleaned_before_rmtree is None and calls is not None:
+            self.cleaned_before_rmtree = calls == 0
 
 
 # ============ Repository Tests - LLM ============
@@ -639,6 +665,53 @@ class TestLLM_Endpoints:
         assert response.status_code == status.HTTP_200_OK
         assert mock_rmtree.call_count >= 1
 
+    @patch("os.path.exists")
+    @patch("shutil.rmtree")
+    def test_delete_unloads_the_model_it_is_deleting(
+        self, mock_rmtree, mock_exists, client, test_db_session
+    ):
+        """Deleting the resident model must stop its inference child first.
+
+        Without this, the child keeps running on a path that no longer exists and
+        holds the accelerator until the 300s idle sweep notices (#521).
+        """
+        mock_exists.return_value = True
+
+        llm = Llm(name="Resident", local=1, type="qwen", link="/models/1", param_size=4.0)
+        test_db_session.add(llm)
+        test_db_session.commit()
+        llm_id = llm.id
+
+        engine = _FakeEngine(model_id=str(llm_id))
+        with patch("src.core.config.LLM_Engine", engine):
+            response = client.delete(f"/erudi/llms/{llm_id}")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert engine.cleanup_calls == 1
+        # The unload has to happen while the weights are still there, otherwise
+        # the child is torn down after its files vanished.
+        assert engine.cleaned_before_rmtree is True
+
+    @patch("os.path.exists")
+    @patch("shutil.rmtree")
+    def test_delete_leaves_a_different_loaded_model_alone(
+        self, mock_rmtree, mock_exists, client, test_db_session
+    ):
+        """Deleting model A must not unload model B, which is the one loaded."""
+        mock_exists.return_value = True
+
+        llm = Llm(name="Not Resident", local=1, type="qwen", link="/models/2", param_size=4.0)
+        test_db_session.add(llm)
+        test_db_session.commit()
+        llm_id = llm.id
+
+        engine = _FakeEngine(model_id=str(llm_id + 1000))
+        with patch("src.core.config.LLM_Engine", engine):
+            response = client.delete(f"/erudi/llms/{llm_id}")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert engine.cleanup_calls == 0
+
     def test_delete_kb_assistant_preserves_base_model_files_and_deletes_kb(
         self, client, test_db_session, tmp_path
     ):
@@ -698,6 +771,80 @@ class TestLLM_Endpoints:
         assert test_db_session.query(Llm).filter_by(id=assistant_id).first() is None
         assert test_db_session.query(KnowledgeBase).filter_by(id=kb_id).first() is None
         assert test_db_session.query(KnowledgeDocument).filter_by(kb_id=kb_id).first() is None
+
+    def test_delete_unloads_a_resident_kb_assistant(self, client, test_db_session, tmp_path):
+        """The assistant branch returns before the base-model path, so it needs
+        its own unload. The weights survive (they belong to the base), but the
+        child would keep running and Diagnostics would keep naming the assistant.
+        """
+        from src.entities.KnowledgeBase import KnowledgeBase
+
+        model_dir = tmp_path / "models" / "77"
+        model_dir.mkdir(parents=True)
+        (model_dir / "weights.safetensors").write_bytes(b"fake weights")
+
+        kb = KnowledgeBase()
+        test_db_session.add(kb)
+        test_db_session.flush()
+        assistant = Llm(
+            name="Resident Assistant",
+            local=1,
+            type="gemma",
+            link=str(model_dir),
+            is_attached_to_kb=True,
+            kb_id=kb.id,
+            param_size=0.27,
+        )
+        test_db_session.add(assistant)
+        test_db_session.commit()
+        assistant_id = assistant.id
+
+        engine = _FakeEngine(model_id=str(assistant_id))
+        with patch("src.core.config.LLM_Engine", engine):
+            response = client.delete(f"/erudi/llms/{assistant_id}")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert engine.cleanup_calls == 1
+        # The base model's files are still there: this branch never deletes them.
+        assert (model_dir / "weights.safetensors").exists()
+
+    @patch("os.path.exists")
+    @patch("shutil.rmtree")
+    def test_a_refused_delete_leaves_the_engine_loaded(
+        self, mock_rmtree, mock_exists, client, test_db_session
+    ):
+        """A base model with dependent assistants is refused with 409 unless the
+        caller opts in. Nothing was deleted, so nothing may be unloaded either.
+        """
+        from src.entities.KnowledgeBase import KnowledgeBase
+
+        mock_exists.return_value = True
+        base = Llm(name="Base", local=1, type="qwen", link="/models/9", param_size=4.0)
+        test_db_session.add(base)
+        test_db_session.flush()
+        kb = KnowledgeBase()
+        test_db_session.add(kb)
+        test_db_session.flush()
+        test_db_session.add(
+            Llm(
+                name="Dependent",
+                local=1,
+                type="qwen",
+                link="/models/9",
+                is_attached_to_kb=True,
+                kb_id=kb.id,
+                param_size=4.0,
+            )
+        )
+        test_db_session.commit()
+        base_id = base.id
+
+        engine = _FakeEngine(model_id=str(base_id))
+        with patch("src.core.config.LLM_Engine", engine):
+            response = client.delete(f"/erudi/llms/{base_id}")
+
+        assert response.status_code == status.HTTP_409_CONFLICT
+        assert engine.cleanup_calls == 0
 
     def test_delete_llm_downloading(self, client, test_db_session):
         """Test DELETE /erudi/llms/{id} fails when model is downloading.
