@@ -74,20 +74,21 @@
     "recommendation": {
       "excellent": {
         "title": "Matériel excellent ! 🚀",
-        "description": "Votre système peut faire tourner sans difficulté n'importe quel modèle de 1B à 12B paramètres. Nous vous recommandons d'essayer la puissance de Mistral 8B ou Gemma 12B pour une expérience optimale. Nous travaillons aussi à la prise en charge de modèles bien plus grands — restez à l'écoute !"
+        "description": "Votre système a de la marge. Même les plus grands modèles de votre plage resteront réactifs."
       },
       "good": {
         "title": "Bonnes performances 👍",
-        "description": "Votre matériel fait tourner sans à-coups les modèles de 1B à 12B paramètres. Mistral 8B et Gemma 12B sont confortablement à votre portée, et les modèles plus petits sembleront instantanés."
+        "description": "Votre matériel fait tourner votre plage recommandée sans à-coups, et les modèles plus petits sembleront instantanés."
       },
       "fair": {
         "title": "Performances correctes",
-        "description": "Bonne nouvelle : les modèles comme Gemma 4B et plus petits fonctionneront bien sur votre machine. Les modèles plus grands, comme Mistral 7B, fonctionneront aussi, mais attendez-vous à quelques lenteurs."
+        "description": "Les petits modèles fonctionneront bien. Le haut de votre plage fonctionnera aussi, mais attendez-vous à quelques lenteurs."
       },
       "limited": {
         "title": "Optimisé pour les petits modèles 💡",
-        "description": "Nous vous recommandons de commencer par nos petits modèles optimisés comme Gemma 1B, 2B ou 4B. Ces modèles sont spécialement ajustés pour offrir des résultats réels et impressionnants, même sur un matériel limité. Vous pouvez tout de même essayer des modèles plus grands, mais les performances peuvent varier."
-      }
+        "description": "Commencez par les petits modèles ajustés pour le matériel limité : ils donnent de vrais résultats. Les plus grands fonctionneront, mais les performances peuvent varier."
+      },
+      "window": "Votre machine fait tourner confortablement les modèles de {{min}}B à {{max}}B."
     },
     "getStarted": "Commencer"
   },

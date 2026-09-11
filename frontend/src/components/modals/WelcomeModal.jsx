@@ -8,6 +8,16 @@ import { formatPercent } from "../../i18n/format";
 WelcomeModal.propTypes = {
   isOpen: PropTypes.bool.isRequired,
   onClose: PropTypes.func.isRequired,
+  loading: PropTypes.bool,
+  // The startup hardware readout. Absent until the benchmark answers, and the
+  // window may be missing from it when profiling fell back.
+  hardwareInfo: PropTypes.shape({
+    global_inference_score: PropTypes.number,
+    global_inference_label: PropTypes.string,
+    recommended_param_min: PropTypes.number,
+    recommended_param_max: PropTypes.number,
+    error: PropTypes.string,
+  }),
 };
 
 // Badge colors for the labels the backend actually emits
@@ -46,6 +56,19 @@ export default function WelcomeModal({ isOpen, onClose, hardwareInfo, loading })
       : t("common:status.unknown");
 
   const tier = hardwareInfo ? recommendationTier(hardwareInfo.global_inference_score) : null;
+
+  // The size window comes from the benchmark, the same numbers the machine
+  // readout shows behind this dialog. The tier copy above is qualitative on
+  // purpose: baking a range into it let the two disagree on the first screen a
+  // user ever sees (#523). Absent when profiling could not produce a window.
+  const windowMin = hardwareInfo?.recommended_param_min;
+  const windowMax = hardwareInfo?.recommended_param_max;
+  const hasWindow =
+    typeof windowMin === "number" &&
+    typeof windowMax === "number" &&
+    Number.isFinite(windowMin) &&
+    Number.isFinite(windowMax) &&
+    windowMax > 0;
 
   return (
     <div
@@ -176,6 +199,14 @@ export default function WelcomeModal({ isOpen, onClose, hardwareInfo, loading })
                             <p className="text-gray-300 text-sm leading-relaxed">
                               {t(`landing:welcome.recommendation.${tier}.description`)}
                             </p>
+                            {hasWindow && (
+                              <p className="text-gray-300 text-sm leading-relaxed mt-2">
+                                {t("landing:welcome.recommendation.window", {
+                                  min: windowMin,
+                                  max: windowMax,
+                                })}
+                              </p>
+                            )}
                           </div>
                         </div>
                       </div>
