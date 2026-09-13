@@ -588,16 +588,20 @@ def _get_server_with_recovery(data_dir: Path):
         try:
             return pgserver.get_server(str(data_dir))
         except (subprocess.TimeoutExpired, AssertionError) as exc:
-            # With the exception: `TimeoutExpired` and `AssertionError` are two
-            # different stories about the same symptom, and only the traceback
-            # says which one this was.
+            # `TimeoutExpired` and `AssertionError` are two different stories
+            # about the same symptom: the warning names which one this was,
+            # and the traceback says where. The traceback is written at INFO,
+            # not on the warning, because `TimeoutExpired`'s message is
+            # pg_ctl's whole command line -- the absolute data and log paths
+            # -- and the warning is listed on the Diagnostics page.
             logger.warning(
                 "pgserver reported the postmaster not ready yet (pg_ctl's "
                 "hardcoded 10s timeout, or its no-wait already-running fast "
                 "path); it is likely still WAL crash-recovering in the "
-                "background - waiting for it to finish before retrying",
-                exc_info=exc,
+                "background - waiting for it to finish before retrying "
+                f"({type(exc).__name__})"
             )
+            logger.info("Traceback of the postmaster not-ready report above", exc_info=exc)
             if _wait_for_postmaster_ready(data_dir, RECOVERY_WAIT_SECONDS):
                 # pgserver caches the instance in _instances BEFORE starting the
                 # server (postgres_server.py:62 precedes ensure_postgres_running at

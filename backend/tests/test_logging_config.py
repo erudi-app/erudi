@@ -371,7 +371,9 @@ def test_a_recovered_start_keeps_pgserver_timeout_off_the_error_list(log_file, m
                 f"Showing contents of postgres server log ({log_file.parent / 'log'}) below:\n"
                 "LOG:  database system was not properly shut down; automatic recovery in progress"
             )
-            raise subprocess.TimeoutExpired(cmd="pg_ctl", timeout=10)
+            raise subprocess.TimeoutExpired(
+                cmd=["pg_ctl", "-D", str(log_file.parent), "start"], timeout=10
+            )
         return sentinel
 
     monkeypatch.setattr(postgres_runtime.pgserver, "get_server", fake_get_server)
@@ -385,11 +387,14 @@ def test_a_recovered_start_keeps_pgserver_timeout_off_the_error_list(log_file, m
     (line,) = [ln for ln in written.splitlines() if "Timeout starting server" in ln]
     assert line.startswith("[INFO]")
     assert "- erudi - " in line
+    listed = log_reader.recent_errors(log_file, limit=200)
     assert not [
         r
-        for r in log_reader.recent_errors(log_file, limit=200)
+        for r in listed
         if "Timeout starting server" in r["message"] or "automatic recovery" in r["message"]
     ]
+    # pg_ctl's command line, and with it the data dir, stays off the list too.
+    assert not [r for r in listed if str(log_file.parent) in r["message"]]
 
 
 # ---------------------------------------------------------------------------

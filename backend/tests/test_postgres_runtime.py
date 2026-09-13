@@ -904,7 +904,7 @@ class TestRecoverySecondChance:
 
     @pytest.mark.unit
     def test_get_server_with_recovery_retries_after_bare_assertion_error(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, caplog
     ):
         """ensure_postgres_running's already-running fast path never waits: it
         asserts status == 'ready' with no check first, so a postmaster that is
@@ -925,8 +925,13 @@ class TestRecoverySecondChance:
         monkeypatch.setattr(postgres_runtime.pgserver, "get_server", fake_get_server)
         monkeypatch.setattr(postgres_runtime, "_wait_for_postmaster_ready", lambda d, s: True)
 
-        assert postgres_runtime._get_server_with_recovery(tmp_path) is sentinel
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            assert postgres_runtime._get_server_with_recovery(tmp_path) is sentinel
         assert calls["n"] == 2
+        (warning,) = [
+            r for r in caplog.records if r.name == "erudi" and r.levelno == logging.WARNING
+        ]
+        assert "(AssertionError)" in warning.getMessage()
 
     @pytest.mark.unit
     def test_get_server_with_recovery_reraises_assertion_error_when_wait_fails(
@@ -1051,6 +1056,45 @@ class TestPgserverRecordsDuringRecovery:
         ]
         assert len(demoted) == 1
         assert demoted[0].levelno == logging.INFO
+
+    @pytest.mark.unit
+    def test_the_not_ready_warning_is_one_line_without_the_data_path(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """TimeoutExpired's message is pg_ctl's whole command line, absolute
+        data and log paths included. The WARNING -- which the Diagnostics page
+        lists -- names the exception type only; the traceback goes to INFO."""
+        sentinel = object()
+        calls = {"n": 0}
+
+        def fake_get_server(path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise subprocess.TimeoutExpired(
+                    cmd=["pg_ctl", "-D", str(tmp_path), "start"], timeout=10
+                )
+            return sentinel
+
+        monkeypatch.setattr(postgres_runtime.pgserver, "get_server", fake_get_server)
+        monkeypatch.setattr(postgres_runtime, "_wait_for_postmaster_ready", lambda d, s: True)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            assert postgres_runtime._get_server_with_recovery(tmp_path) is sentinel
+
+        formatter = logging.Formatter()
+        visible = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert not [r for r in visible if r.name == "erudi" and r.exc_info]
+        assert not [r for r in visible if str(tmp_path) in formatter.format(r)]
+        (warning,) = [r for r in visible if r.name == "erudi" and r.levelno == logging.WARNING]
+        assert "(TimeoutExpired)" in warning.getMessage()
+        assert "\n" not in warning.getMessage()
+        traced = [
+            r
+            for r in caplog.records
+            if r.name == "erudi" and r.levelno == logging.INFO and r.exc_info
+        ]
+        assert len(traced) == 1
+        assert isinstance(traced[0].exc_info[1], subprocess.TimeoutExpired)
 
     @pytest.mark.unit
     def test_a_failed_recovery_wait_keeps_the_timeout_at_error(self, tmp_path, monkeypatch, caplog):
