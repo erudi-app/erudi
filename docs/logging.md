@@ -183,7 +183,7 @@ they appear on the **Diagnostics** page and in a copied report alongside the
 app's — a failure whose cause is in a library is no longer a failure with no
 explanation.
 
-Two deliberate limits:
+Three deliberate limits:
 
 - **`WARNING` and above only.** A library's `INFO` (Alembic's per-revision
   lines, transfer progress, uvicorn's startup chatter) reports no defect, is
@@ -193,6 +193,14 @@ Two deliberate limits:
 - **Nothing of it reaches standard output.** Only the file is shared: the
   backend's stdout is the launcher's event channel, and a library writing
   into it would break the app's startup.
+- **A database start that succeeds is not an error.** After an unclean
+  shutdown, PostgreSQL replays its log before it accepts connections, which
+  can outlast `pgserver`'s ten-second start wait. `pgserver` then writes
+  `Timeout starting server.` at `ERROR`, and Erudi waits for the recovery to
+  finish and joins the server. When that start completes, Erudi's own logger
+  writes pgserver's record at `INFO` instead: it stays in `backend.log`, but
+  never reaches the Diagnostics page's error list or the copied report. A
+  start that really fails still shows pgserver's record at `ERROR`, unchanged.
 
 ## The embedded database's own log
 

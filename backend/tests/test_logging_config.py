@@ -349,6 +349,49 @@ def test_a_multi_line_library_record_parses_as_one_record(log_file):
     assert not [r for r in records if r["message"].startswith("not a header either")]
 
 
+@pytest.mark.unit
+def test_a_recovered_start_keeps_pgserver_timeout_off_the_error_list(log_file, monkeypatch):
+    """After a hard kill, pgserver logs its pg_ctl timeout at ERROR and the
+    crash-recovery second chance then completes the start. The record stays
+    in the file, at INFO under the app's name, and the Diagnostics reader --
+    the page's error list and badge -- does not return it."""
+    import subprocess
+
+    from src.domains.diagnostics import log_reader
+    from src.launcher import postgres_runtime
+
+    sentinel = object()
+    calls = {"n": 0}
+
+    def fake_get_server(path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            logging.getLogger("pgserver").error(
+                "Timeout starting server.\n"
+                f"Showing contents of postgres server log ({log_file.parent / 'log'}) below:\n"
+                "LOG:  database system was not properly shut down; automatic recovery in progress"
+            )
+            raise subprocess.TimeoutExpired(cmd="pg_ctl", timeout=10)
+        return sentinel
+
+    monkeypatch.setattr(postgres_runtime.pgserver, "get_server", fake_get_server)
+    monkeypatch.setattr(postgres_runtime, "_wait_for_postmaster_ready", lambda d, s: True)
+
+    assert postgres_runtime._get_server_with_recovery(log_file.parent) is sentinel
+    _flush_handlers()
+
+    written = log_file.read_text(encoding="utf-8")
+    assert written.count("Timeout starting server") == 1
+    (line,) = [ln for ln in written.splitlines() if "Timeout starting server" in ln]
+    assert line.startswith("[INFO]")
+    assert "- erudi - " in line
+    assert not [
+        r
+        for r in log_reader.recent_errors(log_file, limit=200)
+        if "Timeout starting server" in r["message"] or "automatic recovery" in r["message"]
+    ]
+
+
 # ---------------------------------------------------------------------------
 # Request-context helpers
 # ---------------------------------------------------------------------------
