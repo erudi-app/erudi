@@ -110,7 +110,7 @@ class TestEstimateWebTokens:
     def test_empty_string_is_zero(self):
         assert _estimate_web_tokens("") == 0
 
-    def test_ascii_rounds_down_on_exact_multiple(self):
+    def test_ascii_exact_multiple_of_three(self):
         assert _estimate_web_tokens("a" * 300) == 100
 
     def test_multi_byte_characters_count_by_utf8_bytes(self):
@@ -119,6 +119,11 @@ class TestEstimateWebTokens:
         text = "你" * 12
         assert len(text.encode("utf-8")) == 36
         assert _estimate_web_tokens(text) == 12
+
+    def test_lone_surrogate_is_counted_not_raised(self):
+        # A malformed result (a JSON-escaped "\\ud800" decoded by the search
+        # library) must not make the tool raise.
+        assert _estimate_web_tokens("ab" + chr(0xD800)) == 2
 
     def test_non_multiple_of_three_rounds_up(self):
         assert len("abcd".encode("utf-8")) == 4
@@ -251,3 +256,13 @@ class TestWebToolDoesNotLoadKbTokenizer:
         ]
         out = format_web_tool_result(results, "some question", 400)
         assert "https://www.python.org/downloads/release/python-3130/" in out
+
+
+class TestWebSearchToolMalformedResult:
+    async def test_lone_surrogate_in_a_result_does_not_raise(self, monkeypatch):
+        def fake_run(query, max_results):
+            return [{"title": "t", "href": "https://example.com/a", "body": "x" + chr(0xD800)}]
+
+        monkeypatch.setattr("src.agents.tools._run_ddgs_text", fake_run)
+        out = await web_search.coroutine(query="q", runtime=_runtime(_ctx()))
+        assert "https://example.com/a" in out

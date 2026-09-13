@@ -268,9 +268,11 @@ def _estimate_web_tokens(text: str) -> int:
     over 3 overestimates natural language in every script, CJK included, so it
     stays a conservative (fewer-results) ceiling there; it can undercount
     punctuation- or code-heavy text by roughly a third, which a soft budget
-    ceiling tolerates.
+    ceiling tolerates. ``surrogatepass`` because the text comes from the web: a
+    lone surrogate in a result must cost bytes like any other character, not
+    raise out of a tool that never raises.
     """
-    return math.ceil(len(text.encode("utf-8")) / 3)
+    return math.ceil(len(text.encode("utf-8", errors="surrogatepass")) / 3)
 
 
 def format_web_tool_result(results: list, query: str, token_budget: int) -> str:
