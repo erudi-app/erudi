@@ -104,6 +104,7 @@ ROOT_BRIDGE_LEVEL = logging.WARNING
 # other record from the same logger (HTTP errors, retries, rate limits) keeps
 # its level.
 _INFO_DEMOTED_LOGGER_FUNCS = (("huggingface_hub.utils._http", "_warn_on_warning_headers"),)
+
 LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
 # `%(asctime)s.%(msecs)03dZ` + gmtime converter = UTC ISO-8601 with ms.
 FILE_LOG_FORMAT = (
