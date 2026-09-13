@@ -397,6 +397,104 @@ def test_a_recovered_start_keeps_pgserver_timeout_off_the_error_list(log_file, m
     assert not [r for r in listed if str(log_file.parent) in r["message"]]
 
 
+@pytest.mark.unit
+def test_hf_hub_token_advice_is_written_at_info(log_file):
+    """The Hub sends its "set a HF_TOKEN" advice in an X-HF-Warning response
+    header, and huggingface_hub logs it at WARNING under
+    huggingface_hub.utils._http. That text says nothing wrong about the app,
+    so the bridge writes it at INFO -- in the file, off the error list."""
+    import httpx
+    from huggingface_hub.utils._http import _warn_on_warning_headers
+
+    _warn_on_warning_headers(
+        httpx.Response(
+            200,
+            headers={"X-HF-Warning": "erudi-test-token-advice; Please set a HF_TOKEN"},
+        )
+    )
+    _flush_handlers()
+
+    written = log_file.read_text(encoding="utf-8")
+    (line,) = [ln for ln in written.splitlines() if "Please set a HF_TOKEN" in ln]
+    assert line.startswith("[INFO]")
+
+    from src.domains.diagnostics import log_reader
+
+    listed = log_reader.recent_errors(log_file, limit=200)
+    assert not [r for r in listed if "Please set a HF_TOKEN" in r["message"]]
+
+
+@pytest.mark.unit
+def test_hf_hub_http_errors_keep_their_level(log_file):
+    """Only the Hub's server-sent advice, matched by logger AND function name,
+    is demoted -- an HTTP failure or a retry from the same logger, from any
+    other function, must still show up as a warning on the Diagnostics page."""
+    logging.getLogger("huggingface_hub.utils._http").warning(
+        "HTTP Error 500 thrown while requesting GET https://huggingface.co/x"
+    )
+    _flush_handlers()
+
+    written = log_file.read_text(encoding="utf-8")
+    (line,) = [ln for ln in written.splitlines() if "HTTP Error 500" in ln]
+    assert line.startswith("[WARNING]")
+
+    from src.domains.diagnostics import log_reader
+
+    listed = log_reader.recent_errors(log_file, limit=200)
+    assert [r for r in listed if "HTTP Error 500" in r["message"]]
+
+
+@pytest.mark.unit
+def test_hf_hub_token_advice_respects_target_level(log_file):
+    """The demoted copy still goes through the target handler's own level: a
+    file handler raised above INFO drops it, exactly as it would drop any
+    other INFO record."""
+    import httpx
+    from huggingface_hub.utils._http import _warn_on_warning_headers
+
+    file_handler = next(
+        h for h in logging.getLogger("erudi").handlers if isinstance(h, RotatingFileHandler)
+    )
+    file_handler.setLevel(logging.WARNING)
+
+    _warn_on_warning_headers(
+        httpx.Response(
+            200,
+            headers={"X-HF-Warning": "erudi-test-token-advice-level; Please set a HF_TOKEN"},
+        )
+    )
+    _flush_handlers()
+
+    assert "Please set a HF_TOKEN" not in log_file.read_text(encoding="utf-8")
+
+
+@pytest.mark.unit
+def test_hf_hub_token_advice_does_not_mutate_the_original_record(log_file):
+    """Other handlers on root may still see the record: the bridge must build
+    a copy for the demoted level, never mutate the record it was handed."""
+    import httpx
+    from huggingface_hub.utils._http import _warn_on_warning_headers
+
+    seen = []
+    probe = logging.Handler(level=logging.WARNING)
+    probe.emit = seen.append
+    logging.getLogger().addHandler(probe)
+    try:
+        _warn_on_warning_headers(
+            httpx.Response(
+                200,
+                headers={"X-HF-Warning": "erudi-test-no-mutation; Please set a HF_TOKEN"},
+            )
+        )
+    finally:
+        logging.getLogger().removeHandler(probe)
+    _flush_handlers()
+
+    (record,) = [r for r in seen if "Please set a HF_TOKEN" in r.getMessage()]
+    assert record.levelno == logging.WARNING
+    assert record.levelname == "WARNING"
+
+
 # ---------------------------------------------------------------------------
 # Request-context helpers
 # ---------------------------------------------------------------------------

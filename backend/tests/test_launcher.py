@@ -172,6 +172,29 @@ def test_hf_telemetry_cannot_be_re_enabled(monkeypatch):
 
 
 @pytest.mark.unit
+def test_hf_xet_is_disabled(monkeypatch):
+    # Model downloads never use Xet storage (HfFileSystem.get_file falls back
+    # to plain fsspec streaming for the app's custom callback), and the
+    # packaged app does not ship hf_xet, so a dev run must match it.
+    import run
+
+    monkeypatch.delenv("HF_HUB_DISABLE_XET", raising=False)
+    run.configure_library_env()
+    assert os.environ["HF_HUB_DISABLE_XET"] == "1"
+
+
+@pytest.mark.unit
+def test_hf_xet_cannot_be_re_enabled(monkeypatch):
+    # Same reasoning as the telemetry switch: an inherited HF_HUB_DISABLE_XET=0
+    # would silently turn Xet back on for the small hf_hub_download fetches.
+    import run
+
+    monkeypatch.setenv("HF_HUB_DISABLE_XET", "0")
+    run.configure_library_env()
+    assert os.environ["HF_HUB_DISABLE_XET"] == "1"
+
+
+@pytest.mark.unit
 def test_configure_stdio_survives_streams_without_reconfigure(monkeypatch):
     # Some streams (bare objects, or ones that reject reconfigure kwargs) must
     # not break startup — configure_stdio guards each stream individually.

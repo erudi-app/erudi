@@ -86,7 +86,7 @@ All of them are documented in [`backend/.env.example`](https://github.com/erudi-
 - `ERUDI_LOG_LEVEL` — verbosity of the backend log (`INFO` by default).
 - `ERUDI_ALLOW_LANGSMITH_TRACING=1` — the only way to let LangChain's tracing client send conversations off your machine, meant for a contributor debugging the agent layer. It has to be typed out in full, and it should never be set in a build anyone distributes.
 
-Three more are **written** by the launcher rather than read from you, and setting them yourself has no effect: `HF_HUB_DISABLE_TELEMETRY` is forced to `1`, and `LANGSMITH_TRACING` and `LANGCHAIN_TRACING_V2` are forced to `false`. They are assignments, not defaults, precisely so that a value inherited from your shell cannot re-open them.
+Four more are **written** by the launcher rather than read from you, and setting them yourself has no effect: `HF_HUB_DISABLE_TELEMETRY` is forced to `1`, `HF_HUB_DISABLE_XET` is forced to `1` (downloads use Hugging Face's regular file CDN, never its Xet storage service), and `LANGSMITH_TRACING` and `LANGCHAIN_TRACING_V2` are forced to `false`. They are assignments, not defaults, precisely so that a value inherited from your shell cannot re-open them.
 
 ## Known gaps
 
