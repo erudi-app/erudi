@@ -1,7 +1,0 @@
-- name: Installer les packages.
-  become: true
-  package:
-    name:
-      - git
-      - acl
-    state: present

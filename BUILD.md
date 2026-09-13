@@ -71,22 +71,34 @@ runs `backend-mac-silicon.spec` into `backend/dist/backend/`, copies the bundle
 to `frontend/backend/`, then runs `npm run dist:mac`. The DMG lands in
 `frontend/dist/`.
 
-To sign and notarize, export the credentials before running it:
+To sign and notarize, three things are needed, all from an Apple Developer
+Program membership:
+
+- A **Developer ID Application** certificate installed in the login keychain.
+  electron-builder finds it on its own; `security find-identity -v -p codesigning`
+  lists what is installed, and `CSC_NAME` picks one when there are several.
+- The **Team ID**, shown under Membership in the Apple Developer account.
+- An **app-specific password** for the Apple ID, generated at
+  [appleid.apple.com](https://appleid.apple.com) under Sign-In and Security.
+
+Export them before running the script. These are the names electron-builder
+reads for notarization, and the ones the release workflow sets from repository
+secrets:
 
 ```bash
-# .env.notarize
+# .env.notarize (never committed)
 export APPLE_ID=...
-export APPLE_ID_PASSWORD=...     # app-specific password
+export APPLE_APP_SPECIFIC_PASSWORD=...
 export APPLE_TEAM_ID=...
-export APPLE_SIGNING_IDENTITY=...
+export APPLE_SIGNING_IDENTITY="Developer ID Application: <name> (<team id>)"
 
 source .env.notarize
 bash scripts/build/build-mac-silicon.sh
 ```
 
-Without `APPLE_SIGNING_IDENTITY` the script still builds, but warns that the app
-is unsigned and macOS may block it on first launch. See `NOTARIZATION.md` for
-how to obtain the certificate and the app-specific password.
+`APPLE_SIGNING_IDENTITY` is read by the script alone: without it the build still
+runs, and the script warns that the app is unsigned and macOS may block it on
+first launch.
 
 ### Windows (CUDA)
 

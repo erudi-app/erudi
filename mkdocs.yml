@@ -37,10 +37,6 @@ markdown_extensions:
 extra_css:
   - stylesheets/extra.css
 
-# Historical records live under docs/others/ and are reachable by link only.
-not_in_nav: |
-  others/*
-
 nav:
   - Overview: index.md
   - Getting started: usage.md
@@ -61,11 +57,6 @@ nav:
       - Database migrations: dev/db-migrations.md
       - Release QA checklist: dev/release-qa-checklist.md
       - RAG quality evaluation: dev/rag-quality-eval.md
-      - Archive:
-          - Backend CI on three OSes: dev/backend-ci-multi-os.md
-          - Release engineering audit: dev/release-engineering-audit.md
-          - E2E — agentic knowledge base: dev/e2e-agentic-kb.md
-          - E2E — LangChain conversations: dev/e2e-conversation-langchain.md
   - API reference:
       - Core: reference/core.md
       - Engines: reference/engines.md
