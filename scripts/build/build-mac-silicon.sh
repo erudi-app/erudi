@@ -14,8 +14,8 @@
 #   bash scripts/build/build-mac-silicon.sh
 #
 # Optional — sign & notarize the DMG:
-#   source .env.notarize   # exports APPLE_ID, APPLE_ID_PASSWORD,
-#                          #         APPLE_TEAM_ID, APPLE_SIGNING_IDENTITY
+#   source .env.notarize   # exports APPLE_ID, APPLE_APP_SPECIFIC_PASSWORD,
+#                          #         APPLE_TEAM_ID, APPLE_SIGNING_IDENTITY (see BUILD.md)
 #   bash scripts/build/build-mac-silicon.sh
 #
 # Output:

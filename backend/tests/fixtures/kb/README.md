@@ -1,7 +1,6 @@
 # KB test fixtures
 
-Versioned corpora for Knowledge Base E2E / integration tests (issue #91).
-Used by the agentic KB validation plan (`docs/dev/e2e-agentic-kb.md`).
+Versioned corpora for Knowledge Base E2E and integration tests.
 
 ## `nimbus_contract.txt`
 
