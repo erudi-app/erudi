@@ -14,6 +14,21 @@
     "note": "On by default. When off, the app makes no update request at all; you can still install a new version yourself from the releases page.",
     "toggleLabel": "Automatic updates"
   },
+  "updates": {
+    "title": "Update Erudi",
+    "description": "Look for a new version now, download it and install it straight away. Installing closes Erudi and opens it again on the new version.",
+    "currentVersion": "You are on version {{version}}.",
+    "check": "Check for updates",
+    "checking": "Checking…",
+    "upToDate": "You are on the latest version.",
+    "found": "Version {{version}} is available.",
+    "download": "Download",
+    "downloading": "Downloading… {{percent}}",
+    "ready": "Version {{version}} is ready to install.",
+    "install": "Install now",
+    "failed": "The update could not be checked right now. Try again in a moment.",
+    "unavailable": "Updates are handled by the installed application; this build cannot check for them."
+  },
   "language": {
     "title": "Application language",
     "description": "The language of menus, buttons and messages across the whole app. Model answers stay in whatever language you write in.",

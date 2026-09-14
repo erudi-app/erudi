@@ -1,9 +1,10 @@
 import React from "react";
-import PropTypes from "prop-types";
 import { Cpu, Globe, Languages, RefreshCw, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
+import SettingsCard from "../components/SettingsCard";
 import ToggleSwitch from "../components/ToggleSwitch";
+import UpdatesCard from "../components/UpdatesCard";
 import { useUserSettings, useAppStartupInfo } from "../shared/hooks/api";
 import { setAppLanguage } from "../i18n";
 import { LANGUAGE_NAMES, SUPPORTED_LANGUAGES } from "../i18n/languages";
@@ -16,52 +17,6 @@ const log = createLogger("SettingsPage");
 // point at the code that backs it. The window-open handler in main.js routes
 // target="_blank" links to the system browser.
 export const PRIVACY_PAGE_URL = "https://erudi-app.github.io/erudi/privacy/";
-
-/**
- * One settings card: icon, title, description, optional fine-print note and
- * the control on the right. Shared by every section so they look identical.
- */
-function SettingsCard({ icon, title, description, note, control }) {
-  return (
-    <section className="relative overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface)] rise">
-      <div
-        className="pointer-events-none absolute -right-24 -top-24 w-72 h-72 rounded-full blur-3xl"
-        style={{
-          background: "radial-gradient(circle, rgba(52,214,165,0.10), transparent 70%)",
-        }}
-      />
-      <div className="relative p-6">
-        <div className="flex items-start justify-between gap-6">
-          <div className="flex items-start gap-3.5">
-            <div className="mt-0.5 rounded-xl border border-[var(--line)] bg-[var(--surface-2)] p-2.5">
-              {icon}
-            </div>
-            <div>
-              <h2 className="text-[15px] font-semibold text-[var(--ink)] tracking-tight">
-                {title}
-              </h2>
-              <p className="text-[13px] text-[var(--ink-dim)] mt-1.5 max-w-md leading-relaxed">
-                {description}
-              </p>
-              {note && (
-                <p className="text-[12px] text-[var(--ink-faint)] mt-2.5 leading-relaxed">{note}</p>
-              )}
-            </div>
-          </div>
-          <div className="pt-1">{control}</div>
-        </div>
-      </div>
-    </section>
-  );
-}
-
-SettingsCard.propTypes = {
-  icon: PropTypes.node.isRequired,
-  title: PropTypes.string.isRequired,
-  description: PropTypes.string.isRequired,
-  note: PropTypes.string,
-  control: PropTypes.node.isRequired,
-};
 
 /**
  * Whether the Inference engine card belongs on this machine (#511).
@@ -86,13 +41,15 @@ export function showsInferenceEngineSetting(backendType, inferenceBackend) {
  * App-wide settings page (gear icon in the sidebar rail).
  *
  * Sections: the global Web Search default (#310), automatic updates, the
- * inference engine and the application language (#385). Enabling web search
- * lets tool-capable models
+ * manual update controls (#571), the inference engine and the application
+ * language (#385). Enabling web search lets tool-capable models
  * search the web; the searched query is sent to external search engines, so it
  * ships OFF by default and new conversations inherit whatever the user picks
  * here (each conversation then owns its own toggle). Automatic updates ship ON
  * -- refusing them stops the update traffic entirely, and the choice is handed
- * to the Electron main process, which owns electron-updater. The inference
+ * to the Electron main process, which owns electron-updater. `UpdatesCard`
+ * sits under it and is the only place a check, a download or an installation
+ * can be started by hand, whatever that preference says (#571). The inference
  * engine defaults to Automatic (the hardware decides) and can be pinned to the
  * processor for a machine whose graphics card Erudi cannot drive; the backend
  * reads it once per boot, so changing it restarts the engine. This card only
@@ -214,6 +171,8 @@ export default function SettingsPage() {
               />
             }
           />
+
+          <UpdatesCard />
 
           {showInferenceEngineSetting && (
             <SettingsCard

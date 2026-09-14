@@ -14,6 +14,21 @@
     "note": "Activées par défaut. Une fois désactivées, l'application ne fait plus aucune requête de mise à jour ; vous pouvez toujours installer une nouvelle version vous-même depuis la page des releases.",
     "toggleLabel": "Mises à jour automatiques"
   },
+  "updates": {
+    "title": "Mettre à jour Erudi",
+    "description": "Cherchez une nouvelle version maintenant, téléchargez-la et installez-la dans la foulée. L'installation ferme Erudi et le rouvre sur la nouvelle version.",
+    "currentVersion": "Vous êtes en version {{version}}.",
+    "check": "Rechercher des mises à jour",
+    "checking": "Recherche…",
+    "upToDate": "Vous avez déjà la dernière version.",
+    "found": "La version {{version}} est disponible.",
+    "download": "Télécharger",
+    "downloading": "Téléchargement… {{percent}}",
+    "ready": "La version {{version}} est prête à être installée.",
+    "install": "Installer maintenant",
+    "failed": "La mise à jour n'a pas pu être vérifiée pour l'instant. Réessayez dans un moment.",
+    "unavailable": "Les mises à jour sont gérées par l'application installée ; cette version ne peut pas les vérifier."
+  },
   "language": {
     "title": "Langue de l'application",
     "description": "La langue des menus, des boutons et des messages dans toute l'application. Les réponses des modèles restent dans la langue dans laquelle vous écrivez.",
