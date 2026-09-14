@@ -50,7 +50,7 @@ Every request, when it happens and the code behind it: **[What leaves your machi
 2. Open it. The first launch prepares the embedded database and the model catalog; it takes a few seconds.
 3. Pick a model marked **Runs easily** or **Ideal fit** and press Download. Once it is on disk, you can unplug the network and keep working.
 
-The app updates itself from the GitHub releases of this repository, and only from there.
+The app updates itself from the GitHub releases of this repository, and only from there. **Settings → Update Erudi** checks, downloads and installs one on demand, whether or not automatic updates are on.
 
 ---
 
