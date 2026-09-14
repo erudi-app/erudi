@@ -93,6 +93,18 @@ APP_LOGGER_NAME = "erudi"
 # matter. Deliberately fixed, so ERUDI_LOG_LEVEL=DEBUG makes ERUDI verbose
 # without letting a library flood the file the user is about to send.
 ROOT_BRIDGE_LEVEL = logging.WARNING
+
+# Records the bridge writes at INFO instead of their own level, matched by
+# (logger name, funcName) -- never by message text, since the Hub controls
+# that text and could change it at any time. huggingface_hub's
+# _warn_on_warning_headers logs a response's X-HF-Warning header at WARNING;
+# that header is the Hub's own advice to library users (e.g. "set a
+# HF_TOKEN"), addressed at the operator, not a report of anything wrong with
+# this app, so it does not belong on the Diagnostics page's error list. Every
+# other record from the same logger (HTTP errors, retries, rate limits) keeps
+# its level.
+_INFO_DEMOTED_LOGGER_FUNCS = (("huggingface_hub.utils._http", "_warn_on_warning_headers"),)
+
 LOG_DATEFMT = "%Y-%m-%dT%H:%M:%S"
 # `%(asctime)s.%(msecs)03dZ` + gmtime converter = UTC ISO-8601 with ms.
 FILE_LOG_FORMAT = (
@@ -228,6 +240,10 @@ class RootFileBridge(logging.Handler):
     Records already carrying the app's own name are dropped here: they reached
     the file through the ``erudi`` logger's own handlers before propagating to
     root, and a record must land exactly once.
+
+    A record matching ``_INFO_DEMOTED_LOGGER_FUNCS`` (logger name AND function
+    name) is written at ``INFO`` instead of its own level: it stays in
+    ``backend.log`` but off the Diagnostics page's error list.
     """
 
     def __init__(self, target: logging.Handler, app_logger_name: str = APP_LOGGER_NAME) -> None:
@@ -239,6 +255,17 @@ class RootFileBridge(logging.Handler):
     def emit(self, record: logging.LogRecord) -> None:
         """Hand the record to the file handler, unless the app already wrote it."""
         if record.name == self._app_name or record.name.startswith(self._app_prefix):
+            return
+        if (record.name, record.funcName) in _INFO_DEMOTED_LOGGER_FUNCS:
+            # Never mutate the incoming record: other handlers on root still
+            # see it unchanged. `Handler.handle` applies filters but not the
+            # target's own level (only `Logger.callHandlers` does), so that
+            # check is repeated here for the demoted copy.
+            demoted = logging.makeLogRecord(record.__dict__)
+            demoted.levelno = logging.INFO
+            demoted.levelname = "INFO"
+            if demoted.levelno >= self._target.level:
+                self._target.handle(demoted)
             return
         # `handle` (not `emit`) so the target's own level, filters -- the
         # request-id injection among them -- and formatter all apply.

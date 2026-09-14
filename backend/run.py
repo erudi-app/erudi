@@ -174,6 +174,12 @@ def configure_library_env() -> None:
 
     # Egress switches: assigned, never defaulted. See the docstring.
     os.environ["HF_HUB_DISABLE_TELEMETRY"] = "1"  # local-first egress hygiene (#109)
+    # Hugging Face downloads use the regular file CDN, never the Xet storage
+    # service (HfFileSystem.get_file falls back to plain fsspec streaming for
+    # the app's own callback). The packaged app does not ship hf_xet, so this
+    # keeps a dev run identical to it and keeps that service off the network
+    # list (#533).
+    os.environ["HF_HUB_DISABLE_XET"] = "1"
 
     # One deliberate escape hatch, for a contributor debugging the agent layer.
     # It has to be typed out in full, which is the point: turning it on means

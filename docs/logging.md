@@ -183,7 +183,7 @@ they appear on the **Diagnostics** page and in a copied report alongside the
 app's — a failure whose cause is in a library is no longer a failure with no
 explanation.
 
-Three deliberate limits:
+Four deliberate limits:
 
 - **`WARNING` and above only.** A library's `INFO` (Alembic's per-revision
   lines, transfer progress, uvicorn's startup chatter) reports no defect, is
@@ -201,6 +201,11 @@ Three deliberate limits:
   writes pgserver's record at `INFO` instead: it stays in `backend.log`, but
   never reaches the Diagnostics page's error list or the copied report. A
   start that really fails still shows pgserver's record at `ERROR`, unchanged.
+- **Advice is not an error.** When the Hub answers a request with advice in
+  a response header -- such as asking for a `HF_TOKEN` -- `huggingface_hub`
+  logs it at `WARNING`. The bridge writes that specific record at `INFO`
+  instead: it stays in `backend.log`, and stays off the Diagnostics page. The
+  library's own warnings about failed or retried requests keep their level.
 
 ## The embedded database's own log
 
