@@ -904,7 +904,7 @@ class TestRecoverySecondChance:
 
     @pytest.mark.unit
     def test_get_server_with_recovery_retries_after_bare_assertion_error(
-        self, tmp_path, monkeypatch
+        self, tmp_path, monkeypatch, caplog
     ):
         """ensure_postgres_running's already-running fast path never waits: it
         asserts status == 'ready' with no check first, so a postmaster that is
@@ -925,8 +925,13 @@ class TestRecoverySecondChance:
         monkeypatch.setattr(postgres_runtime.pgserver, "get_server", fake_get_server)
         monkeypatch.setattr(postgres_runtime, "_wait_for_postmaster_ready", lambda d, s: True)
 
-        assert postgres_runtime._get_server_with_recovery(tmp_path) is sentinel
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            assert postgres_runtime._get_server_with_recovery(tmp_path) is sentinel
         assert calls["n"] == 2
+        (warning,) = [
+            r for r in caplog.records if r.name == "erudi" and r.levelno == logging.WARNING
+        ]
+        assert "(AssertionError)" in warning.getMessage()
 
     @pytest.mark.unit
     def test_get_server_with_recovery_reraises_assertion_error_when_wait_fails(
@@ -990,6 +995,212 @@ class TestRecoverySecondChance:
 
         assert postgres_runtime._get_server_with_recovery(tmp_path) is fresh
         assert calls["n"] == 2
+
+
+def _log_pgserver_timeout(data_dir: Path) -> None:
+    """What pgserver writes, on its own logger, before raising TimeoutExpired."""
+    log = data_dir / "log"
+    logging.getLogger("pgserver").error(
+        "Timeout starting server.\n"
+        f"Showing contents of postgres server log ({log.absolute()}) below:\n"
+        "LOG:  database system was interrupted; last known up at 2026-09-14 10:00:00 UTC\n"
+        "LOG:  database system was not properly shut down; automatic recovery in progress"
+    )
+
+
+def _pgserver_errors(caplog) -> list[logging.LogRecord]:
+    return [r for r in caplog.records if r.name == "pgserver" and r.levelno >= logging.ERROR]
+
+
+class TestPgserverRecordsDuringRecovery:
+    """#536 - pgserver logs its pg_ctl timeout at ERROR before the second
+    chance above decides whether the start happened. Only a start that really
+    failed may leave that record at ERROR; a start crash recovery completed
+    writes it at INFO through the app logger, so it never reaches the
+    Diagnostics page's error list.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _filters_are_restored(self):
+        """Every path below leaves pgserver's logger with the filters it had."""
+        pg_logger = logging.getLogger("pgserver")
+        before = list(pg_logger.filters)
+        yield
+        after = list(pg_logger.filters)
+        pg_logger.filters[:] = before  # never let a leak poison later tests
+        assert after == before
+
+    @pytest.mark.unit
+    def test_a_completed_recovery_writes_the_timeout_at_info(self, tmp_path, monkeypatch, caplog):
+        sentinel = object()
+        calls = {"n": 0}
+
+        def fake_get_server(path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                _log_pgserver_timeout(tmp_path)
+                raise subprocess.TimeoutExpired(cmd="pg_ctl", timeout=10)
+            return sentinel
+
+        monkeypatch.setattr(postgres_runtime.pgserver, "get_server", fake_get_server)
+        monkeypatch.setattr(postgres_runtime, "_wait_for_postmaster_ready", lambda d, s: True)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            assert postgres_runtime._get_server_with_recovery(tmp_path) is sentinel
+
+        assert _pgserver_errors(caplog) == []
+        demoted = [
+            r
+            for r in caplog.records
+            if r.name == "erudi" and "Timeout starting server" in r.getMessage()
+        ]
+        assert len(demoted) == 1
+        assert demoted[0].levelno == logging.INFO
+
+    @pytest.mark.unit
+    def test_the_not_ready_warning_is_one_line_without_the_data_path(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        """TimeoutExpired's message is pg_ctl's whole command line, absolute
+        data and log paths included. The WARNING -- which the Diagnostics page
+        lists -- names the exception type only; the traceback goes to INFO."""
+        sentinel = object()
+        calls = {"n": 0}
+
+        def fake_get_server(path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                raise subprocess.TimeoutExpired(
+                    cmd=["pg_ctl", "-D", str(tmp_path), "start"], timeout=10
+                )
+            return sentinel
+
+        monkeypatch.setattr(postgres_runtime.pgserver, "get_server", fake_get_server)
+        monkeypatch.setattr(postgres_runtime, "_wait_for_postmaster_ready", lambda d, s: True)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            assert postgres_runtime._get_server_with_recovery(tmp_path) is sentinel
+
+        formatter = logging.Formatter()
+        visible = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        assert not [r for r in visible if r.name == "erudi" and r.exc_info]
+        assert not [r for r in visible if str(tmp_path) in formatter.format(r)]
+        (warning,) = [r for r in visible if r.name == "erudi" and r.levelno == logging.WARNING]
+        assert "(TimeoutExpired)" in warning.getMessage()
+        assert "\n" not in warning.getMessage()
+        traced = [
+            r
+            for r in caplog.records
+            if r.name == "erudi" and r.levelno == logging.INFO and r.exc_info
+        ]
+        assert len(traced) == 1
+        assert isinstance(traced[0].exc_info[1], subprocess.TimeoutExpired)
+
+    @pytest.mark.unit
+    def test_a_failed_recovery_wait_keeps_the_timeout_at_error(self, tmp_path, monkeypatch, caplog):
+        def fake_get_server(path):
+            _log_pgserver_timeout(tmp_path)
+            raise subprocess.TimeoutExpired(cmd="pg_ctl", timeout=10)
+
+        monkeypatch.setattr(postgres_runtime.pgserver, "get_server", fake_get_server)
+        monkeypatch.setattr(postgres_runtime, "_wait_for_postmaster_ready", lambda d, s: False)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            with pytest.raises(subprocess.TimeoutExpired):
+                postgres_runtime._get_server_with_recovery(tmp_path)
+
+        (record,) = _pgserver_errors(caplog)
+        assert record.levelno == logging.ERROR
+        assert "Timeout starting server" in record.getMessage()
+        assert str((tmp_path / "log").absolute()) in record.getMessage()
+
+    @pytest.mark.unit
+    def test_a_retry_that_raises_keeps_the_timeout_at_error(self, tmp_path, monkeypatch, caplog):
+        calls = {"n": 0}
+
+        def fake_get_server(path):
+            calls["n"] += 1
+            if calls["n"] == 1:
+                _log_pgserver_timeout(tmp_path)
+                raise subprocess.TimeoutExpired(cmd="pg_ctl", timeout=10)
+            raise RuntimeError("the retry could not join the postmaster")
+
+        monkeypatch.setattr(postgres_runtime.pgserver, "get_server", fake_get_server)
+        monkeypatch.setattr(postgres_runtime, "_wait_for_postmaster_ready", lambda d, s: True)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            with pytest.raises(RuntimeError, match="could not join"):
+                postgres_runtime._get_server_with_recovery(tmp_path)
+
+        (record,) = _pgserver_errors(caplog)
+        assert record.levelno == logging.ERROR
+        assert "Timeout starting server" in record.getMessage()
+        assert not [
+            r
+            for r in caplog.records
+            if r.name == "erudi" and "Timeout starting server" in r.getMessage()
+        ]
+
+    @pytest.mark.unit
+    def test_an_uncaught_start_failure_keeps_its_record_at_error(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        def fake_get_server(path):
+            logging.getLogger("pgserver").error(
+                "Failed to start server.\n"
+                f"Showing contents of postgres server log ({tmp_path / 'log'}) below:\n"
+                "FATAL:  could not write to file: No space left on device"
+            )
+            raise subprocess.CalledProcessError(1, "pg_ctl")
+
+        waited = []
+        monkeypatch.setattr(postgres_runtime.pgserver, "get_server", fake_get_server)
+        monkeypatch.setattr(
+            postgres_runtime, "_wait_for_postmaster_ready", lambda d, s: waited.append(d)
+        )
+
+        with pytest.raises(subprocess.CalledProcessError):
+            postgres_runtime._get_server_with_recovery(tmp_path)
+
+        assert waited == []  # not a recovery case: no second chance
+        (record,) = _pgserver_errors(caplog)
+        assert record.levelno == logging.ERROR
+        assert record.getMessage().startswith("Failed to start server.\n")
+        assert "No space left on device" in record.getMessage()
+
+    @pytest.mark.unit
+    def test_a_first_start_that_succeeds_replays_its_records_unchanged(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        sentinel = object()
+
+        def fake_get_server(path):
+            logging.getLogger("pgserver").error("an error pgserver reported on a good start")
+            return sentinel
+
+        monkeypatch.setattr(postgres_runtime.pgserver, "get_server", fake_get_server)
+
+        assert postgres_runtime._get_server_with_recovery(tmp_path) is sentinel
+
+        (record,) = _pgserver_errors(caplog)
+        assert record.getMessage() == "an error pgserver reported on a good start"
+
+    @pytest.mark.unit
+    def test_records_below_error_pass_through_during_the_call(self, tmp_path, monkeypatch, caplog):
+        seen_during_call = []
+        sentinel = object()
+
+        def fake_get_server(path):
+            logging.getLogger("pgserver").info("running pg_ctl... pg_ctl_args=['-w', 'start']")
+            seen_during_call.extend(r.getMessage() for r in caplog.records if r.name == "pgserver")
+            return sentinel
+
+        monkeypatch.setattr(postgres_runtime.pgserver, "get_server", fake_get_server)
+
+        with caplog.at_level(logging.INFO, logger="pgserver"):
+            assert postgres_runtime._get_server_with_recovery(tmp_path) is sentinel
+
+        assert seen_during_call == ["running pg_ctl... pg_ctl_args=['-w', 'start']"]
 
 
 class TestConsoleIsolation:

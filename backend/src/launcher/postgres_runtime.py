@@ -31,6 +31,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import logging
 import os
 import re
 import secrets
@@ -514,6 +515,25 @@ def _wait_for_postmaster_ready(data_dir: Path, deadline_seconds: float) -> bool:
     return False
 
 
+class _HeldPgserverErrors(logging.Filter):
+    """Hold back pgserver's ``ERROR`` and above until a start's outcome is known.
+
+    Attached to the ``pgserver`` logger by :func:`_get_server_with_recovery`,
+    which decides afterwards at which level each held record is written.
+    Records below ``ERROR`` pass through untouched.
+    """
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.records: list[logging.LogRecord] = []
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        if record.levelno >= logging.ERROR:
+            self.records.append(record)
+            return False
+        return True
+
+
 def _get_server_with_recovery(data_dir: Path):
     """Boot (or join) the cluster, tolerating a slow WAL crash-recovery (#161).
 
@@ -543,33 +563,72 @@ def _get_server_with_recovery(data_dir: Path):
     manual Retry minutes after such a crash booted in 1.3s through exactly
     that path). If the wait expires we re-raise the ORIGINAL error, preserving
     today's failure path after real patience and clear logs.
+
+    pgserver logs its own ``ERROR`` before raising -- ``Timeout starting
+    server.`` followed by the postmaster's whole log and its absolute path --
+    and at that moment nothing knows yet whether the start will happen. So
+    pgserver's ``ERROR`` and ``CRITICAL`` records are held back for the whole
+    call (:class:`_HeldPgserverErrors`; its lower levels pass through) and
+    written once the outcome is known:
+
+    - the retry after a completed recovery wait returns a server: the start
+      happened, so each held record is written at ``INFO`` through the app
+      logger, which keeps it in ``backend.log`` and off the Diagnostics
+      page's error list (a library's ``INFO`` would not reach the file);
+    - any other outcome -- the first call succeeds, raises something not
+      caught here, the wait expires, or the retry raises: each held record is
+      replayed unchanged, at its own level, on the ``pgserver`` logger, before
+      the exception propagates.
     """
+    pg_logger = logging.getLogger("pgserver")
+    held = _HeldPgserverErrors()
+    recovered = False
+    pg_logger.addFilter(held)
     try:
-        return pgserver.get_server(str(data_dir))
-    except (subprocess.TimeoutExpired, AssertionError) as exc:
-        # With the exception: `TimeoutExpired` and `AssertionError` are two
-        # different stories about the same symptom, and only the traceback
-        # says which one this was.
-        logger.warning(
-            "pgserver reported the postmaster not ready yet (pg_ctl's "
-            "hardcoded 10s timeout, or its no-wait already-running fast "
-            "path); it is likely still WAL crash-recovering in the "
-            "background - waiting for it to finish before retrying",
-            exc_info=exc,
-        )
-        if _wait_for_postmaster_ready(data_dir, RECOVERY_WAIT_SECONDS):
-            # pgserver caches the instance in _instances BEFORE starting the
-            # server (postgres_server.py:62 precedes ensure_postgres_running at
-            # :64), so after the TimeoutExpired a half-built object with
-            # _postmaster_info=None is still cached — and get_server would hand
-            # that corpse back, crashing on get_uri()'s assert despite the
-            # successful recovery (#215). Evict it so the retry runs the full
-            # constructor and rejoins the live postmaster. (The stale object's
-            # atexit cleanup is harmless: with _postmaster_info=None it never
-            # stops the server.)
-            _pg_server_mod.PostgresServer._instances.pop(data_dir, None)
+        try:
             return pgserver.get_server(str(data_dir))
-        raise
+        except (subprocess.TimeoutExpired, AssertionError) as exc:
+            # `TimeoutExpired` and `AssertionError` are two different stories
+            # about the same symptom: the warning names which one this was,
+            # and the traceback says where. The traceback is written at INFO,
+            # not on the warning, because `TimeoutExpired`'s message is
+            # pg_ctl's whole command line -- the absolute data and log paths
+            # -- and the warning is listed on the Diagnostics page.
+            logger.warning(
+                "pgserver reported the postmaster not ready yet (pg_ctl's "
+                "hardcoded 10s timeout, or its no-wait already-running fast "
+                "path); it is likely still WAL crash-recovering in the "
+                "background - waiting for it to finish before retrying "
+                f"({type(exc).__name__})"
+            )
+            logger.info("Traceback of the postmaster not-ready report above", exc_info=exc)
+            if _wait_for_postmaster_ready(data_dir, RECOVERY_WAIT_SECONDS):
+                # pgserver caches the instance in _instances BEFORE starting the
+                # server (postgres_server.py:62 precedes ensure_postgres_running at
+                # :64), so after the TimeoutExpired a half-built object with
+                # _postmaster_info=None is still cached — and get_server would hand
+                # that corpse back, crashing on get_uri()'s assert despite the
+                # successful recovery (#215). Evict it so the retry runs the full
+                # constructor and rejoins the live postmaster. (The stale object's
+                # atexit cleanup is harmless: with _postmaster_info=None it never
+                # stops the server.)
+                _pg_server_mod.PostgresServer._instances.pop(data_dir, None)
+                server = pgserver.get_server(str(data_dir))
+                recovered = True
+                return server
+            raise
+    finally:
+        # Removed before anything is written: `Logger.handle` applies the
+        # logger's filters, so a replay with the filter attached is held again.
+        pg_logger.removeFilter(held)
+        for record in held.records:
+            if recovered:
+                logger.info(
+                    "pgserver reported this during a start that crash recovery "
+                    f"then completed: {record.getMessage()}"
+                )
+            else:
+                pg_logger.handle(record)
 
 
 def start_postgres(data_dir: Path | str) -> PostgresHandle:
