@@ -97,8 +97,10 @@ mac:
   entitlements: assets/entitlements.mac.plist
   entitlementsInherit: assets/entitlements.mac.plist
   notarize: true
-  # Explicitly sign the bundled PyInstaller backend executable (electron-builder
-  # does not discover arbitrary Mach-O binaries under Resources/ on its own).
+  # electron-builder's own signing walk (@electron/osx-sign's walkAsync) already
+  # recurses through the whole Contents/ tree, including Resources/, and signs
+  # every binary file it finds there — the bundled backend executable included.
+  # Listing it here is belt-and-braces, not what makes it get signed.
   binaries:
     - "Contents/Resources/backend/backend"
 
