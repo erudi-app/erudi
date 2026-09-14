@@ -69,3 +69,17 @@ export function isVerySmallModel(model) {
   const size = parseParamSizeB(model.param_size) ?? parseParamSizeB(model.parameters);
   return size !== null && size < SMALL_MODEL_PARAM_THRESHOLD_B;
 }
+
+// Whether web search is unavailable for a model because it cannot execute
+// tools at all (#570). The `web_search` tool is silently dropped server-side
+// (backend/src/agents/kb_mode.py) whenever `supports_tools` or
+// `supports_tools_wire` is not truthy, so a conversation's header toggle can
+// sit ON with zero effect and zero feedback. This is a POSITIVE-knowledge
+// gate, mirroring `canAttachImages`'s vision-gating philosophy but inverted:
+// the toggle is disabled ONLY when a flag explicitly says `false`. Unknown
+// (null/undefined, e.g. detection not run yet) or a missing/orphaned model
+// never disables it -- only a proven incapacity does.
+export function webSearchUnavailableForModel(model) {
+  if (!model) return false;
+  return model.supports_tools === false || model.supports_tools_wire === false;
+}

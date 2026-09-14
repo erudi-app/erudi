@@ -15,7 +15,11 @@ import { API_BASE_URL } from "../config/api.js";
 import apiClient, { tracedFetch } from "../services/api/client";
 import { createLogger } from "../utils/logger";
 import { conversationPath } from "../utils/routes";
-import { canAttachImages, maxImagesForModel } from "../utils/modelCapabilities";
+import {
+  canAttachImages,
+  maxImagesForModel,
+  webSearchUnavailableForModel,
+} from "../utils/modelCapabilities";
 import { defaultsFor, hasNoPublisherRecommendation } from "../utils/samplingDefaults";
 import {
   baseName,
@@ -890,6 +894,7 @@ export default function ConversationPage() {
             showWebSearch
             initialWebSearch={webSearch}
             onWebSearchChange={handleWebSearchChange}
+            webSearchDisabled={webSearchUnavailableForModel(assignedModel)}
           />
         </div>
 

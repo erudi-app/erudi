@@ -68,3 +68,50 @@ describe("HeaderBar web search toggle (#310)", () => {
     expect(toggle.getAttribute("aria-checked")).toBe("true");
   });
 });
+
+// #570 — when the current model is positively known unable to execute tools,
+// the toggle stays visible (so the state is not hidden) but is disabled and
+// explains why, instead of silently doing nothing when flipped on.
+describe("HeaderBar web search toggle disabled for tool-incapable models (#570)", () => {
+  it("is enabled by default (webSearchDisabled unset)", async () => {
+    renderBar({ showWebSearch: true, initialWebSearch: false });
+    openSettings();
+    const toggle = await screen.findByRole("switch", { name: "Web search" });
+    expect(toggle.disabled).toBe(false);
+  });
+
+  it("is disabled when webSearchDisabled is set", async () => {
+    renderBar({ showWebSearch: true, initialWebSearch: true, webSearchDisabled: true });
+    openSettings();
+    const toggle = await screen.findByRole("switch", { name: "Web search" });
+    expect(toggle.disabled).toBe(true);
+  });
+
+  it("does not report a flip while disabled", async () => {
+    const onWebSearchChange = vi.fn();
+    renderBar({
+      showWebSearch: true,
+      initialWebSearch: false,
+      webSearchDisabled: true,
+      onWebSearchChange,
+    });
+    openSettings();
+    const toggle = await screen.findByRole("switch", { name: "Web search" });
+    fireEvent.click(toggle);
+    expect(onWebSearchChange).not.toHaveBeenCalled();
+  });
+
+  it("keeps the toggle enabled when webSearchDisabled is explicitly false", async () => {
+    renderBar({ showWebSearch: true, initialWebSearch: false, webSearchDisabled: false });
+    openSettings();
+    const toggle = await screen.findByRole("switch", { name: "Web search" });
+    expect(toggle.disabled).toBe(false);
+  });
+
+  it("explains why the toggle is disabled", async () => {
+    renderBar({ showWebSearch: true, initialWebSearch: false, webSearchDisabled: true });
+    openSettings();
+    await screen.findByRole("switch", { name: "Web search" });
+    expect(document.body.textContent).toMatch(/can't use tools/i);
+  });
+});

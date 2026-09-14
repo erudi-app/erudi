@@ -6,6 +6,7 @@ import {
   parseParamSizeB,
   isVerySmallModel,
   SMALL_MODEL_PARAM_THRESHOLD_B,
+  webSearchUnavailableForModel,
 } from "./modelCapabilities";
 
 describe("canAttachImages", () => {
@@ -144,5 +145,35 @@ describe("isVerySmallModel (#381)", () => {
     expect(isVerySmallModel({ parameters: undefined })).toBe(false);
     expect(isVerySmallModel({ parameters: "Unknown" })).toBe(false);
     expect(isVerySmallModel({ param_size: null, parameters: null })).toBe(false);
+  });
+});
+
+describe("webSearchUnavailableForModel (#570)", () => {
+  it("disables when the model is positively known unable to execute tools", () => {
+    expect(webSearchUnavailableForModel({ supports_tools: false })).toBe(true);
+    expect(webSearchUnavailableForModel({ supports_tools_wire: false })).toBe(true);
+    expect(
+      webSearchUnavailableForModel({ supports_tools: false, supports_tools_wire: false })
+    ).toBe(true);
+  });
+
+  it("stays enabled when the model can execute tools", () => {
+    expect(webSearchUnavailableForModel({ supports_tools: true, supports_tools_wire: true })).toBe(
+      false
+    );
+  });
+
+  it("is permissive when a flag is unknown -- only positive knowledge disables it", () => {
+    expect(webSearchUnavailableForModel({ supports_tools: null })).toBe(false);
+    expect(webSearchUnavailableForModel({ supports_tools_wire: null })).toBe(false);
+    expect(webSearchUnavailableForModel({})).toBe(false);
+    expect(webSearchUnavailableForModel({ supports_tools: true, supports_tools_wire: null })).toBe(
+      false
+    );
+  });
+
+  it("never disables for a missing/unknown/orphaned model", () => {
+    expect(webSearchUnavailableForModel(undefined)).toBe(false);
+    expect(webSearchUnavailableForModel(null)).toBe(false);
   });
 });

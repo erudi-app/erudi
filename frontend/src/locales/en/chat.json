@@ -29,7 +29,8 @@
       "temperature": "Controls creativity. Lower = focused, higher = creative.",
       "topP": "Controls word variety. Lower = predictable, higher = diverse.",
       "prompt": "Customize system instructions that guide AI behavior.",
-      "webSearch": "Lets the model search the web for current facts. Searched queries are sent to external search engines."
+      "webSearch": "Lets the model search the web for current facts. Searched queries are sent to external search engines.",
+      "webSearchUnavailable": "This model can't use tools, so web search isn't available for it."
     },
     "noPublisherRecommendation": "No sampling recommendation from this model's publisher; neutral defaults applied.",
     "weightsMissingHint": "Weights missing — re-bind this assistant on the Models page"

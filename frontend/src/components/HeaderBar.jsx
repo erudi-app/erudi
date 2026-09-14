@@ -41,6 +41,14 @@ export default function HeaderBar({
   showWebSearch = false,
   initialWebSearch = false,
   onWebSearchChange,
+  // Positive-knowledge gate (#570): true when the conversation's current
+  // model is known unable to execute tools, so the `web_search` tool never
+  // joins the turn no matter this toggle's state. The toggle stays visible
+  // (its stored value is not hidden) but is disabled with an explanatory
+  // tooltip instead of silently doing nothing when flipped on. The caller
+  // (ConversationPage) computes this from the models list it already loads;
+  // this component stays decoupled from that lookup.
+  webSearchDisabled = false,
   // The model's publisher gives no sampling recommendation (#388,
   // `sampling_defaults.source === "none"`): a discreet line under the sliders
   // says the neutral defaults apply. Nothing is shown when one exists.
@@ -484,14 +492,32 @@ export default function HeaderBar({
                         </span>
                         <TooltipIcon id="web-search" side={isNarrow ? "bottom-right" : "right"} />
                         <div className="ml-auto">
-                          <ToggleSwitch
-                            checked={webSearch}
-                            onChange={(next) => {
-                              setWebSearch(next);
-                              onWebSearchChange?.(next);
-                            }}
-                            label={t("chat:header.webSearchToggle")}
-                          />
+                          {webSearchDisabled ? (
+                            <Tooltip
+                              content={t("chat:header.tooltips.webSearchUnavailable")}
+                              side={isNarrow ? "bottom-right" : "right"}
+                              width={isXs ? "w-40" : isSm ? "w-52" : "w-64"}
+                            >
+                              <ToggleSwitch
+                                checked={webSearch}
+                                onChange={(next) => {
+                                  setWebSearch(next);
+                                  onWebSearchChange?.(next);
+                                }}
+                                label={t("chat:header.webSearchToggle")}
+                                disabled
+                              />
+                            </Tooltip>
+                          ) : (
+                            <ToggleSwitch
+                              checked={webSearch}
+                              onChange={(next) => {
+                                setWebSearch(next);
+                                onWebSearchChange?.(next);
+                              }}
+                              label={t("chat:header.webSearchToggle")}
+                            />
+                          )}
                         </div>
                       </div>
                     )}
@@ -557,6 +583,7 @@ HeaderBar.propTypes = {
   showWebSearch: PropTypes.bool,
   initialWebSearch: PropTypes.bool,
   onWebSearchChange: PropTypes.func,
+  webSearchDisabled: PropTypes.bool,
   disabled: PropTypes.bool,
   models: PropTypes.arrayOf(
     PropTypes.shape({
