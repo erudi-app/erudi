@@ -31,6 +31,25 @@ describe("UpdateBanner state machine", () => {
     expect(container.firstChild).toBeNull();
   });
 
+  it("stays silent on the events added for the Settings card (#571)", () => {
+    // Main forwards "checking-for-update", "update-not-available" and "error"
+    // on the same channel so the Settings card can answer a manual check. The
+    // banner is for an update that exists, and must not turn any of them into
+    // a notification.
+    const { container } = render(<UpdateBanner />);
+    emit({ event: "checking-for-update" });
+    emit({ event: "update-not-available" });
+    emit({ event: "error" });
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("keeps showing a downloaded update when a later background check errors", () => {
+    render(<UpdateBanner />);
+    emit({ event: "update-downloaded", version: "1.2.0" });
+    emit({ event: "error" });
+    expect(screen.getByText(/ready/)).toBeDefined();
+  });
+
   it("shows the available phase with the version and a dismiss button", () => {
     render(<UpdateBanner />);
     emit({ event: "update-available", version: "1.2.0" });

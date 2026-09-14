@@ -86,14 +86,27 @@ contextBridge.exposeInMainWorld("languageAPI", {
 // Auto-updater bridge
 contextBridge.exposeInMainWorld("updaterAPI", {
   // Register a callback for updater events from main process.
-  // event types: "update-available" | "download-progress" | "update-downloaded"
+  // event types: "checking-for-update" | "update-available" | "update-not-available"
+  //            | "download-progress" | "update-downloaded" | "error"
+  //
+  // The cleanup removes THIS listener only: the banner and the Settings card
+  // both listen, and removing every listener would leave whichever unmounted
+  // last the only one still hearing the updater.
   onUpdaterEvent: (callback) => {
-    ipcRenderer.on("updater-event", (_event, payload) => callback(payload));
-    // Return cleanup function
-    return () => ipcRenderer.removeAllListeners("updater-event");
+    const handler = (_event, payload) => callback(payload);
+    ipcRenderer.on("updater-event", handler);
+    return () => ipcRenderer.removeListener("updater-event", handler);
   },
   // Trigger immediate quit-and-install
   installNow: () => ipcRenderer.invoke("updater:install-now"),
+  // The manual flow behind the Settings card (#571): a check the user asked
+  // for, then a download, whatever the automatic-updates preference says.
+  // Both answer {ok} and never throw at the renderer.
+  checkNow: () => ipcRenderer.invoke("updater:check-now"),
+  downloadNow: () => ipcRenderer.invoke("updater:download-now"),
+  // Recover the last phase/version if the card mounted after the events fired
+  // -- the updater equivalent of "backend:getInfo".
+  getState: () => ipcRenderer.invoke("updater:get-state"),
   // The renderer owns the persisted "automatic updates" preference (the
   // user_settings API); main owns electron-updater and holds every check until
   // this arrives. Fire-and-forget, sent at boot and whenever the user changes it.
