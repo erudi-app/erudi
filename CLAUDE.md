@@ -1,4 +1,4 @@
-# CLAUDE.md
+# Engineering guide
 
 This is the engineering guide for working on this repository.
 
