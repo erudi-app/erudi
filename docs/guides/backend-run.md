@@ -118,7 +118,7 @@ logs. The reader must tolerate interleaved non-JSON log lines.
 {"event":"phase","phase":"preparing_database","ts":"..."}
 {"event":"ready","port":27182,"ts":"..."}
 {"event":"shutdown","ts":"..."}
-{"event":"startup_error","code":"PORT_IN_USE","message":"...","ts":"..."}
+{"event":"startup_error","code":"NO_PORT_AVAILABLE","message":"...","ts":"..."}
 {"event":"engine_notice","code":"CUDA_DRIVER_TOO_OLD","gpu_name":"...","ts":"..."}
 ```
 
@@ -175,7 +175,6 @@ per-generation table is in [Hardware Detection](hardware.md).
 
 | Code | Meaning |
 |---|---|
-| `PORT_IN_USE` | the requested port is taken |
 | `NO_PORT_AVAILABLE` | every port in the 27182-27199 scan is busy (transient; the frontend retries) |
 | `CRASH_BEFORE_READY` | the server thread exited before binding a port |
 | `PORT_TIMEOUT` | the server did not bind within the startup window |

@@ -32,7 +32,7 @@ Architecture:
 
 Streaming Pattern:
     All generation endpoints return StreamingResponse with:
-    - Content-Type: text/event-stream
+    - Content-Type: application/x-ndjson
     - Token-by-token yields via async generator
     - Automatic database persistence after stream completes
 
@@ -66,7 +66,7 @@ Example:
         {
           "user_message": "Explain quantum computing"
         }
-        → StreamingResponse (text/event-stream)
+        → StreamingResponse (application/x-ndjson)
         → "Quantum computing..." (token-by-token)
 
         # 3. Fetch conversation history

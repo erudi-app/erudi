@@ -1,4 +1,4 @@
-"""Agent tools — deterministic calculator (issue #81, problem #4).
+"""Agent tools: calculator, knowledge-base search, and web search.
 
 LLMs predict tokens, they don't compute: small quantized models add
 multi-digit numbers wrong with full confidence (measured: a different
@@ -7,16 +7,29 @@ The agent therefore carries a deterministic ``calculator`` tool; models
 with native function calling (Qwen, Mistral, Llama 3.1+…) invoke it
 through the standard agent loop. Models without it (e.g. Gemma 3 — no
 tool format in its chat template, never emits ``tool_calls``) fall back
-to the KB prompt's no-mental-math rule.
+to the KB prompt's no-mental-math rule. The evaluator is a strict AST
+whitelist — NEVER ``eval``: numbers and arithmetic operators only (no
+names, calls, attributes, subscripts).
 
-The evaluator is a strict AST whitelist — NEVER ``eval``: numbers and
-arithmetic operators only (no names, calls, attributes, subscripts).
+``search_knowledge_base`` lets a tool-capable model query the user's
+attached knowledge base on demand instead of having excerpts injected
+up-front every turn; it shares per-turn context (``kb_id``, token
+budgets) with ``web_search`` through the ``TurnToolContext`` dataclass
+passed via ``create_agent(context_schema=...)`` and read through
+``ToolRuntime``, since ``create_agent`` accepts only one context schema.
+
+``web_search`` runs a metasearch query (via ``ddgs``) and returns
+attributed, token-budgeted snippets so the model can ground an answer in
+a current external fact; it degrades to an explicit error string on any
+failure (offline, timeout, no results) instead of raising, so a broken
+search never crashes the agent loop.
 """
 
 from __future__ import annotations
 
 import asyncio
 import ast
+import math
 import operator
 from dataclasses import dataclass
 from typing import List, Optional
@@ -28,7 +41,6 @@ from langchain_core.tools import tool
 from src.agents.prompts import answer_language_line, build_kb_context_block
 from src.core.logging import logger
 from src.core.logutils import truncate_for_log
-from src.ingestion.chunking import count_tokens
 from src.utils.kb_utils import KbExcerpt, retrieve_kb_excerpts
 
 _BINARY_OPERATORS = {
@@ -129,8 +141,9 @@ WEB_SEARCH_OVERALL_TIMEOUT_S = 20
 # prefix; the tail names the cause. The tool NEVER raises.
 WEB_SEARCH_ERROR_PREFIX = "Error during Web Search: "
 _WEB_NO_RESULTS_TEXT = "No results found for this query."
-# Default web snippet budget (e5 tokens) — plan_turn overrides it with the
-# model's size-tier budget; this default keeps a bare context bounded too.
+# Default web snippet budget (measured with ``_estimate_web_tokens``, not e5
+# tokens) — plan_turn overrides it with the model's size-tier budget; this
+# default keeps a bare context bounded too.
 WEB_SEARCH_DEFAULT_TOKEN_BUDGET = 1000
 
 
@@ -257,13 +270,31 @@ def map_web_search_error(exc: BaseException) -> str:
     return f"{WEB_SEARCH_ERROR_PREFIX}{tail}"
 
 
+def _estimate_web_tokens(text: str) -> int:
+    """Network-free token estimate: ``ceil(UTF-8 byte length / 3)``.
+
+    The web tool cannot use the e5 tokenizer from ``src.ingestion.chunking``:
+    that tokenizer is only on disk once the user has accepted the knowledge-base
+    embedding-model download, and loading it otherwise fetches it from Hugging
+    Face — a request docs/privacy.md says only happens for that download. Bytes
+    over 3 overestimates natural language in every script, CJK included, so it
+    stays a conservative (fewer-results) ceiling there; it can undercount
+    punctuation- or code-heavy text by roughly a third, which a soft budget
+    ceiling tolerates. ``surrogatepass`` because the text comes from the web: a
+    lone surrogate in a result must cost bytes like any other character, not
+    raise out of a tool that never raises.
+    """
+    return math.ceil(len(text.encode("utf-8", errors="surrogatepass")) / 3)
+
+
 def format_web_tool_result(results: list, query: str, token_budget: int) -> str:
     """ToolMessage payload for a web search: attributed snippets with SOURCE
     URLS (``title - href`` + snippet) so the model can cite, kept whole and
-    best-first within ``token_budget`` e5 tokens (the first result always
-    survives — mirroring the KB budget rule), a citation reminder, and the
-    localized answer-language line LAST (the spot small local models honor,
-    same as ``format_kb_tool_result``). Empty results are NOT an error."""
+    best-first within ``token_budget`` tokens as measured by
+    ``_estimate_web_tokens`` (the first result always survives — mirroring the
+    KB budget rule), a citation reminder, and the localized answer-language
+    line LAST (the spot small local models honor, same as
+    ``format_kb_tool_result``). Empty results are NOT an error."""
     if not results:
         return _WEB_NO_RESULTS_TEXT
     blocks: List[str] = []
@@ -273,7 +304,7 @@ def format_web_tool_result(results: list, query: str, token_budget: int) -> str:
         href = (result.get("href") or "").strip()
         body = (result.get("body") or "").strip()
         block = f"[{title} - {href}]\n{body}"
-        cost = count_tokens(block)
+        cost = _estimate_web_tokens(block)
         if blocks and spent + cost > token_budget:
             break
         blocks.append(block)

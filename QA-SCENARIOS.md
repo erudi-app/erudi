@@ -30,8 +30,8 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When no base model fits my machine, then the "Recommended" section is hidden (not empty).
 - [ ] When a model is **not runnable on my hardware**, then its card shows "Not supported on your hardware" and Download is disabled.
 - [ ] When a model is **gated** (from a Hugging Face search hit), then the card shows a "gated" tag.
-- [ ] When I browse the **bundled catalog**, then no card links to a gated repository at all — Erudi downloads anonymously, so a gated link would 401 whoever clicked it *(#392; gated repos are dropped at snapshot time, not flagged)*.
-- [ ] When a model is **under ~4B parameters**, then its card — catalog, explore and installed alike — carries the note that tool use, knowledge-base search and multi-step reasoning are unreliable below ~4B *(#381)*; a 7B or unknown-size card carries no such note.
+- [ ] When I browse the **bundled catalog**, then no card links to a gated repository at all — Erudi downloads anonymously, so a gated link would 401 whoever clicked it *(gated repos are dropped at snapshot time, not flagged)*.
+- [ ] When a model is **under ~4B parameters**, then its card — catalog, explore and installed alike — carries the note that tool use, knowledge-base search and multi-step reasoning are unreliable below ~4B; a 7B or unknown-size card carries no such note.
 - [ ] When a category carousel has more than 4 models, then a "See all" control expands it to a grid (and back).
 - [ ] When I apply a **size filter** or **"Fits my machine"** and nothing matches, then I see "No models match these filters. Widen the size range or turn off 'Fits my machine'."
 - [ ] When there are no base models at all, then the browse area shows "No base models available" (not a crash).
@@ -52,10 +52,10 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I send a prompt, then a new conversation is created and I am taken to it, where the reply **streams token by token**.
 - [ ] When I adjust Creativity / Diversity / Max Tokens or customize the prompt, then those settings carry into the conversation.
 
-**Per-model sampling defaults (#388)**
+**Per-model sampling defaults**
 - [ ] When I select a model whose publisher ships sampling values, then Creativity / Diversity start at **that model's** values rather than a global 0.2 / 0.95 (Qwen3 starts at 0.6 / 0.95, Qwen2.5 at 0.7 / 0.8).
-- [ ] When the publisher ships a **greedy** temperature (Qwen2.5-VL ships `0.000001`), then the slider shows **0** and the model answers normally — no stream of `!` *(#395: greedy is sent as an exact 0)*.
-- [ ] When I send the **same prompt in several fresh conversations** on an Apple Silicon model at a non-zero temperature, then the answers differ *(#402: a fresh seed per request; a short factual answer may still converge)*.
+- [ ] When the publisher ships a **greedy** temperature (Qwen2.5-VL ships `0.000001`), then the slider shows **0** and the model answers normally — no stream of `!` *(greedy is sent as an exact 0)*.
+- [ ] When I send the **same prompt in several fresh conversations** on an Apple Silicon model at a non-zero temperature, then the answers differ *(a fresh seed per request; a short factual answer may still converge)*.
 - [ ] When I switch model mid-setup, then the sliders **re-default** to the new model's values.
 - [ ] When I open the Max Tokens control, then its ceiling is the model's own cap (`min(model context, engine context)`), not a fixed 1024.
 - [ ] When the Creativity slider is dragged to the top, then it reaches **2**, not 1.
@@ -96,10 +96,10 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When KB retrieval **fails** (broken/empty vector store), then the turn **degrades to a no-context answer** instead of erroring.
 - [ ] When I ask about something the documents **do not cover** (e.g. an undocumented product variant), then the agentic model searches, finds nothing relevant, and **says the documents don't cover it** — it never invents a value and never substitutes a nearby fact (e.g. another model's price).
 - [ ] When a follow-up returns to a **topic searched earlier in the conversation**, then the model runs a **fresh search** rather than answering from its memory of old excerpts (old tool results are placeholder-stripped from context) — it must not claim "not in the documents" without having just searched.
-- [ ] When ONE question spans **two subjects living in two different documents** ("what is the drone's payload, and how many remote days are allowed?"), then the answer grounds **both** facts — neither half is dropped or answered from world knowledge *(multi-subject coverage — see #85)*.
+- [ ] When ONE question spans **two subjects living in two different documents** ("what is the drone's payload, and how many remote days are allowed?"), then the answer grounds **both** facts — neither half is dropped or answered from world knowledge *(multi-subject coverage)*.
 - [ ] When I inspect any agentic answer, then **no raw tool markup** (`<tool_call>`, JSON arguments, function-call syntax) appears in the answer bubble or in the persisted history; the search call and its excerpts appear only inside the reasoning strip.
 
-**Web search (#310)**
+**Web search**
 - [ ] When I create a new conversation, then its **Web search** toggle (settings panel, next to Max Tokens) starts at the value of the global Settings-page default at creation time.
 - [ ] When I flip the Web search toggle in an open conversation, then it persists immediately (survives a reload) and **takes effect on the next turn** — no Apply needed.
 - [ ] When web search is ON with a tool-capable model and I ask a question needing a **current external fact**, then the reasoning strip shows a `web_search` call with its results, and the answer **cites source URLs** from those results.
@@ -111,10 +111,10 @@ screens, the shared chrome, and non-functional behavior.
 **Multimodal / multi-turn**
 - [ ] When I send an image on a vision model, then it is used for that turn and **carried forward** on later turns so a follow-up ("what colour is his hair?") works without re-attaching; as soon as I send a **newer** image, every older one collapses to an `[image]` marker in the model's context (at most one turn's images ever reach the model), while the display keeps all images.
 - [ ] When I reload a conversation with **file-attached** images, then the thumbnails re-render (for images still present on disk).
-- [ ] When I reload a conversation whose image was **pasted from the clipboard**, then it shows an "image attachment" placeholder, not the image *(clipboard images aren't restorable yet — see #136)*.
+- [ ] When I reload a conversation whose image was **pasted from the clipboard**, then it shows an "image attachment" placeholder, not the image *(clipboard images are not kept, so they cannot be restored)*.
 - [ ] When an attached image's original file was **moved/deleted**, then that image quietly shows nothing on reload (no broken-image artifact).
 
-**Attached documents (#492)**
+**Attached documents**
 - [ ] When I drag a `.pdf`, `.docx`, `.xlsx`, `.csv`, `.txt` or `.md` file onto the composer (or pick it with the attach button), then a chip with its name appears, and asking "what does it say?" produces an answer grounded in that file's content.
 - [ ] When the model has **no vision support**, then documents still attach and are still read (only images are refused).
 - [ ] When I drop a **folder**, then its supported files - those directly inside it and those one level below - are attached, and the answer covers them.
@@ -153,7 +153,7 @@ screens, the shared chrome, and non-functional behavior.
 ## Knowledge Base / Create Assistant — `/erudi/attach_knowledge_base`
 
 **Happy path**
-- [ ] When I open the screen for the **first time** (embedding model not yet installed), then a dialog offers to download the embedding model (multilingual-e5-small) once; accepting downloads it and confirms "the Knowledge Base is ready to use"; declining ("Not now") returns to the Models page *(#146/#157)* and the offer returns on the next visit.
+- [ ] When I open the screen for the **first time** (embedding model not yet installed), then a dialog offers to download the embedding model (multilingual-e5-small) once; accepting downloads it and confirms "the Knowledge Base is ready to use"; declining ("Not now") returns to the Models page and the offer returns on the next visit.
 - [ ] When I open the screen, then I see the KB description, a chat-capabilities rating (my machine's inference label/score), the local-model library, a name field, and a drag-and-drop area.
 - [ ] When I select a base model, type a name, add supported files (`.pdf`/`.txt`/`.docx`/`.xlsx`/`.csv`/`.md`), and click "Create Assistant" + confirm, then a spinner polls progress.
 - [ ] When ingestion completes, then "Data attached to your Assistant successfully!" shows and the form resets.
@@ -183,7 +183,7 @@ screens, the shared chrome, and non-functional behavior.
 **Inference engine**
 
 *Everything in this block needs a Windows or Linux machine with an NVIDIA GPU —
-the card only appears where the setting does something (#511).*
+the card only appears where the setting does something.*
 
 - [ ] When I open Settings on the NVIDIA machine, then an **Inference engine** card offers **Automatic** and **Processor only**, and the note says Erudi restarts its engine when the setting changes.
 - [ ] When I open Settings on a fresh install, then the engine is **Automatic**.
@@ -193,7 +193,7 @@ the card only appears where the setting does something (#511).*
 - [ ] *(NVIDIA machine)* When I switch back to **Automatic** and relaunch, then the GPU is used again — the choice is reversible.
 - [ ] *(Apple Silicon)* When I open Settings on a Mac, then there is no **Inference engine** card at all — the Apple silicon engine is the only one, so the setting would be a no-op.
 
-**Application language (#385)**
+**Application language**
 - [ ] When I open Settings, then an **Application language** card offers English, Français, Español and 中文, each named in its own language.
 - [ ] When I pick another language, then the **whole interface** switches immediately — every screen, the live download widget included — with no English left behind and no reload.
 - [ ] When a language is active, then numbers, percentages, sizes and dates follow it (French shows `10,8 %` and `31 Go`, not `10.8 %` and `31GB`).
@@ -228,9 +228,7 @@ the card only appears where the setting does something (#511).*
 - [ ] When a download is in progress, then the bug icon is hidden; navigation stays enabled and the progress widget follows me across screens.
 - [ ] When I navigate to an unknown route, then I am redirected to the Models screen.
 
-## Security — localhost hardening (#89)
-
-*Merged and shipping in this candidate — no longer skippable.*
+## Security — localhost hardening
 
 - [ ] When the packaged app is running and I send the API a request with a **foreign Origin** (e.g. `curl -H "Origin: https://evil.example" http://127.0.0.1:27182/erudi/health -i`), then the response carries **no** `access-control-allow-origin` header (a malicious website cannot read the local API).
 - [ ] When I send a request with `Origin: null` (what the packaged renderer sends), then the response grants exactly `access-control-allow-origin: null` — and the app's own screens all load their data normally (proof the packaged renderer's requests still pass).
@@ -312,18 +310,18 @@ say which hardware was missing. The rest run on any machine.*
 - [ ] When I close the window on **macOS**, then the app keeps running; on **Windows/Linux**, closing the last window quits and stops the backend.
 - [ ] When I use Help → **"Clear All Data"** and confirm, then the backend stops, the data directory is deleted, and the app quits.
 
-**Shutdown & orphans (#224, #341)**
+**Shutdown & orphans**
 - [ ] When I **hard-kill the app process** (Activity Monitor "Force Quit" / Task Manager "End task") rather than quitting cleanly, then the **backend stops by itself within a few seconds** — it does not survive holding port 27182 (parent-death watchdog).
-- [ ] After that same hard kill, then **no `postgres` and no `llama-server` / `mlx_vlm` process is left running** (check the process list). *Known open question on Windows — see #341; record exactly what survives, and grab the tail of `backend.log` right after the kill: whether it shows a shutdown marker or just stops decides the cause.*
+- [ ] After that same hard kill, then **no `postgres` and no `llama-server` / `mlx_vlm` process is left running** (check the process list). *Known open question on Windows; record exactly what survives, and grab the tail of `backend.log` right after the kill: whether it shows a shutdown marker or just stops decides the cause.*
 - [ ] When I hard-kill **during a generation** (not idle), then the same holds: backend gone, children gone, and relaunching immediately works (the port is free, the cluster is not locked).
 - [ ] When I relaunch after any of the above, then the app boots normally and my conversations, models and knowledge bases are intact.
 
-**Interrupted downloads (#314, #315, #291)**
+**Interrupted downloads**
 - [ ] When a download **completes** but the app is killed before the job row is finalized, then on relaunch the model is **kept and marked installed** — it is never silently deleted (a multi-GB artifact must survive; if it *is* deleted, that is a data-loss regression).
 - [ ] When a download is **genuinely truncated** and the app is killed, then on relaunch the incomplete files are removed and the log states the path and the size reclaimed (deletion is never silent).
 - [ ] When a download finishes and I stay on the screen, then the progress widget resolves and the UI **never stays stuck at 100%** — if finalization wedges, the poll gives up after a few minutes, the sidebar and contact icon come back, and the message says the files were saved (not "Download failed", which would push me to re-download gigabytes I already have).
 
-**Windows regression gate (#313, #321) — run these FIRST on any Windows candidate**
+**Windows regression gate — run these FIRST on any Windows candidate**
 
 *Both were release blockers on an earlier draft (then numbered 2.0.0): the packaged Windows
 build deadlocked on the first chat turn and on the KB embedding download. The
@@ -347,7 +345,7 @@ tool path explicitly — a working chat proves nothing about it.*
 - [ ] When **web search** is on and the model decides to search, then the same holds.
 - [ ] When either turn fails, then check whether the inference child is still alive: a client-side `ReadError` / `ECONNRESET` with no error in the child's output is a crash in the inference binary, not an app bug.
 
-**Model sizes & recommendations (#316, #319)**
+**Model sizes & recommendations**
 - [ ] When I look at a model's **Size** before downloading it and again once installed, then the two figures **match** — a model must not appear to shrink (or grow) the moment it finishes downloading.
 - [ ] When I compare a model's displayed size with the figure on its Hugging Face page, then they agree (decimal GB, the unit HF quotes).
 - [ ] When I read the machine readout's recommended size window, then it reflects **both** what fits in memory **and** what my memory bandwidth can stream at a usable speed — on a 16 GB Apple Silicon machine that lands around 5–10B, not the high teens.
@@ -368,6 +366,4 @@ Per release candidate, note: build version, OS + hardware, who ran it, date, and
 any **FAIL** with a linked issue. For a FAIL, grab both log files and the `fe-…`
 request id of the failing action — locations and the tracing recipe are in
 [docs/logging.md](docs/logging.md). Platform coverage (which OS/GPU each artifact
-was tested on) is tracked in `docs/dev/release-qa-checklist.md`. Scenarios marked
-*(see #136)* are known **P2** UX defects (not release-blocking), tracked in #136;
-the release-blocking defects from the bug bash (#133) are fixed (PR #135).
+was tested on) is tracked in `docs/dev/release-qa-checklist.md`.
