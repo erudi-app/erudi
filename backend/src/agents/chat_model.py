@@ -1,5 +1,32 @@
-"""Two streaming budgets per model call: prompt-sized prefill, then decode (#573).
+"""The ChatOpenAI seam: what Erudi changes about the stock client, and where.
 
+``Erudi_Chat_OpenAI`` (built lazily by :func:`erudi_chat_openai_class`) carries
+exactly two behaviours, each on the narrowest hook that expresses it:
+
+1. **The #573 two-phase streaming watchdog**, in ``_astream`` -- the single
+   place ``ChatOpenAI`` routes async streaming through, and the only hook that
+   receives the messages positionally (the first-chunk budget is computed from
+   what is actually being sent). Details below.
+2. **The #554 reasoning extraction**, in ``_convert_chunk_to_generation_chunk``
+   -- the single place every raw streamed chunk dict is converted to a
+   LangChain chunk, so it is the last point where the dedicated reasoning
+   field the local servers emit (``delta.reasoning_content`` from llama-server
+   under its default ``--reasoning-format auto``, ``delta.reasoning`` from
+   mlx_vlm.server) is still visible: upstream's ``_convert_delta_to_message_chunk``
+   drops it. The override re-attaches it as
+   ``additional_kwargs["reasoning_content"]`` on the message chunk, which the
+   runner turns into ``thinking`` events. ``finish_reason`` needs no help: the
+   base method folds it into ``generation_info`` and langchain-core's stream
+   loop folds that into the yielded message's ``response_metadata``, where the
+   runner reads it (pinned in ``tests/test_stream_watchdog.py``).
+
+The two hooks are disjoint -- the conversion runs INSIDE the budgeted stream,
+so extraction never loosens the watchdog -- and both rest on upstream
+assumptions pinned by ``tests/test_stream_watchdog.py`` so a langchain-openai
+bump fails loudly instead of silently restoring the old behavior.
+
+Why the watchdog replaces the uniform timeout (#573)
+----------------------------------------------------
 ``langchain-openai`` (pinned 1.2.2) bounds every async SSE stream with ONE
 uniform ``stream_chunk_timeout`` (default 120 s, overridable through
 ``LANGCHAIN_OPENAI_STREAM_CHUNK_TIMEOUT_S``), enforced by
@@ -42,6 +69,7 @@ import asyncio
 from functools import lru_cache
 from typing import Any, AsyncIterator, Iterable, Optional
 
+from src.agents.reasoning_stream import REASONING_KWARG, extract_reasoning_delta
 from src.core.exceptions import GenerationTimeoutException
 from src.core.logging import logger
 
@@ -229,13 +257,15 @@ def erudi_chat_openai_class():
     ``ChatOpenAI`` routes async streaming (Chat Completions or Responses API),
     it receives the messages positionally -- which is what the first-chunk
     budget is computed from -- and wrapping it leaves every other path
-    (``ainvoke``, the sync ``stream``) untouched. The assumptions it rests on
-    are pinned by ``tests/test_stream_watchdog.py``.
+    (``ainvoke``, the sync ``stream``) untouched. Same logic for
+    ``_convert_chunk_to_generation_chunk``: it sees every raw streamed chunk
+    dict exactly once, before upstream throws the reasoning field away. The
+    assumptions both rest on are pinned by ``tests/test_stream_watchdog.py``.
     """
     from langchain_openai import ChatOpenAI
 
     class Erudi_Chat_OpenAI(ChatOpenAI):
-        """``ChatOpenAI`` with the #573 two-phase streaming watchdog."""
+        """``ChatOpenAI`` with the #573 watchdog and the #554 reasoning carry."""
 
         async def _astream(self, messages, *args, **kwargs):
             estimated = estimate_prompt_tokens(messages)
@@ -250,5 +280,27 @@ def erudi_chat_openai_class():
                 model_name=self.model_name,
             ):
                 yield chunk
+
+        def _convert_chunk_to_generation_chunk(
+            self, chunk, default_chunk_class, base_generation_info
+        ):
+            """Carry the servers' dedicated reasoning field to the runner (#554).
+
+            The base conversion drops ``delta.reasoning_content`` /
+            ``delta.reasoning``; copy the raw delta's reasoning onto the
+            message chunk's ``additional_kwargs`` so the runner can emit it as
+            ``thinking`` events. Everything else -- content, tool_call_chunks,
+            ``finish_reason`` into ``generation_info`` -- is the base method's
+            result, untouched.
+            """
+            generation_chunk = super()._convert_chunk_to_generation_chunk(
+                chunk, default_chunk_class, base_generation_info
+            )
+            if generation_chunk is None:
+                return None
+            reasoning = extract_reasoning_delta(chunk)
+            if reasoning:
+                generation_chunk.message.additional_kwargs[REASONING_KWARG] = reasoning
+            return generation_chunk
 
     return Erudi_Chat_OpenAI

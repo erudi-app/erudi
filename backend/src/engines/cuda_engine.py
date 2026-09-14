@@ -175,11 +175,14 @@ class CUDA_Engine(BaseLlamaCppEngine):
         OpenAI-style function calling (the agent's calculator tool) —
         without it llama-server never emits ``tool_calls``.
 
-        ``--reasoning-format none`` keeps ``<think>...</think>`` INLINE in the
-        answer stream (#90). The default (``auto``) extracts reasoning into a
-        dedicated ``delta.reasoning_content`` field that ChatOpenAI drops, so the
-        thinking would be silently lost. Inline, the runner's single streaming
-        splitter separates thinking from answer uniformly across engines.
+        ``--reasoning-format`` is deliberately NOT passed (#554): the default
+        (``auto``) is llama-server's per-family reasoning extraction into the
+        dedicated ``delta.reasoning_content`` stream field -- it knows each
+        family's markers, re-injects a prompt-opened thinking block on every
+        post-tool hop, and closes an unterminated block cleanly at EOS.
+        ``Erudi_Chat_OpenAI`` (``src.agents.chat_model``) carries the field to
+        the runner's ``thinking`` events; the runner's ThinkSplitter stays as
+        the inline fallback for families the server parser does not know.
         """
         return [
             str(llama_server),
@@ -198,8 +201,6 @@ class CUDA_Engine(BaseLlamaCppEngine):
             "-ngl",
             str(gpu_layers),
             "--jinja",
-            "--reasoning-format",
-            "none",
         ]
 
     @classmethod

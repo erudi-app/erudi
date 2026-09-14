@@ -19,6 +19,19 @@ over those events with two modes selected by ``emit_events``:
   - Arena: ``thread_id=None`` + ``summarize=False`` + no checkpointer → a
     stateless single-model call.
 
+Thinking events come from two sources (#554). The primary one is the dedicated
+reasoning channel: both local servers extract each family's chain-of-thought
+server-side (llama-server's default ``--reasoning-format auto``, mlx_vlm's
+native split) and ``Erudi_Chat_OpenAI`` re-attaches it to every streamed chunk
+as ``additional_kwargs["reasoning_content"]``. The fallback is the streaming
+ThinkSplitter on the content channel, for families whose markers the server
+parser does not know -- and Arena's plain-text projection depends on it to keep
+inline ``<think>`` out of its wire. A turn that ends with reasoning but no
+answer text (and no tool result to fall back to, #90) yields a curated
+empty-answer line -- a NORMAL answer picked by ``finish_reason``, never the
+ERROR sentinel, so the trace survives persistence -- and, on stateful runs,
+writes that line into the thread state in place of the empty assistant message.
+
 On tool-carrying turns (#297), text a model hop streams BEFORE its tool call is
 not the answer — it is pre-answer narration (often hallucinated guessing on
 small local models: an invented payload figure narrated at length, THEN the
@@ -98,6 +111,25 @@ LOOP_LIMIT_MESSAGE = (
     f"{ERROR_SENTINEL} I couldn't reach a final answer for this request "
     "(the model kept retrying without making progress). Please try rephrasing "
     "your question."
+)
+
+# Curated turns for a stream that ended with NO answer text and nothing to
+# fall back to (#554). Deliberately NOT the ERROR sentinel: a sentinel turn is
+# rendered red by the frontend and persisted WITHOUT its trace (the
+# conversation service drops the trace on sentinel answers), which would throw
+# away exactly the reasoning that explains what happened. One impersonal ASCII
+# line each, actionable by the user AND by the model -- the persisted line is
+# replayed to the model on the next turn. Two wordings because the two
+# finish_reasons are different failures: ``length`` means generation was cut
+# mid-reasoning (the length line never names the removed Max Tokens control);
+# ``stop`` means the model closed its turn without writing an answer.
+EMPTY_ANSWER_LENGTH_MESSAGE = (
+    "Generation stopped during reasoning, before an answer was written. "
+    "Send a follow-up asking for the final answer directly, or lower the reasoning effort."
+)
+EMPTY_ANSWER_STOP_MESSAGE = (
+    "The model finished its turn without writing an answer. "
+    "Send a follow-up asking it to continue."
 )
 
 # Curated turns for a stream that ran out of wall-clock budget (#573). The two
@@ -344,8 +376,10 @@ class AgentRunner:
     ) -> AsyncIterator[dict]:
         """The single capture loop: structured events for the whole turn (#90).
 
-        Yields ``{"t":"answer","text":...}`` (text outside ``<think>``),
-        ``{"t":"thinking","text":...}`` (text inside ``<think>``), one
+        Yields ``{"t":"answer","text":...}`` (the content channel, outside any
+        inline ``<think>``), ``{"t":"thinking","text":...}`` (the servers'
+        dedicated reasoning channel, plus inline ``<think>`` content caught by
+        the fallback splitter, #554), one
         ``{"t":"tool_call","name":...,"args":{...}}`` per call, and
         ``{"t":"tool_result","name":...,"text":...}`` per ToolMessage.
 
@@ -440,13 +474,19 @@ class AgentRunner:
                 return
 
             # Aggregate-only stream accounting (never log per token): start,
-            # first-token latency, then one completion line with totals. Counts
-            # ANSWER text only -- thinking is separated out and must not inflate
-            # the answer accounting nor the empty-final signal below.
+            # first-token latency, then one completion line with totals.
+            # ``char_count`` counts ANSWER text only -- reasoning is counted
+            # apart (``reasoning_chars``) and must not inflate the answer
+            # accounting nor the empty-final signal below. ``finish_reason``
+            # keeps the LAST finish_reason a model hop reported (#554): it
+            # picks the curated empty-answer wording and lands in the
+            # completion log for field-report attribution.
             stream_start_s = time.perf_counter()
             first_token_s: Optional[float] = None
             chunk_count = 0
             char_count = 0
+            reasoning_chars = 0
+            finish_reason: Optional[str] = None
             # Empty-final fallback bookkeeping (#90): some agentic models call a
             # tool successfully, then emit an EMPTY final ANSWER (observed with
             # Gemma: calculator("1240 + 1378 + 1456") -> ToolMessage "4074" ->
@@ -518,8 +558,23 @@ class AgentRunner:
                             for buffered in hop_text_buffer:
                                 yield {"t": "thinking", "text": buffered}
                             hop_text_buffer.clear()
+                        # Dedicated reasoning channel (#554): both servers
+                        # extract chain-of-thought server-side and the chat
+                        # client re-attaches it to the chunk. A reasoning-only
+                        # chunk has EMPTY ``.text`` but is stream activity all
+                        # the same: it must start the first-token clock and
+                        # count in the chunk total, or an all-reasoning turn
+                        # would look like a silent hang in the logs.
+                        reasoning_delta = (getattr(token, "additional_kwargs", None) or {}).get(
+                            "reasoning_content"
+                        ) or ""
                         text = getattr(token, "text", "")
-                        if text:
+                        hop_finish = (getattr(token, "response_metadata", None) or {}).get(
+                            "finish_reason"
+                        )
+                        if hop_finish:
+                            finish_reason = hop_finish
+                        if text or reasoning_delta:
                             if first_token_s is None:
                                 first_token_s = time.perf_counter()
                                 logger.info(
@@ -527,9 +582,17 @@ class AgentRunner:
                                     f"latency_ms={(first_token_s - stream_start_s) * 1000:.0f}"
                                 )
                             chunk_count += 1
+                        if reasoning_delta:
+                            # Never buffered by the #297 narration logic:
+                            # reasoning is thinking by definition, on every hop.
+                            reasoning_chars += len(reasoning_delta)
+                            yield {"t": "thinking", "text": reasoning_delta}
+                        if text:
                             for event in splitter.feed(text):
                                 if event["t"] != "answer":
-                                    # Real <think> content: flows immediately.
+                                    # Real <think> content (fallback splitter
+                                    # families): flows immediately.
+                                    reasoning_chars += len(event["text"])
                                     yield event
                                 elif agentic and hop_has_tool_call:
                                     # Post-tool-call text in a narrating hop
@@ -562,12 +625,14 @@ class AgentRunner:
                         if event["text"].strip():
                             emitted_model_text = True
                         char_count += len(event["text"])
+                    else:
+                        reasoning_chars += len(event["text"])
                     yield event
                 # Empty/blank final answer, but a tool produced a result this
                 # turn: deliver that last tool result AS THE ANSWER (#90) so a
                 # correct value is streamed and persisted instead of crashing the
-                # empty-content guard. No tool ran -> nothing to fall back to;
-                # keep today's behavior (a genuine empty-answer failure).
+                # empty-content guard. No tool ran -> the curated empty-answer
+                # turn below (#554).
                 if not emitted_model_text and last_tool_result is not None:
                     logger.info(
                         f"Empty final answer with a tool result; falling back to "
@@ -580,11 +645,44 @@ class AgentRunner:
                 # emit it now so the trace still records the attempt.
                 for tc_event in _drain_tool_calls(pending_tool_calls):
                     yield tc_event
+                # No answer text and nothing to fall back to (#554): deliver
+                # the curated empty-answer turn as a NORMAL answer instead of
+                # yielding nothing (which crashed the downstream empty-content
+                # guard into a generic error that also dropped the trace). The
+                # wording follows finish_reason: ``length`` = cut mid-reasoning,
+                # anything else = the model closed its turn without an answer.
+                if not emitted_model_text and last_tool_result is None:
+                    curated = (
+                        EMPTY_ANSWER_LENGTH_MESSAGE
+                        if finish_reason == "length"
+                        else EMPTY_ANSWER_STOP_MESSAGE
+                    )
+                    logger.info(
+                        f"Turn ended with no answer text: llm={getattr(llm, 'id', '?')}, "
+                        f"finish_reason={finish_reason or 'unknown'}, "
+                        f"reasoning_chars={reasoning_chars}; yielding the curated turn"
+                    )
+                    char_count += len(curated)
+                    if stateful:
+                        # State BEFORE the yield: a client that disconnects
+                        # right after receiving the curated event closes this
+                        # generator at the yield, and code after it never runs
+                        # -- while the conversation service's finally still
+                        # persists the curated line to SQL. Writing first keeps
+                        # the checkpointer consistent with what a reload shows;
+                        # the reverse window (state written, client already
+                        # gone) is covered by the service's interrupted-turn
+                        # handling. Without the write at all, the checkpointer
+                        # keeps the EMPTY AIMessage the model node committed
+                        # and the next turn replays an empty assistant turn.
+                        await self._write_curated_empty_turn(agent, run_config, curated)
+                    yield {"t": "answer", "text": curated}
                 duration_ms = (time.perf_counter() - stream_start_s) * 1000
                 logger.info(
                     f"Agent stream completed: llm={getattr(llm, 'id', '?')}, "
                     f"duration_ms={duration_ms:.0f}, chunks={chunk_count} (~tokens), "
-                    f"chars={char_count}"
+                    f"reasoning_chars={reasoning_chars}, answer_chars={char_count}, "
+                    f"finish_reason={finish_reason or 'unknown'}"
                 )
             except GraphRecursionError:
                 # #277: the agent hit AGENT_RECURSION_LIMIT (a small model looping
@@ -755,6 +853,45 @@ class AgentRunner:
                 token_counter=count_tokens_approximately,
             ),
         ]
+
+    async def _write_curated_empty_turn(self, agent, run_config, text: str) -> None:
+        """Write the curated empty-answer line into the thread state (#554).
+
+        A turn that ended with no answer text has committed an EMPTY
+        ``AIMessage`` to the checkpointer (the model node aggregates the
+        streamed chunks, reasoning excluded). Mirror of ``_repair_alternation``:
+        update the state as the ``model`` node -- replacing the trailing empty
+        assistant message in place (same id, LangGraph's ``add_messages``
+        replaces on id match) so the next turn's template sees the curated
+        line, not an empty turn; append instead when the last message is
+        something else (defensive: the state is then already well-formed).
+        """
+        from langchain_core.messages import AIMessage
+
+        try:
+            state = await agent.aget_state(run_config)
+            messages = (state.values or {}).get("messages", []) if state else []
+            replace_id = None
+            if messages:
+                last = messages[-1]
+                if (
+                    last.type == "ai"
+                    and not getattr(last, "tool_calls", None)
+                    and not str(getattr(last, "text", "") or "").strip()
+                ):
+                    replace_id = last.id
+            await agent.aupdate_state(
+                run_config,
+                {"messages": [AIMessage(content=text, id=replace_id)]},
+                as_node="model",
+            )
+        except Exception:
+            # Accepted trade: a failed state write leaves SQL ahead of the
+            # thread state (the user still gets the curated line; the next
+            # turn replays an empty assistant message instead of it). There is
+            # no better recovery than proceeding -- retrying here would block
+            # the turn on a checkpointer that just failed.
+            logger.exception("Failed to write the curated empty-answer turn into the thread state")
 
     async def _repair_alternation(self, agent, run_config) -> None:
         """Preserve role alternation in the checkpointer after a failed turn.

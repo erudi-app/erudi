@@ -21,11 +21,16 @@ unit tests that run on Linux CI where `mlx-vlm` is not installed.
 
 In-child patches (pinned mlx-vlm 0.6.13)
 ----------------------------------------
-Three monkeypatches are applied before the server starts. Two 0.6.2-era
-patches were dropped with the 0.6.13 bump because upstream now runs weight
-sanitization unconditionally in `mlx_vlm.utils.load_model` (the 0.6.2
-`format == "mlx"` sanitize skip is gone) — but hardware validation showed the
-static evidence for the first drop was incomplete:
+Two monkeypatches are applied before the server starts. The server's native
+reasoning split is deliberately NOT patched: mlx-vlm streaming chain-of-thought
+in the dedicated `delta.reasoning` field is the wanted behavior (#554) —
+`Erudi_Chat_OpenAI` (`src.agents.chat_model`) carries the field to the
+runner's `thinking` events, so the old `_patch_inline_thinking` (which forced
+reasoning inline into `delta.content` for the runner's ThinkSplitter) is gone.
+Two 0.6.2-era patches were dropped with the 0.6.13 bump because upstream now
+runs weight sanitization unconditionally in `mlx_vlm.utils.load_model` (the
+0.6.2 `format == "mlx"` sanitize skip is gone) — but hardware validation
+showed the static evidence for the first drop was incomplete:
 
   - `_patch_text_only_tied_embeddings` (dropped): the `text_only` route IS
     fixed upstream (`models/text_only.py` `Model.sanitize` delegates to the
@@ -51,7 +56,7 @@ per-spawn file the parent resolved (`mlx_child_log`) before anything else
 runs. mlx-vlm's `logging.basicConfig`, uvicorn's handlers and every native
 write from mlx/Metal then land there, and `MLX_Engine._read_child_output`
 quotes its tail in a crash report -- the same diagnostic `llama-server` gets
-from its drainer. The three patches below report a failure to apply into that
+from its drainer. The patches below report a failure to apply into that
 same file: each compensates for a defect the user meets head-on, so an
 mlx-vlm bump that moves what they patch must not pass unnoticed.
 
@@ -224,92 +229,6 @@ def _patch_gemma_end_of_turn_stop() -> bool:
     return True
 
 
-# Unmatchable thinking markers injected by `_patch_inline_thinking`. Model text
-# can never contain a NUL byte, so these never match a marker (no split) and
-# never partially match a chunk suffix (no `_split_partial` holdback latency).
-_NEVER_OPEN_MARKER = "\x00erudi:no-thinking-split\x00"
-_NEVER_CLOSE_MARKER = "\x00/erudi:no-thinking-split\x00"
-
-
-def _patch_inline_thinking() -> bool:
-    """Keep model reasoning INLINE in ``delta.content`` (#90).
-
-    mlx-vlm 0.6.13 splits streamed thinking into a dedicated
-    ``delta.reasoning`` field via ``ThinkingStreamState`` — a channel that
-    ChatOpenAI silently drops, so the reasoning never reaches the runner. The
-    design (#90) wants the raw ``<think>...</think>`` INLINE in
-    ``delta.content`` so the runner's single streaming ThinkSplitter handles
-    MLX exactly like llama-server with ``--reasoning-format none``.
-
-    Why a monkeypatch and not configuration — on the pinned 0.6.13:
-
-      - ``--thinking-start-token`` / ``MLX_VLM_THINKING_START_TOKEN`` exist
-        but cannot disable the split: ``_build_open_close_markers`` always
-        APPENDS the built-in marker families (``<think>``,
-        ``<|channel>thought``, ``<|START_THINKING|>``) after any custom pair,
-        and a custom pair only registers when BOTH start and end tokens are
-        set. There is no native "reasoning inline / no split" control.
-      - ``ThinkingStreamState.__init__`` still sets ``in_thinking =
-        bool(enable_thinking)``: the route passes ``prompt_has_open_thinking``
-        there, so a prompt whose template opens a thinking block starts the
-        stream in reasoning mode regardless of any marker.
-
-    So the first choke point is the class itself: force every instance to
-    start OUTSIDE thinking with unmatchable markers. ``feed()`` then falls
-    through to its plain-content branch, preserving upstream
-    ``<|START_TEXT|>`` content-marker stripping and the downstream tool-call
-    suppression untouched. The class object is mutated in place (never
-    rebound), so it is irrelevant whether callers imported it before or after
-    the patch.
-
-    0.6.13 adds a second choke point: the ``make_response_stream_state``
-    factory prefers a ``ResponseTemplateStreamState`` (a transformers
-    response-template parser that ALSO routes reasoning to
-    ``delta.reasoning``) whenever the tokenizer exposes a
-    ``response_template`` — bypassing ``ThinkingStreamState`` entirely. The
-    factory resolves its ``_response_template_tokenizer`` helper through the
-    module globals at call time, so neutralizing that helper disables the
-    bypass even though the route modules from-import the factory at package
-    import time. Every stream then goes through the neutralized
-    ``ThinkingStreamState``.
-
-    Returns:
-        True if the patch was applied (or already present), False if
-        mlx-vlm's server module could not be imported (non-MLX hosts, CI).
-        Idempotent.
-    """
-    try:
-        from mlx_vlm.server import responses_state
-    except Exception:
-        return False
-
-    state_cls = getattr(responses_state, "ThinkingStreamState", None)
-    if state_cls is None:
-        return False
-
-    if not getattr(state_cls, "_erudi_inline_thinking_patch", False):
-        _orig_init = state_cls.__init__
-
-        def _init(self, *args, **kwargs):
-            _orig_init(self, *args, **kwargs)
-            self.in_thinking = False
-            self.open_close_markers = ((_NEVER_OPEN_MARKER, _NEVER_CLOSE_MARKER),)
-            self.open_markers = (_NEVER_OPEN_MARKER,)
-            self.close_markers = (_NEVER_CLOSE_MARKER,)
-
-        state_cls.__init__ = _init
-        state_cls._erudi_inline_thinking_patch = True
-
-    # Disable the 0.6.13 template-parser bypass in `make_response_stream_state`.
-    if hasattr(responses_state, "_response_template_tokenizer") and not getattr(
-        responses_state, "_erudi_template_bypass_patch", False
-    ):
-        responses_state._response_template_tokenizer = lambda processor: None
-        responses_state._erudi_template_bypass_patch = True
-
-    return True
-
-
 def _import_mlx_vlm_server_main():
     """Import and return `mlx_vlm.server.cli.main`.
 
@@ -364,10 +283,6 @@ def run_mlx_vlm_server(argv: List[str], log_path: Optional[str] = None) -> None:
     # Register Gemma's <end_of_turn> as a stop token so generation halts at the
     # end of the answer instead of streaming the literal token + garbage (#249).
     _record_unapplied_patch("_patch_gemma_end_of_turn_stop", _patch_gemma_end_of_turn_stop())
-    # Applied in-child before the server starts so every ThinkingStreamState it
-    # builds keeps reasoning inline in delta.content (#90) — see the patch's
-    # docstring for why 0.6.13 offers no configuration path for this.
-    _record_unapplied_patch("_patch_inline_thinking", _patch_inline_thinking())
     main = _import_mlx_vlm_server_main()
     main()
 
@@ -377,10 +292,10 @@ def _record_unapplied_patch(name: str, applied: bool) -> None:
 
     Every patch above compensates for a pinned-mlx-vlm defect with a visible
     consequence: a quantized Gemma3 checkpoint that refuses to load, a Gemma
-    answer that runs past ``<end_of_turn>``, reasoning routed to a field
-    ChatOpenAI drops. Each returns ``False`` when its target module or class
-    is not where it expects it -- an mlx-vlm bump, typically. Unrecorded, that
-    ships a degraded product with nothing to explain it.
+    answer that runs past ``<end_of_turn>``. Each returns ``False`` when its
+    target module or class is not where it expects it -- an mlx-vlm bump,
+    typically. Unrecorded, that ships a degraded product with nothing to
+    explain it.
     """
     if not applied:
         child_warning(
