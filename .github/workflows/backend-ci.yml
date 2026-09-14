@@ -28,10 +28,8 @@ jobs:
   backend-ci:
     name: backend-ci (${{ matrix.os }})
     runs-on: ${{ matrix.os }}
-    # All three legs are merge gates. Windows and macOS were advisory
-    # (continue-on-error) while their failures were triaged; that work is done
-    # -- the last ten were fixed in #358 and all three legs have been green on
-    # main since. Promoted per the criteria in docs/dev/backend-ci-multi-os.md.
+    # All three legs are merge gates: a platform-specific failure blocks the
+    # merge like any other.
     strategy:
       # Never cancel the other legs when one fails: a failure on one platform
       # should not hide the state of the other two.

@@ -17,6 +17,7 @@ from src.agents.tools import (
     TurnToolContext,
     WEB_SEARCH_ERROR_PREFIX,
     WEB_SEARCH_MAX_RESULTS,
+    _estimate_web_tokens,
     format_web_tool_result,
     map_web_search_error,
     web_search,
@@ -94,15 +95,39 @@ class TestFormatWebToolResult:
 
     def test_token_budget_keeps_whole_results_best_first(self, monkeypatch):
         # Fake counter: 10 tokens per result — a 15-token budget keeps ONE.
-        monkeypatch.setattr("src.agents.tools.count_tokens", lambda text: 10)
+        monkeypatch.setattr("src.agents.tools._estimate_web_tokens", lambda text: 10)
         out = format_web_tool_result(_RESULTS, "q", 15)
         assert "Python 3.13 released" in out
         assert "What's new in Python 3.13" not in out
 
     def test_first_result_survives_even_oversized(self, monkeypatch):
-        monkeypatch.setattr("src.agents.tools.count_tokens", lambda text: 9999)
+        monkeypatch.setattr("src.agents.tools._estimate_web_tokens", lambda text: 9999)
         out = format_web_tool_result(_RESULTS, "q", 100)
         assert "Python 3.13 released" in out
+
+
+class TestEstimateWebTokens:
+    def test_empty_string_is_zero(self):
+        assert _estimate_web_tokens("") == 0
+
+    def test_ascii_exact_multiple_of_three(self):
+        assert _estimate_web_tokens("a" * 300) == 100
+
+    def test_multi_byte_characters_count_by_utf8_bytes(self):
+        # Each Chinese character below is 3 bytes in UTF-8, so N characters
+        # cost exactly N estimated tokens.
+        text = "你" * 12
+        assert len(text.encode("utf-8")) == 36
+        assert _estimate_web_tokens(text) == 12
+
+    def test_lone_surrogate_is_counted_not_raised(self):
+        # A malformed result (a JSON-escaped "\\ud800" decoded by the search
+        # library) must not make the tool raise.
+        assert _estimate_web_tokens("ab" + chr(0xD800)) == 2
+
+    def test_non_multiple_of_three_rounds_up(self):
+        assert len("abcd".encode("utf-8")) == 4
+        assert _estimate_web_tokens("abcd") == 2
 
 
 class TestWebSearchErrorMapping:
@@ -200,3 +225,44 @@ class TestWebSearchTool:
         monkeypatch.setattr("src.agents.tools._run_ddgs_text", boom)
         out = await web_search.coroutine(query="q", runtime=_runtime(_ctx()))
         assert out.startswith(f"{WEB_SEARCH_ERROR_PREFIX}unexpected failure (")
+
+
+class TestWebToolDoesNotLoadKbTokenizer:
+    """The privacy promise (docs/privacy.md): Hugging Face is contacted only
+    when the user accepts the knowledge-base embedding download. The web
+    tool must never trigger that fetch by loading the e5 tokenizer."""
+
+    def test_format_web_tool_result_never_loads_the_e5_tokenizer(self, monkeypatch):
+        def boom():
+            raise AssertionError("the web tool must not load the e5 tokenizer")
+
+        monkeypatch.setattr("src.ingestion.chunking._get_tokenizer", boom)
+        results = [
+            {
+                "title": "Python 3.13 released",
+                "href": "https://www.python.org/downloads/release/python-3130/",
+                "body": "Python 3.13.0 is the newest major release of the Python language.",
+            },
+            {
+                "title": "What's new in Python 3.13",
+                "href": "https://docs.python.org/3/whatsnew/3.13.html",
+                "body": "This article explains the new features in Python 3.13.",
+            },
+            {
+                "title": "Python release schedule",
+                "href": "https://peps.python.org/pep-0719/",
+                "body": "PEP 719 documents the release schedule for Python 3.13.",
+            },
+        ]
+        out = format_web_tool_result(results, "some question", 400)
+        assert "https://www.python.org/downloads/release/python-3130/" in out
+
+
+class TestWebSearchToolMalformedResult:
+    async def test_lone_surrogate_in_a_result_does_not_raise(self, monkeypatch):
+        def fake_run(query, max_results):
+            return [{"title": "t", "href": "https://example.com/a", "body": "x" + chr(0xD800)}]
+
+        monkeypatch.setattr("src.agents.tools._run_ddgs_text", fake_run)
+        out = await web_search.coroutine(query="q", runtime=_runtime(_ctx()))
+        assert "https://example.com/a" in out

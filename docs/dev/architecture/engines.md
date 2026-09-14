@@ -47,7 +47,7 @@ from src.core import config
 config.LLM_Engine = BaseEngine.get_engine()
 ```
 
-`BaseEngine.get_engine()` (`base_engine.py:528`) dispatches at startup:
+`BaseEngine.get_engine()` (`base_engine.py`) dispatches at startup:
 
 - macOS ARM (`platform.system() == "Darwin"` and `"arm" in platform.machine()`) → `MLX_Engine`
 - Windows/Linux with `pynvml.nvmlDeviceGetCount() > 0` → `CUDA_Engine`
@@ -112,7 +112,7 @@ generation.
 `BaseEngine` keeps `_model`, `_tokenizer`, `_model_id` and `_last_used` as class
 attributes shared across requests. A cleanup monitor started in the FastAPI lifespan
 (`core/api.py`, `start_cleanup_task()`) ticks every 300 seconds and unloads the model once
-it has been idle for longer than `_max_idle_time` (300 seconds, `base_engine.py:100`).
+it has been idle for longer than `_max_idle_time` (300 seconds, `base_engine.py`).
 While a generation is in flight the active marker `_last_used = None` makes
 `_should_cleanup()` return `False`.
 
