@@ -106,7 +106,8 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When web search is ON with a tool-capable model and I ask a question needing a **current external fact**, then the reasoning strip shows a `web_search` call with its results, and the answer **cites source URLs** from those results.
 - [ ] When web search is ON and I ask something the model already knows ("capital of France"), then it answers **directly with zero web calls**.
 - [ ] When web search is ON but the machine is **offline**, then the turn completes with the model relaying the honest tool text ("Error during Web Search: no internet connection") — no hang, no invented answer.
-- [ ] When the conversation's model is **not verified tool-capable**, then the model never receives the web tool, whatever the toggle says (the toggle stays visible; it simply has no effect on such models).
+- [ ] When the conversation's model is **not verified tool-capable**, then the Web search toggle in the chat header is **disabled** (greyed, cannot be flipped) and hovering it explains why — one wording for a model that **can't** use tools, another for one whose tool support **hasn't been verified** yet. The model never receives the web tool either way.
+- [ ] When the Settings page describes the **Web Search** control, then it reads as the starting value for **new** conversations (each conversation keeps its own toggle in its chat header) — not as a global switch.
 - [ ] When I change the **global** web-search default in Settings, then existing conversations keep their own toggle unchanged; only conversations created afterwards inherit the new default.
 
 **Multimodal / multi-turn**
