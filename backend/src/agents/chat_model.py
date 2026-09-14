@@ -65,8 +65,14 @@ PHASE_INTER_CHUNK = "inter-chunk"
 # - BASE covers what is not proportional to the prompt: connecting, the child
 #   server picking up the request, the chat template being applied.
 # - FLOOR keeps short prompts at the old, field-proven 120 s.
-# - CEILING stops the budget growing without limit: a turn that has not started
-#   after 15 minutes is not worth waiting for, whatever the arithmetic says.
+# - CEILING stops the budget growing without limit. Its constant (900 s) was
+#   sized against the old fixed 4096 window; with the dynamic context window
+#   it is only the FLOOR OF THE CEILING: a full-window prompt on the child's
+#   ALLOCATED window W legitimately needs BASE + W/RATE seconds of prefill,
+#   so the effective ceiling is max(900, BASE + W/RATE). Keeping 900 s flat
+#   would recreate the #573 kill on every long-window model the dynamic
+#   window now allows -- the exact bug this watchdog exists to prevent. With
+#   no known window (engine handle without one) 900 s stands.
 #
 # The incident's own turn lands at 30 + 6878/25 = 305 s, more than twice the
 # 132.9 s it actually needed.
@@ -164,10 +170,26 @@ def estimate_prompt_tokens(messages: Optional[Iterable[Any]]) -> int:
     return tokens + text_bytes
 
 
-def first_chunk_budget_s(estimated_prompt_tokens: int) -> float:
-    """Seconds of silence allowed before the first chunk, for that prompt size."""
+def first_chunk_budget_s(
+    estimated_prompt_tokens: int, effective_window_tokens: Optional[int] = None
+) -> float:
+    """Seconds of silence allowed before the first chunk, for that prompt size.
+
+    ``effective_window_tokens`` is the ALLOCATED window of the loaded child
+    (``BaseEngine.effective_context_tokens``): it raises the ceiling to a
+    full-window prefill (``max(900, BASE + W/RATE)``) so a legitimate
+    window-filling prompt is never killed mid-prefill, while ``None`` (window
+    unknown) keeps the field-proven 900 s. The ceiling only ever rises with
+    the window -- a small window never cuts below 900 s.
+    """
+    ceiling = FIRST_CHUNK_CEILING_S
+    if effective_window_tokens is not None and effective_window_tokens > 0:
+        ceiling = max(
+            ceiling,
+            FIRST_CHUNK_BASE_S + effective_window_tokens / CONSERVATIVE_PREFILL_TOKENS_PER_SEC,
+        )
     raw = FIRST_CHUNK_BASE_S + estimated_prompt_tokens / CONSERVATIVE_PREFILL_TOKENS_PER_SEC
-    return min(max(FIRST_CHUNK_FLOOR_S, raw), FIRST_CHUNK_CEILING_S)
+    return min(max(FIRST_CHUNK_FLOOR_S, raw), ceiling)
 
 
 async def stream_with_two_phase_budget(
@@ -237,14 +259,23 @@ def erudi_chat_openai_class():
     class Erudi_Chat_OpenAI(ChatOpenAI):
         """``ChatOpenAI`` with the #573 two-phase streaming watchdog."""
 
+        # The ALLOCATED window of the child this client points at, stamped by
+        # the factory at build time (the client is rebuilt every turn, right
+        # after the engine resolved the model, so the value is fresh across
+        # model swaps). It raises the first-chunk ceiling to a full-window
+        # prefill; None (unknown window) keeps the 900 s constant.
+        effective_context_tokens: Optional[int] = None
+
         async def _astream(self, messages, *args, **kwargs):
             estimated = estimate_prompt_tokens(messages)
             source = super()._astream(messages, *args, **kwargs)
             async for chunk in stream_with_two_phase_budget(
                 source,
-                first_budget_s=first_chunk_budget_s(estimated),
                 # Read from the module (not captured) so the budgets stay one
                 # source of truth -- and patchable in tests.
+                first_budget_s=first_chunk_budget_s(
+                    estimated, effective_window_tokens=self.effective_context_tokens
+                ),
                 inter_budget_s=INTER_CHUNK_BUDGET_S,
                 estimated_prompt_tokens=estimated,
                 model_name=self.model_name,

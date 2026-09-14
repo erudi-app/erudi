@@ -183,6 +183,45 @@ def test_the_incident_history_reaches_the_ceiling_through_the_estimate():
     assert budget == FIRST_CHUNK_CEILING_S
 
 
+# ===================== the window-aware ceiling =====================
+#
+# FIRST_CHUNK_CEILING_S (900 s) was sized against the old fixed 4096 window.
+# With the dynamic context landing, a full-window prompt on a big window
+# legitimately needs BASE + W/RATE seconds of prefill; a fixed 900 s ceiling
+# there would recreate exactly the #573 kill the two-phase watchdog fixed. So
+# the ceiling derives from the ALLOCATED window of the loaded child
+# (effective_context_tokens) and 900 s stays the floor of the ceiling.
+
+
+def test_the_ceiling_stays_at_900_without_an_effective_window():
+    assert first_chunk_budget_s(10_000_000, effective_window_tokens=None) == FIRST_CHUNK_CEILING_S
+
+
+def test_a_big_window_raises_the_ceiling_to_a_full_window_prefill():
+    budget = first_chunk_budget_s(10_000_000, effective_window_tokens=200_000)
+
+    assert budget == pytest.approx(
+        FIRST_CHUNK_BASE_S + 200_000 / CONSERVATIVE_PREFILL_TOKENS_PER_SEC
+    )
+    assert budget > FIRST_CHUNK_CEILING_S
+
+
+def test_a_small_window_never_lowers_the_ceiling():
+    # max(900, ...) by design: a 4096 window keeps the field-proven ceiling.
+    assert first_chunk_budget_s(10_000_000, effective_window_tokens=4096) == FIRST_CHUNK_CEILING_S
+
+
+def test_a_prompt_below_the_raised_ceiling_keeps_its_own_budget():
+    # The raised ceiling is a cap, not a grant: a smaller prompt still gets
+    # its prompt-sized budget.
+    budget = first_chunk_budget_s(30_000, effective_window_tokens=40_960)
+
+    assert budget == pytest.approx(
+        FIRST_CHUNK_BASE_S + 30_000 / CONSERVATIVE_PREFILL_TOKENS_PER_SEC
+    )
+    assert budget < FIRST_CHUNK_BASE_S + 40_960 / CONSERVATIVE_PREFILL_TOKENS_PER_SEC
+
+
 # ===================== the prompt-size estimate =====================
 
 
@@ -290,6 +329,14 @@ class _Llm:
     param_size = 7.0
 
 
+class _WindowedEngine(_IdentityEngine):
+    """Engine stub whose loaded child carries an allocated window."""
+
+    @staticmethod
+    def effective_context_tokens():
+        return 40_960
+
+
 def test_build_chat_model_returns_the_watchdog_subclass_with_langchains_knob_off(monkeypatch):
     monkeypatch.setattr(config, "LLM_Engine", _IdentityEngine)
 
@@ -298,6 +345,50 @@ def test_build_chat_model_returns_the_watchdog_subclass_with_langchains_knob_off
     assert isinstance(chat, erudi_chat_openai_class())
     # langchain's uniform per-chunk timeout must be OFF: ours replaces it.
     assert chat.stream_chunk_timeout is None
+
+
+def test_build_chat_model_carries_the_engines_allocated_window(monkeypatch):
+    # The factory runs once per turn, AFTER get_model_and_tokenizer, so the
+    # window it reads is the loaded child's -- fresh across model swaps.
+    monkeypatch.setattr(config, "LLM_Engine", _WindowedEngine)
+
+    chat = build_chat_model(_Llm(), temperature=0.3, top_p=0.8, max_tokens=55)
+
+    assert chat.effective_context_tokens == 40_960
+
+
+def test_build_chat_model_without_a_window_probe_keeps_the_window_unknown(monkeypatch):
+    monkeypatch.setattr(config, "LLM_Engine", _IdentityEngine)
+
+    chat = build_chat_model(_Llm(), temperature=0.3, top_p=0.8, max_tokens=55)
+
+    assert chat.effective_context_tokens is None
+
+
+async def test_the_subclass_stream_budgets_with_its_effective_window(monkeypatch):
+    from langchain_openai import ChatOpenAI
+
+    captured: dict = {}
+
+    def _spy(estimated, effective_window_tokens=None):
+        captured["window"] = effective_window_tokens
+        return 0.3
+
+    monkeypatch.setattr(chat_model_module, "first_chunk_budget_s", _spy)
+
+    async def _fast_parent(self, messages, *args, **kwargs):
+        yield "a"
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _fast_parent)
+
+    model = erudi_chat_openai_class()(
+        base_url="http://127.0.0.1:1/v1",
+        api_key="not-needed",
+        model="fake-model",
+        effective_context_tokens=40_960,
+    )
+    assert [chunk async for chunk in model._astream([_Msg("hi")])] == ["a"]
+    assert captured["window"] == 40_960
 
 
 def _tiny_budgets(monkeypatch):
