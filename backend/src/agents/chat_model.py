@@ -84,6 +84,19 @@ FIRST_CHUNK_BASE_S = 30.0
 CONSERVATIVE_PREFILL_TOKENS_PER_SEC = 25.0
 FIRST_CHUNK_CEILING_S = 900.0
 
+# Absolute wall-clock backstop on the first-chunk budget, whatever the window.
+# The window-scaled ceiling exists so a legitimately full ALLOCATED window is
+# never mistaken for a hang -- but the catalog carries million-token windows,
+# and scaling alone would let a genuinely hung child sit undetected for hours
+# while ``generation_guard`` holds the engine's global lock (no other
+# conversation, no model swap). A prefill that has produced nothing after an
+# hour is not an experience worth waiting for on any machine this app targets:
+# machines large enough to hold such prompts prefill far above the
+# conservative rate, and machines that cannot hold them never reach prompts
+# that size (the KV alone exceeds their memory). An honest timeout beats an
+# eleven-hour lock.
+FIRST_CHUNK_ABSOLUTE_MAX_S = 3600.0
+
 # Once tokens flow, two minutes of silence is a hang: decode emits a token every
 # few milliseconds on every engine. This is langchain's default, kept on purpose
 # -- it was never wrong for THIS phase.
@@ -191,6 +204,7 @@ def first_chunk_budget_s(
             ceiling,
             FIRST_CHUNK_BASE_S + effective_window_tokens / CONSERVATIVE_PREFILL_TOKENS_PER_SEC,
         )
+    ceiling = min(ceiling, FIRST_CHUNK_ABSOLUTE_MAX_S)
     raw = FIRST_CHUNK_BASE_S + estimated_prompt_tokens / CONSERVATIVE_PREFILL_TOKENS_PER_SEC
     return min(max(FIRST_CHUNK_FLOOR_S, raw), ceiling)
 

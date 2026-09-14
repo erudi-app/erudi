@@ -198,12 +198,23 @@ def test_the_ceiling_stays_at_900_without_an_effective_window():
 
 
 def test_a_big_window_raises_the_ceiling_to_a_full_window_prefill():
-    budget = first_chunk_budget_s(10_000_000, effective_window_tokens=200_000)
+    budget = first_chunk_budget_s(10_000_000, effective_window_tokens=60_000)
 
     assert budget == pytest.approx(
-        FIRST_CHUNK_BASE_S + 200_000 / CONSERVATIVE_PREFILL_TOKENS_PER_SEC
+        FIRST_CHUNK_BASE_S + 60_000 / CONSERVATIVE_PREFILL_TOKENS_PER_SEC
     )
     assert budget > FIRST_CHUNK_CEILING_S
+
+
+def test_the_absolute_backstop_caps_a_million_token_window():
+    # The window-scaled ceiling must NOT scale without limit: a million-token
+    # window would otherwise let a genuinely hung child hold the engine's
+    # global generation lock for ~11 hours before the watchdog fires. One hour
+    # is the honest maximum wait for a first token on any machine this app
+    # targets.
+    budget = first_chunk_budget_s(10_000_000, effective_window_tokens=1_048_576)
+
+    assert budget == chat_model_module.FIRST_CHUNK_ABSOLUTE_MAX_S
 
 
 def test_a_small_window_never_lowers_the_ceiling():
