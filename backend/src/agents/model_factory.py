@@ -5,12 +5,18 @@ The engine (MLX/CUDA/CPU) spawns a child server and exposes its
 ``get_model_and_tokenizer`` is the authority that spawns/selects the child and
 hands back the ``base_url``; the engine no longer parses SSE itself — token
 streaming is owned by this ``ChatOpenAI`` layer.
+
+The client is an ``Erudi_Chat_OpenAI`` (``src.agents.chat_model``): a
+``ChatOpenAI`` whose async stream carries the two #573 wall-clock budgets
+(prompt-sized before the first token, fixed between tokens) in place of
+langchain's single uniform ``stream_chunk_timeout``.
 """
 
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Optional
 
+from src.agents.chat_model import erudi_chat_openai_class
 from src.core import config
 from src.core.logging import logger
 from src.database.generation_hints import (
@@ -59,8 +65,9 @@ def build_chat_model(
     Params are set on the constructor (NOT via ``.bind`` — LangChain v1 rejects
     pre-bound models passed to ``create_agent``).
     """
-    # Deferred (#160): langchain_openai only loads on the first turn, not at boot.
-    from langchain_openai import ChatOpenAI
+    # Deferred (#160): langchain_openai only loads on the first turn, not at
+    # boot -- the subclass that inherits from it is built on the same first call.
+    chat_openai_class = erudi_chat_openai_class()
 
     engine = config.LLM_Engine
     handle, _tokenizer = engine.get_model_and_tokenizer(llm.id, llm.link)
@@ -108,7 +115,7 @@ def build_chat_model(
         f"temperature={temperature}, top_p={top_p}, max_tokens={max_tokens}, "
         f"extra_body=[{extra_body_desc}]"
     )
-    return ChatOpenAI(
+    return chat_openai_class(
         base_url=f"{handle['base_url']}/v1",
         # Every inference child (llama-server, mlx_vlm.server) is spawned with a
         # per-spawn `--api-key` so nothing else on the loopback interface can
@@ -124,6 +131,11 @@ def build_chat_model(
         extra_body=extra_body,  # restore small-model coherence (repetition controls)
         timeout=None,  # cold model load can stall several seconds before first token
         max_retries=0,  # don't silently double-submit a slow local generation
+        # langchain's ONE uniform per-chunk budget (120 s) cannot tell a long
+        # prefill from a hang and killed healthy long-history turns (#573).
+        # Off here; ``Erudi_Chat_OpenAI._astream`` enforces the two budgets that
+        # replace it.
+        stream_chunk_timeout=None,
         streaming=True,
         stream_usage=False,  # local servers may not emit usage in SSE; summarization triggers on count
     )

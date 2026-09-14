@@ -14,6 +14,7 @@ Exception Hierarchy:
     ├── HuggingFaceAPIException (503, HUGGINGFACE_API_ERROR)
     ├── ModelLoadingException (500, MODEL_LOADING_ERROR)
     ├── GenerationException (500, GENERATION_ERROR)
+    ├── GenerationTimeoutException (504, GENERATION_TIMEOUT)
     ├── KnowledgeBaseNotFoundException (404, KB_NOT_FOUND)
     ├── KnowledgeBaseCorruptedException (500, KB_CORRUPTED)
     ├── ConversationNotFoundException (404, CONVERSATION_NOT_FOUND)
@@ -439,6 +440,62 @@ class GenerationException(AppBaseException):
             erudi_code="GENERATION_ERROR",
             trace=trace,
         )
+
+
+class GenerationTimeoutException(AppBaseException):
+    """Exception raised when a local model's stream stays silent past its budget.
+
+    Raised by the streaming watchdog in ``src.agents.chat_model`` (#573), which
+    gives a model call two wall-clock budgets: a prompt-sized one before the
+    FIRST chunk (prefill, which grows with the history) and a fixed one between
+    chunks once tokens flow. The two are not interchangeable, so the phase
+    travels with the exception: the runner turns it into an honest error turn
+    that says WHICH silence was too long.
+
+    Examples:
+        from src.core.exceptions import GenerationTimeoutException
+        raise GenerationTimeoutException(
+            "no first chunk", phase="first-chunk", budget_s=305.0,
+            estimated_prompt_tokens=6878,
+        )
+
+    """
+
+    def __init__(
+        self,
+        message: str,
+        *,
+        phase: str,
+        budget_s: float,
+        estimated_prompt_tokens: int = 0,
+        trace: Optional[str] = None,
+    ):
+        """Initialize the timeout with the budget that expired.
+
+        Args:
+            message: Description of the silence that ended the stream.
+            phase: Which budget expired -- ``src.agents.chat_model``'s
+                ``PHASE_FIRST_CHUNK`` (nothing arrived, the model was still
+                reading the prompt) or ``PHASE_INTER_CHUNK`` (tokens flowed,
+                then stopped).
+            budget_s: The budget that expired, in seconds.
+            estimated_prompt_tokens: The prompt size the first-chunk budget was
+                computed from. 0 when it is not known.
+
+        Attributes:
+            phase, budget_s, estimated_prompt_tokens: As above, kept on the
+                instance so the handler can log and phrase the turn without
+                parsing the message.
+        """
+        super().__init__(
+            message=message,
+            status_code=status.HTTP_504_GATEWAY_TIMEOUT,
+            erudi_code="GENERATION_TIMEOUT",
+            trace=trace,
+        )
+        self.phase = phase
+        self.budget_s = budget_s
+        self.estimated_prompt_tokens = estimated_prompt_tokens
 
 
 class KnowledgeBaseNotFoundException(AppBaseException):
