@@ -80,6 +80,37 @@ the conversation service carry to the chat stream's error event as `code` + `raw
 The backend's own HTTP server binds 27182-27199, below both pools, so the three local
 servers never contend for a port.
 
+## Context windows
+
+Two numbers describe "the window", and they must never be confused:
+
+- the **declared ceiling** — `BaseEngine.max_context_tokens()`: what configuration
+  imposes on every spawn (`ERUDI_CTX` when the user pinned one, `None` otherwise). It
+  exists before any model is loaded and never depends on which model is.
+- the **allocated window** — `BaseEngine.effective_context_tokens()`: what the currently
+  loaded child actually runs with, read from the live engine handle
+  (`context_tokens`). It exists only while a child is up, differs per model *and* per
+  machine or memory state, and is therefore never stored in the database. Everything
+  that budgets or warns against "the window" (compaction thresholds, the first-token
+  watchdog ceiling, the model-info display) reads this one.
+
+The two engine families resolve the allocated window through **genuinely different
+mechanisms**, each kept inside its own engine:
+
+|  | llama-server (CPU / CUDA) | mlx_vlm.server (MLX) |
+|---|---|---|
+| KV allocation | **Fixed upfront**: the whole window's KV cache is allocated (and touched) at load — a ggml architectural fact (static graphs, fixed-shape tensors), linear in the window size | **Native lazy growth**: nothing allocated upfront, the cache grows with the conversation |
+| Window resolution | **Fit at load**: with no `-c`, the server itself resolves the window to the model's trained window and *continuously reduces* it against measured free memory, down to a 4096 floor, logging `context size reduced from X to Y` (`--fit`, ON by default in the pinned b10883) | **Preflight bound at spawn**: the engine reads the trained window from the local artifact's `config.json` (`read_local_generation_hints`) and passes it as `--max-kv-size` — a validator, not a rotating cache |
+| `ERUDI_CTX` set | Passed verbatim as `-c`; llama-server honours an explicit `-c` unchanged ("no change") | Not read — the bound always comes from the artifact |
+| Overflow behaviour | Honest 400 carrying `n_prompt_tokens` and `n_ctx` | Honest 400 naming the exact budget (`prompt + max generation` vs `MAX_KV_SIZE`); *without* the bound, an oversized prompt would return 200 with silently degenerate output |
+| How the allocated window is known | **Read back after boot**: `_read_server_properties` (called by `_start_server` right after the probe) does one bounded `GET /props` and stamps `default_generation_settings.n_ctx`, `chat_template_caps` and `chat_template` on the handle | **Known at spawn**: the bound just passed *is* the window; `_read_server_properties` stays the base no-op |
+| No derivable window | Cannot happen — the server always resolves one | No `--max-kv-size` (today's unbounded behaviour, one WARNING); a number is never invented |
+
+Either way, a `/props` failure or a missing window degrades to `context_tokens = None`
+(one WARNING) and the model still loads; consumers treat `None` as "window unknown". A
+stopped child clears `context_tokens` on its handle: a dead child holds no KV memory,
+so its allocated window dies with it.
+
 `BaseLlamaCppEngine._find_llama_server` tries the configured flavour first and falls back
 to the other one: a CUDA-built artifact runs CPU inference fine, whereas the CPU artifact
 simply will not use the GPU.
