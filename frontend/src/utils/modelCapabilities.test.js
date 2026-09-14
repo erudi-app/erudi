@@ -6,6 +6,7 @@ import {
   parseParamSizeB,
   isVerySmallModel,
   SMALL_MODEL_PARAM_THRESHOLD_B,
+  webSearchUnavailabilityReason,
 } from "./modelCapabilities";
 
 describe("canAttachImages", () => {
@@ -144,5 +145,43 @@ describe("isVerySmallModel (#381)", () => {
     expect(isVerySmallModel({ parameters: undefined })).toBe(false);
     expect(isVerySmallModel({ parameters: "Unknown" })).toBe(false);
     expect(isVerySmallModel({ param_size: null, parameters: null })).toBe(false);
+  });
+});
+
+describe("webSearchUnavailabilityReason (#570)", () => {
+  it("is operational (null) only when BOTH flags are positively true -- mirrors the backend gate exactly", () => {
+    expect(
+      webSearchUnavailabilityReason({ supports_tools: true, supports_tools_wire: true })
+    ).toBeNull();
+  });
+
+  it("returns 'incapable' when either flag is positively false", () => {
+    expect(webSearchUnavailabilityReason({ supports_tools: false })).toBe("incapable");
+    expect(webSearchUnavailabilityReason({ supports_tools_wire: false })).toBe("incapable");
+    expect(
+      webSearchUnavailabilityReason({ supports_tools: false, supports_tools_wire: false })
+    ).toBe("incapable");
+    // Wire explicitly verified unreliable overrides a true supports_tools --
+    // the backend gate requires supports_tools_wire IS True, not truthy.
+    expect(
+      webSearchUnavailabilityReason({ supports_tools: true, supports_tools_wire: false })
+    ).toBe("incapable");
+  });
+
+  it("returns 'unverified' when a flag is null/undefined and neither is positively false", () => {
+    // supports_tools true but the wire was never confirmed -- the backend
+    // gate needs supports_tools_wire IS True, so null is just as silent as
+    // false and must NOT read as operational.
+    expect(webSearchUnavailabilityReason({ supports_tools: true, supports_tools_wire: null })).toBe(
+      "unverified"
+    );
+    expect(webSearchUnavailabilityReason({ supports_tools: null })).toBe("unverified");
+    expect(webSearchUnavailabilityReason({ supports_tools_wire: null })).toBe("unverified");
+    expect(webSearchUnavailabilityReason({})).toBe("unverified");
+  });
+
+  it("is operational (null) for a missing/orphaned model -- no turn happens, so no claim is made", () => {
+    expect(webSearchUnavailabilityReason(undefined)).toBeNull();
+    expect(webSearchUnavailabilityReason(null)).toBeNull();
   });
 });

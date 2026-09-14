@@ -35,10 +35,18 @@ vi.mock("../components/modals/CustomizePromptModal", () => ({ default: () => nul
 
 // HeaderBar probe: exposes the web-search wiring as testable elements.
 vi.mock("../components/HeaderBar", () => ({
-  default: ({ showWebSearch, initialWebSearch, onWebSearchChange }) => (
+  default: ({
+    showWebSearch,
+    initialWebSearch,
+    webSearchDisabled,
+    webSearchDisabledTooltip,
+    onWebSearchChange,
+  }) => (
     <div>
       <div data-testid="show-web-search">{String(showWebSearch)}</div>
       <div data-testid="initial-web-search">{String(initialWebSearch)}</div>
+      <div data-testid="web-search-disabled">{String(webSearchDisabled)}</div>
+      <div data-testid="web-search-disabled-tooltip">{webSearchDisabledTooltip}</div>
       <button onClick={() => onWebSearchChange(!initialWebSearch)}>FLIP_WEB_SEARCH</button>
     </div>
   ),
@@ -73,6 +81,19 @@ const patchCalls = () =>
     ([url, opts]) => opts?.method === "PATCH" && String(url).includes("/conversations/7")
   );
 
+// Same routing as `routeFetch`, but `/llms/local` returns the given models
+// list instead of an empty array, so the assigned model's tool flags reach
+// ConversationPage (#570).
+const routeFetchWithModels =
+  (models) =>
+  async (url, opts = {}) => {
+    const u = String(url);
+    if (opts.method === "PATCH") return { ok: true, json: async () => ({}) };
+    if (u.endsWith("/conversations/7")) return { ok: true, json: async () => conversationDetail };
+    if (u.endsWith("/llms/local")) return { ok: true, json: async () => models };
+    return { ok: true, json: async () => [] };
+  };
+
 const renderAndSettle = async () => {
   render(<ConversationPage />);
   await waitFor(() => expect(apiClient.get).toHaveBeenCalled());
@@ -106,5 +127,75 @@ describe("ConversationPage web search toggle (#310)", () => {
     expect(body.web_search_enabled).toBe(false);
     // Local state follows optimistically.
     await waitFor(() => expect(screen.getByTestId("initial-web-search").textContent).toBe("false"));
+  });
+});
+
+describe("ConversationPage web search toggle disabled for tool-incapable/unverified models (#570)", () => {
+  it("keeps the toggle enabled when both flags are positively true", async () => {
+    tracedFetchMock.mockImplementation(
+      routeFetchWithModels([
+        { id: 1, name: "tool-model", supports_tools: true, supports_tools_wire: true },
+      ])
+    );
+    await renderAndSettle();
+    await waitFor(() =>
+      expect(screen.getByTestId("web-search-disabled").textContent).toBe("false")
+    );
+  });
+
+  it("disables with the 'incapable' text when supports_tools is positively false", async () => {
+    tracedFetchMock.mockImplementation(
+      routeFetchWithModels([
+        { id: 1, name: "no-tools-model", supports_tools: false, supports_tools_wire: null },
+      ])
+    );
+    await renderAndSettle();
+    await waitFor(() => expect(screen.getByTestId("web-search-disabled").textContent).toBe("true"));
+    expect(screen.getByTestId("web-search-disabled-tooltip").textContent).toMatch(
+      /can't use tools/i
+    );
+  });
+
+  it("disables with the 'incapable' text when supports_tools_wire is positively false, even if supports_tools is true", async () => {
+    tracedFetchMock.mockImplementation(
+      routeFetchWithModels([
+        { id: 1, name: "unreliable-wire-model", supports_tools: true, supports_tools_wire: false },
+      ])
+    );
+    await renderAndSettle();
+    await waitFor(() => expect(screen.getByTestId("web-search-disabled").textContent).toBe("true"));
+    expect(screen.getByTestId("web-search-disabled-tooltip").textContent).toMatch(
+      /can't use tools/i
+    );
+  });
+
+  it("disables with the 'unverified' text when the wire is null but supports_tools is true", async () => {
+    tracedFetchMock.mockImplementation(
+      routeFetchWithModels([
+        { id: 1, name: "unverified-wire-model", supports_tools: true, supports_tools_wire: null },
+      ])
+    );
+    await renderAndSettle();
+    await waitFor(() => expect(screen.getByTestId("web-search-disabled").textContent).toBe("true"));
+    expect(screen.getByTestId("web-search-disabled-tooltip").textContent).toMatch(
+      /hasn't been verified/i
+    );
+  });
+
+  it("disables with the 'unverified' text when supports_tools itself is null/unknown", async () => {
+    tracedFetchMock.mockImplementation(routeFetchWithModels([{ id: 1, name: "unknown-model" }]));
+    await renderAndSettle();
+    await waitFor(() => expect(screen.getByTestId("web-search-disabled").textContent).toBe("true"));
+    expect(screen.getByTestId("web-search-disabled-tooltip").textContent).toMatch(
+      /hasn't been verified/i
+    );
+  });
+
+  it("keeps the toggle enabled when the assigned model is orphaned/unknown (no claim made)", async () => {
+    tracedFetchMock.mockImplementation(routeFetchWithModels([]));
+    await renderAndSettle();
+    await waitFor(() =>
+      expect(screen.getByTestId("web-search-disabled").textContent).toBe("false")
+    );
   });
 });

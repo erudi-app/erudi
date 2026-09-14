@@ -69,3 +69,24 @@ export function isVerySmallModel(model) {
   const size = parseParamSizeB(model.param_size) ?? parseParamSizeB(model.parameters);
   return size !== null && size < SMALL_MODEL_PARAM_THRESHOLD_B;
 }
+
+// Tri-state reason the web_search toggle would have no effect for a model
+// (#570). Mirrors the backend gate EXACTLY (backend/src/agents/kb_mode.py):
+// the tool joins a turn iff `supports_tools` is truthy AND
+// `supports_tools_wire is True` -- so a `supports_tools_wire` that is merely
+// null (verification never ran, or failed to confirm) is JUST AS SILENT as an
+// explicit `false`, and must not read as "operational".
+//   - null            -> operational: both flags are positively `true`.
+//   - "incapable"      -> either flag is positively `false`.
+//   - "unverified"    -> anything else (null/undefined flags): the wire has
+//                        not been confirmed one way or the other yet.
+// A missing/orphaned model (`!model`) also returns null: no model means no
+// turn happens at all, so this function makes no claim about tool capability
+// and leaves the toggle's enabled state to the caller's own orphan handling.
+export function webSearchUnavailabilityReason(model) {
+  if (!model) return null;
+  const { supports_tools, supports_tools_wire } = model;
+  if (supports_tools === true && supports_tools_wire === true) return null;
+  if (supports_tools === false || supports_tools_wire === false) return "incapable";
+  return "unverified";
+}

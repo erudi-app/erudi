@@ -15,7 +15,11 @@ import { API_BASE_URL } from "../config/api.js";
 import apiClient, { tracedFetch } from "../services/api/client";
 import { createLogger } from "../utils/logger";
 import { conversationPath } from "../utils/routes";
-import { canAttachImages, maxImagesForModel } from "../utils/modelCapabilities";
+import {
+  canAttachImages,
+  maxImagesForModel,
+  webSearchUnavailabilityReason,
+} from "../utils/modelCapabilities";
 import { defaultsFor, hasNoPublisherRecommendation } from "../utils/samplingDefaults";
 import {
   baseName,
@@ -832,6 +836,19 @@ export default function ConversationPage() {
     modelsLoaded &&
     (conversationLlmId === null || !assignedModel || assignedModel.weights_available === false);
 
+  // #570: the web_search tool is a silent no-op unless the assigned model is
+  // BOTH `supports_tools` and `supports_tools_wire is True` (the exact
+  // backend gate, kb_mode.py) -- so an unverified wire (null) is disabled
+  // just like a positively-false one, with a distinct explanation for each.
+  const webSearchReason = webSearchUnavailabilityReason(assignedModel);
+  const webSearchDisabled = webSearchReason !== null;
+  const webSearchDisabledTooltip =
+    webSearchReason === "incapable"
+      ? t("chat:header.tooltips.webSearchUnavailable")
+      : webSearchReason === "unverified"
+        ? t("chat:header.tooltips.webSearchUnverified")
+        : "";
+
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar
@@ -890,6 +907,8 @@ export default function ConversationPage() {
             showWebSearch
             initialWebSearch={webSearch}
             onWebSearchChange={handleWebSearchChange}
+            webSearchDisabled={webSearchDisabled}
+            webSearchDisabledTooltip={webSearchDisabledTooltip}
           />
         </div>
 

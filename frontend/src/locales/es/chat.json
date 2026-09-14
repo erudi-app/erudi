@@ -29,7 +29,9 @@
       "temperature": "Controla la creatividad. Más bajo = preciso, más alto = creativo.",
       "topP": "Controla la variedad de palabras. Más bajo = predecible, más alto = variado.",
       "prompt": "Personaliza las instrucciones del sistema que guían el comportamiento de la IA.",
-      "webSearch": "Permite que el modelo busque en la web información actual. Las consultas de búsqueda se envían a motores de búsqueda externos."
+      "webSearch": "Permite que el modelo busque en la web información actual. Las consultas de búsqueda se envían a motores de búsqueda externos.",
+      "webSearchUnavailable": "Este modelo no puede usar herramientas, por lo que la búsqueda web no está disponible para él.",
+      "webSearchUnverified": "Este modelo aún no se ha verificado para ejecutar herramientas, por lo que la búsqueda web permanece desactivada para él."
     },
     "noPublisherRecommendation": "El editor de este modelo no recomienda ajustes de muestreo; se aplican valores neutros.",
     "weightsMissingHint": "Faltan los pesos — vuelve a vincular este asistente en la página Modelos"
