@@ -144,6 +144,24 @@ def get_active_download_tracker(job_id: int) -> Optional["DownloadTracker"]:
 
 GGUF_QUANT_PRIORITY = ["q4_k_m", "q4_0", "q5_k_m", "q8_0", "f16"]
 
+# GGUF weights cut into raw byte pieces instead of llama.cpp splits:
+#   <name>-chunk-001-of-018.gguf   <name>.gguf.part1of2
+#   <name>.gguf.a / .b             <name>.gguf-split-a / -b
+# Each piece is a byte range of ONE file: only the first carries a GGUF header,
+# so llama.cpp cannot load any of them until they are concatenated, and Erudi
+# does not concatenate downloads. llama.cpp's own splits
+# (<name>-00001-of-00003.gguf) are different: every part is a complete GGUF file
+# the loader stitches itself, and they never match this pattern.
+_BYTE_SPLIT_GGUF_RE = re.compile(
+    r"(?:-chunk-\d+-of-\d+\.gguf|\.gguf\.part\d+of\d+|\.gguf\.[a-z]|\.gguf-split-[a-z])$",
+    re.IGNORECASE,
+)
+
+
+def is_byte_split_gguf(filename: str) -> bool:
+    """True when ``filename`` is one raw byte piece of a GGUF file (see _BYTE_SPLIT_GGUF_RE)."""
+    return _BYTE_SPLIT_GGUF_RE.search(filename) is not None
+
 
 def pick_best_gguf(filenames: list[str]) -> str | None:
     """From a list of filenames in a GGUF repo, return the best quantization.
@@ -155,12 +173,17 @@ def pick_best_gguf(filenames: list[str]) -> str | None:
         filenames: All filenames returned by HfApi.list_repo_files().
 
     Returns:
-        Filename of the chosen GGUF, or None if no .gguf files found.
+        Filename of the chosen GGUF, or None if no loadable .gguf file is listed.
     """
     # Exclude multimodal projection files (mmproj-*.gguf) — these are vision
-    # encoder weights, not the main text model, and must not be loaded as LLM.
+    # encoder weights, not the main text model, and must not be loaded as LLM —
+    # and raw byte pieces of a GGUF file, which nothing loads without joining them.
     ggufs = [
-        f for f in filenames if f.lower().endswith(".gguf") and not f.lower().startswith("mmproj")
+        f
+        for f in filenames
+        if f.lower().endswith(".gguf")
+        and not f.lower().startswith("mmproj")
+        and not is_byte_split_gguf(f)
     ]
     if not ggufs:
         return None
@@ -268,10 +291,12 @@ def _select_download_files(
     """Pick the exact files to download from a repo listing (pure, no I/O).
 
     GGUF repos: the single best quantization (pick_best_gguf) + mmproj gguf
-    files + auxiliary non-gguf files with a known size under 10 MB. When the
-    repo has no .gguf at all, best_gguf is None and files is empty (the download
-    path never gets here in that case: `_assert_repo_has_engine_artifact` refuses
-    the repo first; `_chosen_artifact_bytes` falls back to the whole-repo sum).
+    files + auxiliary non-gguf files with a known size under 10 MB. Raw byte
+    pieces of a GGUF file (is_byte_split_gguf) are never selected, in any of the
+    three roles. When the repo has no loadable .gguf, best_gguf is None and files
+    is empty (the download path never gets here in that case:
+    `_assert_repo_has_engine_artifact` refuses the repo first;
+    `_chosen_artifact_bytes` falls back to the whole-repo sum).
 
     Non-GGUF repos: every repo file with a known size (exclusions were already
     applied when building file_sizes).
@@ -301,12 +326,15 @@ def _select_download_files(
             f"Split GGUF detected for {best_gguf!r}: downloading all {len(gguf_parts)} parts"
         )
     mmproj_files = [
-        f for f in all_repo_files if "mmproj" in f.lower() and f.lower().endswith(".gguf")
+        f
+        for f in all_repo_files
+        if "mmproj" in f.lower() and f.lower().endswith(".gguf") and not is_byte_split_gguf(f)
     ]
     small_aux = [
         f
         for f in all_repo_files
         if not f.lower().endswith(".gguf")
+        and not is_byte_split_gguf(f)
         and f in file_sizes
         and file_sizes.get(f, 0) < 10 * 1024 * 1024  # < 10 MB
     ]
@@ -316,6 +344,29 @@ def _select_download_files(
         mmproj_files=mmproj_files,
         small_aux=small_aux,
     )
+
+
+def has_downloadable_gguf(repo_id: str, hf_api) -> bool:
+    """Whether the downloader would select a loadable GGUF artefact from ``repo_id``.
+
+    Runs the download path's own selection (`_select_download_files`) over the
+    repo's file listing, so a catalog build never offers a repo the downloader
+    refuses: one whose only GGUF weights are raw byte pieces, or a llama.cpp split
+    whose listing misses a part.
+
+    The listing is ``model_info(repo_id, expand=["siblings"])``: one request, file
+    names only, and the call the catalog's retrying client paces and retries on
+    HTTP 429. A listing failure propagates; the caller decides what it means.
+    """
+    info = hf_api.model_info(repo_id, expand=["siblings"])
+    all_repo_files = [s.rfilename for s in (getattr(info, "siblings", None) or [])]
+    try:
+        selection = _select_download_files(all_repo_files, {}, uses_gguf=True)
+    except HuggingFaceAPIException:
+        # _assert_split_is_complete: the listing misses a part of the chosen
+        # split, which the downloader refuses before any transfer.
+        return False
+    return selection.best_gguf is not None
 
 
 class DownloadCancelled(Exception):
@@ -607,7 +658,10 @@ def _assert_repo_has_engine_artifact(model_link: str, repo_info, all_repo_files:
     cannot load, so fail here with the reason instead.
 
     - llama.cpp engines (``USES_GGUF``): at least one text-model ``.gguf`` must be
-      listed (``mmproj-*.gguf`` vision projectors do not count).
+      listed (``mmproj-*.gguf`` vision projectors and raw byte pieces of a GGUF
+      file do not count). A repo whose GGUF weights are only raw byte pieces gets
+      its own message: the model exists, but as chunks that must be joined into
+      one file before anything can load it, and Erudi does not join them.
     - Tag-based engines (MLX): the repo must be tagged ``FORMAT_TAG`` or declare
       it as its ``library_name``, exactly what the catalog search filters on.
 
@@ -618,6 +672,14 @@ def _assert_repo_has_engine_artifact(model_link: str, repo_info, all_repo_files:
     tag = getattr(engine, "FORMAT_TAG", None)
     if getattr(engine, "USES_GGUF", False):
         present = pick_best_gguf(all_repo_files) is not None
+        byte_pieces = [f for f in all_repo_files if is_byte_split_gguf(f)]
+        if not present and byte_pieces:
+            raise InvalidInputException(
+                f"{model_link} publishes its GGUF weights as raw chunks "
+                f"(for example {_display_member(byte_pieces[0])}) that must be joined "
+                f"into one file before the model can run, and Erudi does not join them. "
+                f"Pick another repository of this model that ships complete .gguf files."
+            )
     else:
         tags = set(getattr(repo_info, "tags", None) or ())
         present = bool(tag) and (tag in tags or getattr(repo_info, "library_name", None) == tag)

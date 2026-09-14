@@ -140,7 +140,7 @@ def base_key(base_id: str) -> str:
 
 # Quant preference for picking among several EXACT matches (MLX mostly; for GGUF
 # the single best .gguf file is chosen later by pick_best_gguf, so repo choice
-# falls back to download count).
+# falls back to download count, among the repos that ship a loadable file).
 _QUANT_PREF = ("-4bit", "4bit", "-8bit", "8bit", "-6bit", "mxfp4", "bf16", "fp16")
 
 # Quanters we trust to faithfully repackage a base model. Preferred over random
@@ -199,6 +199,11 @@ def resolve_quant(
     mlx-community/lmstudio-community > anyone), then the canonical 4-bit quant,
     breaking ties by download count (#122). No public exact match → None: a base
     whose only quant is gated simply is not listed.
+
+    For ``format_tag == "gguf"`` the ranked candidates are then walked in that
+    order and the first whose file listing yields a loadable artefact wins (see
+    :func:`_gguf_candidate_is_downloadable`); one listing call per candidate
+    tried, usually just the first. MLX candidates are not listed.
     """
     owner, _, slug = base_id.partition("/")
     key = base_key(base_id)
@@ -231,7 +236,8 @@ def resolve_quant(
         )
     if not exact:
         return None
-    best = min(
+    # sorted() is stable, so its head is the element min() would pick.
+    ranked = sorted(
         exact,
         key=lambda m: (
             _trust_rank(m.id, owner),
@@ -239,4 +245,44 @@ def resolve_quant(
             -(getattr(m, "downloads", 0) or 0),
         ),
     )
-    return best.id
+    if format_tag != "gguf":
+        return ranked[0].id
+    for m in ranked:
+        if _gguf_candidate_is_downloadable(m.id, base_id, hf_api):
+            return m.id
+    logger.info(f"[resolve gguf] {base_id}: no exact candidate ships a loadable GGUF artefact")
+    return None
+
+
+def _gguf_candidate_is_downloadable(repo_id: str, base_id: str, hf_api) -> bool:
+    """Whether the downloader would select a loadable artefact from GGUF repo ``repo_id``.
+
+    The name and download count say nothing about the files: a repo can carry the
+    ``gguf`` tag while its weights are raw byte chunks no loader opens, or a split
+    with a missing part. The file listing is checked through the download path's
+    own selection (``has_downloadable_gguf``), so the catalog never binds a base to
+    a repo a download would refuse.
+
+    A listing that fails skips the candidate: an unverified repo is never offered,
+    the retrying catalog client has already absorbed rate limiting, and the next
+    candidate is an exact, public match of the same base. When none remains the
+    base is left out of this catalog build, as when the search itself fails.
+
+    Imported lazily: the selection lives in the llms domain, above engines in the
+    layering (``utils.hf_model_metadata`` sizes rows through it the same way).
+    """
+    from src.domains.llms.services import has_downloadable_gguf
+
+    try:
+        usable = has_downloadable_gguf(repo_id, hf_api)
+    except Exception as e:
+        logger.warning(
+            f"[resolve gguf] {base_id}: could not list the files of {repo_id}, skipping it: {e}"
+        )
+        return False
+    if not usable:
+        logger.info(
+            f"[resolve gguf] {base_id}: skipping {repo_id} (no loadable GGUF artefact, "
+            f"e.g. weights published as raw byte chunks)"
+        )
+    return usable

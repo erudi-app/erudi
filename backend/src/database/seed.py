@@ -84,6 +84,7 @@ from src.utils.hf_model_metadata import (
 )
 from src.domains.hardware.repository import Hardware_Repository
 from src.domains.llms.repository import dir_size_bytes, remove_tree_reporting
+from src.domains.llms.services import has_downloadable_gguf
 from src.domains.hardware.services import Hardware_Service
 from src.engines.model_resolver import resolve_quant, base_key, is_gated
 from src.database.catalog_classify import (
@@ -654,6 +655,26 @@ class Model_Seeder:
                 # the rare KNOWN_BROKEN load-crashers.
                 if not config.LLM_Engine.is_runnable(model_info.id):
                     continue
+                # The gguf tag says nothing about the files: a repo whose weights are
+                # raw byte chunks (or a split missing a part) would be refused at
+                # download, so it never becomes a row. Checked BEFORE the dedup, like
+                # the gated gate, so a loadable twin of the same model still gets in.
+                if getattr(config.LLM_Engine, "USES_GGUF", False):
+                    try:
+                        downloadable = has_downloadable_gguf(model_info.id, self.hf_api)
+                    except Exception as e:
+                        # An unverified repo is never offered; this build goes on
+                        # without it and the next resync lists it again.
+                        logger.warning(
+                            f"Could not list the files of derived {model_info.id}, skipping it: {e}"
+                        )
+                        continue
+                    if not downloadable:
+                        logger.info(
+                            f"Skipping derived {model_info.id}: no loadable GGUF artefact "
+                            f"(e.g. weights published as raw byte chunks)"
+                        )
+                        continue
                 try:
                     out.append(self._create_derived_llm(model_info, search_config))
                     seen.add(mkey)

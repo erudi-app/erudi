@@ -65,7 +65,14 @@ def test_build_derived_models_handles_expanded_search_serialization(monkeypatch)
         seen_kwargs.update(kwargs)
         return list(hits)
 
-    seeder = Model_Seeder(db=None, hf_api=SimpleNamespace(list_models=fake_list_models))
+    api = SimpleNamespace(
+        list_models=fake_list_models,
+        # Every repo lists one loadable quant, so the GGUF file check passes.
+        model_info=lambda repo_id, **kw: SimpleNamespace(
+            siblings=[SimpleNamespace(rfilename="model-Q4_K_M.gguf")]
+        ),
+    )
+    seeder = Model_Seeder(db=None, hf_api=api)
     rows = seeder.build_derived_models(
         [seed_mod.Search_Config(search_term="", model_type="community", default_param_size=7.0)]
     )

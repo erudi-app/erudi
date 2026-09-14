@@ -8,6 +8,7 @@ against a mocked HF api, covering the real tricky cases the research surfaced
 """
 
 import os
+from types import SimpleNamespace
 
 import pytest
 
@@ -21,19 +22,37 @@ class _Model:
         self.gated = gated
 
 
+# The file listing a GGUF candidate gets when a test does not name one: a single
+# ordinary quant, which the downloader selects.
+_LOADABLE_GGUF_LISTING = ["model-Q4_K_M.gguf", "README.md"]
+
+
 class _FakeApi:
     """Returns a fixed candidate list regardless of query (we test selection).
 
     Entries are ``(id, downloads)`` or ``(id, downloads, gated)``; ``gated`` takes
-    the values the Hub serializes (``False``, ``"auto"``, ``"manual"``)."""
+    the values the Hub serializes (``False``, ``"auto"``, ``"manual"``).
 
-    def __init__(self, ids):
+    ``files`` maps a repo id to its file listing, served by ``model_info``; an
+    Exception value is raised instead. Repos it does not name list
+    ``_LOADABLE_GGUF_LISTING``. Every listed repo id is recorded in ``listed``."""
+
+    def __init__(self, ids, files=None):
         self._models = [_Model(*entry) for entry in ids]
+        self._files = files or {}
         self.calls = []
+        self.listed = []
 
     def list_models(self, **kwargs):
         self.calls.append(kwargs)
         return list(self._models)
+
+    def model_info(self, repo_id, **kwargs):
+        self.listed.append(repo_id)
+        listing = self._files.get(repo_id, _LOADABLE_GGUF_LISTING)
+        if isinstance(listing, Exception):
+            raise listing
+        return SimpleNamespace(siblings=[SimpleNamespace(rfilename=name) for name in listing])
 
 
 class _BoomApi:
@@ -193,6 +212,77 @@ class TestResolveQuant:
         resolve_quant("google/gemma-2-2b-it", "mlx", api)
         (kwargs,) = api.calls
         assert {"gated", "downloads"} <= set(kwargs["expand"])
+
+
+# The three exact GGUF candidates the Hub returns for deepseek-ai/DeepSeek-V3.2
+# (#524). The 0-download one ranks first on its "mxfp4" name marker, but its
+# weights are raw byte chunks nothing can load without joining them first.
+_DEEPSEEK_V32_CANDIDATES = [
+    ("unsloth/DeepSeek-V3.2-GGUF", 4423),
+    ("createthis/DeepSeek-V3.2-GGUF", 56),
+    ("stevescot1979/DeepSeek-V3.2-MXFP4-GGUF", 0),
+]
+_DEEPSEEK_V32_FILES = {
+    "stevescot1979/DeepSeek-V3.2-MXFP4-GGUF": [".gitattributes", "README.md"]
+    + [f"DeepSeek-V3.2-MXFP4-chunk-{n:03d}-of-018.gguf" for n in range(1, 19)],
+    "unsloth/DeepSeek-V3.2-GGUF": [".gitattributes", "README.md", "imatrix_unsloth.gguf_file"]
+    + [f"Q4_K_M/DeepSeek-V3.2-Q4_K_M-{n:05d}-of-00009.gguf" for n in range(1, 10)]
+    + [f"Q8_0/DeepSeek-V3.2-Q8_0-{n:05d}-of-00015.gguf" for n in range(1, 16)],
+    "createthis/DeepSeek-V3.2-GGUF": [".gitattributes", "README.md"]
+    + [f"bf16/DeepSeek-V3.2-Bf16-256x21B-F16-{n:05d}-of-00030.gguf" for n in range(1, 31)],
+}
+
+
+class TestResolveQuantSkipsUnusableGguf:
+    """A GGUF candidate the downloader would refuse is never the resolved quant."""
+
+    def test_byte_split_candidate_is_skipped_for_the_next_in_rank(self):
+        api = _FakeApi(_DEEPSEEK_V32_CANDIDATES, files=_DEEPSEEK_V32_FILES)
+        assert (
+            resolve_quant("deepseek-ai/DeepSeek-V3.2", "gguf", api) == "unsloth/DeepSeek-V3.2-GGUF"
+        )
+
+    def test_candidates_are_listed_in_rank_order_until_one_is_usable(self):
+        api = _FakeApi(_DEEPSEEK_V32_CANDIDATES, files=_DEEPSEEK_V32_FILES)
+        resolve_quant("deepseek-ai/DeepSeek-V3.2", "gguf", api)
+        assert api.listed == [
+            "stevescot1979/DeepSeek-V3.2-MXFP4-GGUF",
+            "unsloth/DeepSeek-V3.2-GGUF",
+        ]
+
+    def test_none_when_no_candidate_has_a_usable_artifact(self):
+        api = _FakeApi(
+            [("stevescot1979/DeepSeek-V3.2-MXFP4-GGUF", 0)],
+            files={
+                "stevescot1979/DeepSeek-V3.2-MXFP4-GGUF": _DEEPSEEK_V32_FILES[
+                    "stevescot1979/DeepSeek-V3.2-MXFP4-GGUF"
+                ]
+            },
+        )
+        assert resolve_quant("deepseek-ai/DeepSeek-V3.2", "gguf", api) is None
+
+    def test_candidate_whose_listing_fails_is_skipped(self):
+        api = _FakeApi(
+            [
+                ("lmstudio-community/Qwen3-4B-GGUF", 90000),
+                ("bartowski/Qwen_Qwen3-4B-GGUF", 5000),
+            ],
+            files={"lmstudio-community/Qwen3-4B-GGUF": RuntimeError("hub down")},
+        )
+        assert resolve_quant("Qwen/Qwen3-4B", "gguf", api) == "bartowski/Qwen_Qwen3-4B-GGUF"
+
+    def test_mlx_resolution_lists_no_files(self):
+        api = _FakeApi(
+            [
+                ("mlx-community/gemma-2-2b-it-4bit", 5889),
+                ("mlx-community/gemma-2-2b-it-8bit", 900),
+            ],
+            files={"mlx-community/gemma-2-2b-it-4bit": RuntimeError("must not be listed")},
+        )
+        assert (
+            resolve_quant("google/gemma-2-2b-it", "mlx", api) == "mlx-community/gemma-2-2b-it-4bit"
+        )
+        assert api.listed == []
 
 
 # Ground truth from the HF research sweep: (base_id, format_tag, quant_known_to_exist).

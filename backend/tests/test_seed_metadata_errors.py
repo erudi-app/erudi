@@ -156,7 +156,14 @@ class TestDerivedCatalog:
         monkeypatch.setattr(seed_mod.config, "LLM_Engine", CPU_Engine)
         monkeypatch.setattr(seed_mod, "get_disk_size_after_quant", lambda *a, **k: _Size())
         monkeypatch.setattr(seed_mod, "capture_generation_hints", lambda *a, **k: None)
-        return Model_Seeder(db=None, hf_api=SimpleNamespace(list_models=lambda **kw: list(hits)))
+        api = SimpleNamespace(
+            list_models=lambda **kw: list(hits),
+            # Every repo lists one loadable quant, so the GGUF file check passes.
+            model_info=lambda repo_id, **kw: SimpleNamespace(
+                siblings=[SimpleNamespace(rfilename="model-Q4_K_M.gguf")]
+            ),
+        )
+        return Model_Seeder(db=None, hf_api=api)
 
     def test_broken_metadata_skips_the_model_and_logs_the_repo(self, monkeypatch, caplog):
         seeder = self._seeder(monkeypatch, [_hit("bartowski/Broken-8B-GGUF", _BrokenInfo)])
