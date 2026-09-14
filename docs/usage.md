@@ -269,7 +269,7 @@ cd frontend && npm run lint:check && npm run format:check
 1. Check the virtualenv is active: `which python` must point at `backend/venv/bin/python`.
 2. Reinstall dependencies by re-running your platform's setup script.
 3. Read `backend/logs/backend.log`, and the launcher's `startup_error` JSON line on
-   stdout — its `code` names the failure (`PORT_IN_USE`, `NO_PORT_AVAILABLE`,
+   stdout — its `code` names the failure (`NO_PORT_AVAILABLE`, `CRASH_BEFORE_READY`,
    `IMPORT_ERROR`, `DATA_PREP_ERROR`, …). See [Backend Launcher](guides/backend-run.md).
 
 ### `No module named 'src'`

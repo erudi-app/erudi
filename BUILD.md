@@ -148,9 +148,10 @@ Everything electron-builder produces goes to `frontend/dist/` (`directories.outp
 | Linux | `AppImage`, x64 |
 
 macOS builds set `hardenedRuntime`, apply `assets/entitlements.mac.plist`,
-`notarize: true`, and explicitly sign the bundled backend through
-`mac.binaries` (`Contents/Resources/backend/backend`) — electron-builder does
-not discover arbitrary Mach-O binaries under `Resources/` on its own.
+`notarize: true`, and list the bundled backend under `mac.binaries`
+(`Contents/Resources/backend/backend`) as belt-and-braces: electron-builder's
+own signing walk already recurses through the whole `Contents/` tree,
+including `Resources/`, and signs every binary file it finds there.
 
 ---
 

@@ -1,4 +1,4 @@
-"""Agent tools — deterministic calculator (issue #81, problem #4).
+"""Agent tools: calculator, knowledge-base search, and web search.
 
 LLMs predict tokens, they don't compute: small quantized models add
 multi-digit numbers wrong with full confidence (measured: a different
@@ -7,10 +7,22 @@ The agent therefore carries a deterministic ``calculator`` tool; models
 with native function calling (Qwen, Mistral, Llama 3.1+…) invoke it
 through the standard agent loop. Models without it (e.g. Gemma 3 — no
 tool format in its chat template, never emits ``tool_calls``) fall back
-to the KB prompt's no-mental-math rule.
+to the KB prompt's no-mental-math rule. The evaluator is a strict AST
+whitelist — NEVER ``eval``: numbers and arithmetic operators only (no
+names, calls, attributes, subscripts).
 
-The evaluator is a strict AST whitelist — NEVER ``eval``: numbers and
-arithmetic operators only (no names, calls, attributes, subscripts).
+``search_knowledge_base`` lets a tool-capable model query the user's
+attached knowledge base on demand instead of having excerpts injected
+up-front every turn; it shares per-turn context (``kb_id``, token
+budgets) with ``web_search`` through the ``TurnToolContext`` dataclass
+passed via ``create_agent(context_schema=...)`` and read through
+``ToolRuntime``, since ``create_agent`` accepts only one context schema.
+
+``web_search`` runs a metasearch query (via ``ddgs``) and returns
+attributed, token-budgeted snippets so the model can ground an answer in
+a current external fact; it degrades to an explicit error string on any
+failure (offline, timeout, no results) instead of raising, so a broken
+search never crashes the agent loop.
 """
 
 from __future__ import annotations

@@ -299,11 +299,14 @@ def mock_llm_with_kb(test_db_session):
 #
 #   `mlx_thinking_model_path` — opt-in via ERUDI_TEST_THINKING=1
 #       repo: mlx-community/Qwen3-0.6B-4bit (override: ERUDI_MLX_THINKING_MODEL_REPO)
-#       - Required to validate that `reasoning_text` is delivered as a
-#         separate stream channel by mlx_lm.server (i.e. the refactor does
-#         not silently drop reasoning output).
-#       - Without this fixture, the regression of `<think>...</think>` /
-#         `<|channel>thought ... <channel|>` filtering would be invisible.
+#       - Required to validate that mlx_vlm.server keeps reasoning INLINE in
+#         `delta.content` (the runner patches the server before it starts so
+#         it behaves like llama-server's `--reasoning-format none`, instead
+#         of splitting it into the separate `delta.reasoning` field that
+#         ChatOpenAI silently drops).
+#       - Without this fixture, a regression that let `<think>...</think>` /
+#         `<|channel>thought ... <channel|>` markers leak into the visible
+#         answer would be invisible.
 #
 # Gemma-specific EOS regression coverage is opt-in via ERUDI_TEST_GEMMA=1
 # (added in Phase 1 once we have the corresponding test).
