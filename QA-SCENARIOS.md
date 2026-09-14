@@ -191,7 +191,7 @@ updater, and the card says so.*
 - [ ] When a newer release exists and **Automatic updates is off**, then pressing Check names that version and offers **Download**; nothing is downloaded until I press Download, and quitting still installs nothing — only **Install now** installs it.
 - [ ] When the download is running, then the card shows the percentage and offers no second Download button.
 - [ ] When the update is downloaded, then **Install now** closes Erudi and opens it again on the new version.
-- [ ] When an update was downloaded earlier and its installation never applied (the app was reopened before the installer finished), then opening Settings still offers **Install now** for it — this is the case the card exists for.
+- [ ] When an update was downloaded earlier and its installation never applied (the app was reopened before the installer finished), then it comes back without downloading anything again — this is the case the card exists for. With **Automatic updates on**, the check at launch re-detects it within moments and the card offers **Install now** on its own. With them **off**, pressing **Check for updates** then **Download** brings it back instantly, served from the copy already on disk.
 - [ ] When the machine is offline and I press Check for updates, then one quiet line on the card says the check did not go through, and the button is usable again.
 - [ ] When I run the app from source (`npm start`), then the card says updates are handled by the installed application and the button is disabled.
 

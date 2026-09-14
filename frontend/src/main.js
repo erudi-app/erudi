@@ -1119,6 +1119,15 @@ ipcMain.handle("data:clearAll", async () => {
 // card reads it to recover an update that was staged hours ago (#571).
 // Phases: "idle" | "checking" | "available" | "up-to-date" | "downloading" |
 //         "downloaded" | "error".
+//
+// It lives in memory for the life of this process and is deliberately NOT
+// persisted across restarts: after a relaunch the card starts at "idle" and
+// the next check re-derives the truth -- the boot check when automatic
+// updates are on, the button when they are off. That check validates
+// electron-updater's own download cache and serves the file from it without
+// downloading anything again, which a version string we wrote to disk cannot
+// do: ours would still claim an update is staged after the cache was cleared,
+// the release was pulled, or the app was updated by other means.
 let updaterState = { phase: "idle", version: null, percent: 0 };
 
 // Renderer can trigger an immediate install via "updater:install-now".
