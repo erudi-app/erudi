@@ -344,7 +344,12 @@ def _capture_hints_for_download(model_link: str, final_save_dir) -> Optional[dic
         base_repo = resolve_base_repo(model_link, getattr(info, "tags", None))
     except Exception as e:
         logger.info(f"Could not read the card of {model_link} for its base model: {e}")
-    hints = capture_generation_hints(base_repo, hf_api, quant_repo=model_link)
+    # The downloaded repo IS the quant repo, so it is also the one holding the
+    # .gguf file whose declared window outranks any config.json (#388).
+    quant_format = getattr(config.LLM_Engine, "FORMAT_TAG", None)
+    hints = capture_generation_hints(
+        base_repo, hf_api, quant_repo=model_link, quant_format=quant_format
+    )
     if hints is None and base_repo != model_link:
         hints = capture_generation_hints(model_link, hf_api)
     if hints is None:

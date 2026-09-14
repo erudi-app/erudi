@@ -359,8 +359,11 @@ class TestDownloadCarriesHints:
             "capture_generation_hints",
             remote_hints
             if callable(remote_hints)
-            else (lambda base_repo, hf_api, quant_repo=None: remote_hints),
+            else (lambda base_repo, hf_api, quant_repo=None, quant_format=None: remote_hints),
         )
+        # Pinned so the engine side threaded into the capture is the same on
+        # every platform.
+        monkeypatch.setattr(config, "LLM_Engine", SimpleNamespace(FORMAT_TAG="gguf"))
         monkeypatch.setattr(
             config,
             "get_hf_api",
@@ -408,8 +411,8 @@ class TestDownloadCarriesHints:
         }
         seen = {}
 
-        def capture(base_repo, hf_api, quant_repo=None):
-            seen["args"] = (base_repo, quant_repo)
+        def capture(base_repo, hf_api, quant_repo=None, quant_format=None):
+            seen["args"] = (base_repo, quant_repo, quant_format)
             return {
                 "base_repo": base_repo,
                 "generation_config": {"temperature": 0.15},
@@ -423,7 +426,9 @@ class TestDownloadCarriesHints:
         llm = self._run_task(
             monkeypatch, tmp_path, initial_hints=None, local_hints=local, remote_hints=capture
         )
-        assert seen["args"] == ("org/model", "org/model")
+        # The downloaded repo is the quant repo, and the engine side rides along
+        # (a GGUF download reads its window from the file's own metadata).
+        assert seen["args"] == ("org/model", "org/model", "gguf")
         assert llm.generation_hints["source_stage"] == "model_card"
         assert llm.generation_hints["context_length"] == 32768
         assert llm.generation_hints["supports_thinking"] is False

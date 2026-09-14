@@ -7,6 +7,10 @@ sampling defaults; a row without a usable value MUST resolve to today's
 constants (the #129-validated request bodies stay byte-identical) with
 ``source == "none"``, and optional keys (top_k / min_p / presence_penalty)
 exist only when the captured block defines them.
+
+The context window rides along with its own cascade: the GGUF metadata of the
+quant repo for a GGUF entry (what llama-server reads out of the file), else the
+config.json window under any of the keys and containers publishers use.
 """
 
 import json
@@ -656,6 +660,72 @@ class TestBuildGenerationHints:
         assert hints["supports_thinking"] is True
 
 
+class TestContextLengthSources:
+    """The window is read from several config shapes (a field audit of the
+    uncovered catalog entries): the key lives at the top level or inside a
+    ``*_config`` container, and some lineages name it ``n_positions`` (phi-2) or
+    ``max_sequence_length`` (Nemotron)."""
+
+    @staticmethod
+    def _window(config):
+        hints = build_generation_hints(
+            base_repo="x/y",
+            generation_config=None,
+            config=config,
+            chat_template="plain",
+            captured_at="d",
+        )
+        return hints["context_length"]
+
+    def test_language_config_container(self):
+        # deepseek-vl nests the text model under language_config.
+        assert self._window({"language_config": {"max_position_embeddings": 16384}}) == 16384
+
+    def test_llm_config_container(self):
+        assert self._window({"llm_config": {"max_position_embeddings": 8192}}) == 8192
+
+    def test_n_positions_alias(self):
+        assert self._window({"n_positions": 2048}) == 2048
+
+    def test_max_sequence_length_alias(self):
+        assert self._window({"max_sequence_length": 131072}) == 131072
+
+    def test_alias_inside_a_container(self):
+        assert self._window({"text_config": {"n_positions": 4096}}) == 4096
+
+    def test_max_position_embeddings_beats_an_alias_key(self):
+        assert self._window({"n_positions": 2048, "max_position_embeddings": 32768}) == 32768
+        assert self._window({"max_sequence_length": 512, "max_position_embeddings": 4096}) == 4096
+
+    def test_the_preferred_key_wins_even_from_a_container(self):
+        assert (
+            self._window({"n_positions": 2048, "llm_config": {"max_position_embeddings": 16384}})
+            == 16384
+        )
+
+    def test_top_level_beats_a_container_for_the_same_key(self):
+        assert (
+            self._window(
+                {
+                    "max_position_embeddings": 8192,
+                    "language_config": {"max_position_embeddings": 16384},
+                }
+            )
+            == 8192
+        )
+
+    def test_junk_values_are_ignored(self):
+        assert self._window({"max_position_embeddings": 0, "n_positions": -1}) is None
+        assert self._window({"max_sequence_length": "131072"}) is None
+        assert self._window({"max_position_embeddings": None, "llm_config": None}) is None
+
+    def test_a_junk_preferred_key_falls_through_to_the_next_source(self):
+        assert (
+            self._window({"max_position_embeddings": 0, "text_config": {"n_positions": 4096}})
+            == 4096
+        )
+
+
 def _hub(tmp_path, repos, gated=()):
     """hf_api stub over ``repos`` (repo id -> {filename: obj/str}). A repo in
     ``gated`` serves README.md only: every other file raises GatedRepoError,
@@ -708,6 +778,30 @@ def _fake_hf_api(tmp_path, files):
 
     api.hf_hub_download.side_effect = download
     return api
+
+
+def _set_gguf(api, by_repo):
+    """Fake ``model_info(repo_id=..., expand=["gguf"])`` on a stub: maps a repo id
+    to the ``gguf`` block the Hub answers for it (an ``Exception`` instance is
+    raised instead, an id absent from the map answers no block at all)."""
+
+    def model_info(repo_id=None, expand=None, **_):
+        payload = by_repo.get(repo_id)
+        if isinstance(payload, Exception):
+            raise payload
+        return types.SimpleNamespace(gguf=payload)
+
+    api.model_info.side_effect = model_info
+    return api
+
+
+def _gguf_call(api):
+    """``(repo_id, expand)`` of the single gguf-expand call made on ``api``."""
+    assert api.model_info.call_count == 1
+    call = api.model_info.call_args
+    return (call.kwargs.get("repo_id") or (call.args[0] if call.args else None)), call.kwargs.get(
+        "expand"
+    )
 
 
 _FACTS = {
@@ -915,6 +1009,107 @@ class TestCaptureCascade:
         )
 
 
+class TestGgufContextLength:
+    """For a GGUF entry the authoritative window is the one the .gguf file
+    declares (``n_ctx_train``), which the Hub exposes through
+    ``model_info(expand=["gguf"])`` on the QUANT repo -- it is what llama-server
+    reads, and it disagrees with some base configs by a factor of 2 to 4."""
+
+    def _repos(self, extra_base=None):
+        return {
+            "Qwen/Qwen3-4B": dict(_FACTS, **(extra_base or {})),
+            "bartowski/Qwen3-4B-GGUF": {},
+        }
+
+    def _capture(self, api, **kwargs):
+        return capture_generation_hints(
+            "Qwen/Qwen3-4B",
+            api,
+            quant_repo="bartowski/Qwen3-4B-GGUF",
+            **kwargs,
+        )
+
+    def test_gguf_metadata_beats_the_base_config(self, tmp_path):
+        api = _set_gguf(
+            _hub(tmp_path, self._repos({"config.json": {"max_position_embeddings": 131072}})),
+            {"bartowski/Qwen3-4B-GGUF": {"context_length": 40960}},
+        )
+        hints = self._capture(api, quant_format="gguf")
+        assert hints["context_length"] == 40960
+        # The rest of the capture is untouched.
+        assert hints["supports_thinking"] is True
+        assert _gguf_call(api) == ("bartowski/Qwen3-4B-GGUF", ["gguf"])
+
+    def test_gguf_block_may_be_an_object(self, tmp_path):
+        api = _set_gguf(
+            _hub(tmp_path, self._repos()),
+            {"bartowski/Qwen3-4B-GGUF": types.SimpleNamespace(context_length=262144)},
+        )
+        assert self._capture(api, quant_format="gguf")["context_length"] == 262144
+
+    def test_a_failing_call_falls_back_to_config_json(self, tmp_path):
+        api = _set_gguf(
+            _hub(tmp_path, self._repos()),
+            {"bartowski/Qwen3-4B-GGUF": RuntimeError("hub said no")},
+        )
+        assert self._capture(api, quant_format="gguf")["context_length"] == 40960
+
+    def test_an_empty_block_falls_back_to_config_json(self, tmp_path):
+        for payload in (None, {}, {"context_length": 0}, {"context_length": "40960"}):
+            gh.reset_capture_cache()
+            api = _set_gguf(_hub(tmp_path, self._repos()), {"bartowski/Qwen3-4B-GGUF": payload})
+            assert self._capture(api, quant_format="gguf")["context_length"] == 40960
+
+    def test_gguf_metadata_alone_captures_the_window(self, tmp_path):
+        # Nothing readable on either repo: the window is still captured.
+        api = _set_gguf(
+            _hub(tmp_path, {"Qwen/Qwen3-4B": {}, "bartowski/Qwen3-4B-GGUF": {}}),
+            {"bartowski/Qwen3-4B-GGUF": {"context_length": 32768}},
+        )
+        hints = self._capture(api, quant_format="gguf")
+        assert hints["context_length"] == 32768
+        assert hints["source_stage"] is None
+        assert hints["supports_thinking"] is None
+
+    def test_an_mlx_capture_never_asks_for_gguf_metadata(self, tmp_path):
+        api = _set_gguf(
+            _hub(tmp_path, self._repos()), {"bartowski/Qwen3-4B-GGUF": {"context_length": 1}}
+        )
+        assert self._capture(api, quant_format="mlx")["context_length"] == 40960
+        api.model_info.assert_not_called()
+
+    def test_an_unstated_format_never_asks(self, tmp_path):
+        api = _set_gguf(
+            _hub(tmp_path, self._repos()), {"bartowski/Qwen3-4B-GGUF": {"context_length": 1}}
+        )
+        assert self._capture(api)["context_length"] == 40960
+        api.model_info.assert_not_called()
+
+    def test_without_a_quant_repo_nothing_is_asked(self, tmp_path):
+        api = _set_gguf(_hub(tmp_path, self._repos()), {})
+        assert capture_generation_hints("Qwen/Qwen3-4B", api, quant_format="gguf")
+        api.model_info.assert_not_called()
+
+    def test_memoized_per_quant_repo(self, tmp_path):
+        api = _set_gguf(
+            _hub(
+                tmp_path,
+                {
+                    "Qwen/Qwen3-4B": _FACTS,
+                    "Qwen/Qwen3-8B": _FACTS,
+                    "bartowski/Qwen3-4B-GGUF": {},
+                },
+            ),
+            {"bartowski/Qwen3-4B-GGUF": {"context_length": 40960}},
+        )
+        for base in ("Qwen/Qwen3-4B", "Qwen/Qwen3-8B"):
+            hints = capture_generation_hints(
+                base, api, quant_repo="bartowski/Qwen3-4B-GGUF", quant_format="gguf"
+            )
+            assert hints["context_length"] == 40960
+        assert api.model_info.call_count == 1
+
+
 class TestCaptureGenerationHints:
     def test_captures_the_three_files(self, tmp_path):
         api = _fake_hf_api(
@@ -1031,6 +1226,13 @@ class TestReadLocalGenerationHints:
         assert "generation_config" not in hints
         assert hints["source_stage"] is None
         assert hints["context_length"] == 32768
+
+    def test_context_length_aliases_apply_offline_too(self, tmp_path):
+        # Same reader as the online capture: a downloaded artifact whose config
+        # names the window ``n_positions`` still yields a window (what the MLX
+        # spawn bound reads).
+        (tmp_path / "config.json").write_text(json.dumps({"n_positions": 2048}), encoding="utf-8")
+        assert read_local_generation_hints(tmp_path)["context_length"] == 2048
 
     def test_gguf_directory_has_nothing(self, tmp_path):
         (tmp_path / "model.gguf").write_bytes(b"GGUF")
