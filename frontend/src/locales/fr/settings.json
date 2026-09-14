@@ -4,8 +4,8 @@
   "subtitle": "Préférences qui s'appliquent à toute l'application.",
   "webSearch": {
     "title": "Recherche web",
-    "description": "Autorise les modèles compatibles avec les outils à chercher sur le web lorsqu'une question nécessite des informations récentes ou externes. Lorsque le modèle décide de chercher, la requête est envoyée à des moteurs de recherche externes — rien d'autre ne quitte votre machine.",
-    "note": "Désactivée par défaut. Les nouvelles conversations héritent de ce réglage ; chaque conversation conserve ensuite son propre interrupteur.",
+    "description": "Définit si la recherche web démarre activée ou désactivée pour les nouvelles conversations. Chaque conversation conserve ensuite son propre interrupteur de recherche web dans son en-tête de discussion, donc modifier ce réglage n'affecte jamais une conversation déjà existante.",
+    "note": "Désactivée par défaut. Quand un modèle compatible avec les outils décide de chercher, la requête recherchée est envoyée à des moteurs de recherche externes — rien d'autre ne quitte votre machine.",
     "toggleLabel": "Recherche web"
   },
   "autoUpdate": {

@@ -4,8 +4,8 @@
   "subtitle": "Preferencias que se aplican a toda la aplicación.",
   "webSearch": {
     "title": "Búsqueda web",
-    "description": "Permite que los modelos compatibles con herramientas busquen en la web cuando una pregunta requiere información actual o externa. Cuando el modelo decide buscar, la consulta se envía a motores de búsqueda externos; nada más sale de tu equipo.",
-    "note": "Desactivada por defecto. Las conversaciones nuevas heredan este ajuste; después, cada conversación conserva su propio interruptor.",
+    "description": "Define si la búsqueda web empieza activada o desactivada en las conversaciones nuevas. Cada conversación conserva después su propio interruptor de búsqueda web en la cabecera del chat, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
+    "note": "Desactivada por defecto. Cuando un modelo compatible con herramientas decide buscar, la consulta buscada se envía a motores de búsqueda externos; nada más sale de tu equipo.",
     "toggleLabel": "Búsqueda web"
   },
   "autoUpdate": {

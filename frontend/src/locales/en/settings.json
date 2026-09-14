@@ -4,8 +4,8 @@
   "subtitle": "Preferences that apply across the whole app.",
   "webSearch": {
     "title": "Web Search",
-    "description": "Let models that support tools search the web when a question needs current or external facts. When the model decides to search, the searched query is sent to external search engines — nothing else leaves your machine.",
-    "note": "Off by default. New conversations inherit this setting; each conversation keeps its own toggle afterwards.",
+    "description": "Sets whether web search starts on or off for new conversations. Each conversation keeps its own web search toggle in its chat header afterwards, so changing this setting never affects a conversation that already exists.",
+    "note": "Off by default. When a tool-capable model decides to search, the searched query is sent to external search engines — nothing else leaves your machine.",
     "toggleLabel": "Web search"
   },
   "autoUpdate": {
