@@ -85,8 +85,6 @@ class TestIsByteSplitGguf:
             "Qwen3.5-122B-A10B-Q4_K_M-00001-of-00003.gguf",
             "zai-org.GLM-5.3-Flash.Q4_K_M.gguf-00001-of-00015.gguf",
             "Q4_K_M/DeepSeek-V3.2-Q4_K_M-00001-of-00009.gguf",
-            # A llama.cpp split whose name before the part numbers ends in "chunk".
-            "long-context-chunk-00001-of-00003.gguf",
             "model-Q4_K_M.gguf",
             "gemma-3-4b-it-q4_0.gguf",
             "mmproj-model-f16.gguf",
@@ -97,6 +95,12 @@ class TestIsByteSplitGguf:
     )
     def test_loadable_files_do_not_match(self, filename):
         assert is_byte_split_gguf(filename) is False
+
+    def test_chunk_named_five_digit_pieces_are_read_as_raw_chunks(self):
+        # Ambiguous by name alone: raw chunks padded to five digits and a llama.cpp
+        # split whose prefix ends in "chunk" look the same. Refusing is the safe
+        # side; downloading every piece would only fail when the loader opens them.
+        assert is_byte_split_gguf("model-chunk-00001-of-00002.gguf") is True
 
 
 class TestSelectionSkipsByteSplits:

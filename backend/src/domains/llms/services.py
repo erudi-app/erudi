@@ -151,10 +151,13 @@ GGUF_QUANT_PRIORITY = ["q4_k_m", "q4_0", "q5_k_m", "q8_0", "f16"]
 # so llama.cpp cannot load any of them until they are concatenated, and Erudi
 # does not concatenate downloads. llama.cpp's own splits
 # (<name>-00001-of-00003.gguf) are different: every part is a complete GGUF file
-# the loader stitches itself, and they never match this pattern, even when the
-# name before the part numbers happens to end in "chunk".
+# the loader stitches itself. The one ambiguous shape is a llama.cpp split whose
+# name before the part numbers ends in "chunk" (<name>-chunk-00001-of-00003.gguf):
+# it is read as raw chunks on purpose. Refusing that rare name costs a clear
+# message; accepting it would let five-digit raw chunks through as a split, and
+# a download of every piece would only fail once the loader opens them.
 _BYTE_SPLIT_GGUF_RE = re.compile(
-    r"(?:-chunk-(?!\d{5}-of-\d{5}\.gguf$)\d+-of-\d+\.gguf|\.gguf\.part\d+of\d+|\.gguf\.[a-z]|\.gguf-split-[a-z])$",
+    r"(?:-chunk-\d+-of-\d+\.gguf|\.gguf\.part\d+of\d+|\.gguf\.[a-z]|\.gguf-split-[a-z])$",
     re.IGNORECASE,
 )
 
