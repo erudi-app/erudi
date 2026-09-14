@@ -51,12 +51,16 @@ class TestCudaEngineHierarchy:
 
 @pytest.mark.unit
 class TestSpawnContextAndArgv:
-    def test_prepare_spawn_context_invokes_compute_gpu_layers(self):
+    def test_prepare_spawn_context_invokes_compute_gpu_layers(self, monkeypatch):
+        monkeypatch.delenv("ERUDI_CTX", raising=False)
         with patch.object(CUDA_Engine, "_compute_gpu_layers", return_value=42):
             ctx = CUDA_Engine._prepare_spawn_context()
         assert ctx["gpu_layers"] == 42
         assert ctx["threads"] >= 1
-        assert ctx["ctx_size"] >= 1
+        # Deliberate inversion of the old `>= 1` assertion: without ERUDI_CTX
+        # the engine passes no window — llama-server's own fit resolves it at
+        # load (trained window, reduced only when memory demands it).
+        assert ctx["ctx_size"] is None
 
     def test_prepare_spawn_context_honours_erudi_ctx_env(self, monkeypatch):
         monkeypatch.setenv("ERUDI_CTX", "8192")
@@ -87,6 +91,21 @@ class TestSpawnContextAndArgv:
         assert "-c 4096" in joined
         assert "--threads 4" in joined
         assert "-ngl 32" in joined  # CUDA uses computed layers
+
+    def test_build_spawn_argv_omits_c_without_a_pinned_window(self):
+        """No ERUDI_CTX -> no ``-c``: llama-server's fit (ON by default in the
+        pinned b10883) resolves the window to the model's trained window and
+        reduces it only against measured free memory."""
+        argv = CUDA_Engine._build_spawn_argv(
+            llama_server=Path("/bin/llama-server"),
+            model_gguf=Path("/m.gguf"),
+            alias="erudi-9",
+            port=8456,
+            ctx_size=None,
+            threads=4,
+            gpu_layers=32,
+        )
+        assert "-c" not in [str(x) for x in argv]
 
 
 # =====================================================================

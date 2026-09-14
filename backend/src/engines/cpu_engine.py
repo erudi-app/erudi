@@ -13,7 +13,7 @@ Current Status:
 Features:
     - Load GGUF quantized models via llama-server subprocess
     - Multi-threaded inference with configurable thread count
-    - Context window optimization (configurable via ERUDI_CTX)
+    - Context window resolved at load by llama-server's own fit (ERUDI_CTX pins it)
     - Streaming generation via OpenAI-compatible /v1/chat/completions
     - Automatic port selection and server lifecycle management
     - Cross-platform (macOS, Linux, Windows) with Rosetta support
@@ -75,7 +75,7 @@ import os
 import platform
 import time  # used by hardware warm-up loop
 from pathlib import Path
-from typing import Any, Dict, List
+from typing import Any, Dict, List, Optional
 
 from src.engines.base_llama_cpp_engine import BaseLlamaCppEngine
 from src.engines.cpu_brand import get_cpu_brand
@@ -107,8 +107,9 @@ class CPU_Engine(BaseLlamaCppEngine):
 
     @classmethod
     def _prepare_spawn_context(cls) -> Dict[str, Any]:
-        """Resolve the per-spawn CPU context: context window, thread count,
-        and the fixed `gpu_layers=0` (CPU-only inference)."""
+        """Resolve the per-spawn CPU context: the pinned context window (None
+        unless ERUDI_CTX is set -- llama-server's own fit resolves it then),
+        thread count, and the fixed `gpu_layers=0` (CPU-only inference)."""
         return {
             "ctx_size": cls.max_context_tokens(),
             "threads": max(1, os.cpu_count() or 1),
@@ -123,12 +124,20 @@ class CPU_Engine(BaseLlamaCppEngine):
         model_gguf: Path,
         alias: str,
         port: int,
-        ctx_size: int = 4096,
+        ctx_size: Optional[int] = None,
         threads: int = 1,
         gpu_layers: int = 0,
         **_ignored: Any,
     ) -> List[Any]:
-        """CPU CLI for llama-server: forces `-ngl 0`, sized context, native threads.
+        """CPU CLI for llama-server: forces `-ngl 0`, native threads.
+
+        ``-c`` is passed ONLY when the user pinned a window (``ERUDI_CTX``):
+        an explicit ``-c`` is honoured unchanged by llama-server. With
+        ``ctx_size=None`` the flag is omitted entirely and the server's own
+        fit (ON by default in the pinned b10883) resolves the window at load:
+        the model's trained window, continuously reduced against measured free
+        memory down to a 4096 floor when it must. The resolved value is read
+        back via ``_read_server_properties`` after the probe.
 
         ``--jinja`` enables the model's own chat template and with it
         OpenAI-style function calling (the agent's calculator tool) —
@@ -140,7 +149,7 @@ class CPU_Engine(BaseLlamaCppEngine):
         thinking would be silently lost. Inline, the runner's single streaming
         splitter separates thinking from answer uniformly across engines.
         """
-        return [
+        argv: List[Any] = [
             str(llama_server),
             "-m",
             str(model_gguf),
@@ -150,8 +159,10 @@ class CPU_Engine(BaseLlamaCppEngine):
             str(port),
             "--alias",
             alias,
-            "-c",
-            str(ctx_size),
+        ]
+        if ctx_size is not None:
+            argv += ["-c", str(ctx_size)]
+        argv += [
             "--threads",
             str(threads),
             "-ngl",
@@ -160,6 +171,7 @@ class CPU_Engine(BaseLlamaCppEngine):
             "--reasoning-format",
             "none",
         ]
+        return argv
 
     @classmethod
     def get_hardware_info(cls) -> Dict[str, Any]:

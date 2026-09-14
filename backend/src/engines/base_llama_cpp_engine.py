@@ -29,6 +29,8 @@ from abc import abstractmethod
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
+import requests
+
 from src.core.config import ROOT_DIR
 from src.core.exceptions import EngineException
 from src.core.logging import logger
@@ -151,11 +153,30 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
 
     # ====================== Concrete shared methods ======================
     @classmethod
-    def max_context_tokens(cls) -> int:
-        """llama-server runs with a fixed context window (``-c``): 4096 tokens by
-        default, ``ERUDI_CTX`` to override. Shared by the spawn context and the
-        sampling resolver's ``max_tokens_cap`` (#388)."""
-        return int(os.environ.get("ERUDI_CTX", "4096"))
+    def max_context_tokens(cls) -> Optional[int]:
+        """The DECLARED CEILING for llama-server: ``ERUDI_CTX`` when the user
+        pinned one (then passed verbatim as ``-c`` -- llama-server honours an
+        explicit ``-c`` unchanged, "no change" contract), else ``None``.
+
+        ``None`` does NOT mean 4096 anymore: without ``-c`` the pinned
+        llama.cpp build resolves the window itself at load (``--fit``, ON by
+        default -- the model's trained window, continuously reduced against
+        measured free memory down to a 4096 floor when physics demands). The
+        window it actually allocated is read back through
+        ``effective_context_tokens()`` after boot, never guessed here.
+
+        Shared by the spawn context and the sampling resolver's
+        ``max_tokens_cap`` (#388), both of which tolerate ``None``."""
+        raw = os.environ.get("ERUDI_CTX", "").strip()
+        if not raw:
+            return None
+        try:
+            return int(raw)
+        except ValueError:
+            # Degraded on purpose: a typo in a QA env var must not crash the
+            # spawn; the engine falls back to its own fit.
+            logger.warning(f"[{cls.__name__}] ERUDI_CTX is not an integer; ignoring it")
+            return None
 
     @classmethod
     def _default_install_dir(cls) -> Path:
@@ -451,6 +472,68 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         if "enable_thinking" in kwargs:
             out["chat_template_kwargs"] = {"enable_thinking": kwargs["enable_thinking"]}
         return out
+
+    # Bound on the one post-probe `/props` read. The server just answered the
+    # readiness probe, so 2s of silence here means something is wrong enough
+    # that degrading (window unknown) beats stalling the load.
+    _PROPS_TIMEOUT_S: ClassVar[float] = 2.0
+
+    @classmethod
+    def _read_server_properties(cls, handle: Dict[str, Any]) -> None:
+        """One bounded `GET /props` after the probe: what llama-server ALLOCATED.
+
+        llama-server resolves its context window AT LOAD -- either the user's
+        explicit ``-c`` (kept unchanged), or, with no ``-c``, its own fit: the
+        model's trained window, continuously reduced against measured free
+        memory (pinned b10883, ``common/fit.cpp``). The resolved value is not
+        knowable in advance, so it is read back from the running child:
+
+        * ``context_tokens`` = ``default_generation_settings.n_ctx`` -- the
+          allocated window every percentage, compaction threshold and watchdog
+          budget downstream must use;
+        * ``chat_template_caps`` -- notably ``supports_reasoning_effort``,
+          read by the reasoning-effort mapping;
+        * ``chat_template`` -- the template the server actually applies
+          (per-spawn memory, possibly large; never persisted).
+
+        ANY failure (timeout, non-200, unreadable body, missing keys) degrades:
+        one WARNING, ``context_tokens=None``, and the model finishes loading.
+        MLX does not override this hook -- its window is a preflight bound
+        stamped at spawn, there is nothing to read back (see `MLX_Engine`).
+        """
+        handle["context_tokens"] = None
+        handle["chat_template_caps"] = {}
+        handle["chat_template"] = None
+        api_key = handle.get("api_key")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+        try:
+            resp = requests.get(
+                f"{handle['base_url']}/props", timeout=cls._PROPS_TIMEOUT_S, headers=headers
+            )
+            if resp.status_code != 200:
+                raise ValueError(f"HTTP {resp.status_code}")
+            props = resp.json()
+            settings = props.get("default_generation_settings")
+            n_ctx = settings.get("n_ctx") if isinstance(settings, dict) else None
+            if not isinstance(n_ctx, int) or isinstance(n_ctx, bool) or n_ctx <= 0:
+                raise ValueError("default_generation_settings.n_ctx missing or invalid")
+            caps = props.get("chat_template_caps")
+            template = props.get("chat_template")
+            handle["context_tokens"] = n_ctx
+            handle["chat_template_caps"] = caps if isinstance(caps, dict) else {}
+            handle["chat_template"] = template if isinstance(template, str) else None
+            logger.info(
+                f"[{cls.__name__}] {cls._server_name} allocated context window: "
+                f"{n_ctx} tokens (port {handle.get('port')})"
+            )
+        except Exception as exc:
+            # Degraded, not failed: the model is loaded and usable; only the
+            # window metadata is unknown (downstream treats None as unknown).
+            logger.warning(
+                f"[{cls.__name__}] Could not read {cls._server_name} /props on "
+                f"port {handle.get('port')}; allocated context window unknown "
+                f"({type(exc).__name__}: {exc})"
+            )
 
     @classmethod
     def _spawn_child(
