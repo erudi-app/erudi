@@ -108,8 +108,13 @@ describe("HeaderBar web search toggle disabled for tool-incapable models (#570)"
     expect(toggle.disabled).toBe(false);
   });
 
-  it("explains why the toggle is disabled", async () => {
-    renderBar({ showWebSearch: true, initialWebSearch: false, webSearchDisabled: true });
+  it("renders the caller-supplied, already-translated tooltip explaining why", async () => {
+    renderBar({
+      showWebSearch: true,
+      initialWebSearch: false,
+      webSearchDisabled: true,
+      webSearchDisabledTooltip: "This model can't use tools, so web search isn't available for it.",
+    });
     openSettings();
     await screen.findByRole("switch", { name: "Web search" });
     expect(document.body.textContent).toMatch(/can't use tools/i);

@@ -35,11 +35,18 @@ vi.mock("../components/modals/CustomizePromptModal", () => ({ default: () => nul
 
 // HeaderBar probe: exposes the web-search wiring as testable elements.
 vi.mock("../components/HeaderBar", () => ({
-  default: ({ showWebSearch, initialWebSearch, webSearchDisabled, onWebSearchChange }) => (
+  default: ({
+    showWebSearch,
+    initialWebSearch,
+    webSearchDisabled,
+    webSearchDisabledTooltip,
+    onWebSearchChange,
+  }) => (
     <div>
       <div data-testid="show-web-search">{String(showWebSearch)}</div>
       <div data-testid="initial-web-search">{String(initialWebSearch)}</div>
       <div data-testid="web-search-disabled">{String(webSearchDisabled)}</div>
+      <div data-testid="web-search-disabled-tooltip">{webSearchDisabledTooltip}</div>
       <button onClick={() => onWebSearchChange(!initialWebSearch)}>FLIP_WEB_SEARCH</button>
     </div>
   ),
@@ -123,28 +130,8 @@ describe("ConversationPage web search toggle (#310)", () => {
   });
 });
 
-describe("ConversationPage web search toggle disabled for tool-incapable models (#570)", () => {
-  it("disables the toggle when the assigned model cannot execute tools", async () => {
-    tracedFetchMock.mockImplementation(
-      routeFetchWithModels([
-        { id: 1, name: "no-tools-model", supports_tools: false, supports_tools_wire: null },
-      ])
-    );
-    await renderAndSettle();
-    await waitFor(() => expect(screen.getByTestId("web-search-disabled").textContent).toBe("true"));
-  });
-
-  it("disables the toggle when the wire is known unreliable even if supports_tools is true", async () => {
-    tracedFetchMock.mockImplementation(
-      routeFetchWithModels([
-        { id: 1, name: "unreliable-wire-model", supports_tools: true, supports_tools_wire: false },
-      ])
-    );
-    await renderAndSettle();
-    await waitFor(() => expect(screen.getByTestId("web-search-disabled").textContent).toBe("true"));
-  });
-
-  it("keeps the toggle enabled when the model can execute tools", async () => {
+describe("ConversationPage web search toggle disabled for tool-incapable/unverified models (#570)", () => {
+  it("keeps the toggle enabled when both flags are positively true", async () => {
     tracedFetchMock.mockImplementation(
       routeFetchWithModels([
         { id: 1, name: "tool-model", supports_tools: true, supports_tools_wire: true },
@@ -156,15 +143,55 @@ describe("ConversationPage web search toggle disabled for tool-incapable models 
     );
   });
 
-  it("keeps the toggle enabled when the flags are unknown (not yet detected)", async () => {
-    tracedFetchMock.mockImplementation(routeFetchWithModels([{ id: 1, name: "unknown-model" }]));
+  it("disables with the 'incapable' text when supports_tools is positively false", async () => {
+    tracedFetchMock.mockImplementation(
+      routeFetchWithModels([
+        { id: 1, name: "no-tools-model", supports_tools: false, supports_tools_wire: null },
+      ])
+    );
     await renderAndSettle();
-    await waitFor(() =>
-      expect(screen.getByTestId("web-search-disabled").textContent).toBe("false")
+    await waitFor(() => expect(screen.getByTestId("web-search-disabled").textContent).toBe("true"));
+    expect(screen.getByTestId("web-search-disabled-tooltip").textContent).toMatch(
+      /can't use tools/i
     );
   });
 
-  it("keeps the toggle enabled when the assigned model is orphaned/unknown", async () => {
+  it("disables with the 'incapable' text when supports_tools_wire is positively false, even if supports_tools is true", async () => {
+    tracedFetchMock.mockImplementation(
+      routeFetchWithModels([
+        { id: 1, name: "unreliable-wire-model", supports_tools: true, supports_tools_wire: false },
+      ])
+    );
+    await renderAndSettle();
+    await waitFor(() => expect(screen.getByTestId("web-search-disabled").textContent).toBe("true"));
+    expect(screen.getByTestId("web-search-disabled-tooltip").textContent).toMatch(
+      /can't use tools/i
+    );
+  });
+
+  it("disables with the 'unverified' text when the wire is null but supports_tools is true", async () => {
+    tracedFetchMock.mockImplementation(
+      routeFetchWithModels([
+        { id: 1, name: "unverified-wire-model", supports_tools: true, supports_tools_wire: null },
+      ])
+    );
+    await renderAndSettle();
+    await waitFor(() => expect(screen.getByTestId("web-search-disabled").textContent).toBe("true"));
+    expect(screen.getByTestId("web-search-disabled-tooltip").textContent).toMatch(
+      /hasn't been verified/i
+    );
+  });
+
+  it("disables with the 'unverified' text when supports_tools itself is null/unknown", async () => {
+    tracedFetchMock.mockImplementation(routeFetchWithModels([{ id: 1, name: "unknown-model" }]));
+    await renderAndSettle();
+    await waitFor(() => expect(screen.getByTestId("web-search-disabled").textContent).toBe("true"));
+    expect(screen.getByTestId("web-search-disabled-tooltip").textContent).toMatch(
+      /hasn't been verified/i
+    );
+  });
+
+  it("keeps the toggle enabled when the assigned model is orphaned/unknown (no claim made)", async () => {
     tracedFetchMock.mockImplementation(routeFetchWithModels([]));
     await renderAndSettle();
     await waitFor(() =>

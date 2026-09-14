@@ -6,7 +6,7 @@ import {
   parseParamSizeB,
   isVerySmallModel,
   SMALL_MODEL_PARAM_THRESHOLD_B,
-  webSearchUnavailableForModel,
+  webSearchUnavailabilityReason,
 } from "./modelCapabilities";
 
 describe("canAttachImages", () => {
@@ -148,32 +148,40 @@ describe("isVerySmallModel (#381)", () => {
   });
 });
 
-describe("webSearchUnavailableForModel (#570)", () => {
-  it("disables when the model is positively known unable to execute tools", () => {
-    expect(webSearchUnavailableForModel({ supports_tools: false })).toBe(true);
-    expect(webSearchUnavailableForModel({ supports_tools_wire: false })).toBe(true);
+describe("webSearchUnavailabilityReason (#570)", () => {
+  it("is operational (null) only when BOTH flags are positively true -- mirrors the backend gate exactly", () => {
     expect(
-      webSearchUnavailableForModel({ supports_tools: false, supports_tools_wire: false })
-    ).toBe(true);
+      webSearchUnavailabilityReason({ supports_tools: true, supports_tools_wire: true })
+    ).toBeNull();
   });
 
-  it("stays enabled when the model can execute tools", () => {
-    expect(webSearchUnavailableForModel({ supports_tools: true, supports_tools_wire: true })).toBe(
-      false
+  it("returns 'incapable' when either flag is positively false", () => {
+    expect(webSearchUnavailabilityReason({ supports_tools: false })).toBe("incapable");
+    expect(webSearchUnavailabilityReason({ supports_tools_wire: false })).toBe("incapable");
+    expect(
+      webSearchUnavailabilityReason({ supports_tools: false, supports_tools_wire: false })
+    ).toBe("incapable");
+    // Wire explicitly verified unreliable overrides a true supports_tools --
+    // the backend gate requires supports_tools_wire IS True, not truthy.
+    expect(
+      webSearchUnavailabilityReason({ supports_tools: true, supports_tools_wire: false })
+    ).toBe("incapable");
+  });
+
+  it("returns 'unverified' when a flag is null/undefined and neither is positively false", () => {
+    // supports_tools true but the wire was never confirmed -- the backend
+    // gate needs supports_tools_wire IS True, so null is just as silent as
+    // false and must NOT read as operational.
+    expect(webSearchUnavailabilityReason({ supports_tools: true, supports_tools_wire: null })).toBe(
+      "unverified"
     );
+    expect(webSearchUnavailabilityReason({ supports_tools: null })).toBe("unverified");
+    expect(webSearchUnavailabilityReason({ supports_tools_wire: null })).toBe("unverified");
+    expect(webSearchUnavailabilityReason({})).toBe("unverified");
   });
 
-  it("is permissive when a flag is unknown -- only positive knowledge disables it", () => {
-    expect(webSearchUnavailableForModel({ supports_tools: null })).toBe(false);
-    expect(webSearchUnavailableForModel({ supports_tools_wire: null })).toBe(false);
-    expect(webSearchUnavailableForModel({})).toBe(false);
-    expect(webSearchUnavailableForModel({ supports_tools: true, supports_tools_wire: null })).toBe(
-      false
-    );
-  });
-
-  it("never disables for a missing/unknown/orphaned model", () => {
-    expect(webSearchUnavailableForModel(undefined)).toBe(false);
-    expect(webSearchUnavailableForModel(null)).toBe(false);
+  it("is operational (null) for a missing/orphaned model -- no turn happens, so no claim is made", () => {
+    expect(webSearchUnavailabilityReason(undefined)).toBeNull();
+    expect(webSearchUnavailabilityReason(null)).toBeNull();
   });
 });

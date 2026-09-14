@@ -30,7 +30,8 @@
       "topP": "Contrôle la variété des mots. Plus bas = prévisible, plus haut = varié.",
       "prompt": "Personnalisez les instructions système qui guident le comportement de l'IA.",
       "webSearch": "Permet au modèle de chercher sur le web des informations récentes. Les requêtes de recherche sont envoyées à des moteurs de recherche externes.",
-      "webSearchUnavailable": "Ce modèle ne peut pas utiliser d'outils, la recherche web n'est donc pas disponible pour lui."
+      "webSearchUnavailable": "Ce modèle ne peut pas utiliser d'outils, la recherche web n'est donc pas disponible pour lui.",
+      "webSearchUnverified": "Ce modèle n'a pas encore été vérifié pour l'exécution d'outils, la recherche web reste donc désactivée pour lui."
     },
     "noPublisherRecommendation": "Aucune recommandation de réglages de la part de l'éditeur de ce modèle ; réglages neutres appliqués.",
     "weightsMissingHint": "Poids manquants — réassociez cet assistant depuis la page Modèles"

@@ -41,14 +41,16 @@ export default function HeaderBar({
   showWebSearch = false,
   initialWebSearch = false,
   onWebSearchChange,
-  // Positive-knowledge gate (#570): true when the conversation's current
-  // model is known unable to execute tools, so the `web_search` tool never
-  // joins the turn no matter this toggle's state. The toggle stays visible
-  // (its stored value is not hidden) but is disabled with an explanatory
-  // tooltip instead of silently doing nothing when flipped on. The caller
-  // (ConversationPage) computes this from the models list it already loads;
-  // this component stays decoupled from that lookup.
+  // True when the conversation's current model is known to make the
+  // `web_search` tool a no-op (#570): it never joins the turn no matter this
+  // toggle's state (backend/src/agents/kb_mode.py gate). The toggle stays
+  // visible (its stored value is not hidden) but is disabled instead of
+  // silently doing nothing when flipped on. The caller (ConversationPage)
+  // computes this AND the reason from the models list it already loads; this
+  // component stays decoupled from that taxonomy and just renders the state
+  // and the already-translated explanation it is handed.
   webSearchDisabled = false,
+  webSearchDisabledTooltip = "",
   // The model's publisher gives no sampling recommendation (#388,
   // `sampling_defaults.source === "none"`): a discreet line under the sliders
   // says the neutral defaults apply. Nothing is shown when one exists.
@@ -494,7 +496,7 @@ export default function HeaderBar({
                         <div className="ml-auto">
                           {webSearchDisabled ? (
                             <Tooltip
-                              content={t("chat:header.tooltips.webSearchUnavailable")}
+                              content={webSearchDisabledTooltip}
                               side={isNarrow ? "bottom-right" : "right"}
                               width={isXs ? "w-40" : isSm ? "w-52" : "w-64"}
                             >
@@ -584,6 +586,7 @@ HeaderBar.propTypes = {
   initialWebSearch: PropTypes.bool,
   onWebSearchChange: PropTypes.func,
   webSearchDisabled: PropTypes.bool,
+  webSearchDisabledTooltip: PropTypes.string,
   disabled: PropTypes.bool,
   models: PropTypes.arrayOf(
     PropTypes.shape({
