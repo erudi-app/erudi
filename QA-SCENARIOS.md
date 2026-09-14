@@ -129,6 +129,7 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I delete the conversation I'm viewing, then it's removed and I'm redirected to `/erudi/chat`; deleting a different one keeps me in place.
 - [ ] When I quit and relaunch and reopen the conversation, then its full history is intact.
 - [ ] When generation **fails** or the connection **drops** mid-reply, then a red error message shows and any partial reply is kept.
+- [ ] When a **long conversation** on a **big model / small machine** reaches the point where the model needs more than two minutes just to read the history before writing its first word (e.g. a 9B model on a 16 GB laptop, a dozen long turns in), then the answer still arrives — the turn is no longer cut at exactly two minutes of silence. If it genuinely never starts, the red turn says the model did not start answering for a prompt of that size and suggests sending less, instead of a generic error.
 - [ ] When an answer contains a **markdown image pointing at a web address** (ask the model to reply with exactly `![logo](https://example.com/logo.png)`), then no picture is fetched or shown — at most a broken-image placeholder — because the window loads no remote images, so no site learns my address from an answer on screen.
 - [ ] When the conversation's assigned model was **deleted**, then the conversation survives with no model assigned: sending is **blocked**, the header model picker shows a red "Please select a model" attention state, and **explicitly picking** an installed model unblocks sending (no auto-fallback).
 

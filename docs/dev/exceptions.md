@@ -60,6 +60,7 @@ All classes below live in `backend/src/core/exceptions.py`.
 | `HardwareException` | `(message, trace=None)` | 500 | `HARDWARE_ERROR` |
 | `UnsupportedPlatformException` | `(feature, reason, trace=None)` | 501 | `UNSUPPORTED_PLATFORM` |
 | `HuggingFaceAPIException` | `(message, trace=None)` | 503 | `HUGGINGFACE_API_ERROR` |
+| `GenerationTimeoutException` | `(message, *, phase, budget_s, estimated_prompt_tokens=0, trace=None)` | 504 | `GENERATION_TIMEOUT` |
 | `InsufficientMemoryException` | `(operation, trace=None)` | 507 | `INSUFFICIENT_MEMORY` |
 
 Note the argument shapes: the "not found" exceptions take the **identifier**, not a

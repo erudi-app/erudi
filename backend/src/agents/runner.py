@@ -52,11 +52,12 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 
 from fastapi.concurrency import run_in_threadpool
 
+from src.agents.chat_model import INTER_CHUNK_BUDGET_S, PHASE_FIRST_CHUNK
 from src.agents.model_factory import build_chat_model
 from src.database.generation_hints import resolve_sampling_defaults
 from src.agents.think_splitter import ThinkSplitter
 from src.core import config
-from src.core.exceptions import EngineException
+from src.core.exceptions import EngineException, GenerationTimeoutException
 from src.core.logging import logger
 
 if TYPE_CHECKING:
@@ -98,6 +99,37 @@ LOOP_LIMIT_MESSAGE = (
     "(the model kept retrying without making progress). Please try rephrasing "
     "your question."
 )
+
+# Curated turns for a stream that ran out of wall-clock budget (#573). The two
+# silences are not the same failure and must not read the same: one says the
+# model never started on a prompt this size (retrying makes it WORSE -- the
+# history only grows), the other says it started and then stopped.
+PREFILL_TIMEOUT_MESSAGE_TEMPLATE = (
+    "{sentinel} This model did not start answering within {minutes} minutes on this "
+    "machine. Before writing a word it has to read everything this turn sends it -- "
+    "the whole conversation so far -- and it did not get through that in time. "
+    "Sending the same thing again will take longer, not less: start a new "
+    "conversation, send less at once, or pick a smaller model."
+)
+DECODE_TIMEOUT_MESSAGE = (
+    f"{ERROR_SENTINEL} This model started answering, then went silent for "
+    f"{INTER_CHUNK_BUDGET_S:.0f} seconds, so the turn was stopped. Anything it had "
+    "already written is kept above. Please try asking your question again."
+)
+
+
+def _stream_timeout_message(exc: GenerationTimeoutException) -> str:
+    """The curated turn a ``GenerationTimeoutException`` becomes."""
+    if exc.phase != PHASE_FIRST_CHUNK:
+        return DECODE_TIMEOUT_MESSAGE
+    # The estimated prompt size stays in the WARNING and out of the turn: it is
+    # a deliberate UPPER BOUND (one token per UTF-8 byte, #573), so quoting it
+    # to the user as a token count would overstate the real prompt several-fold.
+    return PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
+        sentinel=ERROR_SENTINEL,
+        minutes=max(1, round(exc.budget_s / 60)),
+    )
+
 
 # Prepended (and persisted with the assistant message) by the conversation and
 # arena services when the CURRENT turn carries images but the model is not
@@ -317,8 +349,9 @@ class AgentRunner:
         ``{"t":"tool_call","name":...,"args":{...}}`` per call, and
         ``{"t":"tool_result","name":...,"text":...}`` per ToolMessage.
 
-        Error paths (#252 construction failure, streaming failure) yield the
-        curated ERROR sentinel as an ``answer`` event -- callers map it: the
+        Error paths (#252 construction failure, streaming failure, #573 stream
+        budget expiry) yield a curated ERROR sentinel as an ``answer`` event --
+        each one saying what actually happened. Callers map it: the
         conversation service turns a sentinel-prefixed answer into an ``error``
         wire event while still accumulating the sentinel STRING for persistence
         (DB behavior unchanged per #225-D4); arena yields it as plain text.
@@ -589,6 +622,26 @@ class AgentRunner:
                         yield {"t": "answer", "text": LOOP_LIMIT_MESSAGE}
                 if stateful:
                     await self._repair_alternation(agent, run_config)
+            except GenerationTimeoutException as exc:
+                # #573: the stream stayed silent past its budget. Nothing
+                # crashed -- the watchdog ended the turn on a budget WE chose --
+                # so this is a degradation, logged at WARNING with the numbers
+                # behind the decision and no traceback (docs/logging.md), and
+                # the user gets a turn that names the actual cause.
+                logger.warning(
+                    f"Agent stream timed out: llm={getattr(llm, 'id', '?')} "
+                    f"({getattr(llm, 'name', '?')}), thread_id={thread_id}, "
+                    f"phase={exc.phase}, budget_s={exc.budget_s:.0f}, "
+                    f"est_prompt_tokens={exc.estimated_prompt_tokens}"
+                )
+                if stateful:
+                    await self._repair_alternation(agent, run_config)
+                # Same parity as the generic failure below: text buffered before
+                # the timeout is delivered ahead of the curated turn.
+                for text in hop_text_buffer:
+                    yield {"t": "answer", "text": text}
+                hop_text_buffer.clear()
+                yield {"t": "answer", "text": _stream_timeout_message(exc)}
             except Exception:
                 # A stream that breaks because the inference child died shows
                 # up here as a connection error; the engine knows the exit

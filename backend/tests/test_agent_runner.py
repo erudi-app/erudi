@@ -8,6 +8,7 @@ patching ``build_chat_model``. The engine is a bare ``BaseEngine`` subclass so
 
 import logging
 from types import SimpleNamespace
+from typing import ClassVar
 
 import pytest
 from langchain.agents import create_agent
@@ -16,10 +17,12 @@ from langchain_core.messages import AIMessage, HumanMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
 from src.agents import runner as runner_module
+from src.agents.chat_model import PHASE_FIRST_CHUNK, PHASE_INTER_CHUNK
 from src.agents.model_factory import build_chat_model
 from src.agents.runner import AgentRunner, GenParams, ERROR_SENTINEL
 from src.agents.tools import calculator
 from src.core import config
+from src.core.exceptions import GenerationTimeoutException
 from src.engines.base_engine import BaseEngine
 
 pytestmark = pytest.mark.unit
@@ -1322,6 +1325,103 @@ async def test_events_construction_error_is_sentinel_answer(monkeypatch):
     assert ERROR_SENTINEL in events[0]["text"]
     assert "Traceback" not in events[0]["text"]
     assert "/secret/path" not in events[0]["text"]
+
+
+# ===== Streaming budgets (#573) =====
+
+
+class _TimingOutModel(ToolableFakeChatModel):
+    """A model whose stream never starts: the #573 first-chunk budget fires."""
+
+    timeout_phase: ClassVar[str] = PHASE_FIRST_CHUNK
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        raise GenerationTimeoutException(
+            "no first chunk",
+            phase=self.timeout_phase,
+            budget_s=305.0,
+            estimated_prompt_tokens=6878,
+        )
+        yield  # pragma: no cover  (makes this an async generator function)
+
+
+async def test_events_first_chunk_timeout_is_an_honest_sentinel_answer(monkeypatch):
+    """#573: a prompt too big to prefill in the budget gets a turn that SAYS so.
+
+    The generic "I encountered an error" turn tells the user nothing and invites
+    a retry that is structurally doomed (the history only grows).
+    """
+    _patch_model(monkeypatch, _TimingOutModel(messages=iter([])))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="e573",
+    )
+
+    text = _answers(events)
+    assert ERROR_SENTINEL in text
+    assert text != runner_module.ERROR_MESSAGE
+    assert "start answering" in text
+    # It names the cause (the size of what the model has to read first) without
+    # quoting the estimate: that number is a deliberate UPPER BOUND on the token
+    # count (#573), so printing it as "about N tokens" would be a lie to the user.
+    assert "read" in text
+    assert "6878" not in text
+    assert "Traceback" not in text
+
+
+async def test_events_inter_chunk_timeout_says_the_model_went_silent(monkeypatch):
+    """#573: once tokens flowed, silence is a hang -- a different, honest turn."""
+
+    class _StallingModel(_TimingOutModel):
+        timeout_phase: ClassVar[str] = PHASE_INTER_CHUNK
+
+    _patch_model(monkeypatch, _StallingModel(messages=iter([])))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="e573b",
+    )
+
+    text = _answers(events)
+    assert ERROR_SENTINEL in text
+    assert text != runner_module.ERROR_MESSAGE
+    assert "start answering" not in text
+
+
+async def test_events_stream_timeout_logs_one_warning_with_the_budget(monkeypatch, caplog):
+    """docs/logging.md: one record, at the handler, at the level of what happened."""
+    _patch_model(monkeypatch, _TimingOutModel(messages=iter([])))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    with caplog.at_level(logging.WARNING):
+        await _events(
+            runner,
+            llm=_Llm(),
+            user_message="hi",
+            system_prompt="s",
+            params=_PARAMS,
+            thread_id="e573c",
+        )
+
+    records = [r for r in caplog.records if "timed out" in r.getMessage()]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert records[0].levelno == logging.WARNING
+    assert PHASE_FIRST_CHUNK in message
+    assert "305" in message
+    assert "6878" in message
+    assert message.isascii()
 
 
 # ===== Pre-tool narration reclassified as thinking (#297) =====
