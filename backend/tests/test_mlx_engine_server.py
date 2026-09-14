@@ -336,6 +336,71 @@ class TestChildLifecycleLogging:
 
 
 @pytest.mark.unit
+class TestAppleSiliconChipDetection:
+    """`_detect_apple_silicon_chip` must return the exact chip variant.
+
+    Regression coverage for #503: the previous implementation looped over
+    `_APPLE_SILICON_SPECS` and returned the first key whose space-stripped
+    lowercase form was a *substring* of the profiler's chip name. Since "M4"
+    is contained in "Apple M4 Pro", every Pro/Max/Ultra chip was detected as
+    its base variant, with the base variant's memory bandwidth and GPU cores.
+    """
+
+    @staticmethod
+    def _mock_profiler_result(chip_type: str) -> MagicMock:
+        result = MagicMock()
+        result.returncode = 0
+        result.stdout = json.dumps({"SPHardwareDataType": [{"chip_type": chip_type}]})
+        return result
+
+    def _patch_profiler(self, monkeypatch, chip_type: str) -> None:
+        monkeypatch.setattr(
+            "src.engines.mlx_engine.subprocess.run",
+            lambda *args, **kwargs: self._mock_profiler_result(chip_type),
+        )
+
+    @pytest.mark.parametrize(
+        "chip_type,expected",
+        [
+            ("Apple M1", "M1"),
+            ("Apple M1 Pro", "M1 Pro"),
+            ("Apple M1 Max", "M1 Max"),
+            ("Apple M1 Ultra", "M1 Ultra"),
+            ("Apple M2 Pro", "M2 Pro"),
+            ("Apple M2 Ultra", "M2 Ultra"),
+            ("Apple M3 Max", "M3 Max"),
+            ("Apple M4", "M4"),
+            ("Apple M4 Pro", "M4 Pro"),
+            ("Apple M4 Max", "M4 Max"),
+        ],
+    )
+    def test_detects_the_exact_variant(self, monkeypatch, chip_type, expected):
+        self._patch_profiler(monkeypatch, chip_type)
+        assert MLX_Engine._detect_apple_silicon_chip() == expected
+
+    def test_every_table_key_detects_itself(self, monkeypatch):
+        """Detection must not depend on the table's insertion order: every
+        key, fed back as "Apple <key>", must map to itself."""
+        for key in MLX_Engine._APPLE_SILICON_SPECS:
+            self._patch_profiler(monkeypatch, f"Apple {key}")
+            assert MLX_Engine._detect_apple_silicon_chip() == key
+
+    def test_unknown_variant_returns_none_and_warns(self, monkeypatch, caplog):
+        """A chip that parses as Apple Silicon but has no table entry must
+        never fall back to a different variant's numbers (#503) -- it
+        reports no chip, so the app takes its existing "unknown chip" path."""
+        self._patch_profiler(monkeypatch, "Apple M4 Ultra")
+        with caplog.at_level(logging.WARNING, logger="erudi"):
+            assert MLX_Engine._detect_apple_silicon_chip() is None
+        records = [r for r in caplog.records if r.name.startswith("erudi")]
+        assert any("M4 Ultra" in r.getMessage() for r in records)
+
+    def test_non_apple_silicon_string_returns_none(self, monkeypatch):
+        self._patch_profiler(monkeypatch, "Intel Core i9-9880H")
+        assert MLX_Engine._detect_apple_silicon_chip() is None
+
+
+@pytest.mark.unit
 class TestCleanupAndCache:
     """Cleanup must terminate the subprocess; cache must avoid respawn."""
 

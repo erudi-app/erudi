@@ -47,7 +47,11 @@ from src.core import config
 # existing installs. Startup re-profiles when the stored value differs.
 #
 #   1 -- everything up to and including #365 (rated clocks, breakdown key names)
-PROFILING_LOGIC_VERSION = 1
+#   2 -- #503: MLX chip detection returned the first table key that was a
+#        substring of the profiler's chip name, so every Apple Silicon Pro,
+#        Max and Ultra machine was profiled as its base chip (wrong memory
+#        bandwidth and GPU core count). Fixed to match the exact variant.
+PROFILING_LOGIC_VERSION = 2
 
 
 # Recommended model size window (billions of params) — drives the hardware-fit

@@ -92,6 +92,7 @@ from __future__ import annotations
 import multiprocessing as mp
 import os
 import platform
+import re
 import secrets
 import subprocess
 import time  # used by hardware warm-up loop
@@ -649,7 +650,99 @@ class MLX_Engine(BaseChatServerEngine):
             "max_memory": 128,
             "architecture": "3nm",
         },
+        # M4 Max also ships in a 14-core CPU / 32-core GPU / 410GB/s
+        # configuration (support.apple.com/en-us/121553), but system_profiler
+        # reports both configurations as the same "Apple M4 Max" chip_type,
+        # so this table cannot hold a second "M4 Max" key without a way to
+        # tell them apart at runtime. Not added; see #503.
+        #
+        # M3 Ultra (support.apple.com/en-us/122211): both the 28-core CPU /
+        # 60-core GPU and 32-core CPU / 80-core GPU configurations report
+        # 819GB/s, so -- unlike M4 Max -- the ambiguity does not affect
+        # bandwidth. Entry uses the 32-core CPU / 80-core GPU configuration,
+        # matching this table's existing M2 Ultra entry (also the higher-end
+        # GPU config of its two). Neural Engine TOPS confirmed by Apple
+        # Newsroom, "Apple reveals M3 Ultra, taking Apple silicon to a new
+        # extreme" (2025-03-05): "32 Neural Engine cores capable of up to 36
+        # trillion operations per second".
+        "M3 Ultra": {
+            "gpu_cores": 80,
+            "memory_bandwidth": 819,
+            "neural_engine_tops": 36.0,
+            "cpu_cores": {"performance": 24, "efficiency": 8},
+            "max_memory": 256,
+            "architecture": "3nm",
+        },
+        # M5 family (support.apple.com/en-us/125405, /en-us/126318, and
+        # apple.com/mac-studio/specs/). M5 Pro and M5 Max drop the
+        # performance/efficiency split for a "super core" / "performance
+        # core" pair instead -- both tiers are full-power cores, there is no
+        # low-power efficiency core on these two chips. Folded into this
+        # table's existing performance/efficiency shape as
+        # performance = super + performance cores, efficiency = 0; that is
+        # the CPU split Apple publishes, not an estimate.
+        # Apple has not published a Neural Engine TOPS figure for M5 (the
+        # generation moved to per-GPU-core "Neural Accelerators" instead), so
+        # neural_engine_tops is left out of every M5 entry below and falls
+        # back to this table's existing 0.0 "unknown" default rather than
+        # a guessed number.
+        "M5": {
+            "gpu_cores": 10,
+            "memory_bandwidth": 153,
+            "cpu_cores": {"performance": 4, "efficiency": 6},
+            "max_memory": 32,
+            "architecture": "3nm",
+        },
+        # M5 Pro ships in two CPU/GPU configurations (15-core CPU/16-core GPU
+        # and 18-core CPU/20-core GPU) that both report 307GB/s. Entry below
+        # is the higher-end 18-core CPU (6 super + 12 performance) / 20-core
+        # GPU configuration, its max_memory (64GB).
+        "M5 Pro": {
+            "gpu_cores": 20,
+            "memory_bandwidth": 307,
+            "cpu_cores": {"performance": 18, "efficiency": 0},
+            "max_memory": 64,
+            "architecture": "3nm",
+        },
+        # M5 Max has the same 32-core/410GB/s vs. 40-core/546-style ambiguity
+        # as M4 Max (32-core GPU/460GB/s vs. 40-core GPU/614GB/s, both
+        # reported as plain "Apple M5 Max" by system_profiler). Entry below
+        # uses the higher-end 18-core CPU (6 super + 12 performance) /
+        # 40-core GPU / 614GB/s configuration, matching this table's M4 Max
+        # precedent; the 32-core GPU configuration is not added, same as the
+        # M4 Max case above.
+        "M5 Max": {
+            "gpu_cores": 40,
+            "memory_bandwidth": 614,
+            "cpu_cores": {"performance": 18, "efficiency": 0},
+            "max_memory": 128,
+            "architecture": "3nm",
+        },
+        # M5 Ultra (apple.com/mac-studio/specs/, announced 2026-08-25,
+        # shipping from 2026-09-22) ships as a 30-core CPU/64-core GPU chip,
+        # configurable to 36-core CPU/80-core GPU; both report 1.2TB/s.
+        # Unlike the other Ultra entries in this table, this entry uses the
+        # LOWER-end 30-core CPU (10 super + 20 performance) / 64-core GPU
+        # configuration: Apple's spec page gives the CPU core split for the
+        # 30-core configuration but not for the 36-core one, and this table
+        # does not guess a split it cannot cite. max_memory (256GB) is this
+        # configuration's ceiling; the 36-core/80-core GPU config goes to
+        # 512GB.
+        "M5 Ultra": {
+            "gpu_cores": 64,
+            "memory_bandwidth": 1200,
+            "cpu_cores": {"performance": 20, "efficiency": 0},
+            "max_memory": 256,
+            "architecture": "3nm",
+        },
     }
+
+    # Matches the chip variant out of a system_profiler `chip_type` string
+    # (e.g. "Apple M4 Pro" -> number="4", variant="Pro"). Used to build an
+    # exact "M4 Pro" lookup key instead of substring-matching the table (#503:
+    # "M4" is a substring of "Apple M4 Pro", so the old loop returned the
+    # base chip's numbers for every Pro/Max/Ultra machine).
+    _CHIP_VARIANT_PATTERN = re.compile(r"\bM(\d+)(?:\s+(Pro|Max|Ultra))?\b", re.IGNORECASE)
 
     @classmethod
     def _detect_apple_silicon_chip(cls) -> Optional[str]:
@@ -658,7 +751,10 @@ class MLX_Engine(BaseChatServerEngine):
         Uses system_profiler command to identify the exact chip variant.
 
         Returns:
-            Optional[str]: Chip model (e.g., "M3 Max") or None if not detected.
+            Optional[str]: Chip model (e.g., "M3 Max") or None if not detected
+                or if the detected variant has no entry in
+                `_APPLE_SILICON_SPECS`. Never falls back to a different
+                variant's key.
 
         Note:
             Internal method. Called by get_hardware_info().
@@ -679,9 +775,18 @@ class MLX_Engine(BaseChatServerEngine):
                 chip_name = hardware_data.get("chip_type", "")
 
                 if chip_name:
-                    for model_key in cls._APPLE_SILICON_SPECS.keys():
-                        if model_key.replace(" ", "").lower() in chip_name.replace(" ", "").lower():
-                            return model_key
+                    match = cls._CHIP_VARIANT_PATTERN.search(chip_name)
+                    if match:
+                        number, variant = match.groups()
+                        canonical_key = f"M{number}" + (
+                            f" {variant.capitalize()}" if variant else ""
+                        )
+                        if canonical_key in cls._APPLE_SILICON_SPECS:
+                            return canonical_key
+                        logger.warning(
+                            f"Detected Apple Silicon chip '{chip_name}' (parsed as "
+                            f"'{canonical_key}') has no entry in the specs table"
+                        )
 
             return None
 
