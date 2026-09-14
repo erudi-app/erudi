@@ -83,20 +83,36 @@ INTER_CHUNK_BUDGET_S = 120.0
 # --- Estimating the prompt size -------------------------------------------
 #
 # The local server owns the tokenizer; the backend does not tokenize here (it
-# would cost more than the budget it informs, on every hop of every turn).
-# 3 characters per token deliberately OVER-estimates -- real tokenizers average
-# closer to 4 on English and ~2-3 on CJK -- and over-estimating only buys a
-# bigger budget. Same reasoning for the flat allowances below: per-message chat
-# template overhead, and image parts whose true cost the backend cannot know.
-# What the estimate CANNOT see (bound tool schemas, a system prompt injected
+# would cost more than the budget it informs, on every hop of every turn). What
+# it needs is not an average but an UPPER BOUND -- under-counting hands the
+# budget back to the bug -- and the UTF-8 byte length of the text is a provable
+# one: these models tokenize bytes (byte-level BPE, with byte fallback for
+# anything unknown), and no token consumes less than one byte, so text of N
+# bytes can never produce more than N tokens.
+#
+# A character-based heuristic is NOT a bound. Chinese and Japanese run near one
+# token per character, and each of those characters is 3 UTF-8 bytes; code and
+# punctuation-dense text sit at 1-2 characters per token. Something like
+# "characters / 3" therefore under-counts CJK threefold -- 7000 Chinese
+# characters would estimate ~2333 tokens and buy a ~123 s budget for ~135 s of
+# real prefill, restoring the #573 kill for exactly the users the zh locale
+# exists for.
+#
+# The bound is loose on English (~4 bytes per token), which only means a bigger
+# budget, and long histories now land on FIRST_CHUNK_CEILING_S more often. That
+# is the accepted trade: a too-large budget merely delays the detection of a
+# true first-chunk hang, a too-small one ends a healthy turn.
+#
+# Same reasoning for the flat allowances below: per-message chat template
+# overhead, and image parts whose true cost the backend cannot know. What the
+# estimate cannot see at all (bound tool schemas, a system prompt injected
 # downstream) is one more reason to keep every fudge factor pessimistic.
-CHARS_PER_ESTIMATED_TOKEN = 3.0
 PER_MESSAGE_OVERHEAD_TOKENS = 8
 NON_TEXT_PART_TOKENS = 1024
 
 
 def _content_cost(content: Any) -> tuple[int, int]:
-    """``(characters, extra tokens)`` carried by one message's content.
+    """``(UTF-8 bytes of text, extra tokens)`` carried by one message's content.
 
     Handles the three shapes LangChain hands a chat model: a plain string, a
     list of content parts (``{"type": "text", ...}`` /
@@ -105,43 +121,47 @@ def _content_cost(content: Any) -> tuple[int, int]:
     if content is None:
         return 0, 0
     if isinstance(content, str):
-        return len(content), 0
+        return len(content.encode("utf-8")), 0
     if isinstance(content, (list, tuple)):
-        chars = 0
+        text_bytes = 0
         extra = 0
         for part in content:
             if isinstance(part, str):
-                chars += len(part)
+                text_bytes += len(part.encode("utf-8"))
                 continue
             text = part.get("text") if isinstance(part, dict) else None
             if isinstance(text, str):
-                chars += len(text)
+                text_bytes += len(text.encode("utf-8"))
                 continue
             # An image (or any part the backend cannot read): charge the flat
             # allowance rather than the base64 length, which says nothing about
             # how many tokens the vision encoder will produce.
             extra += NON_TEXT_PART_TOKENS
-        return chars, extra
-    return len(str(content)), 0
+        return text_bytes, extra
+    return len(str(content).encode("utf-8")), 0
 
 
 def estimate_prompt_tokens(messages: Optional[Iterable[Any]]) -> int:
-    """Pessimistic token count for the messages about to be sent.
+    """Upper bound on the tokens the messages about to be sent can produce.
+
+    One token per UTF-8 byte of text (see above: a byte-level tokenizer cannot
+    do better than one token per byte), plus the flat per-message and
+    non-text-part allowances.
 
     Accepts ``BaseMessage`` objects (``.content``) and raw dicts
     (``{"role": ..., "content": ...}``) so it never fails on the shape it is
     handed. An unreadable message contributes its overhead and nothing else.
     """
-    chars = 0
+    text_bytes = 0
     tokens = 0
     for message in messages or ():
         content = getattr(message, "content", None)
         if content is None and isinstance(message, dict):
             content = message.get("content")
-        part_chars, part_tokens = _content_cost(content)
-        chars += part_chars
+        part_bytes, part_tokens = _content_cost(content)
+        text_bytes += part_bytes
         tokens += part_tokens + PER_MESSAGE_OVERHEAD_TOKENS
-    return int(tokens + chars / CHARS_PER_ESTIMATED_TOKEN)
+    return tokens + text_bytes
 
 
 def first_chunk_budget_s(estimated_prompt_tokens: int) -> float:

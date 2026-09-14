@@ -1367,7 +1367,11 @@ async def test_events_first_chunk_timeout_is_an_honest_sentinel_answer(monkeypat
     assert ERROR_SENTINEL in text
     assert text != runner_module.ERROR_MESSAGE
     assert "start answering" in text
-    assert "6878" in text or "6,878" in text
+    # It names the cause (the size of what the model has to read first) without
+    # quoting the estimate: that number is a deliberate UPPER BOUND on the token
+    # count (#573), so printing it as "about N tokens" would be a lie to the user.
+    assert "read" in text
+    assert "6878" not in text
     assert "Traceback" not in text
 
 

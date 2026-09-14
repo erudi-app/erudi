@@ -173,6 +173,16 @@ def test_the_incident_prompt_gets_more_than_the_measured_prefill():
     assert budget > INTER_CHUNK_BUDGET_S
 
 
+def test_the_incident_history_reaches_the_ceiling_through_the_estimate():
+    # End to end on the reported turn: 6878 English-ish tokens is roughly 27.5k
+    # characters, hence ~27.5k UTF-8 bytes, hence a 30 + 27500/25 = 1130 s raw
+    # budget -- clamped to the 900 s ceiling. Far more than the 132.9 s the turn
+    # actually needed, which is the accepted trade of a provable upper bound.
+    budget = first_chunk_budget_s(estimate_prompt_tokens([_Msg("a" * 27_500)]))
+
+    assert budget == FIRST_CHUNK_CEILING_S
+
+
 # ===================== the prompt-size estimate =====================
 
 
@@ -181,12 +191,45 @@ class _Msg:
         self.content = content
 
 
-def test_the_estimate_over_counts_rather_than_under_counts():
-    # Deliberately pessimistic: ~3 chars per token (real tokenizers average
-    # closer to 4), so the budget is never short because of the estimate.
-    tokens = estimate_prompt_tokens([_Msg("x" * 3_000)])
+def _utf8_bytes(*texts) -> int:
+    return sum(len(text.encode("utf-8")) for text in texts)
 
-    assert tokens >= 1_000
+
+@pytest.mark.parametrize(
+    "text",
+    [
+        pytest.param("The quick brown fox jumps over the lazy dog. " * 50, id="english"),
+        # ~1 token per character on a BPE tokenizer (3 UTF-8 bytes each): the
+        # shape that a chars/N heuristic under-counts by 3x, cutting exactly the
+        # users the zh locale exists for.
+        pytest.param("这是一个很长的中文对话历史记录。" * 200, id="chinese"),
+        pytest.param("こんにちは世界、これはテストです。" * 200, id="japanese"),
+        # Punctuation-dense code sits near 1-2 characters per token.
+        pytest.param("def f(x):\n    return [y**2 for y in x if y % 2 == 0]\n" * 40, id="code"),
+        # 4-byte code points.
+        pytest.param("🚀🎉🔥" * 300, id="emoji"),
+    ],
+)
+def test_the_estimate_never_falls_below_the_utf8_byte_count(text):
+    # A byte-level BPE tokenizer cannot emit more tokens than the text has
+    # bytes: every token consumes at least one. So the byte count is a bound
+    # that holds for EVERY language, not an average that holds for English.
+    assert estimate_prompt_tokens([_Msg(text)]) >= _utf8_bytes(text)
+
+
+def test_a_chinese_history_keeps_a_budget_longer_than_its_real_prefill():
+    # 7000 Chinese characters ~= 7000 tokens ~= 135 s of prefill at the incident
+    # machine's 51.8 tok/s. The budget must clear that.
+    estimated = estimate_prompt_tokens([_Msg("文" * 7_000)])
+
+    assert estimated >= 7_000
+    assert first_chunk_budget_s(estimated) > 135.0
+
+
+def test_the_estimate_covers_the_text_of_every_message():
+    parts = ["première partie", "seconde partie", "troisième partie"]
+
+    assert estimate_prompt_tokens([_Msg(part) for part in parts]) >= _utf8_bytes(*parts)
 
 
 def test_the_estimate_grows_with_the_conversation():
@@ -194,6 +237,12 @@ def test_the_estimate_grows_with_the_conversation():
     long = estimate_prompt_tokens([_Msg("hello " * 500)])
 
     assert long > short
+
+
+def test_the_estimate_counts_the_text_inside_content_parts():
+    parts = [{"type": "text", "text": "décris cette image 描述这张图片"}]
+
+    assert estimate_prompt_tokens([_Msg(parts)]) >= _utf8_bytes(parts[0]["text"])
 
 
 def test_the_estimate_reads_multimodal_parts():

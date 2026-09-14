@@ -106,10 +106,10 @@ LOOP_LIMIT_MESSAGE = (
 # history only grows), the other says it started and then stopped.
 PREFILL_TIMEOUT_MESSAGE_TEMPLATE = (
     "{sentinel} This model did not start answering within {minutes} minutes on this "
-    "machine. Before writing a word it has to read everything this turn sends it "
-    "(about {tokens} tokens), and it did not get through that in time. Sending the "
-    "same thing again will take longer, not less: start a new conversation, send "
-    "less at once, or pick a smaller model."
+    "machine. Before writing a word it has to read everything this turn sends it -- "
+    "the whole conversation so far -- and it did not get through that in time. "
+    "Sending the same thing again will take longer, not less: start a new "
+    "conversation, send less at once, or pick a smaller model."
 )
 DECODE_TIMEOUT_MESSAGE = (
     f"{ERROR_SENTINEL} This model started answering, then went silent for "
@@ -122,10 +122,12 @@ def _stream_timeout_message(exc: GenerationTimeoutException) -> str:
     """The curated turn a ``GenerationTimeoutException`` becomes."""
     if exc.phase != PHASE_FIRST_CHUNK:
         return DECODE_TIMEOUT_MESSAGE
+    # The estimated prompt size stays in the WARNING and out of the turn: it is
+    # a deliberate UPPER BOUND (one token per UTF-8 byte, #573), so quoting it
+    # to the user as a token count would overstate the real prompt several-fold.
     return PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
         sentinel=ERROR_SENTINEL,
         minutes=max(1, round(exc.budget_s / 60)),
-        tokens=exc.estimated_prompt_tokens,
     )
 
 
