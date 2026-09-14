@@ -21,8 +21,11 @@ by a two-phase watchdog: the first chunk gets a budget computed from the prompt
 actually being sent, every later chunk gets the fixed inter-chunk budget.
 
 This is engine-agnostic on purpose. A slow CPU machine can exceed 120 s of
-prefill at 4096 context just as an Apple Silicon machine does at 6878 tokens;
-nothing here branches on MLX / CUDA / CPU.
+prefill on a few thousand tokens just as an Apple Silicon machine does at 6878;
+nothing here branches on MLX / CUDA / CPU. The only engine fact that enters is
+the loaded child's ALLOCATED context window (stamped on the client by the
+factory), which raises the first-chunk ceiling so a legitimately full window
+is never mistaken for a hang.
 
 Both budgets are per MODEL CALL, not per turn: every hop of a tool-calling turn
 pays its own prefill, and each one gets its own first-chunk budget. ``_astream``
