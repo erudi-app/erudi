@@ -51,14 +51,18 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I open Chat with at least one local model, then the first model is auto-selected in the "Chat with" picker.
 - [ ] When I type a prompt and press Enter, then it sends; Shift+Enter inserts a newline.
 - [ ] When I send a prompt, then a new conversation is created and I am taken to it, where the reply **streams token by token**.
-- [ ] When I adjust Creativity / Diversity / Max Tokens or customize the prompt, then those settings carry into the conversation.
+- [ ] When I adjust Creativity / Diversity or customize the prompt, then those settings carry into the conversation.
 
 **Per-model sampling defaults**
 - [ ] When I select a model whose publisher ships sampling values, then Creativity / Diversity start at **that model's** values rather than a global 0.2 / 0.95 (Qwen3 starts at 0.6 / 0.95, Qwen2.5 at 0.7 / 0.8).
 - [ ] When the publisher ships a **greedy** temperature (Qwen2.5-VL ships `0.000001`), then the slider shows **0** and the model answers normally — no stream of `!` *(greedy is sent as an exact 0)*.
 - [ ] When I send the **same prompt in several fresh conversations** on an Apple Silicon model at a non-zero temperature, then the answers differ *(a fresh seed per request; a short factual answer may still converge)*.
 - [ ] When I switch model mid-setup, then the sliders **re-default** to the new model's values.
-- [ ] When I open the Max Tokens control, then its ceiling is the model's own cap (`min(model context, engine context)`), not a fixed 1024.
+**Output budget (no Max Tokens control)**
+- [ ] When I open the conversation settings panel, the pre-conversation panel, or an Arena panel, then there is **no Max Tokens field anywhere** — the answer budget is assigned automatically from the model's context window and the space the conversation already uses.
+- [ ] When I ask for a genuinely long answer (a long structured document, a big code file), then it **completes** — nothing is cut at the old 1024-token default.
+- [ ] When a conversation created **before this version** (with a stored Max Tokens value) sends a turn, then it works normally — the stored value is ignored, nothing errors.
+- [ ] When I search any of the four languages for a "Max Tokens" label, then none survives anywhere in the UI.
 - [ ] When the Creativity slider is dragged to the top, then it reaches **2**, not 1.
 - [ ] When the selected model's publisher recommends **nothing**, then a muted one-liner under the sliders says so ("No sampling recommendation from this model's publisher; neutral defaults applied") — in the conversation header panel, the pre-conversation panel and the model info modal, and **never** on a card face or in the Arena.
 - [ ] When the publisher **does** recommend values, then that one-liner is absent.
@@ -85,9 +89,44 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I reload the page, then the full text history re-renders from the database.
 
 **Reasoning / thinking models**
-- [ ] When a thinking model (e.g. Qwen3) generates, then its reasoning streams into a **collapsible "Reasoning" strip** above the answer — never into the answer bubble itself.
+- [ ] When a thinking model (e.g. Qwen3) generates, then its reasoning streams into a **collapsible "Reasoning" strip** above the answer — never into the answer bubble itself, and **no thinking marker** (`<think>`, `</think>`, channel tags) ever appears as literal text anywhere.
 - [ ] When the turn ends, then the strip settles to a collapsed "Reasoning — N steps" summary; expanding it shows the full trace, and the trace **survives a reload**.
 - [ ] When an agentic model narrates **before calling a tool** ("Let me search the documents…"), then that narration lands in the reasoning strip, not in the answer bubble — the answer zone holds only the final grounded answer.
+- [ ] When a thinking model reasons **again after a tool result** (the hop where the template re-opens the thinking block), then that post-tool reasoning also lands in the strip — never appended to the final answer *(the 1.1.x field report)*.
+- [ ] When a model's reasoning is **cut off before it ever closes** (small thinking model, heavy question), then the partial reasoning shows as reasoning — the answer bubble never fills with raw chain-of-thought.
+- [ ] When a turn ends with reasoning but **no answer text** because the model ran out of budget (`finish` = length), then the turn shows a **normal assistant message** (not a red error) saying the generation stopped during reasoning before an answer was produced — the reasoning strip is intact and both **survive a reload**.
+- [ ] When a turn ends with reasoning but no answer because the model **chose to stop**, then the same normal-message treatment applies with its own wording, and simply asking the model to continue works.
+- [ ] When the turn after an empty-answer turn is sent, then it behaves normally — no role-alternation error, no silent breakage.
+- [ ] When conversation **titles and the automatic summary** are produced, then they never contain reasoning fragments or thinking markers, whatever the model.
+
+**Reasoning effort**
+- [ ] When I open a conversation's settings panel, then a **Reasoning effort** control offers five levels — None, Low, Medium, High, Xhigh — starting at the value of the global Settings default at the conversation's creation time.
+- [ ] When I change the effort in an open conversation, then it persists immediately (survives a reload) and **takes effect on the next turn** — no Apply needed.
+- [ ] When I change the **global default** in Settings, then existing conversations keep their own effort unchanged; only conversations created afterwards inherit the new default.
+- [ ] When I use a model whose own template understands effort levels, then the five levels visibly change how much the model reasons — None shows no strip at all, Xhigh reasons markedly longer than Low.
+- [ ] When I use a thinking model that only knows **on/off** (e.g. Qwen3), then None genuinely suppresses the reasoning, Medium is the model's natural behavior with nothing added, and High/Xhigh lengthen the reasoning best-effort through instructions.
+- [ ] When I use a **non-thinking** model at Medium or above, then it reasons step by step **inside the strip** (never in the answer) and the answer stays clean; at None it behaves exactly as before this version.
+- [ ] When a model that **always reasons** is set to None, then the app asks it to answer directly — best-effort: record what the model actually does; residual reasoning is not a FAIL *(documented limitation)*.
+- [ ] When a long conversation is summarized or a title is generated, then those internal calls always run **without** reasoning, whatever the conversation's effort level — no thinking stall, no reasoning in the title.
+- [ ] When I use the Arena, then panels follow the **global** default effort (no per-panel control in this version).
+
+**Context window**
+- [ ] When I open a model's **info card**, then it shows the model's **context window**; for the **currently loaded** model it also shows the window actually **allocated** on this machine.
+- [ ] When I load a model whose full window **fits** my machine, then the allocated window equals the model's window — no gratuitous reduction.
+- [ ] When I load a model whose full window **cannot fit** (a 128k-context model on a 16 GB machine), then the model still loads, the allocated window shown is smaller than the model's, and `backend.log` carries the engine's own `context size reduced from X to Y` line *(llama.cpp `--fit`)*.
+- [ ] When a conversation grows, then it goes **far past the old 4096-token limit** before anything is compacted (the window is the model's, not a fixed constant).
+- [ ] When a single turn is **larger than the window itself** (a huge attached document), then the turn fails with an honest message naming the prompt size and the window and suggesting what to do — nothing is silently truncated, no answer is invented.
+- [ ] *(Apple Silicon)* When the same oversized turn is sent on MLX, then it is **refused cleanly before generation** with the same honest treatment — never accepted into minutes of silent gibberish.
+- [ ] When `ERUDI_CTX` is set in the environment, then the window is pinned to exactly that value (dev/QA escape hatch) and the engine log says the user's value was respected.
+- [ ] When the app boots **offline** on a fresh install (catalog seeded from the bundled snapshot), then model info cards already show context windows — the values shipped with the snapshot.
+
+**Compaction & memory**
+- [ ] When a conversation reaches about **80 % of the allocated window**, then it is compacted automatically — the on-screen history is untouched, later answers still refer to earlier turns, and `backend.log` records the summarization.
+- [ ] When the **machine's memory** nears saturation (under ~15 % margin), then compaction fires on that signal even well below 80 % of the window.
+- [ ] When compaction was not enough, then — and only then — an **amber notice** appears in the conversation saying the machine's memory is getting saturated and quoting how much this conversation represents; it never appears **before** compaction has tried.
+- [ ] When I ask about something that only existed in a **compacted-away** turn, then the answer still knows it (the summary carried it).
+- [ ] When a conversation is fresh and short, then compaction never fires.
+- [ ] When the amber memory notice is shown, then it is **translated** (fr/es/zh — not English-only), it never lands in the answer bubble or in what the copy button copies, and it does **not** stick to the conversation after a reload once the pressure is gone.
 
 **Knowledge-Base / agentic behavior**
 - [ ] When the model has a KB attached and is **tool-capable (agentic)**, then on a document question the model **calls the KB search tool itself** before answering, and the answer references the source.
@@ -101,7 +140,7 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I inspect any agentic answer, then **no raw tool markup** (`<tool_call>`, JSON arguments, function-call syntax) appears in the answer bubble or in the persisted history; the search call and its excerpts appear only inside the reasoning strip.
 
 **Web search**
-- [ ] When I create a new conversation, then its **Web search** toggle (settings panel, next to Max Tokens) starts at the value of the global Settings-page default at creation time.
+- [ ] When I create a new conversation, then its **Web search** toggle (settings panel, under the sliders) starts at the value of the global Settings-page default at creation time.
 - [ ] When I flip the Web search toggle in an open conversation, then it persists immediately (survives a reload) and **takes effect on the next turn** — no Apply needed.
 - [ ] When web search is ON with a tool-capable model and I ask a question needing a **current external fact**, then the reasoning strip shows a `web_search` call with its results, and the answer **cites source URLs** from those results.
 - [ ] When web search is ON and I ask something the model already knows ("capital of France"), then it answers **directly with zero web calls**.
@@ -178,6 +217,10 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I flip the Web Search toggle, then the change **persists across an app relaunch**.
 - [ ] When the global toggle is on and I start a **new** conversation, then that conversation's own Web search toggle starts **on** (inheritance at creation; the conversation owns it afterwards).
 
+**Default reasoning effort**
+- [ ] When I open Settings on a fresh install, then a **Default reasoning effort** card shows **Medium** selected among None / Low / Medium / High / Xhigh, and the copy says it sets the starting value for new conversations (each conversation keeps its own control afterwards).
+- [ ] When I change the default, then it persists across an app relaunch and only affects conversations created afterwards.
+
 **Automatic updates**
 - [ ] When I open Settings on a fresh install, then the **Automatic updates** toggle is **on** and the copy says the request goes to this project's GitHub releases and carries nothing but my version and platform.
 - [ ] When I turn Automatic updates **off** and relaunch, then it is still off and `erudi-backend.log` says `Updater: automatic updates are turned off; no check will run` — with it on, the same file says `checking now, then every 4 hours` instead.
@@ -195,6 +238,17 @@ updater, and the card says so.*
 - [ ] When an update was downloaded earlier and its installation never applied (the app was reopened before the installer finished), then it comes back without downloading anything again — this is the case the card exists for. With **Automatic updates on**, the check at launch re-detects it within moments and the card offers **Install now** on its own. With them **off**, pressing **Check for updates** then **Download** brings it back instantly, served from the copy already on disk.
 - [ ] When the machine is offline and I press Check for updates, then one quiet line on the card says the check did not go through, and the button is usable again.
 - [ ] When I run the app from source (`npm start`), then the card says updates are handled by the installed application and the button is disabled.
+
+**Context window on a discrete GPU**
+
+*Everything in this block needs a Windows or Linux machine with an NVIDIA GPU —
+the memory the window must fit is the card's VRAM, a path a unified-memory Mac
+cannot exercise at all.*
+
+- [ ] When I load a model whose full window cannot fit the **card's VRAM**, then the engine reduces the window against the VRAM (the `context size reduced` line shows in the log) and the model still loads — the measurement is of the GPU, not of system RAM.
+- [ ] When even the minimum context cannot fit the card, then the load fails with an **explicit readable error**, not a hang.
+- [ ] When the machine has far more system RAM than VRAM (e.g. 64 GB RAM, 8 GB card), then the **memory saturation notice** fires on the card's budget, never on system RAM.
+- [ ] When a model is loaded at a large window, then the VRAM shown by the system monitor at ready matches the expected weights-plus-cache footprint, and no out-of-memory happens later mid-conversation.
 
 **Inference engine**
 
