@@ -2201,6 +2201,36 @@ async def test_stop_with_no_answer_yields_the_curated_stop_turn(monkeypatch):
     assert str(msgs[-1].text) == runner_module.EMPTY_ANSWER_STOP_MESSAGE
 
 
+async def test_curated_turn_state_is_written_before_the_event_is_emitted(monkeypatch):
+    """A client that disconnects right after receiving the curated event closes
+    the generator at that yield -- nothing after it runs. The thread-state
+    write must therefore happen BEFORE the yield, or SQL (persisted by the
+    service's finally) and the checkpointer silently diverge."""
+    saver = InMemorySaver()
+    fake = _raw_chunk_model([_raw_chunk(reasoning="hmm.", finish_reason="stop")])
+    _patch_model(monkeypatch, fake)
+    runner = AgentRunner(checkpointer=saver)
+
+    stream = runner.astream_text(
+        emit_events=True,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="r554-7",
+    )
+    async for event in stream:
+        if event["t"] == "answer" and event["text"] == runner_module.EMPTY_ANSWER_STOP_MESSAGE:
+            # The disconnecting client: the curated event was delivered, then
+            # the connection died. Close the generator right here.
+            await stream.aclose()
+            break
+
+    tup = saver.get_tuple({"configurable": {"thread_id": "r554-7"}})
+    msgs = tup.checkpoint["channel_values"]["messages"]
+    assert str(msgs[-1].text) == runner_module.EMPTY_ANSWER_STOP_MESSAGE
+
+
 async def test_curated_turn_never_fires_when_a_tool_result_exists(monkeypatch):
     """The #90 fallback (last tool result as the answer) outranks the curated
     turn: a correct value beats an apology."""

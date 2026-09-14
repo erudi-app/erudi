@@ -663,13 +663,20 @@ class AgentRunner:
                         f"reasoning_chars={reasoning_chars}; yielding the curated turn"
                     )
                     char_count += len(curated)
-                    yield {"t": "answer", "text": curated}
                     if stateful:
-                        # Without this the checkpointer keeps the EMPTY
-                        # AIMessage the model node committed: the next turn's
-                        # template would replay an empty assistant turn, and
-                        # nothing would replay the line the user actually saw.
+                        # State BEFORE the yield: a client that disconnects
+                        # right after receiving the curated event closes this
+                        # generator at the yield, and code after it never runs
+                        # -- while the conversation service's finally still
+                        # persists the curated line to SQL. Writing first keeps
+                        # the checkpointer consistent with what a reload shows;
+                        # the reverse window (state written, client already
+                        # gone) is covered by the service's interrupted-turn
+                        # handling. Without the write at all, the checkpointer
+                        # keeps the EMPTY AIMessage the model node committed
+                        # and the next turn replays an empty assistant turn.
                         await self._write_curated_empty_turn(agent, run_config, curated)
+                    yield {"t": "answer", "text": curated}
                 duration_ms = (time.perf_counter() - stream_start_s) * 1000
                 logger.info(
                     f"Agent stream completed: llm={getattr(llm, 'id', '?')}, "
@@ -879,6 +886,11 @@ class AgentRunner:
                 as_node="model",
             )
         except Exception:
+            # Accepted trade: a failed state write leaves SQL ahead of the
+            # thread state (the user still gets the curated line; the next
+            # turn replays an empty assistant message instead of it). There is
+            # no better recovery than proceeding -- retrying here would block
+            # the turn on a checkpointer that just failed.
             logger.exception("Failed to write the curated empty-answer turn into the thread state")
 
     async def _repair_alternation(self, agent, run_config) -> None:
