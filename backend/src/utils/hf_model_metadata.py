@@ -687,7 +687,10 @@ def _chosen_artifact_bytes(repo_info) -> int:
     best quant (+ mmproj + small aux), NOT the whole repo. For single-artifact
     repos (e.g. mlx-community) the selection is every file, so the whole-repo sum
     is preserved. Falls back to the whole-repo sum when nothing is selectable
-    (e.g. a "gguf" repo with no .gguf) rather than reporting zero.
+    (e.g. a "gguf" repo with no .gguf, or one whose weights are raw byte chunks)
+    rather than reporting zero. No catalog row is built on that fallback for a
+    GGUF engine: the resolver and the derived catalog only keep repos from which
+    the downloader selects an artefact (``has_downloadable_gguf``).
 
     The selection helpers are imported lazily to keep this utility module free of a
     top-level dependency on the llms domain (utils sits below domains in the layering).

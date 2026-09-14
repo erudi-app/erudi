@@ -33,6 +33,16 @@ def _hit(model_id: str, gated) -> ModelInfo:
     )
 
 
+def _api(hits):
+    """Search returns ``hits``; every repo lists one loadable quant (see test_gguf_byte_splits)."""
+    return SimpleNamespace(
+        list_models=lambda **kw: list(hits),
+        model_info=lambda repo_id, **kw: SimpleNamespace(
+            siblings=[SimpleNamespace(rfilename="model-Q4_K_M.gguf")]
+        ),
+    )
+
+
 @pytest.mark.parametrize("engine", [CPU_Engine, MLX_Engine])
 def test_community_search_requests_the_gated_flag(engine):
     # Without it in ``expand`` the reduced list serialization leaves
@@ -48,7 +58,7 @@ def test_build_derived_models_skips_gated_hits(monkeypatch, gated):
         _hit("bartowski/gemma-1.1-2b-it-GGUF", False),  # same key, public
         _hit("bartowski/Qwen3-8B-GGUF", False),
     ]
-    seeder = Model_Seeder(db=None, hf_api=SimpleNamespace(list_models=lambda **kw: list(hits)))
+    seeder = Model_Seeder(db=None, hf_api=_api(hits))
 
     rows = seeder.build_derived_models(
         [seed_mod.Search_Config(search_term="", model_type="community", default_param_size=7.0)]
@@ -62,7 +72,7 @@ def test_build_derived_models_skips_gated_hits(monkeypatch, gated):
 def test_build_derived_models_keeps_public_hits(monkeypatch):
     monkeypatch.setattr(seed_mod.config, "LLM_Engine", CPU_Engine)
     hits = [_hit("bartowski/Qwen3-8B-GGUF", False)]
-    seeder = Model_Seeder(db=None, hf_api=SimpleNamespace(list_models=lambda **kw: list(hits)))
+    seeder = Model_Seeder(db=None, hf_api=_api(hits))
 
     rows = seeder.build_derived_models(
         [seed_mod.Search_Config(search_term="", model_type="community", default_param_size=7.0)]

@@ -492,7 +492,8 @@ Create DownloadJob (status=pending)
 Background task starts
   ↓
 List repo files → gate: the repo MUST ship an artefact in the engine's format
-(FORMAT_TAG: an MLX repo tag on Apple Silicon, a .gguf file on CPU/CUDA)
+(FORMAT_TAG: an MLX repo tag on Apple Silicon, a loadable .gguf file on CPU/CUDA;
+GGUF weights published as raw byte chunks do not count)
   → otherwise InvalidInputException BEFORE a single byte is downloaded
   ↓
 Download the pre-built quant from Hugging Face → update progress

@@ -37,7 +37,11 @@ offline.
 
 Every catalog row is a pre-built quant that the active engine can load, so `runnable` is true by
 construction; the only exception is a quant known to crash on load for this engine
-(`BaseEngine.is_runnable`).
+(`BaseEngine.is_runnable`). For the `gguf` format the snapshot build also reads each candidate
+repo's file listing and keeps a repo only when the downloader selects a loadable file from it (see
+[The format gate](#the-format-gate)): when several repos quantize the same base model, the
+resolver takes the best-ranked one that passes. A row's size is the bytes of the files a download
+fetches, or an estimate when Hugging Face does not answer.
 
 ### Base models vs community models
 
@@ -123,6 +127,14 @@ a repo that ships nothing this engine can run:
 
 Otherwise the request fails with an `InvalidInputException` explaining that Erudi only downloads
 pre-built artefacts and does not convert weights locally.
+
+On llama.cpp engines the download takes one quant: `pick_best_gguf` picks it, and every part comes
+along when it ships as a llama.cpp split (`<name>-00001-of-00003.gguf`, each part a complete GGUF
+file). A split whose listing misses a part is refused before any transfer. Weights cut into raw
+byte pieces (`<name>-chunk-001-of-018.gguf`, `<name>.gguf.part1of2`, `<name>.gguf.a`,
+`<name>.gguf-split-a`) are never selected: only the first piece carries a GGUF header, and nothing
+loads them until they are joined into one file, which Erudi does not do. A repo whose only GGUF
+weights are such pieces is refused with a message saying so.
 
 ### What happens on completion
 

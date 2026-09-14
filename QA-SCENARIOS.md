@@ -38,6 +38,7 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When a Hugging Face search returns nothing runnable, then I see "Nothing runnable matched…" (a helpful message, not an error).
 - [ ] When I am **offline** and run a Hugging Face search, then I see "No internet connection for the moment." and no request is made.
 - [ ] When a download **fails**, then the widget shows the error and a "Download failed. Please try again." message.
+- [ ] When, on Windows or Linux, I start a by-link download of a repository whose GGUF weights are published as **raw chunks** (`curl -X POST http://127.0.0.1:27182/erudi/llms/download/huggingface -H 'Content-Type: application/json' -d '{"link":"stevescot1979/DeepSeek-V3.2-MXFP4-GGUF"}'`), then the job fails at once with nothing transferred, and `curl http://127.0.0.1:27182/erudi/llms/downloads/<job_id>/status` carries a message saying the model is published as raw chunks that must be joined before it can run, which Erudi does not do.
 - [ ] When I **cancel** an in-progress download, then it stops and the model returns to a not-downloaded state (no "Download failed" dialog).
 - [ ] When I delete an installed model and confirm, then it is removed and a success message shows; if the delete request fails, the list is left intact with an error.
 - [ ] When I delete a base model that **powers KB assistants**, then the confirmation dialog lists the assistants and conversation count and warns they must be re-bound; **Delete anyway** removes the base while the assistants and conversations are kept.
