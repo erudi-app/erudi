@@ -110,7 +110,7 @@ their contents through history forever.
 | `t` | Payload | Meaning |
 |-----|---------|---------|
 | `answer` | `text` | A chunk of the answer, streamed |
-| `thinking` | `text` | A chunk of the model's reasoning, extracted from `<think>` blocks |
+| `thinking` | `text` | A chunk of the model's reasoning (see below) |
 | `tool_call` | `name`, `args` | The agent called a tool (`search_knowledge_base`, `web_search`, `calculator`) |
 | `tool_result` | `name`, `text` | What that tool returned |
 | `error` | `text` | The turn failed; the text is the curated error message |
@@ -120,6 +120,36 @@ their contents through history forever.
 emitted, so a client that refetches on `done` never races the insert.
 
 Non-ASCII text is `\uXXXX`-escaped on the wire (`json.dumps` defaults) and decoded by `JSON.parse`.
+
+### Where `thinking` comes from
+
+The inference server extracts each model family's chain-of-thought markers itself and streams the
+reasoning in a dedicated field of its OpenAI chunks — llama-server (default `--reasoning-format
+auto`) sends `delta.reasoning_content`, mlx_vlm.server sends `delta.reasoning`. Erudi's chat client
+(`Erudi_Chat_OpenAI`, `backend/src/agents/chat_model.py`) carries that field through LangChain, and
+the runner emits it as `thinking` events. The server-side parser also handles the cases inline tag
+matching gets wrong: the thinking block a chat template reopens after every tool call, and a block
+cut by the token budget before its closing tag.
+
+For families whose markers the server parser does not know, the runner's `ThinkSplitter`
+(`backend/src/agents/think_splitter.py`) stays as a fallback on the content channel: inline
+`<think>...</think>` that slips through still becomes `thinking` events instead of leaking into the
+answer.
+
+### When a turn ends without an answer
+
+A thinking model can spend its whole turn reasoning and never write an answer. Instead of a generic
+error (which would also discard the reasoning trace), the stream then ends with a curated `answer`
+line picked by the model's `finish_reason`, persisted like any other answer and replayed to the
+model on the next turn:
+
+- generation was cut mid-reasoning (`length`):
+  `Generation stopped during reasoning, before an answer was written. Send a follow-up asking for the final answer directly, or lower the reasoning effort.`
+- the model closed its turn without an answer (`stop`):
+  `The model finished its turn without writing an answer. Send a follow-up asking it to continue.`
+
+On agentic turns a successful tool result takes precedence: it is delivered as the answer instead of
+either line.
 
 ### Parsing the stream
 

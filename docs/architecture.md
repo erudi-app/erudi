@@ -205,8 +205,9 @@ Other modules in the layer:
 | `prompts.py` | System-prompt construction |
 | `middleware.py` | Summarization and related agent middleware |
 | `model_factory.py` | Builds the chat client pointed at the engine's child server |
-| `chat_model.py` | `Erudi_Chat_OpenAI`: the `ChatOpenAI` subclass carrying the streaming budgets |
-| `think_splitter.py` | Splits inline reasoning tokens out of the answer stream |
+| `chat_model.py` | `Erudi_Chat_OpenAI`: the `ChatOpenAI` subclass carrying the streaming budgets and the servers' dedicated reasoning field |
+| `reasoning_stream.py` | Pure extraction of `delta.reasoning_content` / `delta.reasoning` from raw chunks |
+| `think_splitter.py` | Fallback splitter: inline `<think>` the server parser missed stays out of the answer |
 
 ### Streaming budgets
 

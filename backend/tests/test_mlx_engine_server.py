@@ -13,11 +13,11 @@ Test sections:
       `mlx_lm.server` subprocess against a small downloaded model. Skipped
       on Linux CI via the `mlx_test_model_path` fixture.
     - **Thinking model regression** (`@pytest.mark.mlx_only`, opt-in via
-      `ERUDI_TEST_THINKING=1`): two layers (#90) — the raw-SSE test pins the
+      `ERUDI_TEST_THINKING=1`): two layers (#554) — the raw-SSE test pins the
       server contract (thinking ACTIVATES via `--enable-thinking` and arrives
-      INLINE as `<think>...</think>` in `delta.content`, `delta.reasoning`
-      silent), and the runner test pins that thinking flows as `thinking`
-      events without leaking into the `answer` stream.
+      in the dedicated `delta.reasoning` field, no `<think>` markers leaking
+      into `delta.content`), and the runner test pins that thinking flows as
+      `thinking` events without leaking into the `answer` stream.
     - **Gemma EOS regression** (`@pytest.mark.mlx_only`, opt-in via
       `ERUDI_TEST_GEMMA=1`): validates the audit's GAP #15 (Gemma
       `<end_of_turn>` may not be in `eos_token_ids` natively). If it fails,
@@ -552,32 +552,14 @@ class TestMlxVlmServerRunnerHelper:
         assert not hasattr(runner, "_patch_gemma_shared_kv_sanitize")
         assert callable(runner._patch_gemma3_tied_lm_head_quant)
 
-    def test_runner_applies_inline_thinking_patch_before_main(self, monkeypatch):
-        """The thinking-split neutralization must run before the server's main()
-        so every `ThinkingStreamState` the server ever builds is already patched
-        (#90 — reasoning must stay INLINE in delta.content).
-
-        The sibling in-child patch is stubbed out so this test never imports
-        the real mlx-vlm (absent on Linux CI, mutated-in-pytest-process on Mac).
-        """
-        import sys
+    def test_runner_has_no_inline_thinking_patch(self):
+        """#554 dropped `_patch_inline_thinking`: mlx-vlm's native split into
+        `delta.reasoning` is the wanted behavior now that `Erudi_Chat_OpenAI`
+        carries the field to the runner. Its resurrection would silently force
+        reasoning back inline and double-split every thinking stream."""
         from src.engines import _mlx_vlm_server_runner as runner
 
-        order: list[str] = []
-        monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
-        monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
-        monkeypatch.setattr(
-            runner,
-            "_patch_inline_thinking",
-            lambda: order.append("thinking-patch") or True,
-        )
-        fake_main = MagicMock(side_effect=lambda: order.append("main"))
-        monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
-        monkeypatch.setattr(sys, "argv", ["pytest"])
-
-        runner.run_mlx_vlm_server(["mlx_vlm.server", "--port", "9080"])
-
-        assert order == ["thinking-patch", "main"]
+        assert not hasattr(runner, "_patch_inline_thinking")
 
     def test_runner_applies_tied_lm_head_patch_before_main(self, monkeypatch):
         """The tied-lm_head sanitize completion must run before the server's
@@ -597,7 +579,6 @@ class TestMlxVlmServerRunnerHelper:
             lambda: order.append("tied-lm-head") or True,
         )
         monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
-        monkeypatch.setattr(runner, "_patch_inline_thinking", lambda: True)
         fake_main = MagicMock(side_effect=lambda: order.append("main"))
         monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
         monkeypatch.setattr(sys, "argv", ["pytest"])
@@ -708,7 +689,6 @@ class TestGemmaEndOfTurnStopPatch:
             "_patch_gemma_end_of_turn_stop",
             lambda: order.append("gemma-stop") or True,
         )
-        monkeypatch.setattr(runner, "_patch_inline_thinking", lambda: True)
         fake_main = MagicMock(side_effect=lambda: order.append("main"))
         monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
         monkeypatch.setattr(sys, "argv", ["pytest"])
@@ -863,347 +843,6 @@ class TestGemma3TiedLmHeadQuantPatch:
         assert twice == once
 
 
-@pytest.mark.unit
-class TestInlineThinkingPatch:
-    """`_patch_inline_thinking` neutralizes mlx-vlm's server-side thinking split (#90).
-
-    On the pinned mlx-vlm 0.6.13, `ThinkingStreamState` routes everything between
-    `<think>` boundaries into `delta.reasoning` — which ChatOpenAI drops, so
-    reasoning silently vanishes. The patch forces every state instance to start
-    OUTSIDE thinking with unmatchable markers, so the raw model text (including
-    inline `<think>...</think>`) flows through `delta.content` and the runner's
-    single ThinkSplitter handles it — identical to llama-server with
-    `--reasoning-format none`.
-
-    0.6.13 adds a second splitting path the patch must also neutralize: the
-    `make_response_stream_state` factory prefers a `ResponseTemplateStreamState`
-    (a transformers response-template parser) whenever the tokenizer exposes a
-    `response_template`, bypassing `ThinkingStreamState` entirely. The patch
-    disables that bypass by neutralizing `_response_template_tokenizer` — a
-    call-time global inside the factory, so it works even though the route
-    modules from-import the factory at package import time.
-
-    The fake below is a behavioral double: `__init__`/`feed`, the helpers, and
-    the factory are copied from the real mlx-vlm 0.6.13
-    `server/responses_state.py`, so the assertions exercise the exact upstream
-    logic being neutralized while staying runnable on Linux CI (no mlx-vlm
-    installed).
-    """
-
-    def _install_fake_responses_state(self, monkeypatch):
-        """Inject `mlx_vlm.server.responses_state` with the real 0.6.13 splitter logic."""
-        import sys
-        import types
-        from dataclasses import dataclass
-        from typing import Optional, Tuple
-
-        _CONTENT_MARKERS = ("<|START_TEXT|>", "<|END_TEXT|>")
-
-        def _strip_content_markers(text):
-            for marker in _CONTENT_MARKERS:
-                text = text.replace(marker, "")
-            return text
-
-        @dataclass
-        class ThinkingStreamDelta:
-            reasoning: Optional[str] = None
-            content: Optional[str] = None
-            thinking_closed: bool = False
-
-        class ThinkingStreamState:
-            """Verbatim port of mlx-vlm 0.6.13 server/responses_state.py:40-171."""
-
-            _DEFAULT_OPEN_CLOSE_MARKERS = (
-                ("<|channel>thought", "<channel|>"),
-                ("<think>", "</think>"),
-                ("<|START_THINKING|>", "<|END_THINKING|>"),
-            )
-
-            def __init__(
-                self,
-                enable_thinking: bool = False,
-                thinking_start_token: Optional[str] = None,
-                thinking_end_token: Optional[str] = None,
-            ):
-                self.open_close_markers = self._build_open_close_markers(
-                    thinking_start_token, thinking_end_token
-                )
-                self.open_markers = tuple(m for m, _ in self.open_close_markers)
-                self.close_markers = tuple(m for _, m in self.open_close_markers)
-                self.in_thinking = bool(enable_thinking)
-                self.thinking_done = False
-                self.buffer = ""
-
-            def feed(self, text, last=False):
-                self.buffer += text or ""
-                reasoning = []
-                content = []
-                thinking_closed = False
-                while self.buffer:
-                    if self.in_thinking:
-                        idx, marker = self._find_first(self.buffer, self.close_markers)
-                        if idx < 0:
-                            emit, self.buffer = self._split_partial(self.buffer, self.close_markers)
-                            emit = self._strip_open_marker(emit)
-                            if emit:
-                                reasoning.append(emit)
-                            break
-                        before = self._strip_open_marker(self.buffer[:idx])
-                        if before:
-                            reasoning.append(before)
-                        self.buffer = self.buffer[idx + len(marker) :].lstrip("\n")
-                        self.in_thinking = False
-                        self.thinking_done = True
-                        thinking_closed = True
-                        continue
-                    if self.thinking_done:
-                        emit, self.buffer = self._split_partial(self.buffer, _CONTENT_MARKERS)
-                        emit = _strip_content_markers(emit)
-                        if emit:
-                            content.append(emit)
-                        break
-                    idx, marker = self._find_first(self.buffer, self.open_markers)
-                    if idx < 0:
-                        emit, self.buffer = self._split_partial(self.buffer, self.open_markers)
-                        emit = _strip_content_markers(emit)
-                        if emit:
-                            content.append(emit)
-                        break
-                    if idx:
-                        emit = _strip_content_markers(self.buffer[:idx])
-                        if emit:
-                            content.append(emit)
-                    self.buffer = self.buffer[idx + len(marker) :].lstrip("\n")
-                    self.in_thinking = True
-                if last and self.buffer:
-                    held, self.buffer = self.buffer, ""
-                    if self.in_thinking:
-                        reasoning.append(self._strip_open_marker(held))
-                    else:
-                        content.append(_strip_content_markers(held))
-                return ThinkingStreamDelta(
-                    reasoning="".join(reasoning) or None,
-                    content="".join(content) or None,
-                    thinking_closed=thinking_closed,
-                )
-
-            @classmethod
-            def _build_open_close_markers(cls, thinking_start_token, thinking_end_token):
-                markers = []
-                if thinking_start_token and thinking_end_token:
-                    markers.append((thinking_start_token, thinking_end_token))
-                for marker_pair in cls._DEFAULT_OPEN_CLOSE_MARKERS:
-                    if marker_pair not in markers:
-                        markers.append(marker_pair)
-                return tuple(markers)
-
-            @staticmethod
-            def _find_first(text, markers) -> Tuple[int, str]:
-                found_idx = -1
-                found_marker = ""
-                for marker in markers:
-                    idx = text.find(marker)
-                    if idx >= 0 and (found_idx < 0 or idx < found_idx):
-                        found_idx = idx
-                        found_marker = marker
-                return found_idx, found_marker
-
-            @staticmethod
-            def _split_partial(text, markers) -> Tuple[str, str]:
-                hold = 0
-                for marker in markers:
-                    max_len = min(len(marker) - 1, len(text))
-                    for length in range(max_len, 0, -1):
-                        if text.endswith(marker[:length]):
-                            hold = max(hold, length)
-                            break
-                if hold:
-                    return text[:-hold], text[-hold:]
-                return text, ""
-
-            def _strip_open_marker(self, text):
-                for marker in self.open_markers:
-                    if marker in text:
-                        before, after = text.split(marker, 1)
-                        return before + after.lstrip("\n")
-                return text
-
-        class ResponseTemplateStreamState:
-            """Stand-in for 0.6.13's template-parser splitter (the bypass)."""
-
-            def __init__(self, parser):
-                self.parser = parser
-
-        mlx_vlm = types.ModuleType("mlx_vlm")
-        server = types.ModuleType("mlx_vlm.server")
-        responses_state = types.ModuleType("mlx_vlm.server.responses_state")
-        responses_state.ThinkingStreamDelta = ThinkingStreamDelta
-        responses_state.ThinkingStreamState = ThinkingStreamState
-        responses_state.ResponseTemplateStreamState = ResponseTemplateStreamState
-
-        def _response_template_tokenizer(processor):
-            """Verbatim port of mlx-vlm 0.6.13 server/responses_state.py:214-220."""
-            if processor is None:
-                return None
-            tokenizer = processor.tokenizer if hasattr(processor, "tokenizer") else processor
-            if getattr(tokenizer, "response_template", None) is None:
-                return None
-            return tokenizer
-
-        def make_response_stream_state(
-            processor,
-            enable_thinking=False,
-            thinking_start_token=None,
-            thinking_end_token=None,
-        ):
-            """Verbatim port of mlx-vlm 0.6.13 server/responses_state.py:223-240,
-            minus the logger fallback. Resolves `_response_template_tokenizer`
-            through the module globals at call time — the seam the patch uses.
-            """
-            tokenizer = responses_state._response_template_tokenizer(processor)
-            if tokenizer is not None and hasattr(tokenizer, "get_response_parser"):
-                return ResponseTemplateStreamState(tokenizer.get_response_parser(prefix=""))
-            return ThinkingStreamState(
-                enable_thinking,
-                thinking_start_token,
-                thinking_end_token,
-            )
-
-        responses_state._response_template_tokenizer = _response_template_tokenizer
-        responses_state.make_response_stream_state = make_response_stream_state
-        server.responses_state = responses_state
-        mlx_vlm.server = server
-        monkeypatch.setitem(sys.modules, "mlx_vlm", mlx_vlm)
-        monkeypatch.setitem(sys.modules, "mlx_vlm.server", server)
-        monkeypatch.setitem(sys.modules, "mlx_vlm.server.responses_state", responses_state)
-        return ThinkingStreamState
-
-    @staticmethod
-    def _feed_all(state, chunks):
-        """Feed chunks and concatenate the reasoning/content channels."""
-        reasoning, content = [], []
-        for chunk in chunks:
-            delta = state.feed(chunk)
-            if delta.reasoning:
-                reasoning.append(delta.reasoning)
-            if delta.content:
-                content.append(delta.content)
-        return "".join(reasoning), "".join(content)
-
-    def test_returns_false_when_mlx_vlm_absent(self, monkeypatch):
-        import sys
-        import types
-        from src.engines import _mlx_vlm_server_runner as runner
-
-        # Simulate a host without mlx-vlm (Linux CI): the parent package exists
-        # but the `responses_state` submodule import raises (None sys.modules entry).
-        bare_server = types.ModuleType("mlx_vlm.server")
-        monkeypatch.setitem(sys.modules, "mlx_vlm.server", bare_server)
-        monkeypatch.setitem(sys.modules, "mlx_vlm.server.responses_state", None)
-        assert runner._patch_inline_thinking() is False
-
-    def test_unpatched_state_splits_thinking(self, monkeypatch):
-        """Baseline pin of the 0.6.13 behavior being fixed: with enable_thinking
-        the state starts IN thinking, so everything before `</think>` lands in
-        the reasoning channel and the tags never reach content.
-        """
-        state_cls = self._install_fake_responses_state(monkeypatch)
-
-        state = state_cls(enable_thinking=True)
-        reasoning, content = self._feed_all(
-            state, ["<think>step ", "by step</think>", "The answer is 4."]
-        )
-
-        assert reasoning == "step by step"
-        assert content == "The answer is 4."
-
-    def test_patched_state_keeps_thinking_inline(self, monkeypatch):
-        """After the patch, the same stream flows 100% through content —
-        inline `<think>...</think>` included, reasoning channel silent.
-        """
-        from src.engines import _mlx_vlm_server_runner as runner
-
-        state_cls = self._install_fake_responses_state(monkeypatch)
-        assert runner._patch_inline_thinking() is True
-
-        state = state_cls(enable_thinking=True)
-        reasoning, content = self._feed_all(
-            state, ["<think>step ", "by step</think>", "The answer is 4."]
-        )
-
-        assert reasoning == ""
-        assert content == "<think>step by step</think>The answer is 4."
-
-    def test_patched_factory_skips_template_parser_bypass(self, monkeypatch):
-        """0.6.13's `make_response_stream_state` prefers a template-parser
-        splitter when the tokenizer exposes a `response_template` — a path that
-        routes reasoning to `delta.reasoning` while bypassing
-        `ThinkingStreamState` entirely. After the patch, the factory must fall
-        through to the (neutralized) `ThinkingStreamState` for every processor.
-        """
-        import sys
-        from types import SimpleNamespace
-
-        from src.engines import _mlx_vlm_server_runner as runner
-
-        state_cls = self._install_fake_responses_state(monkeypatch)
-        responses_state = sys.modules["mlx_vlm.server.responses_state"]
-
-        tokenizer = SimpleNamespace(
-            response_template="{% generation %}",
-            get_response_parser=lambda prefix: object(),
-        )
-        processor = SimpleNamespace(tokenizer=tokenizer)
-
-        # Baseline pin: unpatched, the factory takes the bypass.
-        unpatched = responses_state.make_response_stream_state(processor)
-        assert isinstance(unpatched, responses_state.ResponseTemplateStreamState)
-
-        assert runner._patch_inline_thinking() is True
-
-        patched = responses_state.make_response_stream_state(processor, enable_thinking=True)
-        assert isinstance(patched, state_cls)
-        assert patched.in_thinking is False  # and it is the neutralized state
-
-    def test_patched_state_has_no_partial_marker_holdback(self, monkeypatch):
-        """A chunk ending mid-`<think` must flush immediately once patched:
-        the unmatchable sentinel markers share no prefix with model text, so
-        `_split_partial` never holds back a suffix (no latency artifacts).
-        """
-        from src.engines import _mlx_vlm_server_runner as runner
-
-        state_cls = self._install_fake_responses_state(monkeypatch)
-        assert runner._patch_inline_thinking() is True
-
-        state = state_cls(enable_thinking=False)
-        delta = state.feed("text ending in <thin")
-        assert delta.content == "text ending in <thin"
-        assert delta.reasoning is None
-
-    def test_patched_state_still_strips_content_markers(self, monkeypatch):
-        """Upstream `<|START_TEXT|>`/`<|END_TEXT|>` stripping must survive the
-        patch — only the thinking split is neutralized.
-        """
-        from src.engines import _mlx_vlm_server_runner as runner
-
-        state_cls = self._install_fake_responses_state(monkeypatch)
-        assert runner._patch_inline_thinking() is True
-
-        state = state_cls(enable_thinking=False)
-        delta = state.feed("<|START_TEXT|>hello<|END_TEXT|>")
-        assert delta.content == "hello"
-        assert delta.reasoning is None
-
-    def test_patch_is_idempotent(self, monkeypatch):
-        from src.engines import _mlx_vlm_server_runner as runner
-
-        state_cls = self._install_fake_responses_state(monkeypatch)
-        assert runner._patch_inline_thinking() is True
-        first = state_cls.__init__
-        assert runner._patch_inline_thinking() is True
-        assert state_cls.__init__ is first  # not double-wrapped
-
-
 # =====================================================================
 # UNIT — MLX_Engine spawn argv + class attributes + payload model value
 # =====================================================================
@@ -1258,12 +897,12 @@ class TestSpawnArgv:
         assert handle["base_url"] == "http://127.0.0.1:9087"
 
     def test_spawn_does_not_export_dead_thinking_env_sentinel(self, tmp_path, monkeypatch):
-        """MLX_VLM_THINKING_START_TOKEN exists on mlx-vlm 0.6.13 but cannot
-        express "never split": `_build_open_close_markers` always APPENDS the
-        built-in marker families after any custom pair, and it needs both a
-        start AND an end token to register at all. Inline delivery is owned by
-        the in-child `_patch_inline_thinking` monkeypatch instead, so
-        `_spawn_child` must not touch the parent's environment.
+        """MLX_VLM_THINKING_START_TOKEN stays untouched: the server's built-in
+        marker families are exactly what #554 relies on (the native split into
+        `delta.reasoning` is the wanted behavior), a custom pair only registers
+        when BOTH start and end tokens are set, and `_build_open_close_markers`
+        appends the built-ins after any custom pair anyway. `_spawn_child` must
+        not touch the parent's environment.
         """
         import os
 
@@ -1656,24 +1295,23 @@ def _build_real_mlx_chat_model(llm_id, model_path, *, max_tokens):
 
 @pytest.mark.mlx_only
 class TestThinkingServerSideActivation:
-    """Both halves of the MLX thinking fix, proven at the raw SSE boundary (#90).
+    """Both halves of the MLX thinking design, proven at the raw SSE boundary (#554).
 
     Half 1 — activation: `_spawn_child` passes `--enable-thinking`, so a request
-    that does not set `enable_thinking` (Erudi's runner never does) still gets
-    thinking-on-by-default from mlx-vlm 0.6.13 — without it, a thinking model
-    answers directly and no reasoning ever exists.
+    that does not set `enable_thinking` (Erudi's chat turns never do) still gets
+    thinking-on-by-default from mlx-vlm — without it, a thinking model answers
+    directly and no reasoning ever exists.
 
-    Half 2 — inline delivery: the in-child `_patch_inline_thinking` monkeypatch
-    neutralizes the server-side split, so the reasoning arrives as literal
-    `<think>...</think>` INSIDE `delta.content` (the channel ChatOpenAI keeps)
-    and the `delta.reasoning` channel (which ChatOpenAI drops) stays silent.
-
-    Asserting on the raw stream (not the runner) pins the server contract the
-    runner's ThinkSplitter depends on. Opt-in via `mlx_thinking_model_path`
+    Half 2 — dedicated delivery: mlx-vlm's native server-side split routes the
+    reasoning to the dedicated `delta.reasoning` field (mirrored into
+    `delta.reasoning_content` on the pinned 0.6.17), and no `<think>` marker
+    leaks into `delta.content`. `Erudi_Chat_OpenAI` is what carries that field
+    to the runner (pinned in test_stream_watchdog.py); this test pins the
+    server side of the contract. Opt-in via `mlx_thinking_model_path`
     (ERUDI_TEST_THINKING=1).
     """
 
-    def test_thinking_activates_and_streams_inline(self, mlx_thinking_model_path):
+    def test_thinking_activates_and_streams_in_the_dedicated_field(self, mlx_thinking_model_path):
         import requests
 
         try:
@@ -1697,6 +1335,7 @@ class TestThinkingServerSideActivation:
                 json=payload,
                 stream=True,
                 timeout=300,
+                headers={"Authorization": f"Bearer {model['api_key']}"},
             ) as resp:
                 resp.raise_for_status()
                 for line in resp.iter_lines():
@@ -1708,21 +1347,19 @@ class TestThinkingServerSideActivation:
                     delta = json.loads(data)["choices"][0]["delta"]
                     if delta.get("content"):
                         contents.append(delta["content"])
-                    if delta.get("reasoning"):
-                        reasonings.append(delta["reasoning"])
+                    if delta.get("reasoning") or delta.get("reasoning_content"):
+                        reasonings.append(delta.get("reasoning") or delta["reasoning_content"])
 
             text = "".join(contents)
-            assert reasonings == [], (
-                f"server-side thinking split is still active: {len(reasonings)} "
-                f"non-null delta.reasoning chunks (ChatOpenAI would drop them all)"
+            reasoning = "".join(reasonings)
+            assert reasoning.strip(), (
+                "no delta.reasoning chunks arrived -- thinking did not activate "
+                "server-side, or the native split stopped routing it"
             )
-            assert "<think>" in text, (
-                f"thinking did not activate server-side (no inline <think> in "
-                f"delta.content): {text[:200]!r}"
+            assert "<think>" not in text and "</think>" not in text, (
+                f"reasoning markers leaked into delta.content (the native split "
+                f"is off): {text[:200]!r}"
             )
-            assert "</think>" in text, f"thinking block never closed: {text[:200]!r}"
-            inner = text.split("<think>", 1)[1].split("</think>", 1)[0]
-            assert inner.strip(), "thinking block is empty — activation failed"
         finally:
             MLX_Engine.cleanup()
 
@@ -1730,16 +1367,14 @@ class TestThinkingServerSideActivation:
 @pytest.mark.mlx_only
 class TestThinkingModelRegression:
     """Reasoning must actually FLOW as thinking events and never leak into the
-    ANSWER text (#90). Since the design keeps ``<think>...</think>`` INLINE in
-    the engine stream on purpose (the in-child `_patch_inline_thinking`
-    monkeypatch neutralizes mlx-vlm's server-side split), the runner's streaming
-    splitter is what separates thinking from answer -- so this regression
-    asserts on the RUNNER's event stream, not the raw ChatOpenAI content (which
-    now legitimately carries the inline tags). The non-empty `thinking`
-    assertion is what makes this test meaningful: without server-side
-    activation (`--enable-thinking`) the model never thinks and a no-leak-only
-    assertion would pass vacuously. Opt-in via `mlx_thinking_model_path`
-    (ERUDI_TEST_THINKING=1).
+    ANSWER text (#554). The server extracts it into the dedicated
+    `delta.reasoning` field, `Erudi_Chat_OpenAI` re-attaches it to the message
+    chunks, and the runner emits it as `thinking` events -- so this regression
+    asserts on the RUNNER's event stream, the end of that whole chain. The
+    non-empty `thinking` assertion is what makes this test meaningful: without
+    server-side activation (`--enable-thinking`) the model never thinks and a
+    no-leak-only assertion would pass vacuously. Opt-in via
+    `mlx_thinking_model_path` (ERUDI_TEST_THINKING=1).
     """
 
     async def test_thinking_flows_and_does_not_leak_into_answer(

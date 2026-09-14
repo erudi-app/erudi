@@ -723,11 +723,12 @@ async def test_empty_final_answer_falls_back_to_last_tool_result(monkeypatch):
     assert ERROR_SENTINEL not in "".join(out)
 
 
-async def test_empty_final_answer_no_tool_yields_nothing(monkeypatch):
-    """#90 boundary: an empty final answer with NO tool run this turn is a
-    genuine failure — there is nothing to fall back to, so the runner must NOT
-    fabricate content. Behavior is unchanged: the stream yields no text (the
-    downstream empty-content guard still applies at persistence)."""
+async def test_empty_final_answer_no_tool_yields_the_curated_stop_turn(monkeypatch):
+    """#90 boundary, rewritten by #554: an empty final answer with NO tool run
+    this turn used to yield nothing, which crashed the downstream empty-content
+    guard into a generic error turn. The runner now delivers the curated
+    ``stop`` line (a NORMAL answer, never the sentinel) so the turn persists
+    honestly."""
     fake = ToolableFakeChatModel(messages=iter([AIMessage(content="")]))
     _patch_model(monkeypatch, fake)
     runner = AgentRunner(checkpointer=InMemorySaver())
@@ -744,7 +745,7 @@ async def test_empty_final_answer_no_tool_yields_nothing(monkeypatch):
         )
     ]
 
-    assert "".join(out) == ""
+    assert "".join(out) == runner_module.EMPTY_ANSWER_STOP_MESSAGE
     assert ERROR_SENTINEL not in "".join(out)
 
 
@@ -1966,3 +1967,281 @@ def test_build_chat_model_llama_cpp_extra_body_has_no_seed(monkeypatch):
     monkeypatch.setattr(config, "LLM_Engine", _LlamaEngine)
     chat = build_chat_model(_Llm(), temperature=0.6, top_p=0.95, max_tokens=55)
     assert "seed" not in chat.extra_body
+
+
+# ===== Dedicated reasoning channel (#554) =====
+#
+# Both local servers extract chain-of-thought server-side (llama-server's
+# default ``--reasoning-format auto``, mlx_vlm.server's native split) and the
+# chat client re-attaches it to each streamed chunk as
+# ``additional_kwargs["reasoning_content"]``. The runner must surface those
+# chunks as ``thinking`` events, count them as stream activity (a
+# reasoning-only chunk has empty ``.text``), and turn a stream that ends with
+# no answer text into the honest curated turn instead of yielding nothing.
+# Fixture shapes mirror the design-phase captures of both engines
+# (Qwen3.5-0.8B, 2026-09-14): reasoning-only deltas, a post-tool hop that
+# reasons again, and a ``finish_reason=length`` cut mid-reasoning.
+
+import json
+from typing import Any
+
+from langchain_core.messages import AIMessageChunk
+from langchain_core.outputs import ChatGenerationChunk
+
+
+def _raw_chunk(content="", reasoning=None, finish_reason=None, tool_calls=None):
+    """One streamed model chunk as the runner receives it.
+
+    ``reasoning`` rides ``additional_kwargs`` (what ``Erudi_Chat_OpenAI``
+    attaches, pinned in test_stream_watchdog.py); ``finish_reason`` rides
+    ``generation_info`` -- langchain-core's stream loop folds it into the
+    yielded message's ``response_metadata``, which is the path the real client
+    relies on (no stamping), so these fixtures exercise it for real.
+    """
+    return ChatGenerationChunk(
+        message=AIMessageChunk(
+            content=content,
+            additional_kwargs={"reasoning_content": reasoning} if reasoning is not None else {},
+            tool_call_chunks=tool_calls or [],
+        ),
+        generation_info={"finish_reason": finish_reason} if finish_reason else None,
+    )
+
+
+class _RawChunkModel(ToolableFakeChatModel):
+    """Streams pre-built ``ChatGenerationChunk`` lists, one list per model hop."""
+
+    hops: Any = None
+
+    def _stream(self, messages, stop=None, run_manager=None, **kwargs):
+        yield from next(self.hops)
+
+
+def _raw_chunk_model(*hops):
+    return _RawChunkModel(messages=iter([]), hops=iter(list(hops)))
+
+
+def _calc_tool_call_chunk(expression):
+    return [
+        {
+            "name": "calculator",
+            "args": json.dumps({"expression": expression}),
+            "id": "call-554",
+            "index": 0,
+            "type": "tool_call_chunk",
+        }
+    ]
+
+
+async def test_reasoning_only_chunks_stream_as_thinking_and_count_as_activity(monkeypatch, caplog):
+    """A reasoning-only chunk has empty ``.text``: it must still produce a
+    ``thinking`` event, start the first-token clock, and count in the chunk
+    total -- the old ``if text:`` guard silently skipped all three."""
+    fake = _raw_chunk_model(
+        [
+            _raw_chunk(reasoning="step one. "),
+            _raw_chunk(reasoning="step two."),
+            _raw_chunk(content="The answer is 4.", finish_reason="stop"),
+        ]
+    )
+    _patch_model(monkeypatch, fake)
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        events = await _events(
+            runner,
+            llm=_Llm(),
+            user_message="hi",
+            system_prompt="s",
+            params=_PARAMS,
+            thread_id="r554-1",
+        )
+
+    assert _thinking(events) == "step one. step two."
+    assert _answers(events) == "The answer is 4."
+    # Activity accounting saw all three chunks, reasoning-only ones included.
+    assert any("Agent first token" in r.getMessage() for r in caplog.records)
+    (completed,) = [
+        r.getMessage() for r in caplog.records if "Agent stream completed" in r.getMessage()
+    ]
+    assert "chunks=3" in completed
+
+
+async def test_completed_turn_logs_reasoning_answer_and_finish_reason(monkeypatch, caplog):
+    """#554 telemetry: the end-of-turn aggregate line carries the three fields
+    that let a field report be attributed (all-reasoning turn? cut? clean stop?).
+    INFO fields on the existing line -- no new WARNING anywhere."""
+    fake = _raw_chunk_model(
+        [
+            _raw_chunk(reasoning="12345"),
+            _raw_chunk(content="ok!", finish_reason="stop"),
+        ]
+    )
+    _patch_model(monkeypatch, fake)
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        await _events(
+            runner,
+            llm=_Llm(),
+            user_message="hi",
+            system_prompt="s",
+            params=_PARAMS,
+            thread_id="r554-2",
+        )
+
+    (completed,) = [
+        r.getMessage() for r in caplog.records if "Agent stream completed" in r.getMessage()
+    ]
+    assert "reasoning_chars=5" in completed
+    assert "answer_chars=3" in completed
+    assert "finish_reason=stop" in completed
+    assert completed.isascii()
+
+
+async def test_post_tool_hop_reasoning_reaches_the_trace_on_both_sides(monkeypatch):
+    """Post-tool hop (design capture ``tools2``): the prompt reopens the
+    thinking block on every hop and the server extracts it again. Reasoning
+    streamed BEFORE the tool call and AFTER the tool result must both reach
+    the trace as ``thinking`` events, and the answer must stay clean."""
+    fake = _raw_chunk_model(
+        [
+            _raw_chunk(reasoning="I should compute this. "),
+            _raw_chunk(content="", tool_calls=_calc_tool_call_chunk("2 + 2")),
+        ],
+        [
+            _raw_chunk(reasoning="The tool says 4. "),
+            _raw_chunk(content="The answer is 4.", finish_reason="stop"),
+        ],
+    )
+    _patch_model(monkeypatch, fake)
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="2 + 2 ?",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="r554-3",
+        tools=[calculator],
+    )
+
+    assert _thinking(events) == "I should compute this. The tool says 4. "
+    assert _answers(events) == "The answer is 4."
+    kinds = [e["t"] for e in events]
+    # Hop-1 reasoning precedes the tool call; hop-2 reasoning follows the
+    # tool result; the final answer comes last.
+    assert kinds.index("thinking") < kinds.index("tool_call") < kinds.index("tool_result")
+    second_thinking = max(i for i, k in enumerate(kinds) if k == "thinking")
+    assert kinds.index("tool_result") < second_thinking < kinds.index("answer")
+    assert ERROR_SENTINEL not in _answers(events)
+
+
+async def test_all_reasoning_length_cut_yields_the_curated_length_turn(monkeypatch):
+    """Design capture ``cut`` (finish_reason=length, zero content deltas): the
+    trace keeps every thinking event, the turn ends with the curated ``length``
+    line as a NORMAL answer (never the sentinel -- a sentinel would drop the
+    trace at persistence), and the thread state carries the curated line
+    instead of an empty assistant message."""
+    saver = InMemorySaver()
+    fake = _raw_chunk_model(
+        [
+            _raw_chunk(reasoning="Okay, the user asks about X. "),
+            _raw_chunk(reasoning="Let me start by", finish_reason="length"),
+        ]
+    )
+    _patch_model(monkeypatch, fake)
+    runner = AgentRunner(checkpointer=saver)
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="r554-4",
+    )
+
+    assert _thinking(events) == "Okay, the user asks about X. Let me start by"
+    answers = [e for e in events if e["t"] == "answer"]
+    assert [a["text"] for a in answers] == [runner_module.EMPTY_ANSWER_LENGTH_MESSAGE]
+    assert ERROR_SENTINEL not in _answers(events)
+    # Thread state: the empty assistant message is replaced by the curated
+    # line, so the next turn's template never replays an empty turn.
+    tup = saver.get_tuple({"configurable": {"thread_id": "r554-4"}})
+    msgs = tup.checkpoint["channel_values"]["messages"]
+    assert str(msgs[-1].text) == runner_module.EMPTY_ANSWER_LENGTH_MESSAGE
+    assert not any(m.type == "ai" and not str(m.text).strip() for m in msgs)
+
+
+async def test_stop_with_no_answer_yields_the_curated_stop_turn(monkeypatch):
+    """The other wording: the model closed its turn (finish_reason=stop) with
+    thinking but no answer -- a different failure, a different honest line."""
+    saver = InMemorySaver()
+    fake = _raw_chunk_model([_raw_chunk(reasoning="hmm.", finish_reason="stop")])
+    _patch_model(monkeypatch, fake)
+    runner = AgentRunner(checkpointer=saver)
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="r554-5",
+    )
+
+    assert _thinking(events) == "hmm."
+    answers = [e for e in events if e["t"] == "answer"]
+    assert [a["text"] for a in answers] == [runner_module.EMPTY_ANSWER_STOP_MESSAGE]
+    assert ERROR_SENTINEL not in _answers(events)
+    tup = saver.get_tuple({"configurable": {"thread_id": "r554-5"}})
+    msgs = tup.checkpoint["channel_values"]["messages"]
+    assert str(msgs[-1].text) == runner_module.EMPTY_ANSWER_STOP_MESSAGE
+
+
+async def test_curated_turn_never_fires_when_a_tool_result_exists(monkeypatch):
+    """The #90 fallback (last tool result as the answer) outranks the curated
+    turn: a correct value beats an apology."""
+    fake = _raw_chunk_model(
+        [
+            _raw_chunk(content="", tool_calls=_calc_tool_call_chunk("2 + 2")),
+        ],
+        [
+            _raw_chunk(reasoning="done", finish_reason="stop"),
+        ],
+    )
+    _patch_model(monkeypatch, fake)
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="2 + 2 ?",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="r554-6",
+        tools=[calculator],
+    )
+
+    assert _answers(events).strip() == "4"
+    assert runner_module.EMPTY_ANSWER_STOP_MESSAGE not in _answers(events)
+    assert runner_module.EMPTY_ANSWER_LENGTH_MESSAGE not in _answers(events)
+
+
+def test_curated_empty_answer_messages_are_one_ascii_line_without_the_sentinel():
+    """Decisions (#554, final): impersonal English, ASCII, single line, never
+    the ERROR sentinel (the frontend would render red and services would drop
+    the trace), and the ``length`` wording never names the removed Max Tokens
+    control."""
+    for message in (
+        runner_module.EMPTY_ANSWER_LENGTH_MESSAGE,
+        runner_module.EMPTY_ANSWER_STOP_MESSAGE,
+    ):
+        assert message.isascii()
+        assert "\n" not in message
+        assert ERROR_SENTINEL not in message
+        assert " I " not in f" {message} "  # impersonal: no first person
+    assert "Max Tokens" not in runner_module.EMPTY_ANSWER_LENGTH_MESSAGE
+    assert runner_module.EMPTY_ANSWER_LENGTH_MESSAGE != runner_module.EMPTY_ANSWER_STOP_MESSAGE

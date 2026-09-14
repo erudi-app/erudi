@@ -1,11 +1,16 @@
-"""Streaming ``<think>...</think>`` splitter (issue #90).
+"""Streaming ``<think>...</think>`` splitter -- the FALLBACK reasoning path (#554).
 
-Both local inference servers are configured to leave chain-of-thought inline in
-the answer stream -- llama.cpp with ``--reasoning-format none`` and mlx_vlm with
-its server-side split neutralized via env -- so a single state machine here
-separates thinking from answer for BOTH engines. It is fed the model's answer
-deltas and emits event dicts: text outside the tags becomes ``answer`` events,
-text inside becomes ``thinking`` events.
+The primary reasoning path does not run through here: both local inference
+servers extract each family's chain-of-thought server-side (llama-server's
+default ``--reasoning-format auto``, mlx_vlm.server's native split) into a
+dedicated delta field that ``Erudi_Chat_OpenAI`` carries to the runner's
+``thinking`` events. This splitter stays on the CONTENT channel as the
+fallback for families whose markers the server parser does not know: inline
+``<think>`` tags that slip through still become ``thinking`` events instead of
+leaking into the answer. Arena's plain-text projection (``emit_events=False``)
+depends on it -- it is what keeps stray inline reasoning off Arena's wire. It
+is fed the model's answer deltas and emits event dicts: text outside the tags
+becomes ``answer`` events, text inside becomes ``thinking`` events.
 
 Robust to tags split across chunks (``<th`` then ``ink>``): only a trailing
 partial prefix of the tag currently being scanned for is buffered; everything

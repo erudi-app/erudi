@@ -22,8 +22,8 @@ Architecture:
                                   ↓
     ┌───────────────────────────────────────────────────────────────┐
     │ token streaming lives in the agent layer, not the engine:     │
-    │   AgentRunner → ChatOpenAI(base_url) → POST /v1/chat/...      │
-    │   ChatOpenAI yields delta.content, ignores delta.reasoning    │
+    │   AgentRunner → Erudi_Chat_OpenAI(base_url) → POST /v1/...    │
+    │   carries delta.content AND delta.reasoning (#554)            │
     └───────────────────────────────────────────────────────────────┘
                                   ↓
     ┌───────────────────────────────────────────────────────────────┐
@@ -48,14 +48,14 @@ Why multiprocessing instead of subprocess.Popen([sys.executable, "-m", ...])?
     target works in dev (real Python) and in prod (frozen).
 
 Why the `<|channel>thought ... <channel|>` manual filter is gone:
-    Reasoning stays INLINE in `delta.content` as raw `<think>...</think>` (#90):
-    the child spawns with `--enable-thinking` (thinking on by default) and
-    neutralizes mlx-vlm's server-side reasoning split before the server starts
-    (`_patch_inline_thinking` in `_mlx_vlm_server_runner.py`), because the
-    dedicated `delta.reasoning` field it would otherwise emit is silently
-    dropped by ChatOpenAI. The runner's single streaming ThinkSplitter then
-    separates thinking from answer — identical to llama-server with
-    `--reasoning-format none` on the CPU/CUDA path.
+    mlx-vlm's native server-side split owns the reasoning markers (#554): the
+    child spawns with `--enable-thinking` (thinking on by default) and streams
+    chain-of-thought in the dedicated `delta.reasoning` field (mirrored into
+    `delta.reasoning_content` on the pinned 0.6.17), which `Erudi_Chat_OpenAI`
+    re-attaches to the message chunks and the runner emits as `thinking`
+    events — symmetric to llama-server's default `--reasoning-format auto` on
+    the CPU/CUDA path. The runner's ThinkSplitter stays as the inline fallback
+    for families whose markers the server split does not know.
 
 Why the `_MLX_EXECUTOR` thread bottleneck is gone:
     Generation now runs in a separate OS process; the GPU stream is
@@ -381,19 +381,15 @@ class MLX_Engine(BaseChatServerEngine):
             "--log-level",
             "INFO",
             # Thinking on by default for requests that don't set enable_thinking
-            # (Erudi's runner never does). Without it, mlx-vlm 0.6.13 renders the
-            # chat template with enable_thinking=False and a thinking model
-            # (e.g. Qwen3) answers directly — no reasoning ever exists (#90).
-            # Safe for non-thinking models ONLY because the child neutralizes
-            # the server-side thinking split (`_patch_inline_thinking` in
-            # _mlx_vlm_server_runner.py): unpatched, a prompt whose template
-            # opens a thinking block starts the stream in reasoning mode, and
-            # any emitted <think> marker routes text to the delta.reasoning
-            # channel that ChatOpenAI drops. With the patch, the flag's only
-            # remaining effect is the template kwarg, which non-thinking
-            # templates ignore (hardware-verified on Qwen2.5-0.5B on 0.6.2:
-            # byte-identical prompts and answers; re-check in the 0.6.13
-            # hardware pass).
+            # (Erudi's chat turns never do; one-shot titles send
+            # enable_thinking=False). Without it, the chat template renders
+            # with enable_thinking=False and a thinking model (e.g. Qwen3)
+            # answers directly — no reasoning ever exists (#90). The native
+            # server-side split then routes the reasoning to delta.reasoning,
+            # which Erudi_Chat_OpenAI carries to the runner (#554). Safe for
+            # non-thinking models: their templates ignore the kwarg, their
+            # prompts never open a thinking block, so the stream starts (and
+            # stays) on the content channel.
             "--enable-thinking",
             "--api-key",
             api_key,

@@ -511,13 +511,12 @@ class TestRunnerRedirectsBeforeStarting:
         [
             "_patch_gemma3_tied_lm_head_quant",
             "_patch_gemma_end_of_turn_stop",
-            "_patch_inline_thinking",
         ],
     )
     def test_a_patch_that_did_not_apply_is_recorded(self, monkeypatch, patch_name):
         """Each patch fixes a user-visible defect (a Gemma3 quant that will not
-        load, `<end_of_turn>` streamed as text, reasoning dropped on the floor).
-        Returning False silently shipped a degraded product."""
+        load, `<end_of_turn>` streamed as text). Returning False silently
+        shipped a degraded product."""
         from src.engines import _mlx_vlm_server_runner as runner
 
         warnings: list[str] = []
@@ -527,7 +526,6 @@ class TestRunnerRedirectsBeforeStarting:
         for name in (
             "_patch_gemma3_tied_lm_head_quant",
             "_patch_gemma_end_of_turn_stop",
-            "_patch_inline_thinking",
         ):
             monkeypatch.setattr(runner, name, lambda *, applied=name != patch_name: applied)
 
@@ -546,7 +544,6 @@ class TestRunnerRedirectsBeforeStarting:
         for name in (
             "_patch_gemma3_tied_lm_head_quant",
             "_patch_gemma_end_of_turn_stop",
-            "_patch_inline_thinking",
         ):
             monkeypatch.setattr(runner, name, lambda: True)
 
