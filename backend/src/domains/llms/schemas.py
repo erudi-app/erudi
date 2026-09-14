@@ -171,6 +171,56 @@ class LLMResponse(LLMBase):
 
     @computed_field
     @property
+    def context_window(self) -> Optional[int]:
+        """The model's TRAINED context window in tokens, or None when unknown.
+
+        A fact of the artifact (``generation_hints.context_length``: the GGUF
+        metadata for llama.cpp entries, ``config.json`` elsewhere) -- it
+        survives restarts and machines, unlike ``allocated_context_window``
+        below. First-class here so the UI does not dig through the hints blob.
+        """
+        hints = self.generation_hints
+        if isinstance(hints, dict):
+            window = hints.get("context_length")
+            if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+                return window
+        return None
+
+    @computed_field
+    @property
+    def allocated_context_window(self) -> Optional[int]:
+        """The window the engine's loaded child actually runs with, or None.
+
+        Non-None ONLY when this row is the CURRENTLY LOADED model: the value
+        (``BaseEngine.effective_context_tokens``) belongs to a running child,
+        depends on the machine and its memory state (llama-server's fit can
+        shrink it below ``context_window``), and is never persisted. Computed
+        on the fly like ``runnable``: cheap attribute reads, no I/O, and any
+        failure degrades to None (window unknown).
+        """
+        if self.local != 1:
+            return None
+        from src.core import config
+
+        engine = getattr(config, "LLM_Engine", None)
+        if engine is None:
+            return None
+        try:
+            loaded_id = getattr(engine, "_model_id", None)
+            # get_model_and_tokenizer's llm_id is typed str while rows carry
+            # int ids; compare their string forms so neither shape lies.
+            if loaded_id is None or str(loaded_id) != str(self.id):
+                return None
+            probe = getattr(engine, "effective_context_tokens", None)
+            window = probe() if callable(probe) else None
+        except Exception:
+            return None
+        if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+            return window
+        return None
+
+    @computed_field
+    @property
     def runnable(self) -> bool:
         """Whether this model can run on the active engine's hardware.
 

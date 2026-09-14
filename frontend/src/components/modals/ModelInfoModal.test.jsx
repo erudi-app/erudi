@@ -95,6 +95,28 @@ describe("ModelInfoModal", () => {
     expect(screen.getByText('{"license": "apache-2.0"}')).toBeTruthy();
   });
 
+  // Context windows: the trained window is a fact of the model; the allocated
+  // one exists only while this model is the loaded one, so its row only shows
+  // when the backend resolved a value.
+  it("shows the trained and allocated context windows when known", () => {
+    setup({ ...richModel, context_window: 40960, allocated_context_window: 8192 });
+    expect(screen.getByText("Context window:")).toBeTruthy();
+    expect(screen.getByText("40960 tokens")).toBeTruthy();
+    expect(screen.getByText("Currently allocated:")).toBeTruthy();
+    expect(screen.getByText("8192 tokens")).toBeTruthy();
+  });
+
+  it("hides the allocated row when null and both rows when unknown", () => {
+    setup({ ...richModel, context_window: 40960, allocated_context_window: null });
+    expect(screen.getByText("Context window:")).toBeTruthy();
+    expect(screen.queryByText("Currently allocated:")).toBeNull();
+    cleanup();
+
+    setup(richModel);
+    expect(screen.queryByText("Context window:")).toBeNull();
+    expect(screen.queryByText("Currently allocated:")).toBeNull();
+  });
+
   it("Download hands the full model back and closes", () => {
     const { props } = setup();
     fireEvent.click(screen.getByText("Download"));

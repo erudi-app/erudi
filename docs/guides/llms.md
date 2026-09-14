@@ -192,7 +192,7 @@ curl http://127.0.0.1:27182/erudi/llms/local
 ```
 
 `local` encodes the state: `0` remote, `1` installed and ready, `2` downloading. Beyond the stored
-columns, `LLMResponse` computes four fields at read time (no database column, so they self-heal):
+columns, `LLMResponse` computes six fields at read time (no database column, so they self-heal):
 
 | Field | Meaning |
 |-------|---------|
@@ -200,6 +200,8 @@ columns, `LLMResponse` computes four fields at read time (no database column, so
 | `supports_vision` | Image input, read from the artefact (`mmproj` projector for llama.cpp, `config.json` for MLX); `null` until downloaded |
 | `weights_available` | Do the weights still exist on disk — `false` marks an orphaned KB assistant |
 | `sampling_defaults` | Resolved per-model temperature, `top_p`, `max_tokens`, repetition penalty and the `max_tokens_cap`, plus the `source` that produced them |
+| `context_window` | The model's trained context window in tokens (`generation_hints.context_length`); `null` when unknown |
+| `allocated_context_window` | The window the engine's loaded child actually runs with; non-null only for the currently loaded model, resolved live and never persisted (see [Context windows](../dev/architecture/engines.md#context-windows)) |
 
 KB assistants are ordinary rows flagged with `is_attached_to_kb` and a `kb_id`. They carry a **copy**
 of their base model's `link`, so they share the weights on disk.
