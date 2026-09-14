@@ -30,11 +30,13 @@ jobs:
           RUN_ID=$(gh run list --repo "$GITHUB_REPOSITORY" --workflow=release.yml \
             --branch "$TAG" --limit 1 --json databaseId -q '.[0].databaseId')
           [ -n "$RUN_ID" ] || { echo "::error::No release.yml run found for tag $TAG"; exit 1; }
+          # Every gh call names the repository: the job has no checkout, so gh has no
+          # git remote to infer it from and fails before counting anything.
           # Count the build-matrix legs (job names start with "build ") and how many
           # concluded success. All 5 must be green — re-run any failed leg first.
-          TOTAL=$(gh run view "$RUN_ID" --json jobs \
+          TOTAL=$(gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --json jobs \
             -q '[.jobs[]|select(.name|startswith("build "))]|length')
-          GREEN=$(gh run view "$RUN_ID" --json jobs \
+          GREEN=$(gh run view "$RUN_ID" --repo "$GITHUB_REPOSITORY" --json jobs \
             -q '[.jobs[]|select(.name|startswith("build "))|select(.conclusion=="success")]|length')
           echo "Release $TAG (run $RUN_ID): $GREEN/$TOTAL platform legs green."
           if [ "$TOTAL" -ne 5 ] || [ "$GREEN" -ne 5 ]; then
