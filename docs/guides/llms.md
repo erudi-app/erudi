@@ -145,7 +145,10 @@ weights are such pieces is refused with a message saying so.
 3. The job is marked `completed`. Only *then* are capabilities probed, best-effort:
    `supports_tools`, `supports_tools_wire` (does the engine's server actually parse this model's tool
    calls — this is what gates agentic Knowledge Base turns), `supports_vision`, and the sampling
-   defaults captured from the base repo's `generation_config` or model card.
+   defaults captured from the base repo's `generation_config` or model card, alongside the model's
+   context window. On llama.cpp engines that window comes from the GGUF metadata Hugging Face
+   exposes for the downloaded repo — the value the `.gguf` file itself declares, which is the one
+   the inference server reads; elsewhere it comes from `config.json`.
 
 A probe failure leaves the model usable with unset capabilities (`null` = unknown, which every
 consumer treats conservatively).

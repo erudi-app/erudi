@@ -14,9 +14,25 @@ Two halves, deliberately separated:
      even when the weights are gated): prose lines carrying a recommendation
      cue *and* a ``temperature=0.15``-style pair, never a code block.
 
-  Alongside: the context window from ``config.json``, whether the chat template
-  knows ``enable_thinking``, the stage that won (``source_stage``) and, for the
-  card, the exact sentence matched (``evidence``). Never the resolved result.
+  Alongside: the context window, whether the chat template knows
+  ``enable_thinking``, the stage that won (``source_stage``) and, for the card,
+  the exact sentence matched (``evidence``). Never the resolved result.
+
+  The **context window** has a cascade of its own, because the number that
+  matters is the one the loaded artifact declares:
+
+  1. for a GGUF entry (``quant_format="gguf"``), the ``context_length`` of the
+     quant repo's GGUF metadata (``model_info(expand=["gguf"])``) -- that is
+     ``n_ctx_train``, what llama-server reads out of the file it loads, and it
+     disagrees with some base repos' ``config.json`` by a factor of 2 to 4;
+  2. else ``config.json``, whose window is spelled ``max_position_embeddings``,
+     ``n_positions`` or ``max_sequence_length``, at the top level or inside a
+     ``text_config`` / ``language_config`` / ``llm_config`` sub-config.
+
+  ``model_max_length`` (tokenizer_config.json) is **not** a source and must not
+  become one: a field audit over the catalog found it garbage (sentinels such as
+  ``1000000000000000019884624838656``) on 36 % of the entries carrying it, and
+  disagreeing with the real window by factors of 2 to 10 in both directions.
 
 * **Resolution** (pure, read time): ``resolve_sampling_defaults(llm)`` turns the
   stored facts into the defaults a new conversation / arena panel starts from
@@ -431,13 +447,29 @@ _TOKENIZER_CONFIG_FILE = "tokenizer_config.json"
 _CHAT_TEMPLATE_FILE = "chat_template.jinja"
 _README_FILE = "README.md"
 
+# The engine format tag (``BaseEngine.FORMAT_TAG``) whose quant repos carry a
+# .gguf file, and with it the Hub's gguf metadata block.
+GGUF_FORMAT_TAG = "gguf"
+
+# Context-window shapes read from a config.json, in precedence order: the
+# preferred key first, then the aliases; the top level before the sub-configs.
+# ``model_max_length`` (tokenizer_config.json) is deliberately NOT one of them
+# -- see the module docstring.
+_CONTEXT_KEYS: Tuple[str, ...] = (
+    "max_position_embeddings",
+    "n_positions",
+    "max_sequence_length",
+)
+_CONTEXT_CONTAINERS: Tuple[str, ...] = ("text_config", "language_config", "llm_config")
+
 # Memoized for the life of the process: the ~640 derived catalog rows collapse
 # onto ~300 unique bases. Files are cached per (repo, filename) so a base
-# shared by several quants is fetched once; the assembled hints per
-# (base, quant) pair; failures are remembered too, so a gated family is not
-# re-probed for every quant of it.
-_CAPTURE_CACHE: Dict[Tuple[str, Optional[str]], Optional[Dict[str, Any]]] = {}
+# shared by several quants is fetched once; the GGUF metadata per quant repo;
+# the assembled hints per (base, quant, format) triple; failures are remembered
+# too, so a gated family is not re-probed for every quant of it.
+_CAPTURE_CACHE: Dict[Tuple[str, Optional[str], Optional[str]], Optional[Dict[str, Any]]] = {}
 _FILE_CACHE: Dict[Tuple[str, str], Any] = {}
+_GGUF_CONTEXT_CACHE: Dict[str, Optional[int]] = {}
 _GATED_REPOS: Set[str] = set()
 _MISSING_REPOS: Set[str] = set()
 
@@ -445,6 +477,7 @@ _MISSING_REPOS: Set[str] = set()
 def reset_capture_cache() -> None:
     _CAPTURE_CACHE.clear()
     _FILE_CACHE.clear()
+    _GGUF_CONTEXT_CACHE.clear()
     _GATED_REPOS.clear()
     _MISSING_REPOS.clear()
 
@@ -460,17 +493,65 @@ def _chat_template_text(chat_template: Any) -> Optional[str]:
 
 
 def _context_length_of(config: Optional[Dict[str, Any]]) -> Optional[int]:
+    """The training context window declared by a ``config.json``.
+
+    Shared by the online capture and ``read_local_generation_hints`` (which
+    reads a downloaded artifact's own ``config.json``), so every shape added
+    here widens both paths.
+
+    Publishers name the window four ways and nest it three ways: the preferred
+    ``max_position_embeddings``, else ``n_positions`` (phi-2 lineage) or
+    ``max_sequence_length`` (Nemotron lineage); at the top level, else inside a
+    ``text_config`` / ``language_config`` / ``llm_config`` sub-config (a VLM
+    keeps its text model there -- deepseek-vl declares
+    ``language_config.max_position_embeddings``). The preferred key wins over an
+    alias, and within one key the top level wins over a sub-config; the first
+    positive integer in that order is the answer.
+    """
     if not isinstance(config, dict):
         return None
-    candidates: List[Any] = [config.get("max_position_embeddings")]
-    text_config = config.get("text_config")
-    if isinstance(text_config, dict):
-        candidates.append(text_config.get("max_position_embeddings"))
-    for value in candidates:
-        n = _as_int(value)
-        if n is not None and n > 0:
-            return n
+    scopes: List[Dict[str, Any]] = [config]
+    for container in _CONTEXT_CONTAINERS:
+        sub = config.get(container)
+        if isinstance(sub, dict):
+            scopes.append(sub)
+    for key in _CONTEXT_KEYS:
+        for scope in scopes:
+            n = _as_int(scope.get(key))
+            if n is not None and n > 0:
+                return n
     return None
+
+
+def _gguf_context_length(quant_repo: str, hf_api: Any) -> Optional[int]:
+    """The window the GGUF file itself declares (``n_ctx_train``), as the Hub
+    exposes it on the quant repo through ``model_info(expand=["gguf"])``.
+
+    Authoritative for a GGUF entry: it is the value llama-server reads when it
+    loads that file, and it disagrees with some base repos' ``config.json`` by a
+    factor of 2 to 4. Memoized per repo (a catalog build asks once per repo) and
+    best-effort: any failure answers ``None`` and the capture goes on with the
+    ``config.json`` window.
+    """
+    if quant_repo in _GGUF_CONTEXT_CACHE:
+        return _GGUF_CONTEXT_CACHE[quant_repo]
+    window: Optional[int] = None
+    try:
+        info = hf_api.model_info(repo_id=quant_repo, expand=["gguf"])
+        block = getattr(info, "gguf", None)
+        raw = (
+            block.get("context_length")
+            if isinstance(block, dict)
+            else getattr(block, "context_length", None)
+        )
+        n = _as_int(raw)
+        if n is not None and n > 0:
+            window = n
+    except Exception as e:
+        # Degraded, not failed: the config.json window still applies.
+        logger.info(f"GGUF metadata unreadable for {quant_repo}: {e}")
+    _GGUF_CONTEXT_CACHE[quant_repo] = window
+    return window
 
 
 def build_generation_hints(
@@ -482,17 +563,26 @@ def build_generation_hints(
     captured_at: Optional[str] = None,
     source_stage: Optional[str] = None,
     evidence: Optional[str] = None,
+    context_length: Optional[int] = None,
 ) -> Optional[Dict[str, Any]]:
     """Assemble the stored facts from the (optional) source documents.
 
     ``generation_config`` is the block of the stage that won (whitelisted here);
     ``source_stage`` names it (defaults to the base repo's file when a block is
-    given, ``None`` when none is). Returns ``None`` when nothing at all was
-    captured, so the column stays NULL ("no hints") rather than holding an
-    empty envelope.
+    given, ``None`` when none is). ``context_length``, when given, is the window
+    a higher-priority source declared (the GGUF metadata) and replaces the one
+    ``config`` carries; it is a capture on its own, so a repo whose only readable
+    fact is that window still produces hints. Returns ``None`` when nothing at
+    all was captured, so the column stays NULL ("no hints") rather than holding
+    an empty envelope.
     """
     template_text = _chat_template_text(chat_template)
-    if generation_config is None and config is None and template_text is None:
+    if (
+        generation_config is None
+        and config is None
+        and template_text is None
+        and context_length is None
+    ):
         return None
     hints: Dict[str, Any] = {"base_repo": base_repo}
     if isinstance(generation_config, dict):
@@ -502,7 +592,9 @@ def build_generation_hints(
     hints["supports_thinking"] = (
         ("enable_thinking" in template_text) if template_text is not None else None
     )
-    hints["context_length"] = _context_length_of(config)
+    hints["context_length"] = (
+        context_length if context_length is not None else _context_length_of(config)
+    )
     hints["captured_at"] = captured_at or date.today().isoformat()
     hints["source_stage"] = source_stage
     hints["evidence"] = evidence
@@ -588,7 +680,7 @@ def _usable(block: Any) -> Optional[Dict[str, Any]]:
 
 
 def _capture_uncached(
-    base_repo: str, quant_repo: Optional[str], hf_api: Any
+    base_repo: str, quant_repo: Optional[str], hf_api: Any, quant_format: Optional[str] = None
 ) -> Optional[Dict[str, Any]]:
     reader = _Hub_Reader(hf_api)
     stage: Optional[str] = None
@@ -625,6 +717,14 @@ def _capture_uncached(
             if chosen:
                 block, evidence, stage = chosen["values"], chosen["line"], STAGE_MODEL_CARD
 
+    # Context window: for a GGUF entry the .gguf file's own declaration outranks
+    # every config.json, because it is what llama-server loads. Only the quant
+    # repo holds that file, and only the caller knows which engine side this
+    # capture is for.
+    gguf_context = None
+    if quant_format == GGUF_FORMAT_TAG and quant_repo:
+        gguf_context = _gguf_context_length(quant_repo, hf_api)
+
     return build_generation_hints(
         base_repo=base_repo,
         generation_config=block if stage else None,
@@ -632,27 +732,37 @@ def _capture_uncached(
         chat_template=chat_template,
         source_stage=stage,
         evidence=evidence,
+        context_length=gguf_context,
     )
 
 
 def capture_generation_hints(
-    base_repo: Optional[str], hf_api: Any, *, quant_repo: Optional[str] = None
+    base_repo: Optional[str],
+    hf_api: Any,
+    *,
+    quant_repo: Optional[str] = None,
+    quant_format: Optional[str] = None,
 ) -> Optional[Dict[str, Any]]:
     """Read a model's sampling facts from HuggingFace through the cascade
-    (base generation_config > quant generation_config > base model card).
-    Best-effort: ``None`` on any failure (network, malformed file, nothing
-    readable at all), never raises.
+    (base generation_config > quant generation_config > base model card), plus
+    the context window. Best-effort: ``None`` on any failure (network, malformed
+    file, nothing readable at all), never raises.
 
     ``hf_api`` is the retrying client from ``src.core.config.get_hf_api`` (its
-    ``hf_hub_download`` paces and retries 429s like the other catalog calls).
+    ``hf_hub_download`` and ``model_info`` pace and retry 429s like the other
+    catalog calls).
+
+    ``quant_format`` is the engine format tag of the entry being built
+    (``BaseEngine.FORMAT_TAG``: ``gguf`` / ``mlx``). On ``gguf`` the window is
+    read from the quant repo's GGUF metadata first; nothing else depends on it.
     """
     if not base_repo or hf_api is None:
         return None
-    key = (base_repo, quant_repo or None)
+    key = (base_repo, quant_repo or None, quant_format or None)
     if key in _CAPTURE_CACHE:
         return copy.deepcopy(_CAPTURE_CACHE[key])
     try:
-        hints = _capture_uncached(base_repo, quant_repo or None, hf_api)
+        hints = _capture_uncached(base_repo, quant_repo or None, hf_api, quant_format or None)
     except Exception as e:
         logger.warning(f"Generation hints capture failed for {base_repo}: {e}")
         hints = None

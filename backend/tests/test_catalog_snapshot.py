@@ -168,13 +168,21 @@ def test_build_path_emits_classified_snapshot_entries(monkeypatch):
 
 
 def _seeder_with_capture_spy(monkeypatch):
-    """Model_Seeder over a stub HF api, with the hints capture spied (#388)."""
+    """Model_Seeder over a stub HF api, with the hints capture spied (#388).
+
+    The active engine is pinned to a GGUF one so the format tag the seeder
+    threads into the capture (the engine side the row is built for) is the same
+    on every platform."""
     captured = []
 
-    def spy(base_repo, hf_api, quant_repo=None):
-        captured.append((base_repo, quant_repo))
+    def spy(base_repo, hf_api, quant_repo=None, quant_format=None):
+        captured.append((base_repo, quant_repo, quant_format))
         return dict(_HINTS, base_repo=base_repo)
 
+    class _GgufEngine:
+        FORMAT_TAG = "gguf"
+
+    monkeypatch.setattr(seed_mod.config, "LLM_Engine", _GgufEngine)
     monkeypatch.setattr(seed_mod, "capture_generation_hints", spy)
 
     class _Size:
@@ -203,7 +211,9 @@ def test_base_creators_capture_hints_from_the_base_repo_with_the_quant_as_second
 
     fallback = snap.llm_to_dict(seeder._create_base_llm_fallback(cfg, "lmstudio/Qwen3-8B-MLX-4bit"))
     assert fallback["generation_hints"]["base_repo"] == "Qwen/Qwen3-8B"
-    assert captured == [("Qwen/Qwen3-8B", "lmstudio/Qwen3-8B-MLX-4bit")] * 2
+    # The engine side travels with the pair: a GGUF row's window comes from the
+    # quant's GGUF metadata, not the base repo's config.json.
+    assert captured == [("Qwen/Qwen3-8B", "lmstudio/Qwen3-8B-MLX-4bit", "gguf")] * 2
 
 
 def test_derived_creator_captures_from_the_base_model_tag_else_itself(monkeypatch):
@@ -224,8 +234,8 @@ def test_derived_creator_captures_from_the_base_model_tag_else_itself(monkeypatc
     entry = snap.llm_to_dict(seeder._create_derived_llm(untagged, search_config))
     assert entry["generation_hints"]["base_repo"] == "community/foo-GGUF"
     assert captured == [
-        ("Qwen/Qwen3-8B", "mlx-community/Qwen3-8B-4bit"),
-        ("community/foo-GGUF", "community/foo-GGUF"),
+        ("Qwen/Qwen3-8B", "mlx-community/Qwen3-8B-4bit", "gguf"),
+        ("community/foo-GGUF", "community/foo-GGUF", "gguf"),
     ]
 
 

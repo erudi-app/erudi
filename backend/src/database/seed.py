@@ -254,6 +254,13 @@ class Model_Seeder:
         self.filters = quality_filters or Quality_Filters()
         self.offline_mode = offline_mode
 
+    @staticmethod
+    def _format_tag() -> Optional[str]:
+        """The active engine's artifact format (``mlx`` / ``gguf``). A seeded row
+        is derived per format, so this is also the engine side every row built in
+        this pass belongs to."""
+        return getattr(config.LLM_Engine, "FORMAT_TAG", None)
+
     # Slug tokens marking a non-final / intermediate / non-LLM artifact, excluded
     # from org discovery (token-matched, so 'pt' won't hit 'gpt'). '-assistant'
     # distillates and '-qat-…-unquantized' intermediates are the #122 offenders.
@@ -445,7 +452,7 @@ class Model_Seeder:
         """
         out: List[Llm] = []
         seen_quant: set = set()
-        tag = getattr(config.LLM_Engine, "FORMAT_TAG", None)
+        tag = self._format_tag()
         for org, model_type, _term in orgs:
             candidates = self._prefer_instruct_siblings(
                 self.discover_instruct_models(org, model_type)
@@ -485,7 +492,7 @@ class Model_Seeder:
         first-boot catalog. Returns the number of rows added (0 if no snapshot)."""
         from src.database.catalog_snapshot import load_catalog_snapshot, dict_to_llm
 
-        tag = getattr(config.LLM_Engine, "FORMAT_TAG", None)
+        tag = self._format_tag()
         if not tag:
             return 0
         entries = load_catalog_snapshot(tag)
@@ -731,8 +738,14 @@ class Model_Seeder:
             # resolver only rewrote the quant link). Cascade base
             # generation_config > quant generation_config > base model card,
             # tiny file fetches memoized per repo, best-effort (None on failure).
+            # The engine format tag tells the capture which side this row is for:
+            # a GGUF row takes its context window from the .gguf file's own
+            # metadata rather than the base repo's config.json.
             generation_hints=capture_generation_hints(
-                model_config.link, self.hf_api, quant_repo=quant_link
+                model_config.link,
+                self.hf_api,
+                quant_repo=quant_link,
+                quant_format=self._format_tag(),
             ),
         )
 
@@ -770,7 +783,10 @@ class Model_Seeder:
             supports_tools=None,
             # Sampling facts cascade -- see _create_base_llm (#388).
             generation_hints=capture_generation_hints(
-                model_config.link, self.hf_api, quant_repo=quant_link
+                model_config.link,
+                self.hf_api,
+                quant_repo=quant_link,
+                quant_format=self._format_tag(),
             ),
         )
 
@@ -833,9 +849,13 @@ class Model_Seeder:
             category=categorize(model_name, tags, getattr(model_info, "pipeline_tag", None)),
             # Sampling facts (#388): a community quant inherits its base's
             # generation_config (first base_model:* card tag), else its own; the
-            # quant repo itself is the cascade's second stage.
+            # quant repo itself is the cascade's second stage, and on GGUF the
+            # source of the context window (see _create_base_llm).
             generation_hints=capture_generation_hints(
-                resolve_base_repo(model_info.id, tags), self.hf_api, quant_repo=model_info.id
+                resolve_base_repo(model_info.id, tags),
+                self.hf_api,
+                quant_repo=model_info.id,
+                quant_format=self._format_tag(),
             ),
         )
 
