@@ -14,6 +14,21 @@
     "note": "默认开启。关闭后，应用不会发出任何更新请求；您仍可以自己从 releases 页面安装新版本。",
     "toggleLabel": "自动更新"
   },
+  "updates": {
+    "title": "更新 Erudi",
+    "description": "立即查找新版本，下载并马上安装。安装会关闭 Erudi，并以新版本重新打开。",
+    "currentVersion": "您当前使用的是 {{version}} 版。",
+    "check": "检查更新",
+    "checking": "正在检查…",
+    "upToDate": "您已是最新版本。",
+    "found": "{{version}} 版可用。",
+    "download": "下载",
+    "downloading": "正在下载… {{percent}}",
+    "ready": "{{version}} 版已准备好安装。",
+    "install": "立即安装",
+    "failed": "目前无法检查更新。请稍后再试。",
+    "unavailable": "更新由已安装的应用负责处理；此构建无法检查更新。"
+  },
   "language": {
     "title": "应用语言",
     "description": "整个应用中菜单、按钮和消息的语言。模型的回答仍使用您输入时所用的语言。",

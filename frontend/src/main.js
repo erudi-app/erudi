@@ -1114,10 +1114,68 @@ ipcMain.handle("data:clearAll", async () => {
 });
 
 // ── Auto-updater IPC ──────────────────────────────────────────────────────────
+// The last thing the updater said, so a window that mounts after the events
+// fired is not blind -- the same contract as "backend:getInfo". The Settings
+// card reads it to recover an update that was staged hours ago (#571).
+// Phases: "idle" | "checking" | "available" | "up-to-date" | "downloading" |
+//         "downloaded" | "error".
+//
+// It lives in memory for the life of this process and is deliberately NOT
+// persisted across restarts: after a relaunch the card starts at "idle" and
+// the next check re-derives the truth -- the boot check when automatic
+// updates are on, the button when they are off. That check validates
+// electron-updater's own download cache and serves the file from it without
+// downloading anything again, which a version string we wrote to disk cannot
+// do: ours would still claim an update is staged after the cache was cleared,
+// the release was pulled, or the app was updated by other means.
+let updaterState = { phase: "idle", version: null, percent: 0 };
+
 // Renderer can trigger an immediate install via "updater:install-now".
 ipcMain.handle("updater:install-now", () => {
   if (autoUpdater) {
     autoUpdater.quitAndInstall(false, true);
+  }
+});
+
+ipcMain.handle("updater:get-state", () => ({
+  available: autoUpdater !== null,
+  ...updaterState,
+}));
+
+// A check the user asked for. It runs even when automatic updates are off:
+// that is the whole point of the button, and a refused preference is about
+// what the app does on its own, not about what the user asks it to do. What
+// stays off is everything automatic -- no download without a second click,
+// and `autoInstallOnAppQuit` is left exactly as the preference set it, so
+// this never re-arms the install-on-quit path the user turned down.
+ipcMain.handle("updater:check-now", async () => {
+  if (!autoUpdater) {
+    return { ok: false, reason: "unavailable" };
+  }
+  if (autoUpdateEnabled !== true) {
+    autoUpdater.autoDownload = false;
+  }
+  try {
+    await autoUpdater.checkForUpdates();
+    return { ok: true };
+  } catch (err) {
+    logWarn("Updater: a check the user asked for failed", err);
+    return { ok: false, reason: "error" };
+  }
+});
+
+// The second click: download the update that a check found. The card is the
+// only way to start this when automatic downloads are off.
+ipcMain.handle("updater:download-now", async () => {
+  if (!autoUpdater) {
+    return { ok: false, reason: "unavailable" };
+  }
+  try {
+    await autoUpdater.downloadUpdate();
+    return { ok: true };
+  } catch (err) {
+    logWarn("Updater: a download the user asked for failed", err);
+    return { ok: false, reason: "error" };
   }
 });
 
@@ -1132,33 +1190,48 @@ function setupAutoUpdater() {
     }
   };
 
+  // Every event both records the phase and is forwarded, including the two
+  // that used to be logged and dropped ("update-not-available", "error"):
+  // without them a manual check has no answer to show. UpdateBanner ignores
+  // the event types it does not know, so it is unaffected.
   autoUpdater.on("checking-for-update", () => {
     log("Updater: checking for update...");
+    updaterState = { phase: "checking", version: null, percent: 0 };
+    send("checking-for-update", {});
   });
 
   autoUpdater.on("update-available", (info) => {
     log(`Updater: update available - v${info.version}`);
+    updaterState = { phase: "available", version: info.version, percent: 0 };
     send("update-available", { version: info.version, releaseNotes: info.releaseNotes || "" });
   });
 
   autoUpdater.on("update-not-available", () => {
     log("Updater: already on latest version.");
+    updaterState = { phase: "up-to-date", version: null, percent: 0 };
+    send("update-not-available", {});
   });
 
   autoUpdater.on("download-progress", (progress) => {
-    log(`Updater: downloading... ${Math.round(progress.percent)}%`);
-    send("download-progress", { percent: Math.round(progress.percent) });
+    const percent = Math.round(progress.percent);
+    log(`Updater: downloading... ${percent}%`);
+    updaterState = { phase: "downloading", version: updaterState.version, percent };
+    send("download-progress", { percent });
   });
 
   autoUpdater.on("update-downloaded", (info) => {
     log(`Updater: v${info.version} downloaded, ready to install.`);
+    updaterState = { phase: "downloaded", version: info.version, percent: 100 };
     send("update-downloaded", { version: info.version });
   });
 
   autoUpdater.on("error", (err) => {
     // Never crash the app over an update failure: the feature is degraded,
-    // the app is not.
+    // the app is not. The detail stays in the log; the renderer is told only
+    // that it failed, and shows it on the card the user is waiting on.
     logWarn("Updater error (non-fatal)", err);
+    updaterState = { phase: "error", version: updaterState.version, percent: 0 };
+    send("error", {});
   });
 
   // No check yet: applyAutoUpdatePreference() starts the first one once the

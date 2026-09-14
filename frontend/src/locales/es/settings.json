@@ -14,6 +14,21 @@
     "note": "Activadas por defecto. Cuando están desactivadas, la aplicación no hace ninguna solicitud de actualización; siempre puedes instalar una versión nueva tú mismo desde la página de releases.",
     "toggleLabel": "Actualizaciones automáticas"
   },
+  "updates": {
+    "title": "Actualizar Erudi",
+    "description": "Busca una versión nueva ahora, descárgala e instálala al momento. La instalación cierra Erudi y lo vuelve a abrir en la versión nueva.",
+    "currentVersion": "Estás en la versión {{version}}.",
+    "check": "Buscar actualizaciones",
+    "checking": "Buscando…",
+    "upToDate": "Ya tienes la última versión.",
+    "found": "La versión {{version}} está disponible.",
+    "download": "Descargar",
+    "downloading": "Descargando… {{percent}}",
+    "ready": "La versión {{version}} está lista para instalarse.",
+    "install": "Instalar ahora",
+    "failed": "No se ha podido comprobar la actualización ahora mismo. Inténtalo de nuevo en un momento.",
+    "unavailable": "Las actualizaciones las gestiona la aplicación instalada; esta compilación no puede comprobarlas."
+  },
   "language": {
     "title": "Idioma de la aplicación",
     "description": "El idioma de los menús, botones y mensajes en toda la aplicación. Las respuestas de los modelos se mantienen en el idioma en que escribas.",

@@ -181,6 +181,20 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I open Settings on a fresh install, then the **Automatic updates** toggle is **on** and the copy says the request goes to this project's GitHub releases and carries nothing but my version and platform.
 - [ ] When I turn Automatic updates **off** and relaunch, then it is still off and `erudi-backend.log` says `Updater: automatic updates are turned off; no check will run` — with it on, the same file says `checking now, then every 4 hours` instead.
 
+**Update Erudi (the manual controls)**
+
+*The whole block needs a packaged build: running from source there is no
+updater, and the card says so.*
+
+- [ ] When I open Settings, then an **Update Erudi** card names the version I am running and offers **Check for updates**.
+- [ ] When I press **Check for updates** while already on the newest release, then the button shows it is checking, and the card then says I am on the latest version — no dialog, no popup.
+- [ ] When a newer release exists and **Automatic updates is off**, then pressing Check names that version and offers **Download**; nothing is downloaded until I press Download, and quitting still installs nothing — only **Install now** installs it.
+- [ ] When the download is running, then the card shows the percentage and offers no second Download button.
+- [ ] When the update is downloaded, then **Install now** closes Erudi and opens it again on the new version.
+- [ ] When an update was downloaded earlier and its installation never applied (the app was reopened before the installer finished), then it comes back without downloading anything again — this is the case the card exists for. With **Automatic updates on**, the check at launch re-detects it within moments and the card offers **Install now** on its own. With them **off**, pressing **Check for updates** then **Download** brings it back instantly, served from the copy already on disk.
+- [ ] When the machine is offline and I press Check for updates, then one quiet line on the card says the check did not go through, and the button is usable again.
+- [ ] When I run the app from source (`npm start`), then the card says updates are handled by the installed application and the button is disabled.
+
 **Inference engine**
 
 *Everything in this block needs a Windows or Linux machine with an NVIDIA GPU —
@@ -356,6 +370,7 @@ tool path explicitly — a working chat proves nothing about it.*
 - [ ] When I run a **packaged** build and a newer release is published, then a banner shows "downloading…", then "ready — restart to install", and it installs on click or next quit.
 - [ ] When a release is still a **draft**, then my installed build is **not** offered that update.
 - [ ] When **Automatic updates** is off in Settings and a newer release is published, then no banner appears, nothing is downloaded and quitting installs nothing; turning the toggle back on starts a check at once — the "downloading…" banner appears without a relaunch.
+- [ ] When I dismiss the update banner, then the **Update Erudi** card in Settings still knows the update is there and offers to install it.
 - [ ] When I do a **fresh install**, then the Welcome dialog shows once, the catalog seeds instantly from the bundled snapshot (then refreshes in the background), and the machine readout renders (even if hardware profiling falls back).
 - [ ] When the app quits, then the backend and its inference child processes are stopped (none left orphaned).
 
