@@ -159,6 +159,24 @@ def test_artifact_bytes_of_a_missing_path_is_none(tmp_path):
     assert artifact_bytes(tmp_path / "absent") is None
 
 
+def test_artifact_bytes_sums_split_gguf_parts(tmp_path):
+    # [L3] A split GGUF maps ALL its parts: the resolved first part must
+    # account for the whole family, not just itself -- and never for an
+    # unrelated file in the same directory.
+    (tmp_path / "model-Q4-00001-of-00003.gguf").write_bytes(b"a" * 100)
+    (tmp_path / "model-Q4-00002-of-00003.gguf").write_bytes(b"b" * 200)
+    (tmp_path / "model-Q4-00003-of-00003.gguf").write_bytes(b"c" * 300)
+    (tmp_path / "other-model.gguf").write_bytes(b"z" * 1000)
+    assert artifact_bytes(tmp_path / "model-Q4-00001-of-00003.gguf") == 600
+
+
+def test_artifact_bytes_plain_gguf_is_just_the_file(tmp_path):
+    gguf = tmp_path / "model-Q4.gguf"
+    gguf.write_bytes(b"g" * 400)
+    (tmp_path / "sibling-Q8.gguf").write_bytes(b"s" * 4000)
+    assert artifact_bytes(gguf) == 400
+
+
 # ===================== Denominator per engine family =====================
 
 
@@ -196,6 +214,24 @@ def test_total_memory_bytes_cuda_signal_is_off():
 def test_total_memory_bytes_missing_total_is_none():
     engine = _engine_with_flat_data({"backend_type": "cpu"})
     assert total_memory_bytes(engine) is None
+
+
+def test_total_memory_bytes_none_is_retried_not_memoized():
+    # [L4] A total that could not be read is retried on the next call (only a
+    # real value is memoized).
+    calls = []
+
+    class _Engine(BaseEngine):
+        @classmethod
+        def get_flat_hardware_data(cls):
+            calls.append(1)
+            if len(calls) == 1:
+                return {}  # first probe: nothing readable
+            return {"backend_type": "cpu", "total_memory_gb": 4.0}
+
+    assert total_memory_bytes(_Engine) is None
+    assert total_memory_bytes(_Engine) == 4 * 1024**3
+    assert len(calls) == 2
 
 
 def test_total_memory_bytes_is_memoized_per_engine_class():

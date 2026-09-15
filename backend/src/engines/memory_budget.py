@@ -29,6 +29,7 @@ runs with the signal off); a number is never guessed.
 from __future__ import annotations
 
 import json
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
@@ -48,7 +49,11 @@ _SUB_CONFIG_CONTAINERS = ("text_config", "language_config", "llm_config")
 
 # Memoized per engine class: hardware totals do not change while the backend
 # runs, and ``get_flat_hardware_data`` re-probes the platform on every call.
+# Only resolved answers are memoized (a real total, or CUDA's policy None);
+# an UNREADABLE total is retried on the next call ([L4]) and its record is
+# written once per engine, not per turn.
 _TOTALS_CACHE: Dict[type, Optional[int]] = {}
+_TOTALS_WARNED: set = set()
 
 
 def _positive_int(value: Any) -> Optional[int]:
@@ -130,12 +135,32 @@ def kv_bytes_per_token(config: Any) -> Optional[int]:
     return _KV_TENSORS_PER_TOKEN * layers * kv_heads * head_dim * _KV_BYTES_PER_VALUE
 
 
+# A split GGUF part: "<stem>-00002-of-00003.gguf". The engine resolves the
+# FIRST part; the server maps the whole family.
+_GGUF_SPLIT_RE = re.compile(r"^(?P<stem>.+)-\d{5}-of-(?P<total>\d{5})\.gguf$", re.IGNORECASE)
+
+
 def artifact_bytes(model_path: Path) -> Optional[int]:
-    """On-disk size of the loaded artifact: the file itself for a GGUF, the
-    recursive file sum for an MLX snapshot directory. ``None`` when unreadable."""
+    """On-disk size of the loaded artifact: the file for a GGUF (ALL sibling
+    parts of a split family, [L3]), the recursive file sum for an MLX snapshot
+    directory. ``None`` when unreadable."""
     try:
         path = Path(model_path)
         if path.is_file():
+            split = _GGUF_SPLIT_RE.match(path.name)
+            if split:
+                family = re.compile(
+                    re.escape(split.group("stem"))
+                    + r"-\d{5}-of-"
+                    + re.escape(split.group("total"))
+                    + r"\.gguf$",
+                    re.IGNORECASE,
+                )
+                return sum(
+                    part.stat().st_size
+                    for part in path.parent.iterdir()
+                    if part.is_file() and family.match(part.name)
+                )
             return path.stat().st_size
         if path.is_dir():
             return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
@@ -156,24 +181,36 @@ def total_memory_bytes(engine: Any) -> Optional[int]:
     The window signal still protects those machines, and llama's own fit
     already bounded the KV allocation against the card at load.
 
-    Memoized per engine class -- totals are fixed for the life of the process."""
+    Memoized per engine class -- totals are fixed for the life of the process.
+    Only a resolved answer is memoized: an unreadable total is retried on the
+    next call and logged once ([L4])."""
     if engine is None:
         return None
     if engine in _TOTALS_CACHE:
         return _TOTALS_CACHE[engine]
     total: Optional[int] = None
+    failure: Optional[str] = None
     try:
         flat = engine.get_flat_hardware_data() or {}
-        if flat.get("backend_type") != "cuda":
-            gb = flat.get("total_memory_gb")
-            if isinstance(gb, (int, float)) and not isinstance(gb, bool) and gb > 0:
-                total = int(gb * 1024**3)
+        if flat.get("backend_type") == "cuda":
+            # Policy, not a failure: memoized so the probe never re-runs.
+            _TOTALS_CACHE[engine] = None
+            return None
+        gb = flat.get("total_memory_gb")
+        if isinstance(gb, (int, float)) and not isinstance(gb, bool) and gb > 0:
+            total = int(gb * 1024**3)
     except Exception as exc:
-        # Degraded, not failed: the memory signal stays off for this run.
+        failure = f"{type(exc).__name__}: {exc}"
+    if total is not None:
+        _TOTALS_CACHE[engine] = total
+    elif engine not in _TOTALS_WARNED:
+        # Degraded, not failed -- and once per engine, since every later call
+        # retries ([L4]) and would otherwise repeat this record each turn.
+        _TOTALS_WARNED.add(engine)
         logger.warning(
-            f"Hardware totals unreadable; memory signal disabled: " f"{type(exc).__name__}: {exc}"
+            f"Memory total unreadable ({failure or 'no readable total'}); "
+            f"memory signal off until it resolves"
         )
-    _TOTALS_CACHE[engine] = total
     return total
 
 
