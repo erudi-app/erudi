@@ -17,6 +17,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Optional
 
 from src.agents.chat_model import erudi_chat_openai_class
+from src.agents.reasoning_effort import EffortPlan
 from src.core import config
 from src.core.logging import logger
 from src.database.generation_hints import (
@@ -51,6 +52,7 @@ def build_chat_model(
     disable_thinking: bool = False,
     auto_output_budget: bool = True,
     sampling: Optional[SamplingDefaults] = None,
+    effort_plan: Optional[EffortPlan] = None,
 ) -> ChatOpenAI:
     """Resolve the engine child for ``llm`` and wrap it as a ``ChatOpenAI``.
 
@@ -70,6 +72,14 @@ def build_chat_model(
     recomputes a real one per model call from the window it is running in
     (``src.agents.output_budget``). ``auto_output_budget=False`` turns that off
     for the caller whose small budget is deliberate -- the one-shot title path.
+
+    ``effort_plan`` carries the turn's reasoning effort (1.1.2). Its
+    ``wire_effort`` rides the NATIVE ``reasoning_effort`` request field, not
+    ``extra_body``: it is a first-class field of all three layers (the
+    ``ChatOpenAI`` constructor, llama-server, mlx_vlm). ``None`` (no plan, or a
+    level no native lever carries) leaves it unset, and langchain drops unset
+    fields from the payload -- so the request body stays byte-identical to
+    today's.
     """
     # Deferred (#160): langchain_openai only loads on the first turn, not at
     # boot -- the subclass that inherits from it is built on the same first call.
@@ -126,9 +136,11 @@ def build_chat_model(
     # keys (top_k / min_p / presence_penalty, #388) are otherwise invisible in
     # the INFO log and a QA pass cannot confirm they reached the server.
     extra_body_desc = ", ".join(f"{key}={value}" for key, value in extra_body.items())
+    wire_effort = effort_plan.wire_effort if effort_plan is not None else None
     logger.info(
         f"ChatOpenAI built: model={model_field}, base_url={handle['base_url']}/v1, "
         f"temperature={temperature}, top_p={top_p}, max_tokens={max_tokens}, "
+        f"reasoning_effort={wire_effort or 'unset'}, "
         f"extra_body=[{extra_body_desc}]"
     )
     return chat_openai_class(
@@ -144,6 +156,11 @@ def build_chat_model(
         temperature=temperature,
         top_p=top_p,
         max_tokens=max_tokens,
+        # Native field of all three layers (1.1.2): llama-server reads "none"
+        # as enable_thinking=false and forwards any other value to the chat
+        # template; mlx_vlm normalizes it the same way. None = unset, dropped
+        # from the payload.
+        reasoning_effort=wire_effort,
         extra_body=extra_body,  # restore small-model coherence (repetition controls)
         timeout=None,  # cold model load can stall several seconds before first token
         max_retries=0,  # don't silently double-submit a slow local generation

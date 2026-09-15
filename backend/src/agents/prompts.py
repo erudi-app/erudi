@@ -215,18 +215,28 @@ def _compose_prompt(
     size_category: str,
     custom_prompt: Optional[str],
     starred_messages: Optional[List[str]],
+    effort_section: Optional[str] = None,
 ) -> str:
     """Assemble a tool-carrying prompt: tier persona -> tool sections ->
-    custom -> starred.
+    reasoning effort -> custom -> starred.
 
     The persona base is byte-identical to the plain path for the same model
     (``build_system_prompt`` without starred messages — those land in their
     own section AFTER the tool regime, mirroring the plain path's tail order).
+
+    ``effort_section`` is the graded reasoning instruction (1.1.2) a turn needs
+    when the model's template carries no native lever for the chosen level. It
+    sits AFTER the tool regime (how to use the tools comes first) and BEFORE
+    the user's own instructions, which must stay the last word. ``None`` — the
+    case for every level a native lever handles, and for ``medium`` on a model
+    that reasons naturally — leaves the prompt byte-identical.
     """
     sections = [
         build_system_prompt(model_name=llm.name, size_category=size_category),
         *tool_sections,
     ]
+    if effort_section:
+        sections.append(effort_section)
     if custom_prompt and custom_prompt.strip():
         sections.append(f"Additional instructions: {custom_prompt.strip()}")
     if starred_messages:
@@ -241,6 +251,7 @@ def build_agent_system_prompt(
     starred_messages: Optional[List[str]] = None,
     custom_prompt: Optional[str] = None,
     web_search: bool = False,
+    effort_section: Optional[str] = None,
 ) -> str:
     """Build the size-adaptive system prompt for ``llm`` as a real ``SystemMessage``.
 
@@ -249,7 +260,9 @@ def build_agent_system_prompt(
     a proper system message per the model's chat template, so we pass it as-is.
 
     ``web_search=True`` (#310) appends the scoped web section — the plain path
-    without it stays byte-identical (regression-pinned).
+    without it stays byte-identical (regression-pinned). ``effort_section``
+    (1.1.2) takes the same slot on the zero-tool concat path as it does in
+    ``_compose_prompt``: after the regime, before the user's instructions.
     """
     strategy = _tier_strategy(llm)
 
@@ -261,6 +274,7 @@ def build_agent_system_prompt(
             size_category=size_category,
             custom_prompt=custom_prompt,
             starred_messages=starred_messages,
+            effort_section=effort_section,
         )
 
     sys_prompt = build_system_prompt(
@@ -268,6 +282,9 @@ def build_agent_system_prompt(
         size_category=strategy["system_prompt_size_category"],
         starred_messages=starred_messages or None,
     )
+
+    if effort_section:
+        sys_prompt += f"\n\n{effort_section}"
 
     if custom_prompt and custom_prompt.strip():
         sys_prompt += f"\nAdditional instructions: {custom_prompt.strip()}"
@@ -280,6 +297,7 @@ def build_kb_system_prompt(
     *,
     custom_prompt: Optional[str] = None,
     starred_messages: Optional[List[str]] = None,
+    effort_section: Optional[str] = None,
 ) -> str:
     """SYSTEM prompt for a KB assistant on the systematic path (no tools).
 
@@ -295,6 +313,7 @@ def build_kb_system_prompt(
         size_category=strategy["system_prompt_size_category"],
         custom_prompt=custom_prompt,
         starred_messages=starred_messages,
+        effort_section=effort_section,
     )
 
 
@@ -304,6 +323,7 @@ def build_kb_agentic_system_prompt(
     custom_prompt: Optional[str] = None,
     starred_messages: Optional[List[str]] = None,
     web_search: bool = False,
+    effort_section: Optional[str] = None,
 ) -> str:
     """SYSTEM prompt for a TOOL-CALLING KB assistant (issues #84 / #129).
 
@@ -335,6 +355,7 @@ def build_kb_agentic_system_prompt(
         size_category=size_category,
         custom_prompt=custom_prompt,
         starred_messages=starred_messages,
+        effort_section=effort_section,
     )
 
 

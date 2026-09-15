@@ -16,6 +16,10 @@ Example:
 
 from sqlalchemy import Column, Integer, Boolean, String
 from sqlalchemy.orm import validates
+from src.agents.reasoning_effort import (
+    DEFAULT_REASONING_EFFORT,
+    REASONING_EFFORT_LEVELS,
+)
 from src.database.core import Base
 
 # The four interface languages the frontend ships translations for (#385).
@@ -51,12 +55,18 @@ class UserSettings(Base):
             hardware detection decides; "cpu" makes the app run models on the
             CPU build even when an NVIDIA GPU is present. Read once per boot,
             after the migrations, so the choice needs an app restart to apply.
+        default_reasoning_effort: One of REASONING_EFFORT_LEVELS, the GLOBAL
+            default new conversations copy at creation. "medium" by default:
+            the level at which a model that reasons naturally behaves exactly
+            as it did before the setting existed. Arena panels, which have no
+            conversation row, read this value on every turn.
 
     Constraints:
         - web_search_enabled must be a Boolean (enforced by validator).
         - auto_update_enabled must be a Boolean (enforced by validator).
         - language must be one of SUPPORTED_LANGUAGES (enforced by validator).
         - inference_backend must be one of INFERENCE_BACKENDS (validator).
+        - default_reasoning_effort must be one of REASONING_EFFORT_LEVELS.
     """
 
     __tablename__ = "user_settings"
@@ -66,6 +76,7 @@ class UserSettings(Base):
     language = Column(String(8), default=DEFAULT_LANGUAGE, nullable=False)
     auto_update_enabled = Column(Boolean, default=True, nullable=False)
     inference_backend = Column(String(8), default=DEFAULT_INFERENCE_BACKEND, nullable=False)
+    default_reasoning_effort = Column(String(8), default=DEFAULT_REASONING_EFFORT, nullable=False)
 
     @validates("language")
     def validate_language(self, key, value):
@@ -87,6 +98,17 @@ class UserSettings(Base):
         """
         if value not in INFERENCE_BACKENDS:
             raise ValueError(f"{key} must be one of {INFERENCE_BACKENDS}, got {value!r}")
+        return value
+
+    @validates("default_reasoning_effort")
+    def validate_default_reasoning_effort(self, key, value):
+        """Ensure the global reasoning effort is one of the five levels.
+
+        Raises:
+            ValueError: If value is not in REASONING_EFFORT_LEVELS.
+        """
+        if value not in REASONING_EFFORT_LEVELS:
+            raise ValueError(f"{key} must be one of {REASONING_EFFORT_LEVELS}, got {value!r}")
         return value
 
     @validates("web_search_enabled", "auto_update_enabled")

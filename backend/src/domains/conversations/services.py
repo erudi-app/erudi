@@ -22,6 +22,7 @@ from fastapi.concurrency import run_in_threadpool
 from src.core.logging import logger
 from src.core.logutils import truncate_for_log
 from src.agents.kb_mode import plan_turn
+from src.agents.reasoning_effort import plan_reasoning_effort
 from src.agents.runner import (
     AgentRunner,
     GenParams,
@@ -158,6 +159,7 @@ class ConversationService:
         max_tokens: Optional[int] = None,
         custom_prompt: str = "",
         web_search_enabled: Optional[bool] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Conversation:
         """Create a new conversation with the given LLM and generation params.
 
@@ -166,8 +168,9 @@ class ConversationService:
         constants, see ``src.database.generation_hints``); an explicit value
         wins. Mirrors
         ``web_search_enabled=None``, which copies the GLOBAL user-settings
-        default at creation (#310). The conversation owns its values afterwards
-        -- later model/global changes never retro-affect it.
+        default at creation (#310), and ``reasoning_effort=None``, which copies
+        the global default level the same way (1.1.2). The conversation owns its
+        values afterwards -- later model/global changes never retro-affect it.
         """
         logger.info(f"Creating new conversation with LLM {llm_id}")
         if temperature is None or top_p is None or max_tokens is None:
@@ -175,8 +178,11 @@ class ConversationService:
             temperature = defaults.temperature if temperature is None else temperature
             top_p = defaults.top_p if top_p is None else top_p
             max_tokens = defaults.max_tokens if max_tokens is None else max_tokens
+        settings_repo = User_Settings_Repository(self.db)
         if web_search_enabled is None:
-            web_search_enabled = User_Settings_Repository(self.db).get_web_search_enabled()
+            web_search_enabled = settings_repo.get_web_search_enabled()
+        if reasoning_effort is None:
+            reasoning_effort = settings_repo.get_default_reasoning_effort()
         return self.conversation_repo.create_conversation(
             llm_id=llm_id,
             name="New Conversation",
@@ -185,6 +191,7 @@ class ConversationService:
             max_tokens=max_tokens,
             custom_prompt=custom_prompt,
             web_search_enabled=web_search_enabled,
+            reasoning_effort=reasoning_effort,
         )
 
     def update_conversation(
@@ -197,6 +204,7 @@ class ConversationService:
         max_tokens: Optional[int] = None,
         custom_prompt: Optional[str] = None,
         web_search_enabled: Optional[bool] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Conversation:
         """Partial update of conversation metadata (only non-None fields)."""
         logger.info(f"Updating conversation {conversation_id}")
@@ -209,6 +217,7 @@ class ConversationService:
             max_tokens=max_tokens,
             custom_prompt=custom_prompt,
             web_search_enabled=web_search_enabled,
+            reasoning_effort=reasoning_effort,
         )
 
     # ===================== Deletion (DB + checkpointer thread) =====================
@@ -376,6 +385,14 @@ class ConversationService:
             # the model's tool-calling capability and build the runner bundle
             # (#84). Retrieval is injected so it runs only in systematic mode and
             # keeps the conversation's degrade-to-no-context policy.
+            # How much this conversation lets the model deliberate (1.1.2). The
+            # conversation OWNS its level, like its web toggle; the plan is
+            # resolved against the ARTIFACT's lever, so the same level reaches
+            # a gpt-oss and a Qwen2.5 through different mechanisms. Blocking
+            # (a template probe may read the tokenizer) -> threadpool.
+            effort_plan = await run_in_threadpool(
+                plan_reasoning_effort, llm, conversation.reasoning_effort
+            )
             plan = await run_in_threadpool(
                 plan_turn,
                 llm,
@@ -386,6 +403,7 @@ class ConversationService:
                 # #310: the conversation OWNS its web toggle (copied from the
                 # global default at creation).
                 web_search_enabled=bool(conversation.web_search_enabled),
+                effort_section=effort_plan.prompt_section,
             )
             params = GenParams(
                 temperature=payload.temperature
@@ -432,6 +450,7 @@ class ConversationService:
                 tools=plan.tools,
                 context=plan.context,
                 supports_vision=supports_vision,
+                effort_plan=effort_plan,
                 emit_events=True,
             ):
                 if event["t"] == "answer":

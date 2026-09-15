@@ -31,6 +31,7 @@ from src.utils.attachment_utils import (
 )
 from src.utils.kb_utils import KbExcerpt, retrieve_kb_excerpts
 from src.agents.kb_mode import plan_turn
+from src.agents.reasoning_effort import plan_reasoning_effort
 from src.agents.runner import AgentRunner, GenParams, IMAGES_IGNORED_NOTICE
 from src.database.generation_hints import resolve_sampling_defaults
 from src.domains.arena.repository import ArenaRepository
@@ -143,9 +144,12 @@ class ArenaService:
         # only in systematic mode and keeps arena's raise-on-failure policy.
         # #310: arena panels have no conversation row, so the web toggle follows
         # the GLOBAL user setting directly (kept deliberately simple).
-        web_search_enabled = await run_in_threadpool(
-            User_Settings_Repository(self.db).get_web_search_enabled
-        )
+        settings_repo = User_Settings_Repository(self.db)
+        web_search_enabled = await run_in_threadpool(settings_repo.get_web_search_enabled)
+        # 1.1.2: same reasoning -- an arena panel has no conversation row, so
+        # its reasoning effort is the GLOBAL default, read per turn.
+        effort_level = await run_in_threadpool(settings_repo.get_default_reasoning_effort)
+        effort_plan = await run_in_threadpool(plan_reasoning_effort, llm, effort_level)
         plan = await run_in_threadpool(
             plan_turn,
             llm,
@@ -153,6 +157,7 @@ class ArenaService:
             retrieve=lambda: self._retrieve_kb_excerpts(llm, payload.question, strategy),
             custom_prompt=payload.custom_prompt,
             web_search_enabled=web_search_enabled,
+            effort_section=effort_plan.prompt_section,
         )
 
         # Omitted values resolve to the MODEL's defaults (#388); explicit wins.
@@ -203,6 +208,7 @@ class ArenaService:
             tools=plan.tools,
             context=plan.context,
             supports_vision=supports_vision,
+            effort_plan=effort_plan,
         ):
             response += token
             yield token

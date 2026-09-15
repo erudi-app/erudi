@@ -52,6 +52,8 @@ from pydantic import BaseModel, Field, validator
 from datetime import datetime
 from typing import List, Optional
 
+from src.domains.user_settings.schemas import ReasoningEffort
+
 
 class MessageBase(BaseModel):
     """Base schema for messages with sender and content validation.
@@ -179,6 +181,14 @@ class ConversationCreate(ConversationBase):
             "wins (pre-conversation settings panel)."
         ),
     )
+    reasoning_effort: Optional[ReasoningEffort] = Field(
+        default=None,
+        description=(
+            "How much the model may deliberate before answering. None "
+            "(default) copies the global user-settings default at creation; "
+            "an explicit value wins."
+        ),
+    )
 
 
 class ConversationUpdate(ConversationBase):
@@ -214,6 +224,7 @@ class ConversationUpdate(ConversationBase):
     max_tokens: Optional[int] = None
     custom_prompt: Optional[str] = None
     web_search_enabled: Optional[bool] = None
+    reasoning_effort: Optional[ReasoningEffort] = None
 
 
 class ConversationResponse(ConversationBase):
@@ -243,6 +254,7 @@ class ConversationResponse(ConversationBase):
     max_tokens: int
     custom_prompt: str
     web_search_enabled: bool
+    reasoning_effort: ReasoningEffort
 
     class Config:
         from_attributes = True

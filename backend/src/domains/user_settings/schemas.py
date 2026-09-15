@@ -2,8 +2,8 @@
 
 One singleton resource: the app-wide user settings. It carries the global
 web-search default (#310), the interface language (#385), the
-automatic-update preference and the inference backend; new settings slot in as
-additional fields.
+automatic-update preference, the inference backend and the default reasoning
+effort; new settings slot in as additional fields.
 """
 
 from typing import Literal, Optional
@@ -12,6 +12,10 @@ from pydantic import BaseModel, Field, model_validator
 
 LanguageCode = Literal["en", "fr", "es", "zh"]
 InferenceBackend = Literal["auto", "cpu"]
+# Mirrors src.agents.reasoning_effort.REASONING_EFFORT_LEVELS (a Literal cannot
+# be built from a runtime tuple without losing the OpenAPI enum); the entity
+# validator enforces the same list on the way to the database.
+ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh"]
 
 
 class UserSettingsResponse(BaseModel):
@@ -26,6 +30,9 @@ class UserSettingsResponse(BaseModel):
             download and install a new version on its own.
         inference_backend: "auto" to let hardware detection pick the engine,
             "cpu" to run models on the CPU build regardless of the GPU.
+        default_reasoning_effort: Global default for how much a model may
+            deliberate before answering. New conversations copy it at
+            creation; arena turns read it directly.
     """
 
     web_search_enabled: bool = Field(
@@ -43,6 +50,10 @@ class UserSettingsResponse(BaseModel):
     inference_backend: InferenceBackend = Field(
         ...,
         description="Inference backend preference (auto: detect hardware, cpu: force the CPU build)",
+    )
+    default_reasoning_effort: ReasoningEffort = Field(
+        ...,
+        description="Default reasoning effort new conversations inherit (none, low, medium, high, xhigh)",
     )
 
     class Config:
@@ -72,6 +83,10 @@ class UserSettingsUpdate(BaseModel):
         None,
         description="Inference backend preference (auto or cpu); applies on the next app start",
     )
+    default_reasoning_effort: Optional[ReasoningEffort] = Field(
+        None,
+        description="Default reasoning effort for new conversations (none, low, medium, high, xhigh)",
+    )
 
     @model_validator(mode="after")
     def require_at_least_one_field(self):
@@ -80,6 +95,7 @@ class UserSettingsUpdate(BaseModel):
             and self.language is None
             and self.auto_update_enabled is None
             and self.inference_backend is None
+            and self.default_reasoning_effort is None
         ):
             raise ValueError("At least one setting must be provided")
         return self

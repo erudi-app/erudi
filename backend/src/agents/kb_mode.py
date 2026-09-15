@@ -76,11 +76,18 @@ def plan_turn(
     custom_prompt: Optional[str] = None,
     starred_messages: Optional[List[str]] = None,
     web_search_enabled: bool = False,
+    effort_section: Optional[str] = None,
 ) -> TurnPlan:
     """Decide the turn's mode and build the runner bundle.
 
     ``retrieve`` is only called in systematic mode: agentic mode defers
     retrieval to the model's tool call, and plain mode has no KB.
+
+    ``effort_section`` is the graded reasoning instruction for this turn
+    (1.1.2, ``src.agents.reasoning_effort``) or ``None`` when the level needs
+    no instruction. Every mode takes it in the same slot -- after the tool
+    regime, before the user's own instructions -- so the level means the same
+    thing on a plain, a systematic and an agentic turn.
 
     ``web_search_enabled`` is the conversation's toggle (#310, copied from the
     global default at creation; arena passes the global setting directly). The
@@ -158,6 +165,7 @@ def plan_turn(
                 custom_prompt=custom_prompt,
                 starred_messages=starred_messages,
                 web_search=web,
+                effort_section=effort_section,
             ),
             tools=[*base_tools, search_knowledge_base, *([web_search] if web else [])],
             kb_context_block=None,
@@ -188,7 +196,10 @@ def plan_turn(
         )
         return TurnPlan(
             system_prompt=build_kb_system_prompt(
-                llm, custom_prompt=custom_prompt, starred_messages=starred_messages
+                llm,
+                custom_prompt=custom_prompt,
+                starred_messages=starred_messages,
+                effort_section=effort_section,
             ),
             # Zero tools on the systematic path (#288): the context is injected
             # directly, so the model only has to answer. Carrying the calculator
@@ -223,6 +234,7 @@ def plan_turn(
                 custom_prompt=custom_prompt,
                 starred_messages=starred_messages,
                 web_search=True,
+                effort_section=effort_section,
             ),
             tools=[web_search],
             kb_context_block=None,
@@ -231,7 +243,10 @@ def plan_turn(
         )
     return TurnPlan(
         system_prompt=build_agent_system_prompt(
-            llm, custom_prompt=custom_prompt, starred_messages=starred_messages
+            llm,
+            custom_prompt=custom_prompt,
+            starred_messages=starred_messages,
+            effort_section=effort_section,
         ),
         tools=[],
         kb_context_block=None,

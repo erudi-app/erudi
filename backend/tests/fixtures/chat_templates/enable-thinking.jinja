@@ -1,0 +1,13 @@
+{#- Synthetic Qwen3-shaped template: thinking is on unless enable_thinking is
+    explicitly false, in which case the block is emitted already closed. -#}
+{%- for message in messages %}
+{{- '<|im_start|>' + message['role'] + '\n' + message['content'] + '<|im_end|>\n' }}
+{%- endfor %}
+{%- if add_generation_prompt %}
+{{- '<|im_start|>assistant\n' }}
+{%- if enable_thinking is defined and enable_thinking is false %}
+{{- '<think>\n\n</think>\n\n' }}
+{%- else %}
+{{- '<think>\n' }}
+{%- endif %}
+{%- endif %}

@@ -1,0 +1,8 @@
+{#- Synthetic always-on reasoner (R1-shaped): the generation prompt opens a
+    thinking block and no variable can turn it off. -#}
+{%- for message in messages %}
+{{- '<|' + message['role'] + '|>' + message['content'] }}
+{%- endfor %}
+{%- if add_generation_prompt %}
+{{- '<|assistant|><think>\n' }}
+{%- endif %}

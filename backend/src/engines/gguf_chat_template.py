@@ -100,7 +100,7 @@ class GgufChatTemplate:
         add_generation_prompt: bool = False,
         tokenize: bool = False,
         tools: Optional[Sequence[dict]] = None,
-        **_ignored: Any,
+        **template_kwargs: Any,
     ) -> str:
         """Render the template. Raises whatever the template raises -- that
         signal IS the probe (``TemplateError`` from ``raise_exception`` is how a
@@ -108,6 +108,13 @@ class GgufChatTemplate:
 
         ``tokenize`` is accepted for signature compatibility and ignored: there
         is no vocabulary here, and every probe calls with ``tokenize=False``.
+
+        Any other keyword is BOUND as a template variable, exactly as
+        ``transformers.apply_chat_template`` binds its extra kwargs and as both
+        local servers bind theirs (``chat_template_kwargs`` on llama-server,
+        ``to_template_kwargs`` on mlx_vlm). The differential reasoning-lever
+        probe depends on it: dropping the bound variables would make its two
+        renders identical and every GGUF would read as "no lever".
         """
         template = _build_environment().from_string(self.chat_template)
         return template.render(
@@ -116,6 +123,7 @@ class GgufChatTemplate:
             tools=list(tools) if tools else None,
             bos_token=self.bos_token,
             eos_token=self.eos_token,
+            **template_kwargs,
         )
 
 

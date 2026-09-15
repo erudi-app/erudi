@@ -562,3 +562,121 @@ class TestDownloadCarriesHints:
         )
         assert llm.generation_hints is None
         assert Path(llm.link).name == "final"
+
+
+# ------------------------------------------------- reasoning effort on the wire
+
+
+class _WireEngine:
+    """Engine stub with identity kwarg translation (MLX-shaped)."""
+
+    @staticmethod
+    def get_model_and_tokenizer(llm_id, link):
+        return ({"base_url": "http://127.0.0.1:8080", "alias": f"erudi-{llm_id}"}, {})
+
+    @staticmethod
+    def _payload_model_value(handle):
+        return "default_model"
+
+
+class TestReasoningEffortReachesTheRequestBody:
+    """``reasoning_effort`` is a NATIVE field of all three layers (1.1.2).
+
+    It rides the ``ChatOpenAI`` constructor -- not ``extra_body`` -- because
+    llama-server and mlx_vlm both read it off the top level of the request
+    body, where langchain puts a set field and omits an unset one.
+    """
+
+    def _model(self, monkeypatch, **kwargs):
+        from src.agents.model_factory import build_chat_model
+
+        monkeypatch.setattr(config, "LLM_Engine", _WireEngine)
+        return build_chat_model(
+            SimpleNamespace(id=1, name="M", link="/models/m", param_size=7.0),
+            temperature=0.3,
+            top_p=0.8,
+            max_tokens=12,
+            **kwargs,
+        )
+
+    def test_without_a_plan_the_body_is_unchanged(self, monkeypatch):
+        params = self._model(monkeypatch)._default_params
+        assert "reasoning_effort" not in params
+
+    def test_a_plan_with_no_wire_value_leaves_the_body_unchanged(self, monkeypatch):
+        from src.agents.reasoning_effort import EffortPlan
+
+        plan = EffortPlan(level="high", prompt_section="think hard", degraded_from="high")
+        params = self._model(monkeypatch, effort_plan=plan)._default_params
+        assert "reasoning_effort" not in params
+
+    @pytest.mark.parametrize("level", ["none", "low", "medium", "high", "xhigh"])
+    def test_a_native_level_lands_in_the_body(self, monkeypatch, level):
+        from src.agents.reasoning_effort import EffortPlan
+
+        plan = EffortPlan(level=level, wire_effort=level)
+        model = self._model(monkeypatch, effort_plan=plan)
+        assert model.reasoning_effort == level
+        assert model._default_params["reasoning_effort"] == level
+        # extra_body stays the sampling channel: the effort is NOT smuggled in.
+        assert "reasoning_effort" not in model.extra_body
+
+    async def test_the_one_shot_title_path_runs_at_none(self, monkeypatch):
+        # A title is 2-4 words on a ~12-token budget: a reasoning model must not
+        # spend it deliberating. ``enable_thinking`` alone does not reach a
+        # template that only reads ``reasoning_effort``.
+        captured: dict = {}
+        monkeypatch.setattr(agent_runner, "build_chat_model", _capturing_factory(captured))
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+
+        async for _ in agent_runner.AgentRunner().astream_oneshot(
+            llm=SimpleNamespace(id=1, name="M", link="/models/m", param_size=7.0),
+            prompt_text="title this",
+            temperature=0.3,
+            top_p=0.8,
+            max_tokens=12,
+        ):
+            pass
+        assert captured["disable_thinking"] is True
+        assert captured["effort_plan"].wire_effort == "none"
+
+
+class TestTheCompactionSummaryRunsAtNone:
+    """The summarizer gets its OWN client, pinned to ``reasoning_effort="none"``.
+
+    Same child server, same sampling: only the reasoning field differs, so the
+    second client costs a cached handle lookup and the summary gets written
+    instead of deliberated about.
+    """
+
+    async def _calls(self, db, llm, monkeypatch, **conversation_kwargs):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from src.domains.conversations.schemas import ConversationQuery
+        from src.domains.conversations.services import ConversationService
+
+        calls: list = []
+
+        def factory(model, **kw):
+            calls.append(kw)
+            return ToolableFakeChatModel(messages=iter([AIMessage(content="ok")]))
+
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(agent_runner, "build_chat_model", factory)
+        service = ConversationService(db, InMemorySaver())
+        conversation = service.create_conversation(llm_id=llm.id, **conversation_kwargs)
+        async for _ in service.query_and_respond_stream(
+            conversation.id, ConversationQuery(question="q")
+        ):
+            pass
+        return calls
+
+    async def test_a_summarizing_turn_builds_a_second_none_client(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        calls = await self._calls(test_db_session, mock_llm, monkeypatch, reasoning_effort="xhigh")
+        assert len(calls) == 2
+        # Everything but the reasoning field matches the answering client.
+        assert calls[1]["temperature"] == calls[0]["temperature"]
+        assert calls[1]["max_tokens"] == calls[0]["max_tokens"]
+        assert calls[1]["effort_plan"].wire_effort == "none"

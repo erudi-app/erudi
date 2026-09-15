@@ -68,6 +68,7 @@ from fastapi.concurrency import run_in_threadpool
 from src.agents.chat_model import INTER_CHUNK_BUDGET_S, PHASE_FIRST_CHUNK
 from src.agents.model_factory import build_chat_model
 from src.agents.overflow import ContextOverflow, parse_context_overflow
+from src.agents.reasoning_effort import NO_REASONING_PLAN, EffortPlan
 from src.database.generation_hints import resolve_sampling_defaults
 from src.agents.think_splitter import ThinkSplitter
 from src.core import config
@@ -411,6 +412,7 @@ class AgentRunner:
         tools: Optional[list] = None,
         context: Optional[Any] = None,
         supports_vision: Optional[bool] = None,
+        effort_plan: Optional[EffortPlan] = None,
         emit_events: bool = False,
     ) -> AsyncIterator:
         """Project the turn's event stream (:meth:`_astream_events`).
@@ -436,6 +438,7 @@ class AgentRunner:
             tools=tools,
             context=context,
             supports_vision=supports_vision,
+            effort_plan=effort_plan,
         ):
             if emit_events:
                 yield event
@@ -456,6 +459,7 @@ class AgentRunner:
         tools: Optional[list] = None,
         context: Optional[Any] = None,
         supports_vision: Optional[bool] = None,
+        effort_plan: Optional[EffortPlan] = None,
     ) -> AsyncIterator[dict]:
         """The single capture loop: structured events for the whole turn (#90).
 
@@ -495,6 +499,7 @@ class AgentRunner:
 
         async with engine.generation_guard():
             try:
+                sampling = resolve_sampling_defaults(llm)
                 model = await run_in_threadpool(
                     build_chat_model,
                     llm,
@@ -503,7 +508,28 @@ class AgentRunner:
                     max_tokens=params.max_tokens,
                     # Per-model extra sampling keys (#388); the user-facing three
                     # above still come from the conversation row / arena panel.
-                    sampling=resolve_sampling_defaults(llm),
+                    sampling=sampling,
+                    # The turn's reasoning effort (1.1.2): its wire value, when
+                    # the artifact has a native lever for it.
+                    effort_plan=effort_plan,
+                )
+                # The compaction summary ALWAYS runs at effort "none" (1.1.2):
+                # summarizing is machine work, and a reasoning model would spend
+                # the call deliberating about it instead of writing it. Same
+                # child, same everything else -- only the reasoning field
+                # differs, so the second client costs a cached handle lookup.
+                summary_model = (
+                    await run_in_threadpool(
+                        build_chat_model,
+                        llm,
+                        temperature=params.temperature,
+                        top_p=params.top_p,
+                        max_tokens=params.max_tokens,
+                        sampling=sampling,
+                        effort_plan=NO_REASONING_PLAN,
+                    )
+                    if summarize
+                    else None
                 )
                 # Memory accounting for the compaction signal and the amber
                 # warning (1.1.2). Derived AFTER build_chat_model so the child
@@ -513,7 +539,7 @@ class AgentRunner:
                 budget = (
                     await run_in_threadpool(MemoryBudget.from_engine, engine) if summarize else None
                 )
-                middleware = self._build_middleware(model, budget) if summarize else []
+                middleware = self._build_middleware(summary_model, budget) if summarize else []
                 if kb_context_block:
                     # After summarization: the merge must see the final
                     # message list that actually reaches the model.
@@ -914,6 +940,11 @@ class AgentRunner:
                     # splitter below is the safety net for models/engines where
                     # chat-template-level suppression does not apply.
                     disable_thinking=True,
+                    # ...and the native effort field says the same thing to the
+                    # templates ``enable_thinking`` does not reach (1.1.2): a
+                    # template that grades its reasoning reads "none" here and
+                    # nothing at all from the chat-template kwarg.
+                    effort_plan=NO_REASONING_PLAN,
                     # ...and that tiny budget is the point: the caller sized it
                     # for a 2-4 word title, so the automatic window-sized budget
                     # must not replace it.
@@ -962,6 +993,10 @@ class AgentRunner:
         state (drops old turns, inserts a summary) so the agent's context stays
         bounded; the Message table is untouched, so the UI still shows the full
         conversation.
+
+        ``model`` here is the summary client -- the same child served by a
+        second ``ChatOpenAI`` pinned to ``reasoning_effort="none"`` (1.1.2), so
+        the summary is written rather than deliberated about.
         """
         from langchain.agents.middleware import SummarizationMiddleware
         from langchain_core.messages.utils import count_tokens_approximately

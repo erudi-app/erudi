@@ -232,6 +232,58 @@ def test_language_column_backfills_existing_settings_row(fresh_cluster):
 
 
 @pytest.mark.integration
+def test_reasoning_effort_columns_backfill_existing_rows(fresh_cluster):
+    # 1.1.2: the level is NOT NULL with a server default, so a settings row and
+    # a conversation that predate the feature both come out of the migration at
+    # "medium" -- the level at which nothing about their behaviour changes.
+    url = fresh_cluster.sqlalchemy_url
+    cfg = _alembic_config(url)
+    command.upgrade(cfg, "c1d5b83f9a24")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO user_settings (web_search_enabled) VALUES (true)"))
+            conn.execute(
+                text(
+                    "INSERT INTO llms (name, local, link, type, quantized, is_base, category, "
+                    "is_attached_to_kb) VALUES ('Old', 0, 'org/old', 'qwen', true, false, "
+                    "'general', false)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO conversations (llm_id, name, web_search_enabled) "
+                    "SELECT id, 'Old chat', false FROM llms WHERE link='org/old'"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    run_migrations(fresh_cluster)
+
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            assert (
+                conn.execute(text("SELECT default_reasoning_effort FROM user_settings")).scalar()
+                == "medium"
+            )
+            assert (
+                conn.execute(text("SELECT reasoning_effort FROM conversations")).scalar()
+                == "medium"
+            )
+            settings_columns = {c["name"]: c for c in inspect(conn).get_columns("user_settings")}
+            conversation_columns = {
+                c["name"]: c for c in inspect(conn).get_columns("conversations")
+            }
+    finally:
+        engine.dispose()
+    assert settings_columns["default_reasoning_effort"]["nullable"] is False
+    assert conversation_columns["reasoning_effort"]["nullable"] is False
+    assert _alembic_version(url) == _head_revision(cfg)
+
+
+@pytest.mark.integration
 def test_backup_database_writes_a_dump(fresh_cluster):
     # pg_dump (custom format) of the LIVE cluster produces a non-empty snapshot.
     engine = create_engine(fresh_cluster.sqlalchemy_url)
