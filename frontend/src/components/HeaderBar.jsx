@@ -571,7 +571,7 @@ HeaderBar.propTypes = {
   webSearchDisabled: PropTypes.bool,
   webSearchDisabledTooltip: PropTypes.string,
   showReasoningEffort: PropTypes.bool,
-  initialReasoningEffort: PropTypes.oneOf(["none", "low", "medium", "high", "xhigh"]),
+  initialReasoningEffort: PropTypes.oneOf(REASONING_EFFORT_LEVELS),
   onReasoningEffortChange: PropTypes.func,
   disabled: PropTypes.bool,
   models: PropTypes.arrayOf(

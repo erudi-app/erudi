@@ -69,11 +69,14 @@ export default function ChatPage() {
         const data = await apiClient.get("/user_settings/");
         if (!cancelled) {
           setWebSearch(Boolean(data?.web_search_enabled));
-          setReasoningEffort(data?.default_reasoning_effort || "medium");
+          // Functional guard: a user who already picked a level before this
+          // fetch resolved keeps their choice -- the global default only fills
+          // the blank.
+          setReasoningEffort((cur) => cur ?? (data?.default_reasoning_effort || "medium"));
         }
       } catch (error) {
         // The backend applies its own default: degraded, not failed.
-        log.warn("Failed to fetch the global web search default", error);
+        log.warn("Failed to fetch the global chat defaults (web search, reasoning effort)", error);
       }
     })();
     return () => {
@@ -609,7 +612,13 @@ export default function ChatPage() {
                             <TooltipIcon id="reasoning-effort" side="right" />
                             <select
                               aria-label={t("chat:header.reasoningEffort")}
-                              value={reasoningEffort ?? "medium"}
+                              // Until the global default is known the select is
+                              // disabled and shows nothing: displaying "Medium"
+                              // while the backend would copy another default
+                              // into the new conversation would be a lie (and a
+                              // failed settings fetch would make it permanent).
+                              disabled={reasoningEffort === null}
+                              value={reasoningEffort ?? ""}
                               onChange={(e) => setReasoningEffort(e.target.value)}
                               className="ml-auto text-[11px] font-semibold rounded-md border border-emerald-400/25 bg-emerald-500/10 text-emerald-200/90 px-2 py-1 focus:outline-none focus:border-emerald-400/50 transition-colors cursor-pointer"
                             >
