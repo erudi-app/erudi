@@ -575,7 +575,8 @@ async def query_and_respond(
     Note:
         - Supports RAG: If kb_id provided, injects relevant KB chunks into prompt
         - Messages are saved AFTER streaming completes (ensures full response captured)
-        - Uses conversation's temperature, top_p, max_tokens settings
+        - Uses the conversation's temperature and top_p; the output budget is
+          derived from the model's context window, not from the request
     """
     """Query the conversation and get a streaming response."""
     # NDJSON (#90): one JSON event per line (answer / thinking / tool_call /
