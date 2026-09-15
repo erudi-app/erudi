@@ -92,6 +92,24 @@ if TYPE_CHECKING:
 # (``W_eff=None``), and always rides along with OR semantics. Once triggered,
 # older turns are summarized by the same local model and replaced in the
 # checkpointer state; the Message table keeps the full history for display.
+# The summary prompt handed to the compaction middleware. The library default
+# is a generic extraction prompt, and the release recette proved it LOSSY on
+# small local models: summarizing 11 messages of a 4B conversation, it kept
+# the dominant interaction pattern and dropped the one user-stated fact (a
+# name planted early on), which a follow-up then answered wrongly. Compaction
+# is this app's memory resolver, so the prompt puts concrete facts FIRST.
+# ASCII, addressed to the summarizing model.
+SUMMARY_PROMPT = (
+    "Summarize the conversation below for the assistant's own memory. "
+    "FIRST, list every concrete fact the user stated about themselves or "
+    "their world (names, numbers, dates, preferences, decisions), each on "
+    "its own line, exactly as stated -- these lines are the summary's most "
+    "important content and must never be dropped or generalized. "
+    "THEN describe in a few sentences what was discussed and what the "
+    "assistant did. Do not invent anything; omit nothing the user asked to "
+    "remember.\n\nConversation:\n{messages}"
+)
+
 SUMMARY_TRIGGER_MESSAGES = 20
 SUMMARY_KEEP_MESSAGES = 10
 COMPACTION_WINDOW_FRACTION = 0.8
@@ -999,6 +1017,22 @@ class AgentRunner:
         the summary is written rather than deliberated about.
         """
         from langchain.agents.middleware import SummarizationMiddleware
+
+        class _Logged_Summarization_Middleware(SummarizationMiddleware):
+            """The stock middleware plus the ONE aggregate log line the QA
+            spec promises ("backend.log records the summarization"). Without it
+            a fired compaction is invisible -- the only field evidence during
+            the release recette was turn latency collapsing after the trigger.
+            ASCII, INFO: the app did its job, nothing degraded."""
+
+            async def _acreate_summary(self, messages_to_summarize):
+                summary = await super()._acreate_summary(messages_to_summarize)
+                logger.info(
+                    f"Conversation compacted: {len(messages_to_summarize)} message(s) "
+                    f"summarized into {len(summary or '')} chars"
+                )
+                return summary
+
         from langchain_core.messages.utils import count_tokens_approximately
 
         from src.agents.middleware import (
@@ -1017,11 +1051,12 @@ class AgentRunner:
         return [
             _StripStaleImagesMiddleware(),
             _StripStaleToolResults(),
-            SummarizationMiddleware(
+            _Logged_Summarization_Middleware(
                 model=model,
                 trigger=summarization_triggers(effective_window, memory_token_ceiling),
                 keep=("messages", SUMMARY_KEEP_MESSAGES),
                 token_counter=count_tokens_approximately,
+                summary_prompt=SUMMARY_PROMPT,
             ),
         ]
 

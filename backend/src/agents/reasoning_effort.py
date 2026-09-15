@@ -260,8 +260,11 @@ def plan_reasoning_effort(llm, level) -> EffortPlan:
     verdict = model_reasoning_lever(getattr(llm, "link", None), llm_id=getattr(llm, "id", None))
     plan = resolve_effort_plan(level, verdict.lever, verdict.is_thinker)
     logger.info(
+        # 'unset' vs the literal level "none": collapsing both to 'none' made
+        # the field unreadable in the release recette (an xhigh plan that wires
+        # NOTHING logged the same as a none plan that wires "none").
         f"Reasoning effort: level={plan.level}, lever={verdict.lever.value}, "
-        f"thinker={verdict.is_thinker}, wire_effort={plan.wire_effort or 'none'}, "
-        f"degraded_from={plan.degraded_from or 'none'}"
+        f"thinker={verdict.is_thinker}, wire_effort={plan.wire_effort or 'unset'}, "
+        f"degraded_from={plan.degraded_from or 'unset'}"
     )
     return plan

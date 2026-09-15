@@ -105,7 +105,7 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I change the **global default** in Settings, then existing conversations keep their own effort unchanged; only conversations created afterwards inherit the new default.
 - [ ] When I use a model whose own template understands effort levels, then the five levels visibly change how much the model reasons — None shows no strip at all, Xhigh reasons markedly longer than Low.
 - [ ] When I use a thinking model that only knows **on/off** (e.g. Qwen3), then None genuinely suppresses the reasoning, Medium is the model's natural behavior with nothing added, and High/Xhigh lengthen the reasoning best-effort through instructions.
-- [ ] When I use a **non-thinking** model at Medium or above, then it reasons step by step **inside the strip** (never in the answer) and the answer stays clean; at None it behaves exactly as before this version.
+- [ ] When I use a **non-thinking** model at Medium or above, then it reasons step by step **inside the strip** (never in the answer) and the answer stays clean; at None it behaves exactly as before this version *(prompt-instructed: a very small model may not comply — acceptance = the strip appears when it complies, and nothing leaks into the answer when it does not)*.
 - [ ] When a model that **always reasons** is set to None, then the app asks it to answer directly — best-effort: record what the model actually does; residual reasoning is not a FAIL *(documented limitation)*.
 - [ ] When a long conversation is summarized or a title is generated, then those internal calls always run **without** reasoning, whatever the conversation's effort level — no thinking stall, no reasoning in the title.
 - [ ] When I use the Arena, then panels follow the **global** default effort (no per-panel control in this version).
@@ -124,7 +124,7 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When a conversation reaches about **80 % of the allocated window**, then it is compacted automatically — the on-screen history is untouched, later answers still refer to earlier turns, and `backend.log` records the summarization.
 - [ ] *(Apple Silicon)* When the **machine's memory** nears saturation (under ~15 % margin), then compaction fires on that signal even well below 80 % of the window — the memory signal exists only on MLX, whose cache grows with usage; the llama.cpp engines allocate theirs in full at load.
 - [ ] *(Apple Silicon)* When even compacting down to the last few turns could not restore the memory margin, then — and only then — an **amber notice** appears in the conversation saying the machine's memory is nearly saturated and quoting how much this conversation represents; it never appears while compaction can still absorb the pressure.
-- [ ] When I ask about something that only existed in a **compacted-away** turn, then the answer still knows it (the summary carried it).
+- [ ] When I ask about something that only existed in a **compacted-away** turn, then the answer still knows it — the summary lists user-stated facts first, by design *(summary quality is model-bound: acceptance = the fact survives on a mid-size model; a very small summarizer may still lose it)*.
 - [ ] When a conversation is fresh and short, then compaction never fires.
 - [ ] When the amber memory notice is shown, then it is **translated** (fr/es/zh — not English-only), it never lands in the answer bubble or in what the copy button copies, and it does **not** stick to the conversation after a reload once the pressure is gone.
 
