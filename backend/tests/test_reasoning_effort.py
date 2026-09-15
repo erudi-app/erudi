@@ -65,12 +65,24 @@ def _plan(level, lever, is_thinker):
 class TestNativeEffortLever:
     """A template that READS ``reasoning_effort``: every level goes on the wire."""
 
-    @pytest.mark.parametrize("level", REASONING_EFFORT_LEVELS)
-    def test_every_level_is_wired_natively(self, level):
+    @pytest.mark.parametrize("level", ["low", "medium", "high", "xhigh"])
+    def test_every_graded_level_is_wired_natively_and_says_nothing_else(self, level):
         plan = _plan(level, ReasoningLever.NATIVE_EFFORT, True)
         assert plan == EffortPlan(
             level=level, wire_effort=level, prompt_section=None, degraded_from=None
         )
+
+    def test_none_is_wired_AND_instructed(self):
+        # The one cell where both mechanisms ride together. llama-server reads
+        # "none" as enable_thinking=false and ERASES the reasoning_effort
+        # kwarg, so a template that only grades its own reasoning never hears
+        # the request and falls back to its built-in default. The instruction
+        # is the only lever left there, and a harmless prompt line where the
+        # native path does work.
+        plan = _plan("none", ReasoningLever.NATIVE_EFFORT, True)
+        assert plan.wire_effort == "none"
+        assert plan.prompt_section and "directly" in plan.prompt_section
+        assert plan.degraded_from == "none"
 
 
 class TestNativeToggleLever:
@@ -159,17 +171,38 @@ class TestNoLeverNonThinker:
         assert len(set(sections.values())) == 4
 
 
+class TestUnknownVerdict:
+    """The probe FAILED -- which is not the same as "the template has no lever".
+
+    An unrenderable template or an unreadable artifact says nothing about the
+    model. Injecting on that ignorance is the dangerous direction: at the
+    DEFAULT level it would teach a real reasoner, whose own protocol we simply
+    failed to read, a second one. So an unknown verdict does nothing at all,
+    at every level.
+    """
+
+    @pytest.mark.parametrize("level", REASONING_EFFORT_LEVELS)
+    @pytest.mark.parametrize("is_thinker", [True, False])
+    def test_every_level_is_a_full_no_op(self, level, is_thinker):
+        assert resolve_effort_plan(level, ReasoningLever.UNKNOWN, is_thinker) == EffortPlan(
+            level=level, wire_effort=None, prompt_section=None, degraded_from=None
+        )
+
+
 # ===================== cross-cutting properties =====================
 
 
 @pytest.mark.parametrize("lever", list(ReasoningLever))
 @pytest.mark.parametrize("level", REASONING_EFFORT_LEVELS)
 @pytest.mark.parametrize("is_thinker", [True, False])
-def test_a_plan_never_carries_both_a_wire_value_and_a_prompt_section(lever, level, is_thinker):
-    # The two mechanisms are alternatives: wiring the level natively and ALSO
-    # instructing the model about it would double the request.
+def test_the_two_mechanisms_ride_together_only_for_a_best_effort_none(lever, level, is_thinker):
+    # Wiring a level natively and ALSO instructing the model about it would
+    # normally say the same thing twice. The single exception is "none" on a
+    # template that grades its own reasoning, where the native channel is not
+    # reliably honoured end to end and the instruction is the backstop.
     plan = resolve_effort_plan(level, lever, is_thinker)
-    assert not (plan.wire_effort and plan.prompt_section)
+    both = bool(plan.wire_effort and plan.prompt_section)
+    assert both == (level == "none" and lever is ReasoningLever.NATIVE_EFFORT)
     assert plan.level == level
 
 
@@ -193,4 +226,6 @@ def test_the_summary_plan_is_always_none_on_the_wire():
     from src.agents.reasoning_effort import NO_REASONING_PLAN
 
     assert NO_REASONING_PLAN.wire_effort == "none"
+    # The utility paths compose no system prompt of ours, so a section there
+    # would be inert: the wire value is all they can say.
     assert NO_REASONING_PLAN.prompt_section is None

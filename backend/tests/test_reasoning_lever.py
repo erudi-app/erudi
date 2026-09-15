@@ -100,18 +100,39 @@ class _Unrenderable:
         raise ValueError("template unrenderable")
 
 
-def test_an_unrenderable_template_is_never_blamed():
-    # Graceful default: no lever, not a thinker -- the turn runs as it does
-    # today rather than getting an instruction built on a failed probe.
+def test_an_unrenderable_template_is_unknown_not_leverless():
+    # A probe that FAILED knows nothing about the model. Answering NONE here
+    # would make the default level inject an induced chain-of-thought into what
+    # may well be a reasoner with its own protocol.
     assert tokenizer_reasoning_lever(_Unrenderable()) == LeverVerdict(
-        lever=ReasoningLever.NONE, is_thinker=False
+        lever=ReasoningLever.UNKNOWN, is_thinker=False
     )
 
 
-def test_a_missing_tokenizer_is_never_blamed():
+def test_a_missing_tokenizer_is_unknown():
     assert tokenizer_reasoning_lever(None) == LeverVerdict(
-        lever=ReasoningLever.NONE, is_thinker=False
+        lever=ReasoningLever.UNKNOWN, is_thinker=False
     )
+
+
+def test_a_failed_probe_injects_nothing_at_any_level():
+    from src.agents.reasoning_effort import REASONING_EFFORT_LEVELS, resolve_effort_plan
+
+    verdict = tokenizer_reasoning_lever(_Unrenderable())
+    for level in REASONING_EFFORT_LEVELS:
+        plan = resolve_effort_plan(level, verdict.lever, verdict.is_thinker)
+        assert plan.prompt_section is None and plan.wire_effort is None
+
+
+def test_a_probe_that_SUCCEEDED_still_drives_the_feature():
+    # The counterpart guard: a template we rendered fine and found no lever in
+    # is a real verdict, and a non-thinker still gets its induced CoT.
+    from src.agents.reasoning_effort import resolve_effort_plan
+
+    verdict = tokenizer_reasoning_lever(_fixture("qwen2.5-instruct.jinja"))
+    assert verdict.lever is ReasoningLever.NONE
+    plan = resolve_effort_plan("medium", verdict.lever, verdict.is_thinker)
+    assert plan.prompt_section and "<think>" in plan.prompt_section
 
 
 # ===================== the GGUF template view forwards template kwargs =====================
@@ -203,24 +224,51 @@ def test_caps_without_the_effort_capability_fall_through_to_the_probe(caps_engin
     assert caps_engine.probed == ["/models/gguf-plain"]
 
 
+def test_an_unknown_verdict_is_logged(monkeypatch, caps_engine, caplog):
+    # Silent ignorance is the worst outcome: a turn that added nothing because
+    # the probe failed must be readable from the log.
+    import logging
+
+    def _boom(cls, local_path):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(_CapsEngine, "_load_capability_tokenizer", classmethod(_boom))
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        model_reasoning_lever("/models/unreadable", llm_id=7)
+    assert any("unknown" in record.message for record in caplog.records)
+
+
 def test_the_probe_result_is_cached_per_artifact(caps_engine):
     model_reasoning_lever("/models/gguf-plain", llm_id=7)
     model_reasoning_lever("/models/gguf-plain", llm_id=7)
     assert caps_engine.probed == ["/models/gguf-plain"]
 
 
-def test_a_tokenizer_that_cannot_be_loaded_is_never_blamed(monkeypatch, caps_engine):
+def test_a_tokenizer_that_cannot_be_loaded_is_unknown(monkeypatch, caps_engine):
     def _boom(cls, local_path):
         raise OSError("no such artifact")
 
     monkeypatch.setattr(_CapsEngine, "_load_capability_tokenizer", classmethod(_boom))
     assert model_reasoning_lever("/models/missing", llm_id=7) == LeverVerdict(
-        lever=ReasoningLever.NONE, is_thinker=False
+        lever=ReasoningLever.UNKNOWN, is_thinker=False
     )
 
 
-def test_no_local_path_means_no_lever(caps_engine):
+def test_no_local_path_means_unknown(caps_engine):
+    # Nothing to probe is nothing KNOWN -- the same "do nothing" verdict.
     assert model_reasoning_lever("", llm_id=7) == LeverVerdict(
-        lever=ReasoningLever.NONE, is_thinker=False
+        lever=ReasoningLever.UNKNOWN, is_thinker=False
     )
     assert caps_engine.probed == []
+
+
+def test_the_caps_still_upgrade_an_unknown_verdict(monkeypatch, caps_engine):
+    # A template our Jinja cannot render may still be one llama.cpp reads: once
+    # the child is up, its caps decide and the turn stops being a no-op.
+    def _boom(cls, local_path):
+        raise OSError("unreadable")
+
+    monkeypatch.setattr(_CapsEngine, "_load_capability_tokenizer", classmethod(_boom))
+    assert model_reasoning_lever("/models/x", llm_id=7).lever is ReasoningLever.UNKNOWN
+    caps_engine.caps = {"supports_reasoning_effort": True}
+    assert model_reasoning_lever("/models/x", llm_id=7).lever is ReasoningLever.NATIVE_EFFORT

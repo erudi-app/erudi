@@ -209,11 +209,25 @@ template otherwise, and it takes one of three values:
 | only honours `enable_thinking` (Qwen3 and friends) | `none` turns thinking off; `medium` is the natural behaviour; the other levels become a graded instruction |
 | exposes no lever, but the model reasons | `medium` is the natural behaviour; every other level becomes a graded instruction |
 | exposes no lever and the model does not reason | `none` changes nothing; every other level asks for a chain of thought written between `<think>` tags, which the splitter above separates from the answer |
+| could not be read at all | nothing changes, at any level |
+
+The last row is a deliberate asymmetry: a probe that *failed* is not a model
+that *has no lever*. Filing one as the other would, at the default level, teach a
+real reasoner whose own protocol we merely failed to read a second one, so an
+unreadable template leaves the turn exactly as it was and says so in the log.
 
 Two consequences are deliberate. At `medium`, a model that reasons naturally gets exactly the request
 it got before the feature existed — nothing is added to the prompt and nothing to the body. And
-`none` on an always-on reasoner is a best-effort request: the instruction asks it to answer directly,
-and a model that reasons anyway is within its rights.
+`none` is best-effort on every model that reasons: the instruction asks it to answer directly, and a
+model that reasons anyway is within its rights. That is why `none` on a template that grades its own
+reasoning sends the native value *and* the instruction — llama-server maps `none` to
+`enable_thinking=false` and then erases the `reasoning_effort` kwarg, so such a template hears
+neither and falls back to its own default; the instruction is the only lever left there.
+
+Induced reasoning has one accepted cost. When the server has no parser for the `<think>` block the
+model was asked to write, the split happens in Erudi rather than server-side, so the tags and the
+reasoning stay inside the assistant message the agent state keeps and are replayed as history on the
+following turns — bounded, like everything else in the thread, by compaction.
 
 Falling back from a level to an instruction is silent in the interface and recorded once per turn in
 the backend log (`Reasoning effort: level=… lever=… wire_effort=… degraded_from=…`), which is what a

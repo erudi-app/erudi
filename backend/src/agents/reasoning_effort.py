@@ -1,10 +1,10 @@
-"""Reasoning effort: five levels, three levers, one degradation table (1.1.2).
+"""Reasoning effort: five levels, one lever verdict, one degradation table (1.1.2).
 
 The user picks HOW MUCH the model may deliberate before answering --
 ``none / low / medium / high / xhigh``, ``medium`` by default. What that costs
 on the wire depends entirely on the ARTIFACT, so the level is resolved against
 a per-artifact lever verdict (``src.engines.reasoning_lever``) into an
-``EffortPlan`` carrying at most one of two mechanisms:
+``EffortPlan`` carrying one of two mechanisms:
 
 * ``wire_effort`` -- the native OpenAI ``reasoning_effort`` field. Both local
   servers read it: llama-server maps ``"none"`` to ``enable_thinking=false``
@@ -18,8 +18,11 @@ a per-artifact lever verdict (``src.engines.reasoning_lever``) into an
   chain-of-thought between ``<think>`` tags, which our ``ThinkSplitter``
   separates from the answer exactly as it does a native reasoning trace.
 
-The two are alternatives, never both: wiring a level natively AND instructing
-the model about it would say the same thing twice.
+They are alternatives: wiring a level natively AND instructing the model about
+it would normally say the same thing twice. One cell rides both, on purpose --
+``none`` on a template that grades its own reasoning, where llama-server erases
+the effort kwarg it just read as "none" and the instruction is the only lever
+left (see ``resolve_effort_plan``).
 
 ``degraded_from`` names the level a prompt section is standing in for. The
 degradation is SILENT to the user (the picker UX lands in 1.1.3) and shows up
@@ -29,7 +32,9 @@ once per turn in the INFO log, which is what a field report is read against.
 (no wire value, no instruction), so the default level leaves the request
 byte-identical to what it was before this module existed. The one deliberate
 exception is a NON-reasoning model, where every level above ``none`` induces a
-chain of thought that did not exist before -- that is the feature.
+chain of thought that did not exist before -- that is the feature. When the
+lever verdict is ``UNKNOWN`` (the probe could not run), NO level changes
+anything: acting on ignorance is the one failure mode worth designing against.
 
 This module is pure: constants, texts and one table. The composition with the
 engine-side verdict (``plan_reasoning_effort``) is the only impure entry point,
@@ -62,6 +67,12 @@ class ReasoningLever(str, Enum):
     NATIVE_TOGGLE = "native_toggle"
     #: No lever at all: only the prompt can carry the level.
     NONE = "none"
+    #: The probe FAILED -- which is not the same as ``NONE``. An unrenderable
+    #: template or an unreadable artifact says nothing about the model, and
+    #: acting on that ignorance is the dangerous direction: at the default
+    #: level it would teach a real reasoner, whose own protocol we merely
+    #: failed to read, a second one. An unknown verdict changes nothing.
+    UNKNOWN = "unknown"
 
 
 @dataclass(frozen=True)
@@ -86,8 +97,16 @@ class EffortPlan:
 
 # Utility calls (conversation titles, the compaction summary) always run at
 # ``none``: they are one-shot machine work on a tiny budget, and a reasoning
-# model would spend all of it inside <think> (#266). "none" alone is enough on
-# both servers -- each maps it to thinking off.
+# model would spend all of it inside <think> (#266).
+#
+# The wire value is all these paths can say -- they compose no system prompt of
+# ours, so a ``prompt_section`` here would be inert -- and it is not a
+# guarantee. mlx_vlm honours it (thinking off, plus the value bound for the
+# template). llama-server maps "none" to ``enable_thinking=false`` AND ERASES
+# the ``reasoning_effort`` template kwarg, so a template that only grades its
+# own reasoning hears neither and falls back to its built-in default. On that
+# combination the suppression rests on what is left: the deliberately tiny
+# output budget, and the ThinkSplitter keeping the reasoning out of the title.
 NO_REASONING_PLAN = EffortPlan(level="none", wire_effort="none")
 
 
@@ -160,7 +179,9 @@ def resolve_effort_plan(level, lever: ReasoningLever, is_thinker: bool) -> Effor
     ==============  =========================  ================  ==============
     lever           level                      wire_effort       prompt_section
     ==============  =========================  ================  ==============
-    NATIVE_EFFORT   any                        the level         -
+    UNKNOWN         any                        -                 -
+    NATIVE_EFFORT   none                       "none"            thinker tier
+    NATIVE_EFFORT   low / medium / high/xhigh  the level         -
     NATIVE_TOGGLE   none                       "none"            -
     NATIVE_TOGGLE   medium                     -                 -
     NATIVE_TOGGLE   low / high / xhigh         -                 thinker tier
@@ -171,18 +192,32 @@ def resolve_effort_plan(level, lever: ReasoningLever, is_thinker: bool) -> Effor
     NONE, other     low / medium / high/xhigh  -                 induced CoT
     ==============  =========================  ================  ==============
 
-    Two "nothing at all" cells are load-bearing: ``medium`` on any reasoning
-    model (its natural behaviour IS medium) and ``none`` on a model that never
-    reasons (there is nothing to turn off). Both leave the request exactly as
-    it was before this feature.
+    Three "nothing at all" cells are load-bearing: ``medium`` on any reasoning
+    model (its natural behaviour IS medium), ``none`` on a model that never
+    reasons (there is nothing to turn off), and EVERY level on an unknown
+    verdict. All leave the request exactly as it was before this feature.
 
-    An always-on reasoner asked for ``none`` gets an instruction, not a
-    guarantee: the request is best-effort by construction and documented as
-    such.
+    ``none`` is best-effort on every model that reasons, and says so twice on a
+    NATIVE_EFFORT template: llama-server erases the effort kwarg when it reads
+    "none", so a template that only grades its own reasoning never hears the
+    request -- the instruction is then the only lever left, and a harmless
+    prompt line on the engines where the native path does work. An always-on
+    reasoner that reasons anyway is within its rights.
     """
     level = normalize_effort(level)
 
+    if lever is ReasoningLever.UNKNOWN:
+        # We failed to read this artifact. Do nothing rather than guess.
+        return EffortPlan(level=level)
+
     if lever is ReasoningLever.NATIVE_EFFORT:
+        if level == "none":
+            return EffortPlan(
+                level=level,
+                wire_effort="none",
+                prompt_section=_THINKER_SECTIONS["none"],
+                degraded_from="none",
+            )
         return EffortPlan(level=level, wire_effort=level)
 
     if lever is ReasoningLever.NATIVE_TOGGLE:

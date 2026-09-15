@@ -21,9 +21,14 @@ through to the probe below.
 keying on (engine, path), same graceful default. It renders the generation
 prompt with ``reasoning_effort`` low vs high (llama.cpp and mlx_vlm both bind
 the ``reasoning_strength`` alias alongside, so this does too), then with
-``enable_thinking`` true vs false, and reads the verdict from what CHANGES. A
-template that cannot render at all is never blamed: no lever, no thinker, no
-log spam.
+``enable_thinking`` true vs false, and reads the verdict from what CHANGES.
+
+A template that cannot render at all is never blamed -- but it is not filed as
+"no lever" either. That distinction is the point of ``UNKNOWN``: a failed probe
+knows nothing about the model, and at the default level a NONE verdict would
+inject an induced chain-of-thought into what may be a reasoner whose own
+protocol we merely failed to read. Unknown means the effort changes nothing,
+at every level, and says so once in the log.
 
 ``is_thinker`` comes from the same renders -- a template that differs under
 ``enable_thinking``, reads ``reasoning_effort``, or whose generation prompt
@@ -44,6 +49,10 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Any, Optional, Union
 
+# engines -> agents, against the usual direction. Deliberate and safe: the
+# import is one pure Enum from a module that imports nothing of ours (no cycle,
+# no cost at boot), and the vocabulary belongs with the levels it grades rather
+# than duplicated on this side.
 from src.agents.reasoning_effort import ReasoningLever
 from src.core.logging import logger
 
@@ -69,7 +78,10 @@ class LeverVerdict:
     is_thinker: bool
 
 
+# The template rendered, and carries no lever: a real verdict.
 _NO_LEVER = LeverVerdict(lever=ReasoningLever.NONE, is_thinker=False)
+# The probe could not run at all. NOT the same thing: see ReasoningLever.UNKNOWN.
+_UNKNOWN = LeverVerdict(lever=ReasoningLever.UNKNOWN, is_thinker=False)
 
 
 def _render(tokenizer: Any, **template_kwargs: Any) -> Optional[str]:
@@ -97,15 +109,15 @@ def _opens_a_thinking_block(rendered: str) -> bool:
 def tokenizer_reasoning_lever(tokenizer: Any) -> LeverVerdict:
     """The verdict for a tokenizer-shaped object exposing ``apply_chat_template``.
 
-    Pure and differential. Returns the graceful default (no lever, not a
-    thinker) for anything it cannot render -- a wrong verdict would either
-    silence a reasoning model or teach a plain one a protocol it does not know.
+    Pure and differential. Anything it cannot render at all comes back
+    ``UNKNOWN``, never ``NONE``: the caller then changes nothing, instead of
+    teaching a model whose protocol we failed to read a second one.
     """
     if tokenizer is None:
-        return _NO_LEVER
+        return _UNKNOWN
     baseline = _render(tokenizer)
     if baseline is None:
-        return _NO_LEVER
+        return _UNKNOWN
 
     low = _render(tokenizer, reasoning_effort="low", reasoning_strength="low")
     high = _render(tokenizer, reasoning_effort="high", reasoning_strength="high")
@@ -132,11 +144,22 @@ def _cached(engine_name: str, local_path: str) -> LeverVerdict:
     except Exception:
         logger.warning(
             f"[{engine_name}] reasoning-lever detection: could not load a "
-            f"tokenizer for {local_path}; assuming no lever",
+            f"tokenizer for {local_path}; the lever stays unknown and the "
+            f"reasoning effort changes nothing for this model",
             exc_info=True,
         )
-        return _NO_LEVER
+        return _UNKNOWN
     verdict = tokenizer_reasoning_lever(tokenizer)
+    if verdict.lever is ReasoningLever.UNKNOWN:
+        # Worth its own line: a turn that added nothing because the probe could
+        # not run must be readable from the log, not silently indistinguishable
+        # from a model that genuinely has no lever.
+        logger.info(
+            f"[{engine_name}] reasoning lever for {local_path}: unknown "
+            f"(the chat template could not be rendered); the reasoning effort "
+            f"changes nothing for this model"
+        )
+        return verdict
     logger.info(
         f"[{engine_name}] reasoning lever for {local_path}: "
         f"{verdict.lever.value} (thinker={verdict.is_thinker})"
@@ -161,7 +184,8 @@ def model_reasoning_lever(local_path: Union[str, Path, None], llm_id: Any = None
     model per process.
     """
     if not local_path:
-        return _NO_LEVER
+        # Nothing to probe is nothing KNOWN -- same "do nothing" verdict.
+        return _UNKNOWN
 
     from src.core import config
 
