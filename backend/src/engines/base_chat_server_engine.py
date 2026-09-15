@@ -219,6 +219,29 @@ class BaseChatServerEngine(BaseEngine):
         """
         return kwargs
 
+    @classmethod
+    def _read_server_properties(cls, handle: Dict[str, Any]) -> None:
+        """Read runtime facts off the freshly probed child into `handle`.
+
+        Called by `_start_server` exactly once, right after `_probe_ready`
+        succeeds -- the only moment the ALLOCATED window can be read, because
+        it belongs to a running child, not to a model file or a config value.
+
+        Default: no-op. The two shipped families split here on purpose:
+
+        * llama-server resolves its window AT LOAD (its own fit, when no `-c`
+          pins one), so `BaseLlamaCppEngine` overrides this with one bounded
+          `GET /props` and stamps `context_tokens`, `chat_template_caps` and
+          `chat_template` on the handle.
+        * mlx_vlm.server has no fit and no fixed allocation: MLX stamps its
+          preflight bound (`--max-kv-size`) on the handle AT SPAWN, so its
+          implementation of this hook stays this no-op.
+
+        Implementations MUST degrade, never raise: a failure here costs
+        metadata (`context_tokens=None`), never the model load.
+        """
+        return None
+
     # ====================== Shared concrete methods ======================
     @classmethod
     def _assert_requests(cls) -> None:
@@ -421,6 +444,10 @@ class BaseChatServerEngine(BaseEngine):
                 cls._terminate_process(proc)
                 if port is not None:
                     cls._wait_port_closed(port)
+            # A stopped child holds no KV memory: its ALLOCATED window dies
+            # with it, so `effective_context_tokens()` must answer None even
+            # while the stale handle lingers until the next swap/cleanup.
+            model["context_tokens"] = None
         # Always clear the atexit handler — even if the proc was already dead,
         # the registered lambda still holds a reference to it.
         if cls._atexit_handler is not None:
@@ -491,6 +518,9 @@ class BaseChatServerEngine(BaseEngine):
         except Exception:
             cls._terminate_process(handle.get("proc"))
             raise
+        # The child is up: read what it actually allocated (context window,
+        # template capabilities) into the handle. Best-effort by contract.
+        cls._read_server_properties(handle)
         proc = handle.get("proc")
 
         def _atexit_handler() -> None:

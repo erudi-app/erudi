@@ -141,6 +141,34 @@ export default function ModelInfoModal({
                           </span>
                           <span className="text-gray-200 ml-2">{modelInfo.parameters}</span>
                         </div>
+                        {/* Trained window = a fact of the model; allocated =
+                            what the engine's loaded child runs with right
+                            now, present only when this model is the loaded
+                            one (the backend resolves it live). */}
+                        {typeof modelInfo.context_window === "number" && (
+                          <div className="bg-white/5 rounded-xl p-3 border border-white/10">
+                            <span className="text-emerald-400 font-medium">
+                              {t("models:info.contextWindow")}
+                            </span>
+                            <span className="text-gray-200 ml-2">
+                              {t("models:info.contextWindowTokens", {
+                                tokens: modelInfo.context_window,
+                              })}
+                            </span>
+                          </div>
+                        )}
+                        {typeof modelInfo.allocated_context_window === "number" && (
+                          <div className="bg-white/5 rounded-xl p-3 border border-white/10">
+                            <span className="text-emerald-400 font-medium">
+                              {t("models:info.allocatedContextWindow")}
+                            </span>
+                            <span className="text-gray-200 ml-2">
+                              {t("models:info.contextWindowTokens", {
+                                tokens: modelInfo.allocated_context_window,
+                              })}
+                            </span>
+                          </div>
+                        )}
                         {isKnown(modelInfo.author) && (
                           <div className="bg-white/5 rounded-xl p-3 border border-white/10">
                             <span className="text-emerald-400 font-medium">

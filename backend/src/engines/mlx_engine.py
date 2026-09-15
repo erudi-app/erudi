@@ -354,6 +354,19 @@ class MLX_Engine(BaseChatServerEngine):
         # route it registers, `/health` included, so `_probe_ready` sends it
         # from the handle on both probe stages.
         api_key = secrets.token_urlsafe(32)
+        # The MLX window mechanism, deliberately different from llama-server's:
+        # mlx_vlm.server allocates nothing upfront (its KV cache grows lazily,
+        # RoPE positions are computed on the fly), so an unbounded child accepts
+        # a prompt beyond the model's trained window with HTTP 200 and silently
+        # degenerate output. `--max-kv-size W` is a clean PREFLIGHT VALIDATOR
+        # (an oversized request gets a 400 naming the exact budget: prompt +
+        # max generation vs W; it is NOT a rotating cache), so the bound is the
+        # trained window read from the LOCAL artifact's own config.json --
+        # stamped here at spawn, the one moment the artifact and the child are
+        # both in hand. No derivable window: no flag (today's unbounded
+        # behaviour), never an invented number. The hot PATCH /v1/settings
+        # path is deliberately not used in this release (spawn-time only).
+        context_tokens = cls._trained_window_of(model_path)
         # Before the roll below, so a file the PREVIOUS child on this port left
         # behind is older than this mark and cannot be read as ours.
         started_at = time.time()
@@ -391,6 +404,10 @@ class MLX_Engine(BaseChatServerEngine):
             # prompts never open a thinking block, so the stream starts (and
             # stays) on the content channel.
             "--enable-thinking",
+        ]
+        if context_tokens is not None:
+            argv += ["--max-kv-size", str(context_tokens)]
+        argv += [
             "--api-key",
             api_key,
         ]
@@ -432,7 +449,36 @@ class MLX_Engine(BaseChatServerEngine):
             # handle: the readiness probe and the ChatOpenAI inference client
             # both read the key from here. Never log the handle wholesale.
             "api_key": api_key,
+            # The ALLOCATED window (`BaseEngine.effective_context_tokens`):
+            # for MLX it equals the preflight bound passed above, known at
+            # spawn -- hence `_read_server_properties` stays the base no-op
+            # here (nothing to read back, unlike llama-server whose fit
+            # resolves the window at load). None = unbounded child.
+            "context_tokens": context_tokens,
         }
+
+    @classmethod
+    def _trained_window_of(cls, model_path: Path) -> Optional[int]:
+        """The trained context window the local artifact declares, or ``None``.
+
+        Read through ``read_local_generation_hints`` (the offline capture over
+        the artifact's own config.json, with the full key/container aliases),
+        so the spawn bound and the catalog's ``context_length`` agree by
+        construction. ``None`` -- no config, or none of the known keys -- is
+        answered with one WARNING and the child spawns unbounded, exactly
+        today's behaviour; a number is never invented.
+        """
+        from src.database.generation_hints import read_local_generation_hints
+
+        hints = read_local_generation_hints(model_path)
+        window = (hints or {}).get("context_length")
+        if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+            return window
+        logger.warning(
+            f"[MLX_Engine] No trained context window derivable from {model_path}; "
+            f"spawning mlx_vlm.server without a --max-kv-size bound"
+        )
+        return None
 
     @classmethod
     def _terminate_process(cls, proc) -> None:

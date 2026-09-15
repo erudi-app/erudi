@@ -637,3 +637,105 @@ class TestCleanup:
         mock_stop.assert_called_once()
         assert _TestEngine._model is None
         assert _TestEngine._tokenizer is None
+
+
+# =====================================================================
+# UNIT — server properties hook + effective (allocated) context window
+# =====================================================================
+
+
+@pytest.mark.unit
+class TestReadServerPropertiesHook:
+    """`_start_server` calls `_read_server_properties(handle)` exactly once,
+    right after the probe succeeds — the window a child actually allocated can
+    only be read from a child that is up. The base hook is a no-op (MLX stamps
+    its window at spawn); llama.cpp engines override it with a `/props` read."""
+
+    def test_hook_called_once_after_a_successful_probe(self):
+        calls: list = []
+        with (
+            patch.object(_TestEngine, "_probe_ready", return_value=None),
+            patch.object(
+                _TestEngine,
+                "_read_server_properties",
+                side_effect=lambda handle: calls.append(handle),
+            ),
+            patch("src.engines.base_chat_server_engine.atexit.register"),
+        ):
+            handle = _TestEngine._start_server(model_path=Path("/tmp"), alias="test-x", port=19040)
+        assert calls == [handle]
+
+    def test_hook_not_called_when_the_probe_fails(self):
+        with (
+            patch.object(_TestEngine, "_probe_ready", side_effect=EngineException("down")),
+            patch.object(_TestEngine, "_read_server_properties") as hook,
+        ):
+            with pytest.raises(EngineException):
+                _TestEngine._start_server(model_path=Path("/tmp"), alias="test-x", port=19041)
+        hook.assert_not_called()
+
+    def test_base_hook_is_a_noop(self):
+        handle = {"base_url": "http://127.0.0.1:19042"}
+        _TestEngine._read_server_properties(handle)
+        assert handle == {"base_url": "http://127.0.0.1:19042"}
+
+
+@pytest.mark.unit
+class TestEffectiveContextTokens:
+    """The ALLOCATED window of the currently loaded child, read from the live
+    handle — never stored in the DB, because the same model gets a different
+    window on a different machine or memory state."""
+
+    def test_none_when_nothing_is_loaded(self):
+        assert _TestEngine.effective_context_tokens() is None
+
+    def test_returns_the_stamped_window_of_the_loaded_child(self):
+        _TestEngine._model = {
+            "pid": 1,
+            "proc": MagicMock(),
+            "port": 19050,
+            "base_url": "http://127.0.0.1:19050",
+            "alias": "test-x",
+            "model_path": Path("/m"),
+            "context_tokens": 40960,
+        }
+        assert _TestEngine.effective_context_tokens() == 40960
+
+    def test_none_when_the_handle_carries_no_window(self):
+        _TestEngine._model = {
+            "pid": 1,
+            "proc": MagicMock(),
+            "port": 19051,
+            "base_url": "http://127.0.0.1:19051",
+            "alias": "test-x",
+            "model_path": Path("/m"),
+        }
+        assert _TestEngine.effective_context_tokens() is None
+
+    def test_cleared_after_stop_server(self):
+        """A dead child holds no KV memory: its allocated window dies with it,
+        even before the handle itself is swapped out."""
+        _TestEngine._model = {
+            "pid": 1,
+            "proc": MagicMock(),
+            "port": 19052,
+            "base_url": "http://127.0.0.1:19052",
+            "alias": "test-x",
+            "model_path": Path("/m"),
+            "context_tokens": 8192,
+        }
+        _TestEngine._stop_server_if_running()
+        assert _TestEngine.effective_context_tokens() is None
+
+    def test_cleared_after_cleanup(self):
+        _TestEngine._model = {
+            "pid": 1,
+            "proc": MagicMock(),
+            "port": 19053,
+            "base_url": "http://127.0.0.1:19053",
+            "alias": "test-x",
+            "model_path": Path("/m"),
+            "context_tokens": 8192,
+        }
+        _TestEngine.cleanup()
+        assert _TestEngine.effective_context_tokens() is None

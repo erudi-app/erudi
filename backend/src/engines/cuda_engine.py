@@ -148,8 +148,9 @@ class CUDA_Engine(BaseLlamaCppEngine):
 
     @classmethod
     def _prepare_spawn_context(cls) -> Dict[str, Any]:
-        """Resolve per-spawn CUDA context: context window, thread count,
-        and GPU layers computed from current VRAM (NVML)."""
+        """Resolve per-spawn CUDA context: the pinned context window (None
+        unless ERUDI_CTX is set -- llama-server's own fit resolves it then),
+        thread count, and GPU layers computed from current VRAM (NVML)."""
         return {
             "ctx_size": cls.max_context_tokens(),
             "threads": max(1, os.cpu_count() or 1),
@@ -164,12 +165,18 @@ class CUDA_Engine(BaseLlamaCppEngine):
         model_gguf: Path,
         alias: str,
         port: int,
-        ctx_size: int = 4096,
+        ctx_size: Optional[int] = None,
         threads: int = 1,
         gpu_layers: int = -1,
         **_ignored: Any,
     ) -> List[Any]:
         """CUDA CLI for llama-server: injects computed `-ngl <gpu_layers>`.
+
+        ``-c`` is passed ONLY when the user pinned a window (``ERUDI_CTX``);
+        with ``ctx_size=None`` llama-server's own fit resolves the window at
+        load (trained window, reduced against measured free memory when it
+        must), and ``_read_server_properties`` reads the resolved value back
+        after the probe. Same contract as `CPU_Engine._build_spawn_argv`.
 
         ``--jinja`` enables the model's own chat template and with it
         OpenAI-style function calling (the agent's calculator tool) —
@@ -184,7 +191,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
         the runner's ``thinking`` events; the runner's ThinkSplitter stays as
         the inline fallback for families the server parser does not know.
         """
-        return [
+        argv: List[Any] = [
             str(llama_server),
             "-m",
             str(model_gguf),
@@ -194,14 +201,17 @@ class CUDA_Engine(BaseLlamaCppEngine):
             str(port),
             "--alias",
             alias,
-            "-c",
-            str(ctx_size),
+        ]
+        if ctx_size is not None:
+            argv += ["-c", str(ctx_size)]
+        argv += [
             "--threads",
             str(threads),
             "-ngl",
             str(gpu_layers),
             "--jinja",
         ]
+        return argv
 
     @classmethod
     def _build_spawn_env(cls) -> Dict[str, str]:

@@ -73,6 +73,16 @@ def build_chat_model(
     handle, _tokenizer = engine.get_model_and_tokenizer(llm.id, llm.link)
     model_field = engine._payload_model_value(handle)
 
+    # The ALLOCATED window of the child just resolved (llama-server: read from
+    # /props after its fit; MLX: the --max-kv-size bound stamped at spawn).
+    # Handed to the client so the first-chunk watchdog ceiling scales with the
+    # window a full-window prompt can now legitimately fill -- without it, the
+    # dynamic context window would recreate the #573 kill (a healthy long
+    # prefill cut at the fixed 900 s ceiling). Fresh per turn: this factory
+    # runs on every turn, after any model swap. None = window unknown.
+    window_probe = getattr(engine, "effective_context_tokens", None)
+    effective_window = window_probe() if callable(window_probe) else None
+
     # Extra sampling params absent from the OpenAI wire schema. mlx_vlm.server reads
     # the HF names natively; llama.cpp engines translate them to their wire names
     # (repeat_penalty / repeat_last_n) via ``_translate_payload_kwargs``. Sent via
@@ -136,6 +146,7 @@ def build_chat_model(
         # Off here; ``Erudi_Chat_OpenAI._astream`` enforces the two budgets that
         # replace it.
         stream_chunk_timeout=None,
+        effective_context_tokens=effective_window,
         streaming=True,
         stream_usage=False,  # local servers may not emit usage in SSE; summarization triggers on count
     )

@@ -217,15 +217,21 @@ the client switches off):
 
 | Silence | Budget | Why |
 |---|---|---|
-| Before the first chunk | `clamp(120 s, 30 s + estimated prompt tokens / 25, 900 s)` | The model is reading the prompt. That grows with the conversation: 6878 tokens prefill in 132.9 s on an Apple M4 base running a 9B model, and a CPU-only machine is slower still. |
+| Before the first chunk | `clamp(120 s, 30 s + estimated prompt tokens / 25, ceiling)` | The model is reading the prompt. That grows with the conversation: 6878 tokens prefill in 132.9 s on an Apple M4 base running a 9B model, and a CPU-only machine is slower still. |
 | Between chunks | 120 s | Decode emits a token every few milliseconds on every engine, so two minutes of silence is a hang. |
+
+The ceiling derives from the loaded child's allocated context window
+(`effective_context_tokens`, stamped on the client per turn by the model factory):
+`max(900 s, 30 s + window / 25)`, so a legitimately full window is never killed
+mid-prefill — with the dynamic context window, a flat 900 s would recreate the very
+kill the two budgets fixed. An unknown window keeps 900 s.
 
 The prompt size is bounded, not averaged: one token per UTF-8 byte of text, plus a flat
 allowance per message and per image part. A byte-level tokenizer cannot emit more tokens
 than the text has bytes, so the bound holds for every language — where a character-based
 heuristic would under-count Chinese or Japanese threefold and end a healthy turn on
 exactly the machines this budget exists for. The bound is loose on English, so long
-histories reach the 900 s ceiling; that only delays the detection of a true hang. Both
+histories reach the ceiling; that only delays the detection of a true hang. Both
 budgets apply per model call, so each hop of a tool-calling turn gets its own.
 
 Either budget expiring raises `GenerationTimeoutException`, which the runner turns into

@@ -981,6 +981,70 @@ class TestSpawnApiKey:
 
 
 @pytest.mark.unit
+class TestSpawnContextBound:
+    """The MLX window mechanism, distinct from llama-server's on purpose.
+
+    mlx_vlm.server has no upfront KV allocation and no fit: its cache grows
+    lazily and, unbounded, a prompt beyond the model's trained window returns
+    HTTP 200 with silently degenerate output. `--max-kv-size W` is a clean
+    PREFLIGHT VALIDATOR (an oversized request gets a 400 naming the exact
+    budget; it is NOT a rotating cache), so the engine derives W from the
+    local artifact's own config.json at spawn and passes it. No derivable
+    window -> no flag (today's unbounded behaviour), never an invented number.
+    """
+
+    def _model_dir_with_config(self, tmp_path, config: dict) -> Path:
+        model_dir = tmp_path / "model"
+        model_dir.mkdir(exist_ok=True)
+        (model_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        return model_dir
+
+    def _spawn(self, model_dir: Path):
+        captured: dict = {}
+
+        def _fake_process(*, target, args, daemon):
+            captured["argv"] = list(args[0])
+            return MagicMock(pid=4321)
+
+        with patch("src.engines.mlx_engine.mp.Process", side_effect=_fake_process):
+            handle = MLX_Engine._spawn_child(model_path=model_dir, alias="erudi-x", port=9087)
+        return handle, captured["argv"]
+
+    def test_trained_window_becomes_the_preflight_bound(self, tmp_path):
+        model_dir = self._model_dir_with_config(tmp_path, {"max_position_embeddings": 32768})
+        handle, argv = self._spawn(model_dir)
+        assert "--max-kv-size" in argv
+        assert argv[argv.index("--max-kv-size") + 1] == "32768"
+        assert handle["context_tokens"] == 32768
+
+    def test_nested_text_config_window_is_found(self, tmp_path):
+        # A VLM keeps its text model's window in a sub-config; the PR-A
+        # aliases in read_local_generation_hints cover it.
+        model_dir = self._model_dir_with_config(
+            tmp_path, {"text_config": {"max_position_embeddings": 8192}}
+        )
+        handle, argv = self._spawn(model_dir)
+        assert argv[argv.index("--max-kv-size") + 1] == "8192"
+        assert handle["context_tokens"] == 8192
+
+    def test_no_derivable_window_spawns_unbounded_with_one_warning(self, tmp_path, caplog):
+        model_dir = self._model_dir_with_config(tmp_path, {"architectures": ["FooModel"]})
+        with caplog.at_level(logging.WARNING):
+            handle, argv = self._spawn(model_dir)
+        assert "--max-kv-size" not in argv
+        assert handle["context_tokens"] is None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+
+    def test_missing_config_file_spawns_unbounded(self, tmp_path):
+        model_dir = tmp_path / "model"
+        model_dir.mkdir()
+        handle, argv = self._spawn(model_dir)
+        assert "--max-kv-size" not in argv
+        assert handle["context_tokens"] is None
+
+
+@pytest.mark.unit
 class TestMlxVlmApiKeyGuard:
     """The upstream fact the MLX key relies on, pinned against the installed mlx-vlm.
 

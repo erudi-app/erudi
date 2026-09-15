@@ -296,14 +296,27 @@ class TestMaxTokensCap:
         assert resolve_sampling_defaults(_Llm(None)).max_tokens_cap == UNBOUNDED_CONTEXT_TOKENS
 
     def test_real_engines_expose_context_window(self, monkeypatch):
+        # Deliberately inverted from the pre-dynamic-context behaviour: the
+        # llama.cpp engines no longer declare a hardcoded 4096 ceiling. Unset
+        # ERUDI_CTX means "no configured ceiling" (the engine's own fit
+        # resolves the ALLOCATED window at load; read it via
+        # ``effective_context_tokens``); ERUDI_CTX set is the explicit pin.
         from src.engines.base_engine import BaseEngine
         from src.engines.base_llama_cpp_engine import BaseLlamaCppEngine
 
         assert BaseEngine.max_context_tokens() is None
         monkeypatch.delenv("ERUDI_CTX", raising=False)
-        assert BaseLlamaCppEngine.max_context_tokens() == 4096
+        assert BaseLlamaCppEngine.max_context_tokens() is None
         monkeypatch.setenv("ERUDI_CTX", "8192")
         assert BaseLlamaCppEngine.max_context_tokens() == 8192
+
+    def test_invalid_erudi_ctx_degrades_to_no_ceiling(self, monkeypatch):
+        from src.engines.base_llama_cpp_engine import BaseLlamaCppEngine
+
+        monkeypatch.setenv("ERUDI_CTX", "not-a-number")
+        assert BaseLlamaCppEngine.max_context_tokens() is None
+        monkeypatch.setenv("ERUDI_CTX", "")
+        assert BaseLlamaCppEngine.max_context_tokens() is None
 
 
 class TestToDict:

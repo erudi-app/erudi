@@ -137,6 +137,11 @@ export default function LandingPage() {
       // Resolved sampling defaults (#388): the details modal reads `source`
       // to say when the publisher gives no recommendation.
       sampling_defaults: model.sampling_defaults,
+      // Context windows: trained (a fact of the model) and allocated (what
+      // the engine's loaded child runs with; null unless this model is the
+      // currently loaded one).
+      context_window: model.context_window,
+      allocated_context_window: model.allocated_context_window,
       metadata,
       rawMetadata: model.model_metadata,
     };
@@ -168,6 +173,11 @@ export default function LandingPage() {
       weights_available: model.weights_available,
       // Resolved sampling defaults (#388), read by the details modal.
       sampling_defaults: model.sampling_defaults,
+      // Context windows: trained (a fact of the model) and allocated (what
+      // the engine's loaded child runs with; null unless this model is the
+      // currently loaded one).
+      context_window: model.context_window,
+      allocated_context_window: model.allocated_context_window,
       metadata,
       rawMetadata: model.model_metadata,
     };

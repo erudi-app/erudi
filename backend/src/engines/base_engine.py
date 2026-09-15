@@ -92,6 +92,23 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         _max_idle_time: Seconds before automatic memory cleanup (default: 300).
         MODEL_MAPPING: Dictionary mapping model architectures to classes.
 
+    Context windows -- two numbers that must never be confused:
+
+    * ``max_context_tokens()`` is the **declared ceiling**: the window the
+      configuration imposes on every spawn (``ERUDI_CTX`` when the user pinned
+      one), or ``None`` when nothing is imposed. It exists before any model is
+      loaded and never depends on which model is.
+    * ``effective_context_tokens()`` is the **allocated window**: what the
+      CURRENTLY LOADED child actually runs with, read from the live engine
+      handle. It only exists while a child is up, differs per model AND per
+      machine/memory state (llama-server's fit can shrink it below the model's
+      trained window), and is therefore never stored in the database.
+
+    Consumers that budget or warn against "the window" (compaction thresholds,
+    the first-token watchdog, the UI's allocated-window display) must read the
+    allocated window; only the sampling resolver's ``max_tokens_cap`` reads the
+    declared ceiling, because it describes configuration, not a running child.
+
     Note:
         Do not instantiate directly. Use get_engine() to obtain the appropriate
         engine class, then call class methods for operations.
@@ -122,9 +139,35 @@ class BaseEngine(ABC, metaclass=EngineMeta):
 
     @classmethod
     def max_context_tokens(cls) -> Optional[int]:
-        """The engine-imposed context window in tokens, or ``None`` when the engine
-        sets none (MLX). llama.cpp engines spawn with a fixed ``-c`` and override
-        this; the per-model sampling resolver (#388) caps ``max_tokens`` on it."""
+        """The DECLARED CEILING: the configured context window imposed on every
+        spawn, or ``None`` when none is configured (the default everywhere).
+
+        llama.cpp engines override this to return ``ERUDI_CTX`` when the user
+        pinned one (then passed as ``-c``); MLX never imposes one. This is a
+        configuration fact, not a runtime one -- for the window the loaded
+        child actually runs with, read ``effective_context_tokens()``. The
+        per-model sampling resolver (#388) caps ``max_tokens`` on this value
+        when it exists."""
+        return None
+
+    @classmethod
+    def effective_context_tokens(cls) -> Optional[int]:
+        """The ALLOCATED WINDOW: the context window of the CURRENTLY LOADED
+        child, in tokens, or ``None`` when no child is up or the window could
+        not be read.
+
+        Read from the live engine handle (``_model``): llama.cpp engines stamp
+        it from the server's ``/props`` after boot (their fit resolves the
+        window at load and may shrink it below the model's trained window when
+        memory demands); MLX stamps the preflight bound it passed at spawn.
+        Never persisted anywhere -- the same model gets a different window on a
+        different machine or memory state, so the only truthful source is the
+        running child."""
+        model = cls._model
+        if isinstance(model, dict):
+            window = model.get("context_tokens")
+            if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+                return window
         return None
 
     # Stored model links that download fine but FAIL TO RUN on this engine

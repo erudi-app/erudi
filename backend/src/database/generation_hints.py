@@ -213,9 +213,12 @@ def _hints_of(llm: Any) -> Dict[str, Any]:
 def max_tokens_cap(context_length: Any, engine: Any = None) -> int:
     """``min(model context window, engine context window)``, both optional.
 
-    The engine window is the llama.cpp ``-c`` (``ERUDI_CTX``, 4096 by default);
-    MLX has none. Informational for the UI (the max-tokens field's ceiling, the
-    #136 "2000" item) and a soft server-side clamp -- never a rejection.
+    The engine window is the DECLARED ceiling (``max_context_tokens``): the
+    ``ERUDI_CTX`` pin on llama.cpp engines when the user set one, ``None``
+    everywhere else -- with no pin the engines resolve their ALLOCATED window
+    at load and this cap simply falls back to the model's own window.
+    Informational for the UI (the max-tokens field's ceiling, the #136 "2000"
+    item) and a soft server-side clamp -- never a rejection.
     """
     if engine is None:
         from src.core import config

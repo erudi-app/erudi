@@ -8,9 +8,12 @@ Shared subprocess + SSE lifecycle is covered by `test_base_chat_server_engine.py
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
+from unittest.mock import MagicMock, patch
 
 import pytest
+import requests
 
 from src.core.exceptions import EngineException
 from src.engines.cpu_engine import CPU_Engine
@@ -44,11 +47,16 @@ class TestCpuEngineHierarchy:
 
 @pytest.mark.unit
 class TestSpawnContextAndArgv:
-    def test_prepare_spawn_context_forces_zero_gpu_layers(self):
+    def test_prepare_spawn_context_forces_zero_gpu_layers(self, monkeypatch):
+        monkeypatch.delenv("ERUDI_CTX", raising=False)
         ctx = CPU_Engine._prepare_spawn_context()
         assert ctx["gpu_layers"] == 0
         assert ctx["threads"] >= 1
-        assert ctx["ctx_size"] >= 1
+        # Deliberate inversion of the old `>= 1` assertion: without ERUDI_CTX
+        # the engine no longer chooses a number — llama-server's own fit
+        # resolves the window at load (trained window, reduced only when the
+        # machine's memory demands it).
+        assert ctx["ctx_size"] is None
 
     def test_prepare_spawn_context_honours_erudi_ctx_env(self, monkeypatch):
         monkeypatch.setenv("ERUDI_CTX", "8192")
@@ -79,6 +87,23 @@ class TestSpawnContextAndArgv:
         assert "-c 4096" in joined
         assert "--threads 8" in joined
         assert "-ngl 0" in joined  # CPU forces 0
+
+    def test_build_spawn_argv_omits_c_without_a_pinned_window(self):
+        """No ERUDI_CTX -> no ``-c`` at all: llama-server's own fit (ON by
+        default in the pinned b10883) then resolves the window to the model's
+        trained window and reduces it only against measured free memory.
+        Passing any number here would either shrink the catalog (the old
+        hardcoded 4096) or pay KV memory for nothing."""
+        argv = CPU_Engine._build_spawn_argv(
+            llama_server=Path("/bin/llama-server"),
+            model_gguf=Path("/m.gguf"),
+            alias="erudi-7",
+            port=8123,
+            ctx_size=None,
+            threads=8,
+            gpu_layers=0,
+        )
+        assert "-c" not in [str(x) for x in argv]
 
     def test_build_spawn_argv_keeps_native_reasoning_extraction_on(self):
         """#554: no ``--reasoning-format`` override. llama-server's default
@@ -218,3 +243,121 @@ class TestCpuEngineConfig:
     def test_payload_model_value_returns_handle_alias(self):
         """LlamaCpp engines use the handle's alias (not the MLX sentinel)."""
         assert CPU_Engine._payload_model_value({"alias": "erudi-x"}) == "erudi-x"
+
+
+# =====================================================================
+# UNIT — _read_server_properties (the allocated window, read after boot)
+# =====================================================================
+
+
+def _props_handle() -> dict:
+    return {
+        "pid": 1,
+        "proc": MagicMock(),
+        "port": 27200,
+        "base_url": "http://127.0.0.1:27200",
+        "alias": "erudi-7",
+        "model_path": "/m.gguf",
+        "api_key": "spawn-key",
+    }
+
+
+def _props_payload() -> dict:
+    """The `/props` shape the pinned b10883 answers (verified on a real spawn
+    of the bundled binary against SmolLM2-135M without `-c`)."""
+    return {
+        "default_generation_settings": {"n_ctx": 40960},
+        "chat_template_caps": {
+            "supports_reasoning_effort": False,
+            "supports_system_role": True,
+        },
+        "chat_template": "{{ bos_token }}...",
+    }
+
+
+@pytest.mark.unit
+class TestReadServerProperties:
+    """After the probe, ONE bounded `GET /props` reads what llama-server
+    actually allocated: `default_generation_settings.n_ctx` is the window the
+    engine's fit resolved (trained window, or less when memory demanded it) —
+    the value every percentage, warning and budget downstream must use, which
+    the declared ceiling (ERUDI_CTX) cannot substitute for."""
+
+    def test_success_stamps_window_caps_and_template_on_the_handle(self):
+        handle = _props_handle()
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = _props_payload()
+        with patch("src.engines.base_llama_cpp_engine.requests.get", return_value=resp) as mock_get:
+            CPU_Engine._read_server_properties(handle)
+        assert handle["context_tokens"] == 40960
+        assert handle["chat_template_caps"] == {
+            "supports_reasoning_effort": False,
+            "supports_system_role": True,
+        }
+        assert handle["chat_template"] == "{{ bos_token }}..."
+        url = mock_get.call_args.args[0]
+        assert url == "http://127.0.0.1:27200/props"
+
+    def test_request_carries_the_spawn_key_and_a_bounded_timeout(self):
+        """The child only answers its own per-spawn key, and a wedged server
+        must not stall the load: the call is authenticated and bounded."""
+        handle = _props_handle()
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = _props_payload()
+        with patch("src.engines.base_llama_cpp_engine.requests.get", return_value=resp) as mock_get:
+            CPU_Engine._read_server_properties(handle)
+        kwargs = mock_get.call_args.kwargs
+        assert kwargs["headers"] == {"Authorization": "Bearer spawn-key"}
+        assert 0 < kwargs["timeout"] <= 5.0
+
+    def test_timeout_degrades_to_none_with_one_warning(self, caplog):
+        handle = _props_handle()
+        with patch(
+            "src.engines.base_llama_cpp_engine.requests.get",
+            side_effect=requests.Timeout("no answer"),
+        ):
+            with caplog.at_level(logging.WARNING):
+                CPU_Engine._read_server_properties(handle)
+        assert handle["context_tokens"] is None
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+
+    def test_http_500_degrades_to_none_with_one_warning(self, caplog):
+        handle = _props_handle()
+        resp = MagicMock(status_code=500, text="boom")
+        with patch("src.engines.base_llama_cpp_engine.requests.get", return_value=resp):
+            with caplog.at_level(logging.WARNING):
+                CPU_Engine._read_server_properties(handle)
+        assert handle["context_tokens"] is None
+        assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+    def test_garbage_body_degrades_to_none_with_one_warning(self, caplog):
+        handle = _props_handle()
+        resp = MagicMock(status_code=200)
+        resp.json.side_effect = ValueError("not json")
+        with patch("src.engines.base_llama_cpp_engine.requests.get", return_value=resp):
+            with caplog.at_level(logging.WARNING):
+                CPU_Engine._read_server_properties(handle)
+        assert handle["context_tokens"] is None
+        assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+    def test_missing_n_ctx_degrades_to_none_with_one_warning(self, caplog):
+        handle = _props_handle()
+        resp = MagicMock(status_code=200)
+        resp.json.return_value = {"chat_template": "t"}
+        with patch("src.engines.base_llama_cpp_engine.requests.get", return_value=resp):
+            with caplog.at_level(logging.WARNING):
+                CPU_Engine._read_server_properties(handle)
+        assert handle["context_tokens"] is None
+        assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+    def test_failure_never_raises_so_the_model_still_loads(self):
+        """Degradation is mandatory: a /props hiccup costs the window metadata,
+        never the model."""
+        handle = _props_handle()
+        with patch(
+            "src.engines.base_llama_cpp_engine.requests.get",
+            side_effect=requests.ConnectionError("refused"),
+        ):
+            CPU_Engine._read_server_properties(handle)  # must not raise
+        assert handle["context_tokens"] is None
