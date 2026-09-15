@@ -109,131 +109,237 @@ def test_there_is_no_fixed_ceiling_the_window_is_the_ceiling():
     assert budget > 900_000
 
 
-# ===================== the preflight-safety cap =====================
+# ===================== the exact-count retry =====================
 #
 # mlx_vlm.server validates `prompt + max_tokens <= window` BEFORE generating
 # and answers 400 when it does not hold (`_check_configured_context_budget`).
-# It counts the REAL tokenised prompt, so a budget sized from the chars/4
-# estimate can ask for more window than exists and make the app reject its own
-# turn -- worst on CJK, where chars/4 under-counts threefold. The watchdog's
-# UTF-8 byte bound is a PROVABLE upper bound on that real prompt, so capping
-# the budget at `window - byte_bound` makes a self-inflicted 400 arithmetically
-# impossible. Only on the engine that preflights: on llama-server (which just
-# truncates `n_predict` server-side) the same cap would shrink long English
-# budgets by thousands of tokens for nothing.
+# It counts the REAL tokenised prompt, which chars/4 under-counts threefold on
+# CJK -- far past what the margin absorbs -- so a budget sized from the
+# estimate can make the app reject its own turn.
+#
+# The fix is precision, not pessimism: that 400 NAMES the exact prompt count,
+# so the call is retried ONCE with a budget computed from it. Capping the
+# budget with the watchdog's byte bound instead would be provably safe but
+# costs English dearly (the bound over-counts it fourfold: a turn of ~8000
+# real tokens in a 32k window would drop from a ~24000-token budget to the
+# 512 floor, silently). The retry costs nothing on English, which never
+# triggers the 400, and one instant local round-trip on the rare turn that
+# does. The estimators stay in their lane: chars/4 sizes, bytes bound the
+# watchdog, and the SERVER supplies the only exact number anyone has.
 
 _CJK = "这是一个很长的中文句子，用来测试预算的计算方式。" * 40
 
+_MLX_400 = (
+    "Error code: 400 - Request needs {needed} context tokens "
+    "({prompt} prompt + {generation} max generation), but MAX_KV_SIZE is {window}."
+)
 
-def _fits_the_preflight(messages, window, budget):
-    """The inequality mlx_vlm.server checks, with the bound standing in for the
-    real prompt (which is provably no larger)."""
-    return byte_bound_estimate(messages) + budget <= window
+
+class _PreflightRejection(Exception):
+    """The mlx_vlm.server 400 as the openai client surfaces it."""
+
+    def __init__(self, prompt, generation, window):
+        super().__init__(
+            _MLX_400.format(
+                needed=prompt + generation, prompt=prompt, generation=generation, window=window
+            )
+        )
 
 
-def test_cjk_on_a_preflighting_engine_is_capped_by_the_byte_bound():
-    messages = [_Msg(_CJK)]
+def _retry_budget(exc, window):
+    from src.agents.chat_model import preflight_retry_budget
+
+    return preflight_retry_budget(exc, window)
+
+
+def test_the_retry_budget_comes_from_the_servers_own_prompt_count():
+    from src.agents.chat_model import PREFLIGHT_RETRY_MARGIN_TOKENS
+
     window = 32768
-    uncapped = compute_output_budget(messages, window)
 
-    capped = compute_output_budget(
-        messages, window, prompt_upper_bound_tokens=byte_bound_estimate(messages)
+    budget = _retry_budget(
+        _PreflightRejection(prompt=30000, generation=5000, window=window), window
     )
 
-    assert capped < uncapped
-    assert capped == window - byte_bound_estimate(messages)
-    assert _fits_the_preflight(messages, window, capped)
+    assert budget == window - 30000 - PREFLIGHT_RETRY_MARGIN_TOKENS
+    assert 30000 + budget <= window
 
 
-def test_the_same_cjk_turn_without_the_cap_would_overflow_the_preflight():
-    # The regression this cap exists for: chars/4 alone asks for more window
-    # than the tokeniser will leave.
-    messages = [_Msg(_CJK)]
-    window = 32768
+def test_the_retry_budget_can_fall_below_the_normal_floor():
+    # A tiny honest budget beats an error: the turn still answers, briefly.
+    window = 4096
 
-    assert not _fits_the_preflight(messages, window, compute_output_budget(messages, window))
+    budget = _retry_budget(_PreflightRejection(prompt=4000, generation=900, window=window), window)
 
-
-def test_the_cap_never_applies_on_the_engine_that_clamps():
-    # llama-server truncates `n_predict` server-side, so nothing there needs a
-    # provable bound and the chars/4 formula stands untouched -- which is why
-    # the cap is wired to an engine fact rather than applied everywhere.
-    messages = [_Msg("the quick brown fox jumps over the lazy dog " * 200)]
-    window = 131_072
-
-    assert compute_output_budget(messages, window) == window - estimate_prompt_tokens(
-        messages
-    ) - max(MARGIN_FLOOR_TOKENS, int(MARGIN_FRACTION * estimate_prompt_tokens(messages)))
+    assert 1 <= budget < OUTPUT_BUDGET_FLOOR_TOKENS
+    assert 4000 + budget <= window
 
 
-def test_the_cap_costs_english_budget_because_the_bound_is_loose_there():
-    """The price of a PROVABLE bound, pinned so it cannot be forgotten.
-
-    One token per UTF-8 byte over-counts English roughly fourfold, so on a
-    preflighting engine a long English turn is capped far below what the
-    chars/4 formula would give it -- and once the bound alone fills the window
-    (a real prompt around a quarter of it) the budget sits on the floor. The
-    answer is still generated, just shorter. Removing this cost needs a REAL
-    token count rather than a bound; the parameter is shaped to take one
-    (pass the exact count and the cap stops costing anything).
-    """
-    window = 32768
-    messages = [_Msg(_text(8000))]  # ~8000 real English tokens
-    bound = byte_bound_estimate(messages)
-
-    capped = compute_output_budget(messages, window, prompt_upper_bound_tokens=bound)
-
-    assert compute_output_budget(messages, window) > 20_000
-    assert capped < 1_000
-    # An exact count in the same parameter costs nothing: the formula wins.
-    exact = compute_output_budget(
-        messages, window, prompt_upper_bound_tokens=estimate_prompt_tokens(messages)
-    )
-    assert exact == compute_output_budget(messages, window)
-
-
-def test_a_long_english_prompt_on_a_preflighting_engine_stays_within_the_window():
-    messages = [_Msg("the quick brown fox jumps over the lazy dog " * 200)]
-    window = 16384
-    bound = byte_bound_estimate(messages)
-
-    budget = compute_output_budget(messages, window, prompt_upper_bound_tokens=bound)
-
-    assert budget >= OUTPUT_BUDGET_FLOOR_TOKENS
-
-
-def test_the_cap_never_goes_below_the_floor():
-    # A prompt whose BOUND already fills the window: the floor stands, and the
-    # engine's own preflight is then free to reject a genuinely full window --
-    # which is the honest answer, not something to paper over with a 0-token
-    # call.
-    messages = [_Msg(_text(3000))]
-    window = 2048
-
-    budget = compute_output_budget(
-        messages, window, prompt_upper_bound_tokens=byte_bound_estimate(messages)
-    )
-
-    assert budget == OUTPUT_BUDGET_FLOOR_TOKENS
-
-
-def test_no_bound_means_no_cap():
-    messages = [_Msg(_CJK)]
-
-    assert compute_output_budget(messages, 32768, prompt_upper_bound_tokens=None) == (
-        compute_output_budget(messages, 32768)
-    )
-
-
-def test_the_override_still_wins_over_the_cap():
-    messages = [_Msg(_CJK)]
+def test_a_genuine_overflow_is_not_retried():
+    # The prompt ALONE fills the window: no budget makes this request fit, and
+    # the runner's curated overflow turn is the honest answer.
+    window = 4096
 
     assert (
-        compute_output_budget(
-            messages, 32768, override=99, prompt_upper_bound_tokens=byte_bound_estimate(messages)
-        )
-        == 99
+        _retry_budget(_PreflightRejection(prompt=4096, generation=8, window=window), window) is None
     )
+    assert (
+        _retry_budget(_PreflightRejection(prompt=9000, generation=8, window=window), window) is None
+    )
+
+
+def test_an_unrelated_failure_is_not_retried():
+    assert _retry_budget(Exception("connection reset by peer"), 32768) is None
+
+
+def test_the_llama_overflow_shape_is_not_retried():
+    # llama-server clamps `n_predict` instead of rejecting on this axis, so a
+    # 400 from it is a genuine overflow, never a budget miscount.
+    class _Llama(Exception):
+        body = {"type": "exceed_context_size_error", "n_prompt_tokens": 9030, "n_ctx": 8192}
+
+    assert _retry_budget(_Llama("Error code: 400"), 8192) is None
+
+
+def test_no_window_means_no_retry():
+    assert (
+        _retry_budget(_PreflightRejection(prompt=30000, generation=5000, window=32768), None)
+        is None
+    )
+
+
+async def test_a_cjk_turn_is_retried_once_with_the_exact_budget(monkeypatch):
+    from langchain_openai import ChatOpenAI
+
+    from src.agents.chat_model import PREFLIGHT_RETRY_MARGIN_TOKENS
+
+    window = 32768
+    real_prompt = 30000
+    attempts = []
+
+    async def _server(self, messages, *args, **kwargs):
+        attempts.append(kwargs.get("max_tokens"))
+        if real_prompt + kwargs["max_tokens"] > window:
+            raise _PreflightRejection(real_prompt, kwargs["max_tokens"], window)
+        yield "answer"
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    client = _client(max_tokens=1234, effective_context_tokens=window)
+
+    chunks = [c async for c in client._astream([HumanMessage(_CJK)])]
+
+    assert chunks == ["answer"]
+    assert len(attempts) == 2, "exactly one retry"
+    assert attempts[0] == compute_output_budget([HumanMessage(_CJK)], window)
+    assert attempts[1] == window - real_prompt - PREFLIGHT_RETRY_MARGIN_TOKENS
+
+
+async def test_an_english_turn_is_never_retried(monkeypatch):
+    from langchain_openai import ChatOpenAI
+
+    window = 32768
+    real_prompt = 8000
+    attempts = []
+
+    async def _server(self, messages, *args, **kwargs):
+        attempts.append(kwargs.get("max_tokens"))
+        if real_prompt + kwargs["max_tokens"] > window:
+            raise _PreflightRejection(real_prompt, kwargs["max_tokens"], window)
+        yield "answer"
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    client = _client(max_tokens=1234, effective_context_tokens=window)
+
+    chunks = [c async for c in client._astream([HumanMessage(_text(8000))])]
+
+    assert chunks == ["answer"]
+    assert len(attempts) == 1, "chars/4 is accurate on English: nothing to correct"
+
+
+async def test_a_genuine_overflow_reaches_the_caller_untouched(monkeypatch):
+    from langchain_openai import ChatOpenAI
+
+    window = 4096
+    attempts = []
+
+    async def _server(self, messages, *args, **kwargs):
+        attempts.append(kwargs.get("max_tokens"))
+        raise _PreflightRejection(prompt=9000, generation=kwargs["max_tokens"], window=window)
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    client = _client(max_tokens=1234, effective_context_tokens=window)
+
+    with pytest.raises(_PreflightRejection) as raised:
+        async for _ in client._astream([HumanMessage(_CJK)]):
+            pass
+
+    assert len(attempts) == 1, "a prompt that alone overflows is never retried"
+    # The runner parses THIS exception into its curated overflow turn.
+    from src.agents.overflow import parse_context_overflow
+
+    assert parse_context_overflow(raised.value).context_tokens == window
+
+
+async def test_a_rejection_after_the_first_chunk_is_never_retried(monkeypatch):
+    # Retrying mid-stream would replay text the user has already seen.
+    from langchain_openai import ChatOpenAI
+
+    attempts = []
+
+    async def _server(self, messages, *args, **kwargs):
+        attempts.append(kwargs.get("max_tokens"))
+        yield "partial"
+        raise _PreflightRejection(prompt=30000, generation=5000, window=32768)
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    client = _client(max_tokens=1234, effective_context_tokens=32768)
+
+    seen = []
+    with pytest.raises(_PreflightRejection):
+        async for chunk in client._astream([HumanMessage(_CJK)]):
+            seen.append(chunk)
+
+    assert seen == ["partial"]
+    assert len(attempts) == 1
+
+
+async def test_the_retry_gets_its_own_first_chunk_budget(monkeypatch):
+    """The watchdog clock restarts on the retry, deliberately.
+
+    The rejection arrives from the preflight BEFORE any prefill, so the first
+    attempt consumed effectively none of its budget; the retry is the attempt
+    that actually prefills, and it must get the full budget its prompt size
+    earns. Sharing one clock would charge the retry for a wait that never
+    happened.
+    """
+    from langchain_openai import ChatOpenAI
+
+    from src.agents import chat_model as chat_model_module
+
+    budgets = []
+    real = chat_model_module.first_chunk_budget_s
+
+    def _spy(estimated, effective_window_tokens=None):
+        budgets.append(real(estimated, effective_window_tokens))
+        return budgets[-1]
+
+    monkeypatch.setattr(chat_model_module, "first_chunk_budget_s", _spy)
+
+    window = 32768
+    attempts = []
+
+    async def _server(self, messages, *args, **kwargs):
+        attempts.append(kwargs.get("max_tokens"))
+        if len(attempts) == 1:
+            raise _PreflightRejection(prompt=30000, generation=kwargs["max_tokens"], window=window)
+        yield "answer"
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    client = _client(max_tokens=1234, effective_context_tokens=window)
+
+    assert [c async for c in client._astream([HumanMessage(_CJK)])] == ["answer"]
+    assert len(budgets) == 2 and budgets[0] == budgets[1]
 
 
 # ===================== no window reported =====================
@@ -448,12 +554,6 @@ class _Engine:
         return "m"
 
 
-class _PreflightingEngine(_Engine):
-    @staticmethod
-    def preflight_counts_output_tokens():
-        return True
-
-
 class _Llm:
     id = 7
     link = "/fake"
@@ -470,54 +570,6 @@ def test_the_factory_opts_a_client_out_of_the_budget(monkeypatch):
     assert not build_chat_model(
         _Llm(), temperature=0.3, top_p=0.8, max_tokens=12, auto_output_budget=False
     ).auto_output_budget
-
-
-def test_the_factory_stamps_the_engines_preflight_fact(monkeypatch):
-    from src.agents.model_factory import build_chat_model
-    from src.core import config
-
-    monkeypatch.setattr(config, "LLM_Engine", _Engine)
-    assert not build_chat_model(
-        _Llm(), temperature=0.3, top_p=0.8, max_tokens=55
-    ).preflight_counts_output
-
-    monkeypatch.setattr(config, "LLM_Engine", _PreflightingEngine)
-    assert build_chat_model(
-        _Llm(), temperature=0.3, top_p=0.8, max_tokens=55
-    ).preflight_counts_output
-
-
-def test_only_mlx_declares_that_its_preflight_counts_the_output():
-    from src.engines.base_engine import BaseEngine
-    from src.engines.cpu_engine import CPU_Engine
-    from src.engines.mlx_engine import MLX_Engine
-
-    assert BaseEngine.preflight_counts_output_tokens() is False
-    assert CPU_Engine.preflight_counts_output_tokens() is False
-    assert MLX_Engine.preflight_counts_output_tokens() is True
-
-
-async def test_a_preflighting_client_budgets_within_the_provable_bound(monkeypatch):
-    from langchain_openai import ChatOpenAI
-
-    captured: dict = {}
-
-    async def _capture(self, messages, *args, **kwargs):
-        captured.update(kwargs)
-        yield "chunk"
-
-    monkeypatch.setattr(ChatOpenAI, "_astream", _capture)
-    messages = [HumanMessage(_CJK)]
-    window = 32768
-    client = _client(max_tokens=1234, effective_context_tokens=window, preflight_counts_output=True)
-
-    assert [c async for c in client._astream(messages)] == ["chunk"]
-    assert _fits_the_preflight(messages, window, captured["max_tokens"])
-    # ...and a client on the other engine keeps the chars/4 budget.
-    plain = _client(max_tokens=1234, effective_context_tokens=window)
-    captured.clear()
-    assert [c async for c in plain._astream(messages)] == ["chunk"]
-    assert captured["max_tokens"] == compute_output_budget(messages, window)
 
 
 async def test_the_environment_override_wins_over_the_computed_budget(monkeypatch):

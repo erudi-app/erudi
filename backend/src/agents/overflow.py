@@ -20,6 +20,13 @@ Two wire shapes (established evidence):
   overflow when the ``MAX_KV_SIZE`` marker is present, since the marker is
   the stable part of the contract and the wording around it is not.
 
+Two consumers, both reading the same parse:
+
+- the runner, which turns an overflow into the curated, numbers-carrying turn;
+- ``chat_model.preflight_retry_budget``, which reads the MLX shape's
+  ``prompt_only_tokens`` to retry a call the engine rejected only because the
+  output budget was sized from an estimate that under-counted the prompt.
+
 Import-light and duck-typed on purpose: this module never imports ``openai``
 or ``langchain`` -- it reads ``exc.body`` (when present) and falls back to
 ``str(exc)``, so it stays a plain, fast, unit-testable module.
@@ -35,6 +42,7 @@ _LLAMA_OVERFLOW_TYPE = "exceed_context_size_error"
 _MLX_MARKER = "MAX_KV_SIZE"
 _MLX_NEEDS_PATTERN = re.compile(r"Request needs (\d+) context tokens")
 _MLX_LIMIT_PATTERN = re.compile(r"MAX_KV_SIZE is (\d+)")
+_MLX_PROMPT_PATTERN = re.compile(r"\((\d+) prompt")
 
 
 @dataclass(frozen=True)
@@ -48,6 +56,15 @@ class ContextOverflow:
 
     prompt_tokens: Optional[int]
     context_tokens: Optional[int]
+    # The prompt ALONE, without the generation budget that was requested
+    # alongside it -- mlx_vlm.server breaks the two out ("5037 context tokens
+    # (5029 prompt + 8 max generation)") and only that engine rejects on this
+    # axis. It is the one EXACT prompt count anything in the backend ever
+    # sees, which is what lets the output budget retry a rejected call with a
+    # figure instead of a guess (``chat_model.preflight_retry_budget``).
+    # ``None`` for the llama shape and for an MLX variant without the
+    # breakdown; the user-facing message uses ``prompt_tokens`` either way.
+    prompt_only_tokens: Optional[int] = None
 
 
 def parse_context_overflow(exc: object) -> Optional[ContextOverflow]:
@@ -91,9 +108,11 @@ def _parse_mlx_detail(text: str) -> Optional[ContextOverflow]:
         return None
     needs_match = _MLX_NEEDS_PATTERN.search(text)
     limit_match = _MLX_LIMIT_PATTERN.search(text)
+    prompt_match = _MLX_PROMPT_PATTERN.search(text)
     return ContextOverflow(
         prompt_tokens=_as_int(needs_match.group(1)) if needs_match else None,
         context_tokens=_as_int(limit_match.group(1)) if limit_match else None,
+        prompt_only_tokens=_as_int(prompt_match.group(1)) if prompt_match else None,
     )
 
 

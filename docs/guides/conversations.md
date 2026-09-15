@@ -93,13 +93,19 @@ the chat template's own tokens, the tool schemas, the system prompt.
 
 There is no fixed ceiling above that: the window is the ceiling.
 
-On Apple Silicon the budget is held under one more limit. `mlx_vlm.server` checks
-`prompt + budget ≤ window` before it generates and answers 400 when the sum does not fit, and it
-counts the real tokenised prompt — which the estimate above under-counts on scripts like Chinese
-or Japanese. So on that engine the budget is also capped at `window − upper bound of the prompt`,
-using the same provable bound (one token per UTF-8 byte) the first-token watchdog runs on. The app
-can then never reject its own turn. `llama-server` needs none of this: it trims its own generation
-against what is left of the window, so it keeps the formula unchanged.
+The prompt in that formula is an estimate — counting the real tokens would cost more than the
+budget it informs, on every hop of every turn. `llama-server` does not mind: it trims its own
+generation against what is actually left of the window. `mlx_vlm.server` does — it checks
+`prompt + budget ≤ window` against the real tokenised prompt before generating and rejects the
+whole call otherwise, and the estimate under-counts scripts like Chinese or Japanese by roughly
+threefold.
+
+That rejection carries its own cure: it names the exact prompt count. So the call is retried once,
+with a budget built from that number instead of an estimate. Nothing is lost — the rejection
+arrives before any generation — and the turn then answers normally. A prompt that fills the window
+on its own is not retried: no budget makes it fit, and it is reported as a genuine overflow with
+the real numbers (see [When the prompt no longer fits the context
+window](#when-the-prompt-no-longer-fits-the-context-window)).
 
 Two values still matter at the edges:
 

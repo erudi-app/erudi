@@ -48,17 +48,17 @@ clean up -- the two estimates have OPPOSITE failure costs:
   would over-count English ~4x and shrink real answer budgets by thousands of
   tokens -- a visible regression.
 
-The byte bound has a second job here, though: a SAFETY CAP on the engine whose
-own preflight counts ``prompt + max_tokens`` against the window and answers 400
-when the sum does not fit (mlx_vlm.server's
-``_check_configured_context_budget``). That preflight counts the REAL tokenised
-prompt, so a budget sized from chars/4 can ask for more window than exists and
-make the app reject its own turn -- badly on CJK, where chars/4 under-counts
-threefold and the margin is nowhere near enough to absorb it. Capping the
-budget at ``window - byte_bound`` makes that arithmetically impossible, because
-``byte_bound >= real prompt`` by construction. It applies ONLY to the
-preflighting engine: llama-server truncates ``n_predict`` server-side instead,
-where the same cap would shrink long English budgets for nothing.
+Under-counting is close to free on the budget side. llama-server truncates
+``n_predict`` server-side. mlx_vlm.server is stricter -- it validates
+``prompt + max_tokens <= window`` against the REAL tokenised prompt and answers
+400 -- and there the margin is nowhere near enough on CJK, where chars/4
+under-counts threefold. That is handled by PRECISION rather than pessimism:
+that 400 names the exact prompt count, so ``chat_model`` retries the call once
+with a budget computed from it. Capping the budget with the byte bound instead
+would be provably safe but would cost English dearly, since the bound
+over-counts it fourfold -- a measured ~24000-token budget would collapse to the
+512 floor on a turn of ~8000 real tokens in a 32k window, silently. The retry
+costs nothing on the text that never trips the check.
 
 ``tests/test_output_budget.py`` asserts the two estimators still disagree on a
 CJK string, so neither can silently adopt the other's.
@@ -125,23 +125,11 @@ def compute_output_budget(
     messages: Optional[Iterable[Any]],
     effective_window_tokens: Optional[int],
     override: Optional[int] = None,
-    prompt_upper_bound_tokens: Optional[int] = None,
 ) -> Optional[int]:
     """Tokens this call may generate, or ``None`` to leave the caller's value.
 
-    ``prompt_upper_bound_tokens`` is the PROVABLE upper bound on the prompt
-    (the watchdog's byte bound), and passing it additionally caps the budget at
-    ``window - bound``. Pass it when the engine's own preflight counts
-    ``prompt + max_tokens`` against the window and rejects the request when the
-    sum does not fit -- it is what keeps the app from rejecting its own turn on
-    a prompt chars/4 under-counted. Leave it ``None`` where the server
-    truncates instead (llama-server), so a long English turn keeps the full
-    budget the formula gives it. See the module docstring.
-
-    Pure: the environment is read by :func:`output_budget_override` and the
-    bound by the caller (which already computes it for the watchdog), so the
-    arithmetic stays testable on its own -- and this module never has to import
-    back from ``chat_model``.
+    Pure: the environment is read by :func:`output_budget_override`, which the
+    caller passes in, so the arithmetic stays testable on its own.
     """
     if override is not None:
         return override
@@ -160,11 +148,4 @@ def compute_output_budget(
         )
         return None
     margin = max(MARGIN_FLOOR_TOKENS, int(MARGIN_FRACTION * estimated))
-    budget = effective_window_tokens - estimated - margin
-    if prompt_upper_bound_tokens is not None:
-        budget = min(budget, effective_window_tokens - prompt_upper_bound_tokens)
-    # The floor stands even when the bound alone fills the window: a 0-token
-    # call is never the right answer. The preflight then rejects only if the
-    # REAL prompt plus 512 overflows, which is a genuinely full window -- and
-    # reporting that honestly is the overflow chantier's job, not this one's.
-    return max(OUTPUT_BUDGET_FLOOR_TOKENS, budget)
+    return max(OUTPUT_BUDGET_FLOOR_TOKENS, effective_window_tokens - estimated - margin)

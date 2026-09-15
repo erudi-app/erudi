@@ -11,7 +11,9 @@ four behaviours, each on the narrowest hook that expresses it:
    reason: it is the one hook holding the FINAL message list of a model call,
    so the budget is recomputed per model hop of a tool turn, each one against
    the history that hop actually sends. The arithmetic and the reasoning live
-   in ``src.agents.output_budget``.
+   in ``src.agents.output_budget``; the single retry that corrects a budget
+   the engine's own context check rejected lives here, beside the call it
+   replays (see ``Retrying a call the engine's context check rejected``).
 3. **The #554 reasoning extraction**, in ``_convert_chunk_to_generation_chunk``
    -- the single place every raw streamed chunk dict is converted to a
    LangChain chunk, so it is the last point where the dedicated reasoning
@@ -92,6 +94,7 @@ from functools import lru_cache
 from typing import Any, AsyncIterator, Iterable, Optional
 
 from src.agents.output_budget import compute_output_budget, output_budget_override
+from src.agents.overflow import parse_context_overflow
 from src.agents.reasoning_stream import REASONING_KWARG, extract_reasoning_delta
 from src.core.exceptions import GenerationTimeoutException
 from src.core.logging import logger
@@ -257,6 +260,58 @@ def first_chunk_budget_s(
     return min(max(FIRST_CHUNK_FLOOR_S, raw), ceiling)
 
 
+# --- Retrying a call the engine's context check rejected --------------------
+#
+# The output budget is sized from an ESTIMATE of the prompt (chars/4, see
+# src.agents.output_budget). llama-server clamps its own generation against
+# what is left of the window, so an over-estimate costs nothing there.
+# mlx_vlm.server does not: it validates `prompt + max_tokens <= window` against
+# the REAL tokenised prompt and answers 400. On text the estimate under-counts
+# -- Chinese and Japanese, roughly threefold -- the app would then reject its
+# own turn on a conversation that fits perfectly well.
+#
+# The rejection carries the cure: it names the exact prompt count. So the call
+# is retried once with a budget built from that number instead of an estimate.
+# The alternative, capping every budget with the watchdog's provable byte
+# bound, is safe but pessimistic in the wrong direction: that bound over-counts
+# English fourfold, and a measured 24 000-token budget collapsed to the 512
+# floor on an 8 000-token turn in a 32 k window. Precision beats pessimism, and
+# the rejection costs one instant local round-trip on the rare turn that hits it.
+#
+# Engine-agnostic by construction: the retry is triggered by the wire shape, so
+# a llama-server (which never produces it) never enters this path.
+PREFLIGHT_RETRY_MARGIN_TOKENS = 64
+
+
+def preflight_retry_budget(exc: Exception, window_tokens: Optional[int]) -> Optional[int]:
+    """The budget to retry ``exc``'s rejected call with, or ``None``: don't.
+
+    ``None`` means the failure is not a context check the budget can fix -- a
+    different error, an engine that clamps instead, an unparseable variant, no
+    known window, or a prompt that fills the window ON ITS OWN. That last case
+    is a GENUINE overflow: no budget makes it fit, so the exception must reach
+    the runner, whose curated turn tells the user the real numbers.
+
+    The retry keeps a small margin under the window rather than filling it to
+    the token: the count the server reports is for the prompt as it tokenised
+    it, and the retry sends the same messages, so the margin only has to cover
+    nothing at all -- it is there so an off-by-a-few in either direction costs
+    a few tokens of answer instead of a second rejection.
+    """
+    if not window_tokens or window_tokens <= 0:
+        return None
+    overflow = parse_context_overflow(exc)
+    if overflow is None or overflow.prompt_only_tokens is None:
+        return None
+    prompt_tokens = overflow.prompt_only_tokens
+    if prompt_tokens + 1 > window_tokens:
+        return None
+    # Below the normal 512 floor when the window is nearly full: a short honest
+    # answer beats an error, and the model stops at its own EOS well before the
+    # budget on most turns anyway.
+    return max(1, window_tokens - prompt_tokens - PREFLIGHT_RETRY_MARGIN_TOKENS)
+
+
 async def stream_with_two_phase_budget(
     source: AsyncIterator[Any],
     *,
@@ -343,22 +398,21 @@ def erudi_chat_openai_class():
         # through ``_astream``, so the distinction has to live here.
         auto_output_budget: bool = True
 
-        # Whether the child this client points at REJECTS a request whose
-        # prompt plus requested generation overflows the window (MLX's
-        # preflight validator) rather than clamping it (llama-server). Stamped
-        # by the factory from ``BaseEngine.preflight_counts_output_tokens()``.
-        # When it does, the budget below is additionally held under the byte
-        # bound, which is provably >= the real prompt -- otherwise a budget
-        # sized from the chars/4 estimate could make the app reject its own
-        # turn on text that estimate under-counts (CJK).
-        preflight_counts_output: bool = False
+        def _budgeted_stream(self, messages, estimated, *args, **kwargs):
+            """One attempt at the model call, under both watchdog budgets."""
+            return stream_with_two_phase_budget(
+                super()._astream(messages, *args, **kwargs),
+                # Read from the module (not captured) so the budgets stay one
+                # source of truth -- and patchable in tests.
+                first_budget_s=first_chunk_budget_s(
+                    estimated, effective_window_tokens=self.effective_context_tokens
+                ),
+                inter_budget_s=INTER_CHUNK_BUDGET_S,
+                estimated_prompt_tokens=estimated,
+                model_name=self.model_name,
+            )
 
         async def _astream(self, messages, *args, **kwargs):
-            # One byte-bound estimate, two consumers: the first-chunk watchdog
-            # budget below, and -- on a preflighting child -- the safety cap on
-            # the output budget. Both need an UPPER bound; only the output
-            # budget's SIZE comes from the chars/4 counter instead (the
-            # duality is spelled out in src.agents.output_budget).
             estimated = estimate_prompt_tokens(messages)
             # What this call may generate: the window minus what the turn
             # already occupies. Per model call, not per turn -- every hop of a
@@ -368,28 +422,51 @@ def erudi_chat_openai_class():
             # alone, which is what an engine with no reportable window gets.
             budget = (
                 compute_output_budget(
-                    messages,
-                    self.effective_context_tokens,
-                    override=output_budget_override(),
-                    prompt_upper_bound_tokens=(estimated if self.preflight_counts_output else None),
+                    messages, self.effective_context_tokens, override=output_budget_override()
                 )
                 if self.auto_output_budget
                 else None
             )
             if budget is not None:
                 kwargs["max_tokens"] = budget
-            source = super()._astream(messages, *args, **kwargs)
-            async for chunk in stream_with_two_phase_budget(
-                source,
-                # Read from the module (not captured) so the budgets stay one
-                # source of truth -- and patchable in tests.
-                first_budget_s=first_chunk_budget_s(
-                    estimated, effective_window_tokens=self.effective_context_tokens
-                ),
-                inter_budget_s=INTER_CHUNK_BUDGET_S,
-                estimated_prompt_tokens=estimated,
-                model_name=self.model_name,
-            ):
+
+            yielded = 0
+            try:
+                async for chunk in self._budgeted_stream(messages, estimated, *args, **kwargs):
+                    yielded += 1
+                    yield chunk
+                return
+            except Exception as exc:
+                # The budget was sized from an estimate; mlx_vlm.server checks
+                # the REAL prompt and rejects the whole call when the two do
+                # not fit together. Its rejection NAMES the exact prompt count,
+                # so the one thing missing is now in hand: retry once with a
+                # budget that fits for certain. Only before the first chunk --
+                # mid-stream there is nothing to retry, the user has already
+                # seen text. Only once, and only for that specific wire shape,
+                # so nothing else in the 400 space is silently replayed.
+                retry_budget = (
+                    preflight_retry_budget(exc, self.effective_context_tokens)
+                    if yielded == 0
+                    else None
+                )
+                if retry_budget is None:
+                    raise
+                logger.info(
+                    f"Output budget overshot the engine's context check; retrying once "
+                    f"with the server's own prompt count: max_tokens={retry_budget}, "
+                    f"model={self.model_name}"
+                )
+
+            kwargs["max_tokens"] = retry_budget
+            # A FRESH watchdog clock on purpose: the rejection came from the
+            # preflight, before any prefill, so the first attempt spent
+            # essentially none of its budget. The retry is the attempt that
+            # actually prefills and must get the full budget its prompt size
+            # earns -- charging it for a wait that never happened would
+            # recreate the #573 kill on exactly the long turns this path exists
+            # for.
+            async for chunk in self._budgeted_stream(messages, estimated, *args, **kwargs):
                 yield chunk
 
         def _get_request_payload(self, input_, *, stop=None, **kwargs):

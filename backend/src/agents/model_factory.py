@@ -89,14 +89,6 @@ def build_chat_model(
     window_probe = getattr(engine, "effective_context_tokens", None)
     effective_window = window_probe() if callable(window_probe) else None
 
-    # Whether this engine's child rejects an over-budget request instead of
-    # clamping it (MLX's preflight validator vs llama-server's n_predict
-    # clamp). The output budget holds itself under a provable prompt bound on
-    # the ones that reject, so the app can never reject its own turn.
-    # (getattr keeps test stubs and non-server engines working.)
-    preflight_probe = getattr(engine, "preflight_counts_output_tokens", None)
-    preflight_counts_output = bool(preflight_probe()) if callable(preflight_probe) else False
-
     # Extra sampling params absent from the OpenAI wire schema. mlx_vlm.server reads
     # the HF names natively; llama.cpp engines translate them to their wire names
     # (repeat_penalty / repeat_last_n) via ``_translate_payload_kwargs``. Sent via
@@ -162,7 +154,6 @@ def build_chat_model(
         stream_chunk_timeout=None,
         effective_context_tokens=effective_window,
         auto_output_budget=auto_output_budget,
-        preflight_counts_output=preflight_counts_output,
         streaming=True,
         stream_usage=False,  # local servers may not emit usage in SSE; summarization triggers on count
     )
