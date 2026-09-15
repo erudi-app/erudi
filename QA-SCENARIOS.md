@@ -124,7 +124,7 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When a conversation reaches about **80 % of the allocated window**, then it is compacted automatically — the on-screen history is untouched, later answers still refer to earlier turns, and `backend.log` records the summarization.
 - [ ] *(Apple Silicon)* When the **machine's memory** nears saturation (under ~15 % margin), then compaction fires on that signal even well below 80 % of the window — the memory signal exists only on MLX, whose cache grows with usage; the llama.cpp engines allocate theirs in full at load.
 - [ ] *(Apple Silicon)* When even compacting down to the last few turns could not restore the memory margin, then — and only then — an **amber notice** appears in the conversation saying the machine's memory is nearly saturated and quoting how much this conversation represents; it never appears while compaction can still absorb the pressure.
-- [ ] When I ask about something that only existed in a **compacted-away** turn, then the answer still knows it (the summary carried it).
+- [ ] When I ask about something that only existed in a **compacted-away** turn, then the answer still knows it — the summary lists user-stated facts first, by design *(summary quality is model-bound: acceptance = the fact survives on a mid-size model; a very small summarizer may still lose it)*.
 - [ ] When a conversation is fresh and short, then compaction never fires.
 - [ ] When the amber memory notice is shown, then it is **translated** (fr/es/zh — not English-only), it never lands in the answer bubble or in what the copy button copies, and it does **not** stick to the conversation after a reload once the pressure is gone.
 

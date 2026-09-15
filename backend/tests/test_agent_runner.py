@@ -256,6 +256,19 @@ def test_build_middleware_includes_strip_and_summarization():
     assert any(type(m).__name__ == "_StripStaleImagesMiddleware" for m in built)
 
 
+def test_build_middleware_uses_the_facts_first_summary_prompt():
+    # The library default proved lossy on small local models during the
+    # release recette (a user-stated name vanished from the summary); the
+    # facts-first prompt is load-bearing, so its wiring is pinned.
+    from langchain.agents.middleware import SummarizationMiddleware
+
+    built = AgentRunner()._build_middleware(ToolableFakeChatModel(messages=iter([])))
+    (mw,) = [m for m in built if isinstance(m, SummarizationMiddleware)]
+    assert mw.summary_prompt == runner_module.SUMMARY_PROMPT
+    assert "{messages}" in runner_module.SUMMARY_PROMPT
+    assert "concrete fact" in runner_module.SUMMARY_PROMPT
+
+
 async def test_summarization_compacts_checkpointer_state(monkeypatch):
     import itertools
 
