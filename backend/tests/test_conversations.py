@@ -1079,6 +1079,41 @@ class TestConversationService:
         assert all(e["t"] == "thinking" for e in messages[1].trace)
         assert "".join(e["text"] for e in messages[1].trace) == "reasoning here"
 
+    async def test_memory_warning_reaches_the_wire_but_never_the_trace(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        """1.1.2: the runner's ``memory_warning`` event is forwarded as an
+        NDJSON line but NOT persisted with the assistant turn -- it is a
+        statement about NOW (this machine, this load); an old conversation
+        reopened on a bigger machine must not replay it."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+
+        warning = {"t": "memory_warning", "used_fraction": 0.91, "conversation_bytes": 4096}
+
+        async def fake_stream(**kwargs):
+            yield {"t": "thinking", "text": "hm"}
+            yield {"t": "answer", "text": "The answer."}
+            yield dict(warning)
+
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        payload = ConversationQuery(question="Long conversation")
+        result = [t async for t in service.query_and_respond_stream(conversation.id, payload)]
+
+        events = _parse_ndjson(result)
+        assert warning in events  # forwarded to the wire, fields intact
+        assert events[-1] == {"t": "done"}
+
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[1].content == "The answer."
+        # The trace persists the thinking event but NEVER the memory warning.
+        assert messages[1].trace is not None
+        assert not any(e.get("t") == "memory_warning" for e in messages[1].trace)
+
 
 class TestTraceHelpers:
     """Unit tests for the NDJSON framing + trace-cap helpers (#90)."""
