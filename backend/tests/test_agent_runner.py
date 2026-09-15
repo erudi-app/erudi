@@ -2437,3 +2437,202 @@ def test_curated_empty_answer_messages_are_one_ascii_line_without_the_sentinel()
         assert " I " not in f" {message} "  # impersonal: no first person
     assert "Max Tokens" not in runner_module.EMPTY_ANSWER_LENGTH_MESSAGE
     assert runner_module.EMPTY_ANSWER_LENGTH_MESSAGE != runner_module.EMPTY_ANSWER_STOP_MESSAGE
+
+
+# ============ Two-signal compaction + memory warning (1.1.2 spec) ============
+
+
+def test_summarization_triggers_with_window():
+    """W_eff known: the window signal is 80 % of the ALLOCATED window, OR'd
+    with the 20-message floor."""
+    assert runner_module.summarization_triggers(10000) == [
+        ("tokens", 8000),
+        ("messages", runner_module.SUMMARY_TRIGGER_MESSAGES),
+    ]
+
+
+def test_summarization_triggers_without_window_is_messages_only():
+    assert runner_module.summarization_triggers(None) == [
+        ("messages", runner_module.SUMMARY_TRIGGER_MESSAGES)
+    ]
+
+
+def test_summarization_triggers_memory_ceiling_folds_into_the_token_signal():
+    # Whichever token threshold comes FIRST wins (min), still OR'd with the floor.
+    assert runner_module.summarization_triggers(10000, memory_token_ceiling=5000) == [
+        ("tokens", 5000),
+        ("messages", 20),
+    ]
+    assert runner_module.summarization_triggers(10000, memory_token_ceiling=12000) == [
+        ("tokens", 8000),
+        ("messages", 20),
+    ]
+    assert runner_module.summarization_triggers(None, memory_token_ceiling=5000) == [
+        ("tokens", 5000),
+        ("messages", 20),
+    ]
+    # Weights alone already blow the floor: compact as aggressively as possible.
+    assert runner_module.summarization_triggers(None, memory_token_ceiling=-3) == [
+        ("tokens", 1),
+        ("messages", 20),
+    ]
+
+
+def test_build_middleware_composes_the_two_signal_trigger(monkeypatch):
+    from langchain.agents.middleware import SummarizationMiddleware
+
+    monkeypatch.setattr(_FakeEngine, "effective_context_tokens", classmethod(lambda cls: 10000))
+    budget = SimpleNamespace(tokens_at_margin=lambda margin: 5000)
+    built = AgentRunner()._build_middleware(ToolableFakeChatModel(messages=iter([])), budget)
+    mw = next(m for m in built if isinstance(m, SummarizationMiddleware))
+    assert mw.trigger == [("tokens", 5000), ("messages", 20)]
+
+
+def test_build_middleware_without_window_or_budget_keeps_the_messages_floor():
+    from langchain.agents.middleware import SummarizationMiddleware
+
+    built = AgentRunner()._build_middleware(ToolableFakeChatModel(messages=iter([])))
+    mw = next(m for m in built if isinstance(m, SummarizationMiddleware))
+    assert mw.trigger == [("messages", 20)]
+
+
+class _StubBudget:
+    """Accounting stub: margin (a value, or a callable of the token count)
+    plus fixed conversation bytes; records every margin evaluation."""
+
+    def __init__(self, margin, conversation_bytes=1234, weights_bytes=10000):
+        self._margin = margin
+        self._bytes = conversation_bytes
+        self.weights_bytes = weights_bytes
+        self.margin_calls = []
+
+    def memory_margin_fraction(self, conversation_tokens):
+        self.margin_calls.append(conversation_tokens)
+        return self._margin(conversation_tokens) if callable(self._margin) else self._margin
+
+    def conversation_bytes(self, conversation_tokens):
+        return self._bytes
+
+    def tokens_at_margin(self, margin):
+        return 999999
+
+
+def _patch_budget(monkeypatch, budget):
+    monkeypatch.setattr(
+        runner_module, "MemoryBudget", SimpleNamespace(from_engine=lambda engine: budget)
+    )
+
+
+async def test_memory_warning_emitted_once_after_the_answer(monkeypatch):
+    """Margin under 15 % even for the projected keep-tail (compaction cannot
+    restore it): ONE ``memory_warning`` event, after the answer events, and
+    the projection includes the summary allowance."""
+    fake = ToolableFakeChatModel(messages=iter([AIMessage(content="hello")]))
+    _patch_model(monkeypatch, fake)
+    stub = _StubBudget(margin=0.10)
+    _patch_budget(monkeypatch, stub)
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="mw1",
+        summarize=True,
+    )
+
+    warnings = [e for e in events if e["t"] == "memory_warning"]
+    assert len(warnings) == 1
+    assert warnings[0]["used_fraction"] == pytest.approx(0.90)
+    assert warnings[0]["conversation_bytes"] == 1234
+    # The copy quotes conversation + model: KV bytes plus the weights.
+    assert warnings[0]["footprint_bytes"] == 1234 + 10000
+    last_answer = max(i for i, e in enumerate(events) if e["t"] == "answer")
+    assert events.index(warnings[0]) > last_answer
+    # The warn decision was taken on the PROJECTED post-compaction size: the
+    # keep-tail plus the summary allowance (>= 512 on this tiny thread).
+    assert any(tokens >= runner_module.SUMMARY_TOKEN_ALLOWANCE for tokens in stub.margin_calls)
+
+
+async def test_no_memory_warning_when_compaction_could_restore_the_margin(monkeypatch):
+    """[M1] The middleware only compacts on the NEXT turn's before_model, so
+    the honest question at end of turn is: would compaction down to the
+    keep-tail restore the margin? Here the CURRENT size is under the floor
+    but the projected keep-tail is comfortably fine -> no warning (compaction
+    will save this conversation; warning now would flicker for one turn)."""
+    fake = ToolableFakeChatModel(messages=iter([AIMessage(content="hello")]))
+    _patch_model(monkeypatch, fake)
+    # Tiny thread: current tokens are far below 100; the projection adds the
+    # 512-token summary allowance, so it lands above 100.
+    stub = _StubBudget(margin=lambda tokens: 0.05 if tokens <= 100 else 0.40)
+    _patch_budget(monkeypatch, stub)
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="mw5",
+        summarize=True,
+    )
+    assert not any(e["t"] == "memory_warning" for e in events)
+
+
+async def test_no_memory_warning_when_the_margin_is_fine(monkeypatch):
+    fake = ToolableFakeChatModel(messages=iter([AIMessage(content="hello")]))
+    _patch_model(monkeypatch, fake)
+    _patch_budget(monkeypatch, _StubBudget(margin=0.50))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="mw2",
+        summarize=True,
+    )
+    assert not any(e["t"] == "memory_warning" for e in events)
+
+
+async def test_no_memory_warning_at_the_exact_boundary(monkeypatch):
+    # The floor is STRICT: exactly 15 % of margin left does not warn.
+    fake = ToolableFakeChatModel(messages=iter([AIMessage(content="hello")]))
+    _patch_model(monkeypatch, fake)
+    _patch_budget(monkeypatch, _StubBudget(margin=0.15))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="mw3",
+        summarize=True,
+    )
+    assert not any(e["t"] == "memory_warning" for e in events)
+
+
+async def test_no_memory_warning_when_the_accounting_is_off(monkeypatch):
+    # A model whose facts are unreadable (margin None) never warns.
+    fake = ToolableFakeChatModel(messages=iter([AIMessage(content="hello")]))
+    _patch_model(monkeypatch, fake)
+    _patch_budget(monkeypatch, _StubBudget(margin=None))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="mw4",
+        summarize=True,
+    )
+    assert not any(e["t"] == "memory_warning" for e in events)

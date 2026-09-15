@@ -53,7 +53,9 @@ Routers are mounted under the `/erudi` prefix in `register_routers`
   `POST /erudi/conversations/star_message` and `/unstar_message`
 - **Entities**: `Conversation`, `Message`
 - **Conversation state**: held by the LangGraph checkpointer, not rebuilt from the
-  message table; older turns are summarized by a middleware as the thread grows
+  message table; older turns are compacted by a summarization middleware when the
+  conversation reaches 80 % of the allocated context window or the machine's memory
+  margin runs low (see the [Conversations guide](guides/conversations.md))
 - [Reference](reference/conversations.md)
 
 ### 2. LLMs
@@ -489,8 +491,8 @@ longer than `_max_idle_time` (300 seconds). A generation in flight sets the acti
 ### Streaming
 
 Conversation turns stream as **NDJSON** (`application/x-ndjson`): one JSON event per
-line, typed `answer`, `thinking`, `tool_call`, `tool_result`, `error`, or `done`. Title
-generation and Arena keep a plain-text stream.
+line, typed `answer`, `thinking`, `tool_call`, `tool_result`, `memory_warning`, `error`,
+or `done`. Title generation and Arena keep a plain-text stream.
 
 ## Main flows
 

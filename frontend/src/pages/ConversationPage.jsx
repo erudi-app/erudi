@@ -7,7 +7,7 @@ import QuestionInput from "../components/QuestionInput";
 import HeaderBar from "../components/HeaderBar";
 import CustomizePromptModal from "../components/modals/CustomizePromptModal";
 import EngineFailureModal from "../components/modals/EngineFailureModal";
-import { Copy, Check, FileText, Star } from "lucide-react";
+import { AlertTriangle, Copy, Check, FileText, Star } from "lucide-react";
 import TypingIndicator from "../components/TypingIndicator";
 import MarkdownRenderer from "../components/MarkdownRenderer";
 import TraceStrip from "../components/TraceStrip";
@@ -27,6 +27,7 @@ import {
   getDisplayContent,
   getImagePaths,
 } from "../utils/messageContent";
+import { formatBytes } from "../utils/formatBytes";
 
 const log = createLogger("ConversationPage");
 
@@ -114,6 +115,16 @@ export default function ConversationPage() {
   const [webSearch, setWebSearch] = useState(false);
   const [collapsed, setCollapsed] = useState(false);
   const [firstReplyPending, setFirstReplyPending] = useState(false);
+  // The amber memory warning (1.1.2): the LATEST turn's `memory_warning`
+  // stream event, or null. Transient by design — never persisted, never in
+  // the message content — and cleared by the next turn that carries none.
+  const [memoryWarning, setMemoryWarning] = useState(null);
+
+  // A memory warning is about ONE conversation on THIS machine right now:
+  // switching conversations must never show conversation A's warning over B.
+  useEffect(() => {
+    setMemoryWarning(null);
+  }, [id]);
   // A ref, not state: the scroll handler updates it on every scroll event, and
   // reading it from the auto-scroll effect must NOT re-run that effect. As state
   // it did (the effect depended on it), so toggling it near the bottom snapped
@@ -423,6 +434,7 @@ export default function ConversationPage() {
           let parseWarned = false;
           let sawError = false;
           let sawDone = false;
+          let sawMemoryWarning = false;
 
           // Push the current accumulators onto the streaming assistant message.
           const flushMessage = () => {
@@ -468,6 +480,18 @@ export default function ConversationPage() {
                 if (evt.code) {
                   setEngineFailure({ code: evt.code, raw: evt.raw });
                 }
+                break;
+              case "memory_warning":
+                // Statement about NOW (this machine, this load): page state
+                // only — never appended to the answer text or the trace, so
+                // it survives neither the copy path nor a reload.
+                sawMemoryWarning = true;
+                setMemoryWarning({
+                  usedFraction: evt.used_fraction,
+                  conversationBytes: evt.conversation_bytes,
+                  // Conversation + loaded model: what the copy quotes.
+                  footprintBytes: evt.footprint_bytes,
+                });
                 break;
               case "done":
                 sawDone = true;
@@ -534,6 +558,12 @@ export default function ConversationPage() {
             flushMessage();
           } finally {
             assistantMessage.content = answerText;
+            // A completed turn that carried no memory warning clears the amber
+            // block: the margin recovered (compaction sufficed, or the model
+            // changed), so a stale warning must not linger.
+            if (!sawMemoryWarning) {
+              setMemoryWarning(null);
+            }
             // Turn is over: stop the live strip (it settles to the collapsed
             // summary) and drop the trace on an error turn to match persisted
             // history (the backend persists no trace for error turns).
@@ -1085,6 +1115,25 @@ export default function ConversationPage() {
         </div>
         <div className="sticky bottom-0 left-0 right-0 px-10 py-10 backdrop-blur-md flex justify-center w-full">
           <div className="w-full max-w-lg">
+            {/* Amber memory warning (1.1.2): the machine is close to memory
+                saturation even after auto-compaction had its chance. Same
+                amber vocabulary as the DragDropArea rejection toast. */}
+            {memoryWarning && (
+              <div
+                role="alert"
+                className="mb-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-200 text-xs"
+              >
+                <AlertTriangle className="w-4 h-4 flex-shrink-0" />
+                <span>
+                  {t("chat:memoryWarning.text", {
+                    size:
+                      formatBytes(memoryWarning.footprintBytes) ??
+                      formatBytes(memoryWarning.conversationBytes) ??
+                      "?",
+                  })}
+                </span>
+              </div>
+            )}
             <QuestionInput
               onSend={handleAsk}
               disabled={loading || isModelOrphaned}

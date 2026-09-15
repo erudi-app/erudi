@@ -106,5 +106,8 @@
     "createConversation": "La création de la conversation a échoué",
     "generationFailed": "Je suis désolé, une erreur est survenue lors de la génération de la réponse. Veuillez reposer votre question.",
     "connectionInterrupted": "Connexion interrompue pendant la génération de la réponse."
+  },
+  "memoryWarning": {
+    "text": "La mémoire de votre machine est presque saturée par cette conversation et son modèle (environ {{size}}). Pensez à démarrer une nouvelle conversation ou à passer à un modèle plus petit."
   }
 }

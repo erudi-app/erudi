@@ -106,5 +106,8 @@
     "createConversation": "No se pudo crear la conversación",
     "generationFailed": "Lo siento, se produjo un error al generar la respuesta. Vuelve a hacer tu pregunta.",
     "connectionInterrupted": "La conexión se interrumpió mientras se generaba la respuesta."
+  },
+  "memoryWarning": {
+    "text": "La memoria de su equipo está casi saturada por esta conversación y su modelo (alrededor de {{size}}). Considere iniciar una nueva conversación o cambiar a un modelo más pequeño."
   }
 }
