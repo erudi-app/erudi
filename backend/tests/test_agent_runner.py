@@ -2338,9 +2338,10 @@ class _StubBudget:
     """Accounting stub: margin (a value, or a callable of the token count)
     plus fixed conversation bytes; records every margin evaluation."""
 
-    def __init__(self, margin, conversation_bytes=1234):
+    def __init__(self, margin, conversation_bytes=1234, weights_bytes=10000):
         self._margin = margin
         self._bytes = conversation_bytes
+        self.weights_bytes = weights_bytes
         self.margin_calls = []
 
     def memory_margin_fraction(self, conversation_tokens):
@@ -2384,6 +2385,8 @@ async def test_memory_warning_emitted_once_after_the_answer(monkeypatch):
     assert len(warnings) == 1
     assert warnings[0]["used_fraction"] == pytest.approx(0.90)
     assert warnings[0]["conversation_bytes"] == 1234
+    # The copy quotes conversation + model: KV bytes plus the weights.
+    assert warnings[0]["footprint_bytes"] == 1234 + 10000
     last_answer = max(i for i, e in enumerate(events) if e["t"] == "answer")
     assert events.index(warnings[0]) > last_answer
     # The warn decision was taken on the PROJECTED post-compaction size: the

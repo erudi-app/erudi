@@ -977,10 +977,19 @@ class AgentRunner:
                 f"current_margin={margin:.3f}, projected_margin={projected_margin:.3f}, "
                 f"conversation_tokens={conversation_tokens}"
             )
+            conversation_kv = budget.conversation_bytes(conversation_tokens)
+            weights = getattr(budget, "weights_bytes", None)
             return {
                 "t": "memory_warning",
                 "used_fraction": round(1.0 - margin, 4),
-                "conversation_bytes": budget.conversation_bytes(conversation_tokens),
+                "conversation_bytes": conversation_kv,
+                # What the warning copy quotes: the conversation AND its
+                # loaded model together (the two things the user can act on).
+                "footprint_bytes": (
+                    conversation_kv + weights
+                    if conversation_kv is not None and weights is not None
+                    else None
+                ),
             }
         except Exception:
             # Advisory signal: losing it costs one warning, never the answer.

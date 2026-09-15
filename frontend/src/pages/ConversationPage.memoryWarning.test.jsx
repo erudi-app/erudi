@@ -10,10 +10,11 @@ import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-libra
 //    (so it cannot be copied with the message) and a LATER turn that carries
 //    no warning clears it.
 
-const { tracedFetchMock, navigateMock, locationMock } = vi.hoisted(() => ({
+const { tracedFetchMock, navigateMock, locationMock, paramsMock } = vi.hoisted(() => ({
   tracedFetchMock: vi.fn(),
   navigateMock: vi.fn(),
   locationMock: { pathname: "/conversation/7", state: null },
+  paramsMock: { id: "7" },
 }));
 
 vi.mock("../services/api/client", () => ({
@@ -23,7 +24,7 @@ vi.mock("../services/api/client", () => ({
 }));
 
 vi.mock("react-router-dom", () => ({
-  useParams: () => ({ id: "7" }),
+  useParams: () => ({ id: paramsMock.id }),
   useNavigate: () => navigateMock,
   useLocation: () => locationMock,
 }));
@@ -102,7 +103,9 @@ const makeRoute = (queryStreams) => {
     const u = String(url);
     if (u.includes("/query")) return pending.shift().response;
     if (u.includes("generate_title")) return doneStream();
-    if (u.endsWith("/conversations/7")) return { ok: true, json: async () => conversationDetail };
+    if (/\/conversations\/\d+$/.test(u)) {
+      return { ok: true, json: async () => conversationDetail };
+    }
     if (u.includes("fetch_messages")) return { ok: true, json: async () => [] };
     return { ok: true, json: async () => [] };
   };
@@ -126,6 +129,7 @@ const runTurn = async (stream, lines) => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  paramsMock.id = "7";
   Element.prototype.scrollTo = () => {};
 });
 
@@ -142,7 +146,7 @@ describe("ConversationPage memory warning", () => {
     fireEvent.click(screen.getByText("SEND"));
     await runTurn(turn, [
       '{"t":"answer","text":"Fine."}\n',
-      '{"t":"memory_warning","used_fraction":0.91,"conversation_bytes":4294967296}\n',
+      '{"t":"memory_warning","used_fraction":0.91,"conversation_bytes":1073741824,"footprint_bytes":4294967296}\n',
       '{"t":"done"}\n',
     ]);
 
@@ -172,6 +176,32 @@ describe("ConversationPage memory warning", () => {
 
     fireEvent.click(screen.getByText("SEND"));
     await runTurn(second, ['{"t":"answer","text":"Compacted."}\n', '{"t":"done"}\n']);
+
+    await waitFor(() => {
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+  });
+
+  it("clears when switching to another conversation", async () => {
+    // [M2] The warning is about ONE conversation on THIS machine right now:
+    // conversation A's warning must never show over conversation B.
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    const view = render(<ConversationPage />);
+    await waitFor(() => expect(apiClient.get).toHaveBeenCalled());
+    await act(async () => {});
+    await screen.findByText("SEND");
+
+    fireEvent.click(screen.getByText("SEND"));
+    await runTurn(turn, [
+      '{"t":"answer","text":"Long."}\n',
+      '{"t":"memory_warning","used_fraction":0.9,"conversation_bytes":1048576}\n',
+      '{"t":"done"}\n',
+    ]);
+    await screen.findByRole("alert");
+
+    paramsMock.id = "8";
+    view.rerender(<ConversationPage />);
 
     await waitFor(() => {
       expect(screen.queryByRole("alert")).toBeNull();

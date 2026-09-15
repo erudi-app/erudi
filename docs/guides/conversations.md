@@ -113,7 +113,7 @@ their contents through history forever.
 | `thinking` | `text` | A chunk of the model's reasoning (see below) |
 | `tool_call` | `name`, `args` | The agent called a tool (`search_knowledge_base`, `web_search`, `calculator`) |
 | `tool_result` | `name`, `text` | What that tool returned |
-| `memory_warning` | `used_fraction`, `conversation_bytes` | The machine's memory margin is still under 15 % after compaction had its chance (see below) |
+| `memory_warning` | `used_fraction`, `conversation_bytes`, `footprint_bytes` | Even compacting could not restore the machine's 15 % memory margin (see below); `footprint_bytes` = conversation + loaded model |
 | `error` | `text` | The turn failed; the text is the curated error message |
 | `done` | — | Terminal event, always sent, including after an `error` |
 

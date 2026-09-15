@@ -119,6 +119,12 @@ export default function ConversationPage() {
   // stream event, or null. Transient by design — never persisted, never in
   // the message content — and cleared by the next turn that carries none.
   const [memoryWarning, setMemoryWarning] = useState(null);
+
+  // A memory warning is about ONE conversation on THIS machine right now:
+  // switching conversations must never show conversation A's warning over B.
+  useEffect(() => {
+    setMemoryWarning(null);
+  }, [id]);
   // A ref, not state: the scroll handler updates it on every scroll event, and
   // reading it from the auto-scroll effect must NOT re-run that effect. As state
   // it did (the effect depended on it), so toggling it near the bottom snapped
@@ -483,6 +489,8 @@ export default function ConversationPage() {
                 setMemoryWarning({
                   usedFraction: evt.used_fraction,
                   conversationBytes: evt.conversation_bytes,
+                  // Conversation + loaded model: what the copy quotes.
+                  footprintBytes: evt.footprint_bytes,
                 });
                 break;
               case "done":
@@ -1118,7 +1126,10 @@ export default function ConversationPage() {
                 <AlertTriangle className="w-4 h-4 flex-shrink-0" />
                 <span>
                   {t("chat:memoryWarning.text", {
-                    size: formatBytes(memoryWarning.conversationBytes) ?? "?",
+                    size:
+                      formatBytes(memoryWarning.footprintBytes) ??
+                      formatBytes(memoryWarning.conversationBytes) ??
+                      "?",
                   })}
                 </span>
               </div>
