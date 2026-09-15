@@ -21,6 +21,14 @@
     "diversity": "Diversity",
     "webSearch": "Web Search",
     "webSearchToggle": "Web search",
+    "reasoningEffort": "Reasoning effort",
+    "reasoningEffortLevels": {
+      "none": "None",
+      "low": "Low",
+      "medium": "Medium",
+      "high": "High",
+      "xhigh": "Extra high"
+    },
     "customizePrompt": "Customize Prompt",
     "apply": "Apply",
     "pickerAttention": "Please select a model",
@@ -30,7 +38,8 @@
       "prompt": "Customize system instructions that guide AI behavior.",
       "webSearch": "Lets the model search the web for current facts. Searched queries are sent to external search engines.",
       "webSearchUnavailable": "This model can't use tools, so web search isn't available for it.",
-      "webSearchUnverified": "This model hasn't been verified to run tools yet, so web search stays off for it."
+      "webSearchUnverified": "This model hasn't been verified to run tools yet, so web search stays off for it.",
+      "reasoningEffort": "How much the model may deliberate before answering. Higher levels reason more but take longer; None asks it to answer directly."
     },
     "noPublisherRecommendation": "No sampling recommendation from this model's publisher; neutral defaults applied.",
     "weightsMissingHint": "Weights missing — re-bind this assistant on the Models page"

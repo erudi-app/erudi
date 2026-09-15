@@ -113,6 +113,9 @@ export default function ConversationPage() {
   // GET, persisted through a one-field PATCH the moment it is flipped (like
   // the model picker) so the NEXT turn already honors it.
   const [webSearch, setWebSearch] = useState(false);
+  // Per-conversation Reasoning effort control (PR-D2): same hydrate-then-PATCH
+  // pattern as the web-search toggle above.
+  const [reasoningEffort, setReasoningEffort] = useState("medium");
   const [collapsed, setCollapsed] = useState(false);
   const [firstReplyPending, setFirstReplyPending] = useState(false);
   // The amber memory warning (1.1.2): the LATEST turn's `memory_warning`
@@ -248,6 +251,21 @@ export default function ConversationPage() {
       });
     } catch (error) {
       log.error("Failed to save the web search toggle", error);
+    }
+  };
+
+  // PR-D2: persist a reasoning-effort change immediately (one-field PATCH,
+  // same pattern as the web-search toggle) with an optimistic local update.
+  const handleReasoningEffortChange = async (next) => {
+    setReasoningEffort(next);
+    try {
+      await tracedFetch(`${API_BASE_URL}/conversations/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ reasoning_effort: next }),
+      });
+    } catch (error) {
+      log.error("Failed to save the reasoning effort", error);
     }
   };
 
@@ -688,6 +706,7 @@ export default function ConversationPage() {
             topP: conversation.top_p,
           });
           setWebSearch(Boolean(conversation.web_search_enabled));
+          setReasoningEffort(conversation.reasoning_effort || "medium");
           setCustomPrompt(conversation.custom_prompt || "");
 
           // Record the conversation's assigned model; the header picker's
@@ -936,6 +955,9 @@ export default function ConversationPage() {
             onWebSearchChange={handleWebSearchChange}
             webSearchDisabled={webSearchDisabled}
             webSearchDisabledTooltip={webSearchDisabledTooltip}
+            showReasoningEffort
+            initialReasoningEffort={reasoningEffort}
+            onReasoningEffortChange={handleReasoningEffortChange}
           />
         </div>
 

@@ -1,5 +1,5 @@
 import React from "react";
-import { Cpu, Globe, Languages, RefreshCw, ShieldCheck } from "lucide-react";
+import { Brain, Cpu, Globe, Languages, RefreshCw, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
 import SettingsCard from "../components/SettingsCard";
@@ -9,6 +9,7 @@ import { useUserSettings, useAppStartupInfo } from "../shared/hooks/api";
 import { setAppLanguage } from "../i18n";
 import { LANGUAGE_NAMES, SUPPORTED_LANGUAGES } from "../i18n/languages";
 import { notifyAutoUpdatePreference } from "../utils/autoUpdate";
+import { REASONING_EFFORT_LEVELS, DEFAULT_REASONING_EFFORT } from "../utils/reasoningEffort";
 import { createLogger } from "../utils/logger";
 
 const log = createLogger("SettingsPage");
@@ -65,6 +66,7 @@ export default function SettingsPage() {
   const { startupInfo } = useAppStartupInfo();
   const webSearchEnabled = settings?.web_search_enabled ?? false;
   const autoUpdateEnabled = settings?.auto_update_enabled ?? true;
+  const reasoningEffort = settings?.default_reasoning_effort ?? DEFAULT_REASONING_EFFORT;
   const inferenceBackend = settings?.inference_backend ?? "auto";
   const showInferenceEngineSetting = showsInferenceEngineSetting(
     startupInfo?.backend_type,
@@ -79,6 +81,15 @@ export default function SettingsPage() {
   const handleWebSearchToggle = async (next) => {
     try {
       await updateSettings({ web_search_enabled: next });
+    } catch {
+      // Already recorded by the hook.
+    }
+  };
+
+  const handleReasoningEffortChange = async (event) => {
+    const next = event.target.value;
+    try {
+      await updateSettings({ default_reasoning_effort: next });
     } catch {
       // Already recorded by the hook.
     }
@@ -154,6 +165,28 @@ export default function SettingsPage() {
                 label={t("settings:webSearch.toggleLabel")}
                 disabled={loading}
               />
+            }
+          />
+
+          <SettingsCard
+            icon={<Brain className="w-5 h-5 text-[var(--fit-good)]" />}
+            title={t("settings:reasoningEffort.title")}
+            description={t("settings:reasoningEffort.description")}
+            note={t("settings:reasoningEffort.note")}
+            control={
+              <select
+                aria-label={t("settings:reasoningEffort.selectLabel")}
+                value={reasoningEffort}
+                onChange={handleReasoningEffortChange}
+                disabled={loading}
+                className="text-[13px] rounded-lg border border-[var(--line)] bg-[var(--canvas)] text-[var(--ink)] px-3 py-1.5 focus:outline-none focus:border-[var(--fit-good)] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {REASONING_EFFORT_LEVELS.map((level) => (
+                  <option key={level} value={level}>
+                    {t(`settings:reasoningEffort.levels.${level}`)}
+                  </option>
+                ))}
+              </select>
             }
           />
 

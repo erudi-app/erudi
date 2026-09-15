@@ -8,6 +8,19 @@
     "note": "Desactivada por defecto. Cuando un modelo compatible con herramientas decide buscar, la consulta buscada se envía a motores de búsqueda externos; nada más sale de tu equipo.",
     "toggleLabel": "Búsqueda web"
   },
+  "reasoningEffort": {
+    "title": "Esfuerzo de razonamiento predeterminado",
+    "description": "Define el esfuerzo de razonamiento inicial para las conversaciones nuevas. Cada conversación conserva después su propio control de esfuerzo de razonamiento en la cabecera del chat, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
+    "note": "Medio por defecto. Los niveles más altos permiten que el modelo delibere más antes de responder; Ninguno le pide responder directamente.",
+    "selectLabel": "Esfuerzo de razonamiento predeterminado",
+    "levels": {
+      "none": "Ninguno",
+      "low": "Bajo",
+      "medium": "Medio",
+      "high": "Alto",
+      "xhigh": "Muy alto"
+    }
+  },
   "autoUpdate": {
     "title": "Actualizaciones automáticas",
     "description": "Busca una nueva versión de Erudi en segundo plano, la descarga y la instala la próxima vez que cierres la aplicación. La solicitud va a las releases de GitHub de este proyecto y solo lleva tu versión y tu plataforma.",
