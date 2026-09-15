@@ -70,7 +70,12 @@ def parse_context_overflow(exc: object) -> Optional[ContextOverflow]:
 
 
 def _parse_llama_body(body: dict) -> Optional[ContextOverflow]:
-    error = body.get("error")
+    # The openai SDK UNWRAPS the wire envelope before storing it: for a body
+    # of ``{"error": {...}}`` it sets ``exc.body`` to the INNER error object
+    # (openai/_client.py: ``data = body.get("error", body)``). So the common
+    # shape here is the flat error dict; the enveloped form is kept as a
+    # defensive fallback for any client path that skips the unwrap.
+    error = body if body.get("type") == _LLAMA_OVERFLOW_TYPE else body.get("error")
     if not isinstance(error, dict):
         return None
     if error.get("type") != _LLAMA_OVERFLOW_TYPE:

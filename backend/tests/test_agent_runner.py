@@ -1455,19 +1455,19 @@ class _OverflowRaisingModel(ToolableFakeChatModel):
 
 async def test_events_llama_overflow_yields_curated_turn_with_numbers(monkeypatch):
     class _LlamaOverflowModel(_OverflowRaisingModel):
+        # The FLAT body the openai SDK actually stores (the wire envelope's
+        # inner error object -- the SDK unwraps ``{"error": {...}}``).
         overflow_exc: ClassVar[Exception] = _FakeBadRequestError(
             "Error code: 400",
             body={
-                "error": {
-                    "code": 400,
-                    "message": (
-                        "request (9030 tokens) exceeds the available context "
-                        "size (8192 tokens), try increasing it"
-                    ),
-                    "type": "exceed_context_size_error",
-                    "n_prompt_tokens": 9030,
-                    "n_ctx": 8192,
-                }
+                "code": 400,
+                "message": (
+                    "request (9030 tokens) exceeds the available context "
+                    "size (8192 tokens), try increasing it"
+                ),
+                "type": "exceed_context_size_error",
+                "n_prompt_tokens": 9030,
+                "n_ctx": 8192,
             },
         )
 

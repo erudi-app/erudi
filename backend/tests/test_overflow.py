@@ -21,15 +21,35 @@ class _FakeBadRequestError(Exception):
 
 
 def test_llama_overflow_body_yields_both_numbers():
+    # The PRODUCTION shape: the openai SDK unwraps the wire envelope before
+    # storing it (openai/_client.py: ``data = body.get("error", body)``), so
+    # ``exc.body`` is the FLAT error object, not ``{"error": {...}}``.
+    exc = _FakeBadRequestError(
+        "Error code: 400",
+        body={
+            "code": 400,
+            "message": (
+                "request (9030 tokens) exceeds the available context size "
+                "(8192 tokens), try increasing it"
+            ),
+            "type": "exceed_context_size_error",
+            "n_prompt_tokens": 9030,
+            "n_ctx": 8192,
+        },
+    )
+
+    overflow = parse_context_overflow(exc)
+
+    assert overflow == ContextOverflow(prompt_tokens=9030, context_tokens=8192)
+
+
+def test_llama_overflow_enveloped_body_still_matches():
+    # Defensive fallback: a client path that skips the SDK's unwrap hands the
+    # whole ``{"error": {...}}`` envelope. Both shapes must parse.
     exc = _FakeBadRequestError(
         "Error code: 400",
         body={
             "error": {
-                "code": 400,
-                "message": (
-                    "request (9030 tokens) exceeds the available context size "
-                    "(8192 tokens), try increasing it"
-                ),
                 "type": "exceed_context_size_error",
                 "n_prompt_tokens": 9030,
                 "n_ctx": 8192,
