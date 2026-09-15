@@ -210,7 +210,7 @@ curl -N -X POST http://127.0.0.1:27182/erudi/conversations/1/query \
 ```
 
 The response is `application/x-ndjson`: one JSON event per line, typed `answer`,
-`thinking`, `tool_call`, `tool_result`, `error`, or `done`. See the
+`thinking`, `tool_call`, `tool_result`, `memory_warning`, `error`, or `done`. See the
 [Conversations guide](guides/conversations.md).
 
 ## Repository layout

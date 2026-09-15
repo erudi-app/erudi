@@ -443,6 +443,12 @@ class ConversationService:
                         yield _ndjson(build_stream_error_event(event))
                     else:
                         yield _ndjson(event)
+                elif event["t"] == "memory_warning":
+                    # Wire only, NEVER the persisted trace (1.1.2): the
+                    # warning describes the machine's memory NOW -- an old
+                    # conversation reopened on a bigger machine must not
+                    # replay it as if it still applied.
+                    yield _ndjson(event)
                 else:
                     # thinking / tool_call / tool_result -> wire AND replay trace.
                     trace.append(event)
