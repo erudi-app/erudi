@@ -21,6 +21,14 @@
     "diversity": "多样性",
     "webSearch": "网页搜索",
     "webSearchToggle": "网页搜索",
+    "reasoningEffort": "推理强度",
+    "reasoningEffortLevels": {
+      "none": "无",
+      "low": "低",
+      "medium": "中",
+      "high": "高",
+      "xhigh": "极高"
+    },
     "customizePrompt": "自定义提示词",
     "apply": "应用",
     "pickerAttention": "请选择一个模型",
@@ -30,7 +38,8 @@
       "prompt": "自定义引导 AI 行为的系统提示词。",
       "webSearch": "允许模型搜索网页以获取最新信息。搜索查询会发送给外部搜索引擎。",
       "webSearchUnavailable": "该模型无法使用工具，因此网页搜索对它不可用。",
-      "webSearchUnverified": "该模型尚未验证能够运行工具，因此网页搜索对它保持关闭。"
+      "webSearchUnverified": "该模型尚未验证能够运行工具，因此网页搜索对它保持关闭。",
+      "reasoningEffort": "决定模型在回答前可以深思熟虑的程度：级别越高，推理越多但耗时越长；“无”会要求模型直接作答。"
     },
     "noPublisherRecommendation": "此模型的发布者未提供采样建议；已应用中性默认值。",
     "weightsMissingHint": "缺少模型权重——请在“模型”页面重新绑定此助手"

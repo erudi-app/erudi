@@ -121,6 +121,7 @@ describe("ChatPage send flow", () => {
       top_p: 0.95,
       custom_prompt: "",
       web_search_enabled: false, // inherited from the global setting (#310)
+      reasoning_effort: "medium", // inherited from the global setting (PR-D2)
     });
 
     const [path, { state }] = navigateMock.mock.calls[0];
@@ -165,6 +166,7 @@ describe("ChatPage send flow", () => {
       top_p: 0.5,
       custom_prompt: "Answer like a pirate",
       web_search_enabled: false,
+      reasoning_effort: "medium",
     });
     expect(navigateMock.mock.calls[0][1].state.initialCustomPrompt).toBe("Answer like a pirate");
     expect(navigateMock.mock.calls[0][1].state.initialSettings).toEqual({

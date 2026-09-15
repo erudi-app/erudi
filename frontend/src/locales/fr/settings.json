@@ -8,6 +8,19 @@
     "note": "Désactivée par défaut. Quand un modèle compatible avec les outils décide de chercher, la requête recherchée est envoyée à des moteurs de recherche externes — rien d'autre ne quitte votre machine.",
     "toggleLabel": "Recherche web"
   },
+  "reasoningEffort": {
+    "title": "Effort de raisonnement par défaut",
+    "description": "Définit l'effort de raisonnement de départ pour les nouvelles conversations. Chaque conversation conserve ensuite son propre réglage d'effort de raisonnement dans son en-tête de discussion, donc modifier ce réglage n'affecte jamais une conversation déjà existante.",
+    "note": "Moyen par défaut. Les niveaux plus élevés laissent le modèle réfléchir davantage avant de répondre ; Aucun lui demande de répondre directement.",
+    "selectLabel": "Effort de raisonnement par défaut",
+    "levels": {
+      "none": "Aucun",
+      "low": "Faible",
+      "medium": "Moyen",
+      "high": "Élevé",
+      "xhigh": "Très élevé"
+    }
+  },
   "autoUpdate": {
     "title": "Mises à jour automatiques",
     "description": "Cherche une nouvelle version d'Erudi en arrière-plan, la télécharge et l'installe à la prochaine fermeture. La requête part vers les releases GitHub de ce projet et ne transporte que votre version et votre plateforme.",

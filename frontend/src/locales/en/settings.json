@@ -8,6 +8,19 @@
     "note": "Off by default. When a tool-capable model decides to search, the searched query is sent to external search engines — nothing else leaves your machine.",
     "toggleLabel": "Web search"
   },
+  "reasoningEffort": {
+    "title": "Default reasoning effort",
+    "description": "Sets the starting reasoning effort for new conversations. Each conversation keeps its own reasoning effort control in its chat header afterwards, so changing this setting never affects a conversation that already exists.",
+    "note": "Medium by default. Higher levels let the model deliberate more before answering; None asks it to answer directly.",
+    "selectLabel": "Default reasoning effort",
+    "levels": {
+      "none": "None",
+      "low": "Low",
+      "medium": "Medium",
+      "high": "High",
+      "xhigh": "Extra high"
+    }
+  },
   "autoUpdate": {
     "title": "Automatic updates",
     "description": "Check for a new version of Erudi in the background, download it and install it the next time you quit. The request goes to this project's GitHub releases and carries nothing but your version and platform.",

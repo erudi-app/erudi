@@ -21,6 +21,7 @@ import { canAttachImages } from "../utils/modelCapabilities";
 import { hasMissingWeights } from "../utils/modelWeights";
 import { defaultsFor, hasNoPublisherRecommendation } from "../utils/samplingDefaults";
 import { formatNumber } from "../i18n/format";
+import { REASONING_EFFORT_LEVELS } from "../utils/reasoningEffort";
 
 const log = createLogger("ChatPage");
 
@@ -56,16 +57,26 @@ export default function ChatPage() {
   // field while null). Once fetched or flipped, the explicit value is sent
   // and the FIRST turn already honors it.
   const [webSearch, setWebSearch] = useState(null);
+  // Reasoning effort (PR-D2): same null-until-fetched pattern as webSearch
+  // above, seeded from the global default and sent explicitly once known so
+  // the FIRST turn already honors it.
+  const [reasoningEffort, setReasoningEffort] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
     (async () => {
       try {
         const data = await apiClient.get("/user_settings/");
-        if (!cancelled) setWebSearch(Boolean(data?.web_search_enabled));
+        if (!cancelled) {
+          setWebSearch(Boolean(data?.web_search_enabled));
+          // Functional guard: a user who already picked a level before this
+          // fetch resolved keeps their choice -- the global default only fills
+          // the blank.
+          setReasoningEffort((cur) => cur ?? (data?.default_reasoning_effort || "medium"));
+        }
       } catch (error) {
         // The backend applies its own default: degraded, not failed.
-        log.warn("Failed to fetch the global web search default", error);
+        log.warn("Failed to fetch the global chat defaults (web search, reasoning effort)", error);
       }
     })();
     return () => {
@@ -210,6 +221,7 @@ export default function ChatPage() {
             // null (global default not fetched yet) -> omit: the backend
             // copies the global setting at creation (#310).
             ...(webSearch === null ? {} : { web_search_enabled: webSearch }),
+            ...(reasoningEffort === null ? {} : { reasoning_effort: reasoningEffort }),
           }),
         });
         if (!res.ok) {
@@ -235,7 +247,7 @@ export default function ChatPage() {
         );
       }
     },
-    [models, selectedModel, navigate, settings, customPrompt, webSearch, t]
+    [models, selectedModel, navigate, settings, customPrompt, webSearch, reasoningEffort, t]
   );
 
   const handleRename = (id, newName) => {
@@ -272,7 +284,9 @@ export default function ChatPage() {
             ? t("chat:header.tooltips.prompt")
             : id === "web-search"
               ? t("chat:header.tooltips.webSearch")
-              : "";
+              : id === "reasoning-effort"
+                ? t("chat:header.tooltips.reasoningEffort")
+                : "";
     return (
       <Tooltip content={text} side={side} width="w-64">
         <HelpCircle className="w-4 h-4 text-gray-400 hover:text-emerald-400 transition-colors cursor-help" />
@@ -589,6 +603,31 @@ export default function ChatPage() {
                                 />
                               </div>
                             </div>
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <span className="text-[0.72rem] uppercase tracking-wide font-semibold text-gray-300/80">
+                              {t("chat:header.reasoningEffort")}
+                            </span>
+                            <TooltipIcon id="reasoning-effort" side="right" />
+                            <select
+                              aria-label={t("chat:header.reasoningEffort")}
+                              // Until the global default is known the select is
+                              // disabled and shows nothing: displaying "Medium"
+                              // while the backend would copy another default
+                              // into the new conversation would be a lie (and a
+                              // failed settings fetch would make it permanent).
+                              disabled={reasoningEffort === null}
+                              value={reasoningEffort ?? ""}
+                              onChange={(e) => setReasoningEffort(e.target.value)}
+                              className="ml-auto text-[11px] font-semibold rounded-md border border-emerald-400/25 bg-emerald-500/10 text-emerald-200/90 px-2 py-1 focus:outline-none focus:border-emerald-400/50 transition-colors cursor-pointer"
+                            >
+                              {REASONING_EFFORT_LEVELS.map((level) => (
+                                <option key={level} value={level}>
+                                  {t(`chat:header.reasoningEffortLevels.${level}`)}
+                                </option>
+                              ))}
+                            </select>
                           </div>
 
                           <div className="flex flex-row items-center gap-3 w-full">

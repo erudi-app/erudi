@@ -197,6 +197,11 @@ copies the global default (`user_settings.default_reasoning_effort`) when it is 
 level afterwards, so changing the global setting only affects the next conversation. Arena panels
 have no conversation row and read the global level on every turn.
 
+The chat header's settings panel carries a Reasoning effort control next to the Web search toggle,
+seeded from the conversation's level and persisted through the same one-field PATCH the moment it
+changes; the pre-conversation panel shows the same control seeded from the global default. The
+Settings page's "Default reasoning effort" card sets that global default.
+
 What a level costs on the wire depends on the model's own chat template, never on its family name: a
 community fine-tune keeps its parent's name and ships whatever template its author baked in. The
 verdict is read per artifact (`backend/src/engines/reasoning_lever.py`), from the

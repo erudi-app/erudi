@@ -21,6 +21,14 @@
     "diversity": "Diversité",
     "webSearch": "Recherche web",
     "webSearchToggle": "Recherche web",
+    "reasoningEffort": "Effort de raisonnement",
+    "reasoningEffortLevels": {
+      "none": "Aucun",
+      "low": "Faible",
+      "medium": "Moyen",
+      "high": "Élevé",
+      "xhigh": "Très élevé"
+    },
     "customizePrompt": "Personnaliser les instructions",
     "apply": "Appliquer",
     "pickerAttention": "Veuillez sélectionner un modèle",
@@ -30,7 +38,8 @@
       "prompt": "Personnalisez les instructions système qui guident le comportement de l'IA.",
       "webSearch": "Permet au modèle de chercher sur le web des informations récentes. Les requêtes de recherche sont envoyées à des moteurs de recherche externes.",
       "webSearchUnavailable": "Ce modèle ne peut pas utiliser d'outils, la recherche web n'est donc pas disponible pour lui.",
-      "webSearchUnverified": "Ce modèle n'a pas encore été vérifié pour l'exécution d'outils, la recherche web reste donc désactivée pour lui."
+      "webSearchUnverified": "Ce modèle n'a pas encore été vérifié pour l'exécution d'outils, la recherche web reste donc désactivée pour lui.",
+      "reasoningEffort": "Détermine à quel point le modèle peut réfléchir avant de répondre. Les niveaux plus élevés raisonnent davantage mais prennent plus de temps ; Aucun lui demande de répondre directement."
     },
     "noPublisherRecommendation": "Aucune recommandation de réglages de la part de l'éditeur de ce modèle ; réglages neutres appliqués.",
     "weightsMissingHint": "Poids manquants — réassociez cet assistant depuis la page Modèles"
