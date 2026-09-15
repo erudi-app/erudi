@@ -106,5 +106,8 @@
     "createConversation": "Failed to create conversation",
     "generationFailed": "I apologize, but I encountered an error while generating a response. Please try asking your question again.",
     "connectionInterrupted": "Connection interrupted while generating response."
+  },
+  "memoryWarning": {
+    "text": "Your machine's memory is nearly saturated. Consider compacting this conversation — it represents about {{size}} of memory."
   }
 }
