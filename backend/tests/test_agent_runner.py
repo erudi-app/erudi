@@ -1425,6 +1425,168 @@ async def test_events_stream_timeout_logs_one_warning_with_the_budget(monkeypatc
     assert message.isascii()
 
 
+# ===== Honest context-overflow errors (PR-G) =====
+#
+# Both local engines reject an over-budget prompt with a precise 400 that
+# names the real numbers. The runner discriminates it from a generic 400 via
+# ``src.agents.overflow.parse_context_overflow`` and surfaces the numbers
+# instead of the generic apology -- never any silent truncation/shifting.
+
+
+class _FakeBadRequestError(Exception):
+    """Stands in for ``openai.BadRequestError`` -- any object with a ``.body``
+    dict reaches the runner's overflow check the same way the real SDK
+    exception does."""
+
+    def __init__(self, message: str, body: dict):
+        super().__init__(message)
+        self.body = body
+
+
+class _OverflowRaisingModel(ToolableFakeChatModel):
+    """A model whose stream raises one context-overflow wire shape."""
+
+    overflow_exc: ClassVar[Exception] = RuntimeError("unset")
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        raise self.overflow_exc
+        yield  # pragma: no cover  (makes this an async generator function)
+
+
+async def test_events_llama_overflow_yields_curated_turn_with_numbers(monkeypatch):
+    class _LlamaOverflowModel(_OverflowRaisingModel):
+        overflow_exc: ClassVar[Exception] = _FakeBadRequestError(
+            "Error code: 400",
+            body={
+                "error": {
+                    "code": 400,
+                    "message": (
+                        "request (9030 tokens) exceeds the available context "
+                        "size (8192 tokens), try increasing it"
+                    ),
+                    "type": "exceed_context_size_error",
+                    "n_prompt_tokens": 9030,
+                    "n_ctx": 8192,
+                }
+            },
+        )
+
+    _patch_model(monkeypatch, _LlamaOverflowModel(messages=iter([])))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="eoverflow1",
+    )
+
+    text = _answers(events)
+    assert ERROR_SENTINEL in text
+    assert "9030" in text
+    assert "8192" in text
+    assert "Traceback" not in text
+    assert text != runner_module.ERROR_MESSAGE
+
+
+async def test_events_mlx_overflow_yields_curated_turn_with_numbers(monkeypatch):
+    class _MlxOverflowModel(_OverflowRaisingModel):
+        overflow_exc: ClassVar[Exception] = _FakeBadRequestError(
+            "Request needs 5037 context tokens (5029 prompt + 8 max generation), "
+            "but MAX_KV_SIZE is 4096.",
+            body={},
+        )
+
+    _patch_model(monkeypatch, _MlxOverflowModel(messages=iter([])))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="eoverflow2",
+    )
+
+    text = _answers(events)
+    assert ERROR_SENTINEL in text
+    assert "5037" in text
+    assert "4096" in text
+    assert text != runner_module.ERROR_MESSAGE
+
+
+async def test_events_unrelated_bad_request_error_keeps_generic_error(monkeypatch):
+    """A 400 that is NOT a context overflow (e.g. a bad sampling param) must
+    keep today's generic error path -- the discrimination is strict."""
+
+    class _UnrelatedBadRequestModel(_OverflowRaisingModel):
+        overflow_exc: ClassVar[Exception] = _FakeBadRequestError(
+            "Error code: 400",
+            body={
+                "error": {
+                    "code": 400,
+                    "message": "invalid 'temperature': must be between 0 and 2",
+                    "type": "invalid_request_error",
+                }
+            },
+        )
+
+    _patch_model(monkeypatch, _UnrelatedBadRequestModel(messages=iter([])))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="eoverflow3",
+    )
+
+    assert _answers(events) == runner_module.ERROR_MESSAGE
+
+
+async def test_events_overflow_logs_one_warning_with_the_numbers(monkeypatch, caplog):
+    """docs/logging.md: one record, at the handler, at the level of what happened
+    -- a degradation the app recovered from on its own, not a crash."""
+
+    class _LlamaOverflowModel(_OverflowRaisingModel):
+        overflow_exc: ClassVar[Exception] = _FakeBadRequestError(
+            "Error code: 400",
+            body={
+                "error": {
+                    "type": "exceed_context_size_error",
+                    "n_prompt_tokens": 9030,
+                    "n_ctx": 8192,
+                }
+            },
+        )
+
+    _patch_model(monkeypatch, _LlamaOverflowModel(messages=iter([])))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    with caplog.at_level(logging.WARNING):
+        await _events(
+            runner,
+            llm=_Llm(),
+            user_message="hi",
+            system_prompt="s",
+            params=_PARAMS,
+            thread_id="eoverflow4",
+        )
+
+    records = [r for r in caplog.records if "overflow" in r.getMessage().lower()]
+    assert len(records) == 1
+    message = records[0].getMessage()
+    assert records[0].levelno == logging.WARNING
+    assert "9030" in message
+    assert "8192" in message
+    assert message.isascii()
+
+
 # ===== Pre-tool narration reclassified as thinking (#297) =====
 #
 # On tool-carrying turns, text the model streams BEFORE its tool call is

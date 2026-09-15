@@ -151,6 +151,21 @@ model on the next turn:
 On agentic turns a successful tool result takes precedence: it is delivered as the answer instead of
 either line.
 
+### When the prompt no longer fits the context window
+
+Both local engines reject an over-budget prompt with a precise 400 that names the real numbers --
+llama-server as `n_prompt_tokens`/`n_ctx` in its error body, mlx_vlm.server as a `MAX_KV_SIZE` detail
+string. `src.agents.overflow.parse_context_overflow` discriminates that specific failure from any
+other 400 (strictly on the llama body's `type`, never on message text) and the runner surfaces it as
+an honest `error` turn instead of the generic one:
+
+`This conversation no longer fits the model's context window (the request needs about N tokens; the
+window holds W). Start a new conversation or send less at once.`
+
+When the wire error matched but its numbers didn't parse, the turn drops the figures but keeps the
+same honest wording. There is no silent truncation or shifting of the conversation to make it fit --
+the user always gets a turn that says why and what to do next.
+
 ### Parsing the stream
 
 Lines can be split across network chunks, so buffer and only parse complete lines:
