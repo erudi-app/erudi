@@ -999,6 +999,22 @@ class AgentRunner:
         the summary is written rather than deliberated about.
         """
         from langchain.agents.middleware import SummarizationMiddleware
+
+        class _Logged_Summarization_Middleware(SummarizationMiddleware):
+            """The stock middleware plus the ONE aggregate log line the QA
+            spec promises ("backend.log records the summarization"). Without it
+            a fired compaction is invisible -- the only field evidence during
+            the release recette was turn latency collapsing after the trigger.
+            ASCII, INFO: the app did its job, nothing degraded."""
+
+            async def _acreate_summary(self, messages_to_summarize):
+                summary = await super()._acreate_summary(messages_to_summarize)
+                logger.info(
+                    f"Conversation compacted: {len(messages_to_summarize)} message(s) "
+                    f"summarized into {len(summary or '')} chars"
+                )
+                return summary
+
         from langchain_core.messages.utils import count_tokens_approximately
 
         from src.agents.middleware import (
@@ -1017,7 +1033,7 @@ class AgentRunner:
         return [
             _StripStaleImagesMiddleware(),
             _StripStaleToolResults(),
-            SummarizationMiddleware(
+            _Logged_Summarization_Middleware(
                 model=model,
                 trigger=summarization_triggers(effective_window, memory_token_ceiling),
                 keep=("messages", SUMMARY_KEEP_MESSAGES),
