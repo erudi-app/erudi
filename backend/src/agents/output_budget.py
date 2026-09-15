@@ -31,23 +31,34 @@ must behave exactly as it did before this module existed.
 ``ERUDI_MAX_TOKENS`` wins over all of it, window or no window: a QA/dev escape
 hatch for pinning a small budget while reproducing a truncation report.
 
-Estimating the prompt: deliberately NOT the watchdog's estimator
-----------------------------------------------------------------
-``src.agents.chat_model.estimate_prompt_tokens`` bounds the same messages with
-one token per UTF-8 byte, and this module counts characters/4 through
+Two estimators, two jobs -- and one of them does both
+-----------------------------------------------------
+``src.agents.chat_model.estimate_prompt_tokens`` bounds the messages with one
+token per UTF-8 byte, and this module counts characters/4 through
 ``count_tokens_approximately``. That is not a duplication anyone forgot to
 clean up -- the two estimates have OPPOSITE failure costs:
 
-- The watchdog needs an UPPER bound. Under-counting there ends a healthy turn
-  mid-prefill (#573), so it pays a loose over-count on English to stay a
-  provable bound on CJK.
-- The budget needs the counter the summarization middleware already uses
-  (``runner._build_middleware``), so the compaction trigger and the budget can
-  never disagree about how full the window is. Using the byte bound here would
-  over-count English ~4x and shrink real answer budgets by thousands of tokens
-  -- a visible regression. Under-counting is close to free on the budget side:
-  llama-server truncates ``n_predict`` server-side, and MLX's preflight has the
-  margin.
+- The byte bound is a PROVABLE UPPER bound (byte-level tokenizers cannot emit
+  a token per less than a byte). The watchdog needs one: under-counting there
+  ends a healthy turn mid-prefill (#573), so it pays a loose over-count on
+  English to stay honest on CJK.
+- SIZING the budget needs the counter the summarization middleware already
+  uses (``runner._build_middleware``), so the compaction trigger and the budget
+  can never disagree about how full the window is. Using the byte bound to SIZE
+  would over-count English ~4x and shrink real answer budgets by thousands of
+  tokens -- a visible regression.
+
+The byte bound has a second job here, though: a SAFETY CAP on the engine whose
+own preflight counts ``prompt + max_tokens`` against the window and answers 400
+when the sum does not fit (mlx_vlm.server's
+``_check_configured_context_budget``). That preflight counts the REAL tokenised
+prompt, so a budget sized from chars/4 can ask for more window than exists and
+make the app reject its own turn -- badly on CJK, where chars/4 under-counts
+threefold and the margin is nowhere near enough to absorb it. Capping the
+budget at ``window - byte_bound`` makes that arithmetically impossible, because
+``byte_bound >= real prompt`` by construction. It applies ONLY to the
+preflighting engine: llama-server truncates ``n_predict`` server-side instead,
+where the same cap would shrink long English budgets for nothing.
 
 ``tests/test_output_budget.py`` asserts the two estimators still disagree on a
 CJK string, so neither can silently adopt the other's.
@@ -114,11 +125,23 @@ def compute_output_budget(
     messages: Optional[Iterable[Any]],
     effective_window_tokens: Optional[int],
     override: Optional[int] = None,
+    prompt_upper_bound_tokens: Optional[int] = None,
 ) -> Optional[int]:
     """Tokens this call may generate, or ``None`` to leave the caller's value.
 
-    Pure: the environment is read by :func:`output_budget_override`, which the
-    caller passes in, so the arithmetic stays testable on its own.
+    ``prompt_upper_bound_tokens`` is the PROVABLE upper bound on the prompt
+    (the watchdog's byte bound), and passing it additionally caps the budget at
+    ``window - bound``. Pass it when the engine's own preflight counts
+    ``prompt + max_tokens`` against the window and rejects the request when the
+    sum does not fit -- it is what keeps the app from rejecting its own turn on
+    a prompt chars/4 under-counted. Leave it ``None`` where the server
+    truncates instead (llama-server), so a long English turn keeps the full
+    budget the formula gives it. See the module docstring.
+
+    Pure: the environment is read by :func:`output_budget_override` and the
+    bound by the caller (which already computes it for the watchdog), so the
+    arithmetic stays testable on its own -- and this module never has to import
+    back from ``chat_model``.
     """
     if override is not None:
         return override
@@ -137,4 +160,11 @@ def compute_output_budget(
         )
         return None
     margin = max(MARGIN_FLOOR_TOKENS, int(MARGIN_FRACTION * estimated))
-    return max(OUTPUT_BUDGET_FLOOR_TOKENS, effective_window_tokens - estimated - margin)
+    budget = effective_window_tokens - estimated - margin
+    if prompt_upper_bound_tokens is not None:
+        budget = min(budget, effective_window_tokens - prompt_upper_bound_tokens)
+    # The floor stands even when the bound alone fills the window: a 0-token
+    # call is never the right answer. The preflight then rejects only if the
+    # REAL prompt plus 512 overflows, which is a genuinely full window -- and
+    # reporting that honestly is the overflow chantier's job, not this one's.
+    return max(OUTPUT_BUDGET_FLOOR_TOKENS, budget)

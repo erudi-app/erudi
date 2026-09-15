@@ -170,6 +170,26 @@ class BaseEngine(ABC, metaclass=EngineMeta):
                 return window
         return None
 
+    @classmethod
+    def preflight_counts_output_tokens(cls) -> bool:
+        """Does this engine's child REJECT a request whose prompt plus its
+        requested generation exceeds the allocated window?
+
+        ``False`` here, and on every llama.cpp engine: llama-server clamps
+        ``n_predict`` against what is left of the window and generates anyway.
+        MLX overrides it to ``True`` -- its ``--max-kv-size`` bound is a
+        preflight VALIDATOR that answers 400 naming ``prompt + max generation``
+        vs the bound.
+
+        The automatic output budget (``src.agents.output_budget``) reads this
+        to decide whether it must stay under a PROVABLE bound on the prompt:
+        against a validating child, a budget sized from an under-counting
+        estimate would make the app reject its own turn. It is an engine fact,
+        so it lives with the engine rather than being inferred from
+        ``FORMAT_TAG`` -- which says what artefacts an engine loads, not how
+        its server handles an oversized request."""
+        return False
+
     # Stored model links that download fine but FAIL TO RUN on this engine
     # (e.g. a quantized checkpoint the loader can't read). Overridden per engine.
     # is_runnable() uses it to ban such models from the catalog for this hardware.

@@ -109,6 +109,133 @@ def test_there_is_no_fixed_ceiling_the_window_is_the_ceiling():
     assert budget > 900_000
 
 
+# ===================== the preflight-safety cap =====================
+#
+# mlx_vlm.server validates `prompt + max_tokens <= window` BEFORE generating
+# and answers 400 when it does not hold (`_check_configured_context_budget`).
+# It counts the REAL tokenised prompt, so a budget sized from the chars/4
+# estimate can ask for more window than exists and make the app reject its own
+# turn -- worst on CJK, where chars/4 under-counts threefold. The watchdog's
+# UTF-8 byte bound is a PROVABLE upper bound on that real prompt, so capping
+# the budget at `window - byte_bound` makes a self-inflicted 400 arithmetically
+# impossible. Only on the engine that preflights: on llama-server (which just
+# truncates `n_predict` server-side) the same cap would shrink long English
+# budgets by thousands of tokens for nothing.
+
+_CJK = "这是一个很长的中文句子，用来测试预算的计算方式。" * 40
+
+
+def _fits_the_preflight(messages, window, budget):
+    """The inequality mlx_vlm.server checks, with the bound standing in for the
+    real prompt (which is provably no larger)."""
+    return byte_bound_estimate(messages) + budget <= window
+
+
+def test_cjk_on_a_preflighting_engine_is_capped_by_the_byte_bound():
+    messages = [_Msg(_CJK)]
+    window = 32768
+    uncapped = compute_output_budget(messages, window)
+
+    capped = compute_output_budget(
+        messages, window, prompt_upper_bound_tokens=byte_bound_estimate(messages)
+    )
+
+    assert capped < uncapped
+    assert capped == window - byte_bound_estimate(messages)
+    assert _fits_the_preflight(messages, window, capped)
+
+
+def test_the_same_cjk_turn_without_the_cap_would_overflow_the_preflight():
+    # The regression this cap exists for: chars/4 alone asks for more window
+    # than the tokeniser will leave.
+    messages = [_Msg(_CJK)]
+    window = 32768
+
+    assert not _fits_the_preflight(messages, window, compute_output_budget(messages, window))
+
+
+def test_the_cap_never_applies_on_the_engine_that_clamps():
+    # llama-server truncates `n_predict` server-side, so nothing there needs a
+    # provable bound and the chars/4 formula stands untouched -- which is why
+    # the cap is wired to an engine fact rather than applied everywhere.
+    messages = [_Msg("the quick brown fox jumps over the lazy dog " * 200)]
+    window = 131_072
+
+    assert compute_output_budget(messages, window) == window - estimate_prompt_tokens(
+        messages
+    ) - max(MARGIN_FLOOR_TOKENS, int(MARGIN_FRACTION * estimate_prompt_tokens(messages)))
+
+
+def test_the_cap_costs_english_budget_because_the_bound_is_loose_there():
+    """The price of a PROVABLE bound, pinned so it cannot be forgotten.
+
+    One token per UTF-8 byte over-counts English roughly fourfold, so on a
+    preflighting engine a long English turn is capped far below what the
+    chars/4 formula would give it -- and once the bound alone fills the window
+    (a real prompt around a quarter of it) the budget sits on the floor. The
+    answer is still generated, just shorter. Removing this cost needs a REAL
+    token count rather than a bound; the parameter is shaped to take one
+    (pass the exact count and the cap stops costing anything).
+    """
+    window = 32768
+    messages = [_Msg(_text(8000))]  # ~8000 real English tokens
+    bound = byte_bound_estimate(messages)
+
+    capped = compute_output_budget(messages, window, prompt_upper_bound_tokens=bound)
+
+    assert compute_output_budget(messages, window) > 20_000
+    assert capped < 1_000
+    # An exact count in the same parameter costs nothing: the formula wins.
+    exact = compute_output_budget(
+        messages, window, prompt_upper_bound_tokens=estimate_prompt_tokens(messages)
+    )
+    assert exact == compute_output_budget(messages, window)
+
+
+def test_a_long_english_prompt_on_a_preflighting_engine_stays_within_the_window():
+    messages = [_Msg("the quick brown fox jumps over the lazy dog " * 200)]
+    window = 16384
+    bound = byte_bound_estimate(messages)
+
+    budget = compute_output_budget(messages, window, prompt_upper_bound_tokens=bound)
+
+    assert budget >= OUTPUT_BUDGET_FLOOR_TOKENS
+
+
+def test_the_cap_never_goes_below_the_floor():
+    # A prompt whose BOUND already fills the window: the floor stands, and the
+    # engine's own preflight is then free to reject a genuinely full window --
+    # which is the honest answer, not something to paper over with a 0-token
+    # call.
+    messages = [_Msg(_text(3000))]
+    window = 2048
+
+    budget = compute_output_budget(
+        messages, window, prompt_upper_bound_tokens=byte_bound_estimate(messages)
+    )
+
+    assert budget == OUTPUT_BUDGET_FLOOR_TOKENS
+
+
+def test_no_bound_means_no_cap():
+    messages = [_Msg(_CJK)]
+
+    assert compute_output_budget(messages, 32768, prompt_upper_bound_tokens=None) == (
+        compute_output_budget(messages, 32768)
+    )
+
+
+def test_the_override_still_wins_over_the_cap():
+    messages = [_Msg(_CJK)]
+
+    assert (
+        compute_output_budget(
+            messages, 32768, override=99, prompt_upper_bound_tokens=byte_bound_estimate(messages)
+        )
+        == 99
+    )
+
+
 # ===================== no window reported =====================
 
 
@@ -309,23 +436,33 @@ async def test_a_client_with_a_deliberate_budget_keeps_it(monkeypatch):
     assert "max_tokens" not in captured
 
 
+class _Engine:
+    """Engine stub: a handle, an MLX-style payload model value, no preflight."""
+
+    @staticmethod
+    def get_model_and_tokenizer(llm_id, link):
+        return ({"base_url": "http://127.0.0.1:8080", "alias": "a"}, {})
+
+    @staticmethod
+    def _payload_model_value(handle):
+        return "m"
+
+
+class _PreflightingEngine(_Engine):
+    @staticmethod
+    def preflight_counts_output_tokens():
+        return True
+
+
+class _Llm:
+    id = 7
+    link = "/fake"
+    name = "Test"
+
+
 def test_the_factory_opts_a_client_out_of_the_budget(monkeypatch):
     from src.agents.model_factory import build_chat_model
     from src.core import config
-
-    class _Engine:
-        @staticmethod
-        def get_model_and_tokenizer(llm_id, link):
-            return ({"base_url": "http://127.0.0.1:8080", "alias": "a"}, {})
-
-        @staticmethod
-        def _payload_model_value(handle):
-            return "m"
-
-    class _Llm:
-        id = 7
-        link = "/fake"
-        name = "Test"
 
     monkeypatch.setattr(config, "LLM_Engine", _Engine)
 
@@ -333,6 +470,54 @@ def test_the_factory_opts_a_client_out_of_the_budget(monkeypatch):
     assert not build_chat_model(
         _Llm(), temperature=0.3, top_p=0.8, max_tokens=12, auto_output_budget=False
     ).auto_output_budget
+
+
+def test_the_factory_stamps_the_engines_preflight_fact(monkeypatch):
+    from src.agents.model_factory import build_chat_model
+    from src.core import config
+
+    monkeypatch.setattr(config, "LLM_Engine", _Engine)
+    assert not build_chat_model(
+        _Llm(), temperature=0.3, top_p=0.8, max_tokens=55
+    ).preflight_counts_output
+
+    monkeypatch.setattr(config, "LLM_Engine", _PreflightingEngine)
+    assert build_chat_model(
+        _Llm(), temperature=0.3, top_p=0.8, max_tokens=55
+    ).preflight_counts_output
+
+
+def test_only_mlx_declares_that_its_preflight_counts_the_output():
+    from src.engines.base_engine import BaseEngine
+    from src.engines.cpu_engine import CPU_Engine
+    from src.engines.mlx_engine import MLX_Engine
+
+    assert BaseEngine.preflight_counts_output_tokens() is False
+    assert CPU_Engine.preflight_counts_output_tokens() is False
+    assert MLX_Engine.preflight_counts_output_tokens() is True
+
+
+async def test_a_preflighting_client_budgets_within_the_provable_bound(monkeypatch):
+    from langchain_openai import ChatOpenAI
+
+    captured: dict = {}
+
+    async def _capture(self, messages, *args, **kwargs):
+        captured.update(kwargs)
+        yield "chunk"
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _capture)
+    messages = [HumanMessage(_CJK)]
+    window = 32768
+    client = _client(max_tokens=1234, effective_context_tokens=window, preflight_counts_output=True)
+
+    assert [c async for c in client._astream(messages)] == ["chunk"]
+    assert _fits_the_preflight(messages, window, captured["max_tokens"])
+    # ...and a client on the other engine keeps the chars/4 budget.
+    plain = _client(max_tokens=1234, effective_context_tokens=window)
+    captured.clear()
+    assert [c async for c in plain._astream(messages)] == ["chunk"]
+    assert captured["max_tokens"] == compute_output_budget(messages, window)
 
 
 async def test_the_environment_override_wins_over_the_computed_budget(monkeypatch):

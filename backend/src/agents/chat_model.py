@@ -343,7 +343,22 @@ def erudi_chat_openai_class():
         # through ``_astream``, so the distinction has to live here.
         auto_output_budget: bool = True
 
+        # Whether the child this client points at REJECTS a request whose
+        # prompt plus requested generation overflows the window (MLX's
+        # preflight validator) rather than clamping it (llama-server). Stamped
+        # by the factory from ``BaseEngine.preflight_counts_output_tokens()``.
+        # When it does, the budget below is additionally held under the byte
+        # bound, which is provably >= the real prompt -- otherwise a budget
+        # sized from the chars/4 estimate could make the app reject its own
+        # turn on text that estimate under-counts (CJK).
+        preflight_counts_output: bool = False
+
         async def _astream(self, messages, *args, **kwargs):
+            # One byte-bound estimate, two consumers: the first-chunk watchdog
+            # budget below, and -- on a preflighting child -- the safety cap on
+            # the output budget. Both need an UPPER bound; only the output
+            # budget's SIZE comes from the chars/4 counter instead (the
+            # duality is spelled out in src.agents.output_budget).
             estimated = estimate_prompt_tokens(messages)
             # What this call may generate: the window minus what the turn
             # already occupies. Per model call, not per turn -- every hop of a
@@ -356,6 +371,7 @@ def erudi_chat_openai_class():
                     messages,
                     self.effective_context_tokens,
                     override=output_budget_override(),
+                    prompt_upper_bound_tokens=(estimated if self.preflight_counts_output else None),
                 )
                 if self.auto_output_budget
                 else None

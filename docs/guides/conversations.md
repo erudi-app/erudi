@@ -93,6 +93,14 @@ the chat template's own tokens, the tool schemas, the system prompt.
 
 There is no fixed ceiling above that: the window is the ceiling.
 
+On Apple Silicon the budget is held under one more limit. `mlx_vlm.server` checks
+`prompt + budget ≤ window` before it generates and answers 400 when the sum does not fit, and it
+counts the real tokenised prompt — which the estimate above under-counts on scripts like Chinese
+or Japanese. So on that engine the budget is also capped at `window − upper bound of the prompt`,
+using the same provable bound (one token per UTF-8 byte) the first-token watchdog runs on. The app
+can then never reject its own turn. `llama-server` needs none of this: it trims its own generation
+against what is left of the window, so it keeps the formula unchanged.
+
 Two values still matter at the edges:
 
 - `Conversation.max_tokens` (and the model's `sampling_defaults.max_tokens`, clamped to

@@ -119,6 +119,16 @@ class MLX_Engine(BaseChatServerEngine):
     # searching filter="mlx" (any author), so no hand-maintained mapping is needed.
     FORMAT_TAG = "mlx"
 
+    @classmethod
+    def preflight_counts_output_tokens(cls) -> bool:
+        """True: the `--max-kv-size` bound posted at spawn is a preflight
+        VALIDATOR, not a rotating cache. mlx_vlm.server adds the requested
+        generation to the tokenised prompt and answers 400 when the sum
+        exceeds the bound, so whatever asks it to generate must keep that sum
+        inside the window (see ``src.agents.output_budget``). llama-server
+        clamps instead, which is why the base answer is False."""
+        return True
+
     # Stored links that download but crash at load.
     # gemma-4 E2B (the 0.6.2 140-weight ValueError) was re-probed on real
     # mlx-vlm 0.6.13 during the #273 hardware pass — loads via the native
