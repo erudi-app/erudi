@@ -1,13 +1,18 @@
 """The ChatOpenAI seam: what Erudi changes about the stock client, and where.
 
 ``Erudi_Chat_OpenAI`` (built lazily by :func:`erudi_chat_openai_class`) carries
-exactly two behaviours, each on the narrowest hook that expresses it:
+four behaviours, each on the narrowest hook that expresses it:
 
 1. **The #573 two-phase streaming watchdog**, in ``_astream`` -- the single
    place ``ChatOpenAI`` routes async streaming through, and the only hook that
    receives the messages positionally (the first-chunk budget is computed from
    what is actually being sent). Details below.
-2. **The #554 reasoning extraction**, in ``_convert_chunk_to_generation_chunk``
+2. **The automatic output budget**, also in ``_astream``, and for the same
+   reason: it is the one hook holding the FINAL message list of a model call,
+   so the budget is recomputed per model hop of a tool turn, each one against
+   the history that hop actually sends. The arithmetic and the reasoning live
+   in ``src.agents.output_budget``.
+3. **The #554 reasoning extraction**, in ``_convert_chunk_to_generation_chunk``
    -- the single place every raw streamed chunk dict is converted to a
    LangChain chunk, so it is the last point where the dedicated reasoning
    field the local servers emit (``delta.reasoning_content`` from llama-server
@@ -19,11 +24,25 @@ exactly two behaviours, each on the narrowest hook that expresses it:
    base method folds it into ``generation_info`` and langchain-core's stream
    loop folds that into the yielded message's ``response_metadata``, where the
    runner reads it (pinned in ``tests/test_stream_watchdog.py``).
+4. **The legacy token-cap key**, in ``_get_request_payload`` -- see
+   ``The wire name of the cap`` below.
 
-The two hooks are disjoint -- the conversion runs INSIDE the budgeted stream,
-so extraction never loosens the watchdog -- and both rest on upstream
-assumptions pinned by ``tests/test_stream_watchdog.py`` so a langchain-openai
-bump fails loudly instead of silently restoring the old behavior.
+The hooks are disjoint -- the conversion runs INSIDE the budgeted stream, so
+extraction never loosens the watchdog -- and all of them rest on upstream
+assumptions pinned by ``tests/test_stream_watchdog.py`` and
+``tests/test_output_budget.py`` so a langchain-openai bump fails loudly instead
+of silently restoring the old behavior.
+
+The wire name of the cap
+------------------------
+OpenAI deprecated ``max_tokens`` in favour of ``max_completion_tokens`` in
+2024, and stock ``ChatOpenAI`` renames the field on its way into the payload.
+Erudi does not talk to OpenAI: it talks to two local servers, and only one of
+them followed. llama-server accepts both names (``n_predict`` aliases each),
+but mlx_vlm.server 0.6.17 reads ``max_tokens`` alone -- and because its request
+schema DEFAULTS that field, the modern name is not rejected, it is silently
+replaced by the server's own default (2048). ``_get_request_payload`` therefore
+puts the cap back on the legacy key, the only one both children honour.
 
 Why the watchdog replaces the uniform timeout (#573)
 ----------------------------------------------------
@@ -72,6 +91,7 @@ import asyncio
 from functools import lru_cache
 from typing import Any, AsyncIterator, Iterable, Optional
 
+from src.agents.output_budget import compute_output_budget, output_budget_override
 from src.agents.reasoning_stream import REASONING_KWARG, extract_reasoning_delta
 from src.core.exceptions import GenerationTimeoutException
 from src.core.logging import logger
@@ -315,6 +335,19 @@ def erudi_chat_openai_class():
 
         async def _astream(self, messages, *args, **kwargs):
             estimated = estimate_prompt_tokens(messages)
+            # What this call may generate: the window minus what the turn
+            # already occupies. Per model call, not per turn -- every hop of a
+            # tool turn sends a longer history and gets a smaller budget. A
+            # kwarg wins over the constructor's ``max_tokens`` in
+            # ``_get_request_payload`` (pinned); ``None`` leaves that value
+            # alone, which is what an engine with no reportable window gets.
+            budget = compute_output_budget(
+                messages,
+                self.effective_context_tokens,
+                override=output_budget_override(),
+            )
+            if budget is not None:
+                kwargs["max_tokens"] = budget
             source = super()._astream(messages, *args, **kwargs)
             async for chunk in stream_with_two_phase_budget(
                 source,
@@ -328,6 +361,19 @@ def erudi_chat_openai_class():
                 model_name=self.model_name,
             ):
                 yield chunk
+
+        def _get_request_payload(self, input_, *, stop=None, **kwargs):
+            """Send the token cap as ``max_tokens`` (see the module docstring).
+
+            Stock ``ChatOpenAI`` renames it to ``max_completion_tokens``, which
+            mlx_vlm.server silently replaces with its own default. Renaming it
+            back here covers every path that builds a payload -- streaming and
+            non-streaming alike -- and leaves the value itself untouched.
+            """
+            payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+            if "max_completion_tokens" in payload:
+                payload["max_tokens"] = payload.pop("max_completion_tokens")
+            return payload
 
         def _convert_chunk_to_generation_chunk(
             self, chunk, default_chunk_class, base_generation_info

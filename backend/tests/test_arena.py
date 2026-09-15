@@ -18,6 +18,7 @@ from langchain_core.messages import AIMessage
 
 import src.agents.runner as agent_runner
 from src.core import config
+from src.database.generation_hints import FALLBACK_MAX_TOKENS
 from src.engines.base_engine import BaseEngine
 from src.agents.runner import ERROR_SENTINEL
 from src.domains.arena.repository import ArenaRepository
@@ -336,7 +337,11 @@ class TestArenaService:
         assert "".join(result) == "Custom response."
         assert captured["temperature"] == 1.5
         assert captured["top_p"] == 0.95
-        assert captured["max_tokens"] == 2048
+        # ...except the output budget, which is no longer a per-request param:
+        # it is derived from the running context window per model call, and the
+        # value handed to the factory is only the fallback for an engine that
+        # cannot report one. A number from an old client is ignored.
+        assert captured["max_tokens"] == FALLBACK_MAX_TOKENS
 
     async def test_query_llm_stream_engine_failure_yields_sentinel(
         self, test_db_session, mock_llm, monkeypatch

@@ -27,7 +27,7 @@ out, is resolved rather than hard-coded:
 | `llm_id` | int | required |
 | `temperature` | float, 0.0–2.0 | resolved from the model's own defaults (`sampling_defaults`) |
 | `top_p` | float, 0.0–1.0 | resolved from the model's own defaults |
-| `max_tokens` | int, 1–32768 | resolved from the model's own defaults |
+| `max_tokens` | int, 1–32768 | resolved from the model's own defaults — see [Output budget](#output-budget) |
 | `custom_prompt` | string, ≤ 4096 chars | empty |
 | `web_search_enabled` | bool | copies the global default from `GET /erudi/user_settings/` |
 
@@ -66,7 +66,43 @@ Request body (`ConversationQuery`):
 | `images` | list of strings | base64 data-URL images attached to the question (vision models) |
 | `image_paths` | list of strings | local paths parallel to `images`, empty string when unavailable |
 | `attachments` | list of strings | local paths of documents, or of folders of documents, attached to this question |
-| `temperature`, `top_p`, `max_new_tokens`, `custom_prompt` | optional | per-turn overrides of the conversation's settings |
+| `temperature`, `top_p`, `custom_prompt` | optional | per-turn overrides of the conversation's settings |
+| `max_new_tokens` | optional | accepted and ignored — see [Output budget](#output-budget) |
+
+### Output budget
+
+How long an answer may get is not a setting. There is no Max Tokens control, and neither
+`max_new_tokens` on a turn nor `max_tokens` on the conversation decides it in normal operation.
+
+The reason is what the parameter actually does: it is a server-side cut the model never sees. It
+cannot make an answer shorter or more focused — it can only end one mid-sentence. A number chosen
+in advance is therefore either too small (a truncated answer) or irrelevant, and the model itself
+stops when it is done.
+
+So every model call gets its budget computed from the window it is running in:
+
+```
+max_tokens = max(512, window − prompt − margin)      margin = max(256, 10 % of prompt)
+```
+
+The window is the one the loaded model actually runs with (see
+[Context window](llms.md)); the prompt is the whole turn as it is about to be sent, so a long
+conversation leaves a smaller budget than a fresh one, and each hop of a tool-calling turn is
+budgeted again against its own longer history. The margin covers what the estimate cannot see —
+the chat template's own tokens, the tool schemas, the system prompt.
+
+There is no fixed ceiling above that: the window is the ceiling.
+
+Two values still matter at the edges:
+
+- `Conversation.max_tokens` (and the model's `sampling_defaults.max_tokens`, clamped to
+  `max_tokens_cap`) is the **fallback**: what a turn runs with when the engine cannot report the
+  window it loaded with. The column is kept and resolved at creation; nothing writes it from the
+  interface.
+- `ERUDI_MAX_TOKENS` pins the budget for every call and wins over all of the above. It is a QA and
+  development escape hatch, documented in `backend/.env.example`.
+
+`max_new_tokens` stays on the request schema so an older client gets an answer instead of a 422.
 
 ### Attached documents
 

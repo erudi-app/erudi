@@ -162,9 +162,14 @@ class ArenaService:
             if payload.temperature is None
             else payload.temperature,
             top_p=defaults.top_p if payload.top_p is None else payload.top_p,
-            max_tokens=defaults.max_tokens
-            if payload.max_new_tokens is None
-            else payload.max_new_tokens,
+            # Only the FALLBACK output budget (same contract as a conversation):
+            # the per-call budget computed from the running window
+            # (``src.agents.output_budget``) overrides it whenever the engine
+            # reports one, and this value is what an engine that reports none
+            # runs with. ``payload.max_new_tokens`` is deliberately not read --
+            # the arena panel no longer offers the control, and the field stays
+            # accepted only so an older client is not rejected.
+            max_tokens=defaults.max_tokens,
         )
 
         # Safety net (#133/#212): unless the model is positively vision-capable,

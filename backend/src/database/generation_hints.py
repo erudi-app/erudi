@@ -217,8 +217,13 @@ def max_tokens_cap(context_length: Any, engine: Any = None) -> int:
     ``ERUDI_CTX`` pin on llama.cpp engines when the user set one, ``None``
     everywhere else -- with no pin the engines resolve their ALLOCATED window
     at load and this cap simply falls back to the model's own window.
-    Informational for the UI (the max-tokens field's ceiling, the #136 "2000"
-    item) and a soft server-side clamp -- never a rejection.
+
+    It is NOT a UI ceiling any more -- there is no max-tokens field. What it
+    caps is ``SamplingDefaults.max_tokens``, the FALLBACK output budget: the
+    number a turn runs with only when the engine cannot report the window it
+    loaded with. Whenever the engine does report one, the per-call budget in
+    ``src.agents.output_budget`` derives the real ceiling from that window and
+    this value is never reached. A soft clamp, never a rejection.
     """
     if engine is None:
         from src.core import config

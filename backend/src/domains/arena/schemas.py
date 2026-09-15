@@ -10,7 +10,6 @@ Example:
         question="What is quantum computing?",
         temperature=0.7,
         top_p=0.9,
-        max_new_tokens=512,
         custom_prompt="Use simple language"
     )
 """
@@ -33,7 +32,8 @@ class ArenaQueryPayload(BaseModel):
         attachments: Local filesystem paths of documents/folders attached to the question.
         temperature: Sampling temperature (0.0=deterministic, 2.0=creative, default=0.1).
         top_p: Nucleus sampling threshold (0.0-1.0, default=0.5).
-        max_new_tokens: Maximum tokens to generate (1-8192, default=1024).
+        max_new_tokens: Accepted and ignored -- the output budget comes from the
+            model's context window, not from the client.
         custom_prompt: Optional additional instructions appended to system prompt.
 
     Example:
@@ -41,7 +41,6 @@ class ArenaQueryPayload(BaseModel):
         ...     question="Explain relativity",
         ...     temperature=0.7,
         ...     top_p=0.9,
-        ...     max_new_tokens=512,
         ...     custom_prompt="Use analogies"
         ... )
     """
@@ -73,11 +72,15 @@ class ArenaQueryPayload(BaseModel):
         le=1.0,
         description="Nucleus sampling threshold (0.0-1.0); None resolves the model's default (#388)",
     )
+    # Accepted, never read. The output budget is computed per model call from
+    # the context window the model is running in (``src.agents.output_budget``),
+    # so there is no panel control left to send a number from. The field stays
+    # on the schema so an older client keeps getting an answer instead of a 422.
     max_new_tokens: Optional[int] = Field(
         default=None,
         ge=1,
         le=32768,
-        description="Maximum number of tokens to generate; None resolves the model's default (#388)",
+        description="Ignored: the output budget is derived from the model's context window",
     )
     custom_prompt: Optional[str] = Field(
         default=None, description="Optional additional instructions for the model"

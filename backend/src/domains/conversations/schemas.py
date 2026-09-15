@@ -278,7 +278,11 @@ class ConversationQuery(BaseModel):
         attachments: Local filesystem paths of documents/folders attached to the question.
         temperature: Optional temperature override for this query only.
         top_p: Optional top_p override for this query only.
-        max_new_tokens: Optional max_tokens override for this query only.
+        max_new_tokens: Accepted and ignored -- the output budget is computed per
+            model call from the context window the model runs in
+            (``src.agents.output_budget``), so nothing on the client sets it.
+            The field stays on the schema so an older client is answered, not
+            rejected with a 422.
         custom_prompt: Optional system prompt override for this query only.
 
     Example:
