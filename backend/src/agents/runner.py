@@ -72,18 +72,62 @@ from src.agents.think_splitter import ThinkSplitter
 from src.core import config
 from src.core.exceptions import EngineException, GenerationTimeoutException
 from src.core.logging import logger
+from src.engines.memory_budget import MemoryBudget
 
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
 
-# Auto-summarization thresholds (message-count based — token triggers need a
-# model profile the local server doesn't expose). Once a conversation's agent
-# state exceeds the trigger, older turns are summarized by the same local model
-# and replaced in the checkpointer state; the Message table keeps the full
-# history for display.
+# Auto-summarization (compaction) fires on TWO signals, whichever comes first,
+# recomputed PER TURN (``_build_middleware`` runs after the child spawned, so
+# the allocated window is fresh):
+#   1. the WINDOW signal -- the conversation reaches 80 % of the ALLOCATED
+#      context window (``BaseEngine.effective_context_tokens``);
+#   2. the MEMORY signal -- the machine's deterministic memory margin
+#      (``src.engines.memory_budget``) would drop under 15 %, expressed as the
+#      conversation token count at which that happens.
+# The 20-message floor stays as the trigger when no window is readable
+# (``W_eff=None``), and always rides along with OR semantics. Once triggered,
+# older turns are summarized by the same local model and replaced in the
+# checkpointer state; the Message table keeps the full history for display.
 SUMMARY_TRIGGER_MESSAGES = 20
 SUMMARY_KEEP_MESSAGES = 10
+COMPACTION_WINDOW_FRACTION = 0.8
+# Shared floor of the memory signal AND the amber warning: under 15 % of
+# deterministic margin, compaction fires; if the margin is STILL under 15 %
+# at end of turn (compaction had its chance), the warning is emitted.
+MEMORY_MARGIN_FLOOR = 0.15
+
+
+def summarization_triggers(
+    effective_window: Optional[int], memory_token_ceiling: Optional[int] = None
+) -> list:
+    """The OR-semantics trigger list for ``SummarizationMiddleware``.
+
+    ``effective_window`` is the ALLOCATED window (80 % of it becomes the token
+    threshold); ``memory_token_ceiling`` is the conversation token count at
+    which the memory margin hits its floor (``MemoryBudget.tokens_at_margin``,
+    possibly negative when the weights alone blow it -- clamped to 1 so
+    compaction fires as early as it can). The two fold into ONE ``tokens``
+    entry (min: whichever signal comes first) so the middleware sees at most
+    one token threshold plus the message floor.
+
+    Deliberately never ``("fraction", ...)``: that form needs a
+    ``model.profile`` our local chat clients do not carry (the middleware's
+    ``__init__`` would raise). The token counter stays
+    ``count_tokens_approximately`` -- the same counter the output budget uses,
+    so the two never disagree.
+    """
+    token_thresholds = []
+    if isinstance(effective_window, int) and effective_window > 0:
+        token_thresholds.append(int(COMPACTION_WINDOW_FRACTION * effective_window))
+    if memory_token_ceiling is not None:
+        token_thresholds.append(max(1, memory_token_ceiling))
+    triggers: list = []
+    if token_thresholds:
+        triggers.append(("tokens", max(1, min(token_thresholds))))
+    triggers.append(("messages", SUMMARY_TRIGGER_MESSAGES))
+    return triggers
 
 # Hard cap on LangGraph super-steps per turn (#277). Without it the graph
 # defaults leave a runaway agent unbounded: a small model that keeps issuing the
@@ -422,7 +466,17 @@ class AgentRunner:
                     # above still come from the conversation row / arena panel.
                     sampling=resolve_sampling_defaults(llm),
                 )
-                middleware = self._build_middleware(model) if summarize else []
+                # Memory accounting for the compaction signal and the amber
+                # warning (1.1.2). Derived AFTER build_chat_model so the child
+                # is up and the handle carries the loaded artifact; file I/O
+                # and hardware probes -> threadpool. ``from_engine`` never
+                # raises; an unaccountable model just carries None facts.
+                budget = (
+                    await run_in_threadpool(MemoryBudget.from_engine, engine)
+                    if summarize
+                    else None
+                )
+                middleware = self._build_middleware(model, budget) if summarize else []
                 if kb_context_block:
                     # After summarization: the merge must see the final
                     # message list that actually reaches the model.
@@ -677,6 +731,18 @@ class AgentRunner:
                         # and the next turn replays an empty assistant turn.
                         await self._write_curated_empty_turn(agent, run_config, curated)
                     yield {"t": "answer", "text": curated}
+                # Compact first, warn second (1.1.2): the summarization
+                # middleware ran INSIDE this turn, so by stream end it has had
+                # its chance -- evaluate the memory margin HERE, at end of
+                # turn, on the POST-turn thread state (the compacted state a
+                # follow-up will actually replay). If the margin is still
+                # under the floor, one ``memory_warning`` event goes out; the
+                # conversation service forwards it to the wire and never
+                # persists it (it is a statement about NOW, on THIS machine).
+                if stateful and budget is not None:
+                    warning = await self._memory_warning_event(agent, run_config, budget)
+                    if warning is not None:
+                        yield warning
                 duration_ms = (time.perf_counter() - stream_start_s) * 1000
                 logger.info(
                     f"Agent stream completed: llm={getattr(llm, 'id', '?')}, "
@@ -828,12 +894,15 @@ class AgentRunner:
                 if event["t"] == "answer":
                     yield event["text"]
 
-    def _build_middleware(self, model):
-        """Auto-summarization using the SAME local model, triggered by message count.
+    def _build_middleware(self, model, memory_budget=None):
+        """Auto-summarization using the SAME local model, on the two-signal trigger.
 
-        The middleware rewrites the checkpointer state (drops old turns, inserts a
-        summary) so the agent's context stays bounded; the Message table is
-        untouched, so the UI still shows the full conversation.
+        Runs per turn, after the child spawned, so the allocated window
+        (``effective_context_tokens``) and the memory accounting are fresh for
+        THIS model on THIS machine. The middleware rewrites the checkpointer
+        state (drops old turns, inserts a summary) so the agent's context stays
+        bounded; the Message table is untouched, so the UI still shows the full
+        conversation.
         """
         from langchain.agents.middleware import SummarizationMiddleware
         from langchain_core.messages.utils import count_tokens_approximately
@@ -843,16 +912,60 @@ class AgentRunner:
             _StripStaleToolResults,
         )
 
+        engine = config.LLM_Engine
+        window_probe = getattr(engine, "effective_context_tokens", None)
+        effective_window = window_probe() if callable(window_probe) else None
+        memory_token_ceiling = (
+            memory_budget.tokens_at_margin(MEMORY_MARGIN_FLOOR)
+            if memory_budget is not None
+            else None
+        )
         return [
             _StripStaleImagesMiddleware(),
             _StripStaleToolResults(),
             SummarizationMiddleware(
                 model=model,
-                trigger=("messages", SUMMARY_TRIGGER_MESSAGES),
+                trigger=summarization_triggers(effective_window, memory_token_ceiling),
                 keep=("messages", SUMMARY_KEEP_MESSAGES),
                 token_counter=count_tokens_approximately,
             ),
         ]
+
+    async def _memory_warning_event(self, agent, run_config, budget) -> Optional[dict]:
+        """The ``memory_warning`` event for this turn, or ``None``.
+
+        Reads the POST-turn thread state (what the next turn will replay,
+        summarization included), counts it with the SAME
+        ``count_tokens_approximately`` the compaction trigger uses, and asks
+        the deterministic accounting for the margin. Strictly under the shared
+        floor -> the event; anything else (fine margin, unaccountable model,
+        empty state) -> ``None``. Advisory only: a failure here is logged and
+        never sinks the turn.
+        """
+        from langchain_core.messages.utils import count_tokens_approximately
+
+        try:
+            state = await agent.aget_state(run_config)
+            messages = (state.values or {}).get("messages", []) if state else []
+            if not messages:
+                return None
+            conversation_tokens = count_tokens_approximately(messages)
+            margin = budget.memory_margin_fraction(conversation_tokens)
+            if margin is None or margin >= MEMORY_MARGIN_FLOOR:
+                return None
+            logger.warning(
+                f"Memory margin still under the floor after compaction: "
+                f"margin={margin:.3f}, conversation_tokens={conversation_tokens}"
+            )
+            return {
+                "t": "memory_warning",
+                "used_fraction": round(1.0 - margin, 4),
+                "conversation_bytes": budget.conversation_bytes(conversation_tokens),
+            }
+        except Exception:
+            # Advisory signal: losing it costs one warning, never the answer.
+            logger.exception("Memory-margin evaluation failed; skipping the warning")
+            return None
 
     async def _write_curated_empty_turn(self, agent, run_config, text: str) -> None:
         """Write the curated empty-answer line into the thread state (#554).
