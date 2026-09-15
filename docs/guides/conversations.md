@@ -30,13 +30,15 @@ out, is resolved rather than hard-coded:
 | `max_tokens` | int, 1–32768 | resolved from the model's own defaults — see [Output budget](#output-budget) |
 | `custom_prompt` | string, ≤ 4096 chars | empty |
 | `web_search_enabled` | bool | copies the global default from `GET /erudi/user_settings/` |
+| `reasoning_effort` | `none` \| `low` \| `medium` \| `high` \| `xhigh` | copies the global default from `GET /erudi/user_settings/` |
 
 There is no `name` field: the conversation is created as `"New Conversation"` and renamed later.
-Once created, the conversation **owns** its values — a later change to the model's defaults or to the
-global web-search setting never retro-affects it.
+Once created, the conversation **owns** its values — a later change to the model's defaults, to the
+global web-search setting or to the global reasoning effort never retro-affects it.
 
 The response (`ConversationResponse`) carries `id`, `llm_id`, `name`, `created_at`,
-`last_message_time`, `temperature`, `top_p`, `max_tokens`, `custom_prompt`, `web_search_enabled`.
+`last_message_time`, `temperature`, `top_p`, `max_tokens`, `custom_prompt`, `web_search_enabled`,
+`reasoning_effort`.
 `llm_id` is nullable: deleting the bound model nulls it server-side and the conversation survives,
 unbound, until it is pointed at another model.
 
@@ -187,6 +189,39 @@ For families whose markers the server parser does not know, the runner's `ThinkS
 `<think>...</think>` that slips through still becomes `thinking` events instead of leaking into the
 answer.
 
+### How much the model may think: reasoning effort
+
+A conversation carries a reasoning effort — one of `none`, `low`, `medium`, `high`, `xhigh` — that
+says how much the model may deliberate before answering. `medium` is the default: a conversation
+copies the global default (`user_settings.default_reasoning_effort`) when it is created and owns its
+level afterwards, so changing the global setting only affects the next conversation. Arena panels
+have no conversation row and read the global level on every turn.
+
+What a level costs on the wire depends on the model's own chat template, never on its family name: a
+community fine-tune keeps its parent's name and ships whatever template its author baked in. The
+verdict is read per artifact (`backend/src/engines/reasoning_lever.py`), from the
+`chat_template_caps` llama-server reports for the running child and from a differential render of the
+template otherwise, and it takes one of three values:
+
+| the template… | how a level is delivered |
+|---|---|
+| reads `reasoning_effort` (gpt-oss and friends) | the level goes on the wire, natively |
+| only honours `enable_thinking` (Qwen3 and friends) | `none` turns thinking off; `medium` is the natural behaviour; the other levels become a graded instruction |
+| exposes no lever, but the model reasons | `medium` is the natural behaviour; every other level becomes a graded instruction |
+| exposes no lever and the model does not reason | `none` changes nothing; every other level asks for a chain of thought written between `<think>` tags, which the splitter above separates from the answer |
+
+Two consequences are deliberate. At `medium`, a model that reasons naturally gets exactly the request
+it got before the feature existed — nothing is added to the prompt and nothing to the body. And
+`none` on an always-on reasoner is a best-effort request: the instruction asks it to answer directly,
+and a model that reasons anyway is within its rights.
+
+Falling back from a level to an instruction is silent in the interface and recorded once per turn in
+the backend log (`Reasoning effort: level=… lever=… wire_effort=… degraded_from=…`), which is what a
+field report is read against.
+
+Utility calls never reason, whatever the conversation's level: the conversation title and the
+compaction summary both run at `none` — the summary through a second client on the same child server.
+
 ### When a turn ends without an answer
 
 A thinking model can spend its whole turn reasoning and never write an answer. Instead of a generic
@@ -317,8 +352,8 @@ curl -X PATCH http://127.0.0.1:27182/erudi/conversations/42 \
   -d '{"name": "Physics questions", "temperature": 0.3}'
 ```
 
-`ConversationUpdate` accepts `name`, `llm_id`, `temperature`, `top_p`, `max_tokens`, `custom_prompt`
-and `web_search_enabled`; omitted fields are left unchanged. Switching `llm_id` is how an unbound
+`ConversationUpdate` accepts `name`, `llm_id`, `temperature`, `top_p`, `max_tokens`, `custom_prompt`,
+`web_search_enabled` and `reasoning_effort`; omitted fields are left unchanged. Switching `llm_id` is how an unbound
 conversation (its model was deleted) is put back to work.
 
 ### Star and unstar a message

@@ -102,7 +102,8 @@ Routers are mounted under the `/erudi` prefix in `register_routers`
 
 - `GET /erudi/startup/welcome-popup` drives first-run UI state (`StartupVariables`).
 - `GET|PUT /erudi/user_settings/` reads and writes the UI language, the global
-  web-search default and the automatic-update preference (`UserSettings`).
+  web-search default, the automatic-update preference and the default reasoning
+  effort (`UserSettings`).
   See [Internationalization](i18n.md).
 - Connectivity for the status pill is read in the renderer from `navigator.onLine`
   and the `online` / `offline` events, corrected by requests that fail on the wire
@@ -205,6 +206,7 @@ Other modules in the layer:
 | `kb_mode.py` | Chooses agentic (tool-driven) vs systematic KB retrieval; `ERUDI_KB_AGENTIC` overrides |
 | `tools.py` | Tool definitions, including `search_knowledge_base` |
 | `prompts.py` | System-prompt construction |
+| `reasoning_effort.py` | The five reasoning-effort levels and how each is delivered on a given model (`src/engines/reasoning_lever.py` reads that model's lever) |
 | `middleware.py` | Summarization and related agent middleware |
 | `model_factory.py` | Builds the chat client pointed at the engine's child server |
 | `chat_model.py` | `Erudi_Chat_OpenAI`: the `ChatOpenAI` subclass carrying the streaming budgets and the servers' dedicated reasoning field |

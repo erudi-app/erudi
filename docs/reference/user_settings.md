@@ -1,8 +1,13 @@
 # User Settings
 
 Persisted user preferences exposed over the `/erudi/user_settings` routes: the global
-web-search default, the interface language, the automatic-update preference and the
-inference backend.
+web-search default, the interface language, the automatic-update preference, the
+inference backend and the default reasoning effort.
+
+`default_reasoning_effort` (`none`, `low`, `medium`, `high`, `xhigh`, `medium` by default)
+is what a NEW conversation copies at creation and what an arena turn runs at; an existing
+conversation keeps the level it copied. See
+[Conversations](../guides/conversations.md#how-much-the-model-may-think-reasoning-effort).
 
 `inference_backend` (`auto` or `cpu`) is the one setting the backend reads outside a
 request: the FastAPI lifespan reads it once per boot, after the migrations, and swaps
