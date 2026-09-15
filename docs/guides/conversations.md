@@ -113,6 +113,7 @@ their contents through history forever.
 | `thinking` | `text` | A chunk of the model's reasoning (see below) |
 | `tool_call` | `name`, `args` | The agent called a tool (`search_knowledge_base`, `web_search`, `calculator`) |
 | `tool_result` | `name`, `text` | What that tool returned |
+| `memory_warning` | `used_fraction`, `conversation_bytes` | The machine's memory margin is still under 15 % after compaction had its chance (see below) |
 | `error` | `text` | The turn failed; the text is the curated error message |
 | `done` | — | Terminal event, always sent, including after an `error` |
 
@@ -212,7 +213,9 @@ ends, the accumulated `answer` text becomes the assistant message's `content`, a
 events (`thinking`, `tool_call`, `tool_result`) are stored in order as that message's `trace`, so the
 reasoning and tool panel can be replayed on reload. The serialized trace is capped at 32 KB,
 drop-oldest, with a `{"t": "truncated"}` marker prepended when events were dropped. Error turns
-persist no trace.
+persist no trace. `memory_warning` is the one event that reaches the wire but is **never** persisted:
+it describes the machine's memory at that moment, and an old conversation reopened on a bigger
+machine must not replay it.
 
 ## Other endpoints
 
@@ -296,11 +299,33 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    by endpoints through the `get_checkpointer` dependency. The conversation id is the thread id, so a
    turn restores its own prior history without the caller replaying anything.
 
-2. **Summarization middleware.** `SummarizationMiddleware`
-   (`backend/src/agents/runner.py`, `_build_middleware`) runs on the **same local model**. It
-   triggers at 20 messages and keeps the last 10, rewriting the checkpointer state: old turns are
-   dropped and replaced by a summary, so the agent's context stays bounded. The `messages` table is
-   untouched — the UI still shows the whole conversation.
+2. **Summarization middleware (compaction).** `SummarizationMiddleware`
+   (`backend/src/agents/runner.py`, `_build_middleware`) runs on the **same local model**. It fires
+   on **two signals, whichever comes first**, recomputed on every turn (the middleware is built
+   after the inference child spawned, so both are fresh for this model on this machine):
+
+   - **the window signal** — the conversation's token size reaches **80 % of the allocated context
+     window** (`BaseEngine.effective_context_tokens()`, the window the loaded child actually runs
+     with);
+   - **the memory signal** — the machine's deterministic memory margin would drop under **15 %**
+     (`backend/src/engines/memory_budget.py`): on-disk weights size plus a per-token KV-cache cost
+     (`2 × layers × kv_heads × head_dim × 2 bytes f16`, read from the local artifact's
+     `config.json`) against the engine family's memory pool — unified memory on Apple Silicon, VRAM
+     on CUDA, system RAM on CPU. The accounting deliberately never reads the OS's "available"
+     memory (macOS compression and swap make it non-deterministic); a model whose facts cannot be
+     read (a GGUF file usually ships no `config.json`) simply runs without the memory signal.
+
+   When no window is readable, the trigger falls back to the 20-message floor — which always rides
+   along with OR semantics anyway. Compaction keeps the last 10 messages, rewriting the checkpointer
+   state: old turns are dropped and replaced by a summary, so the agent's context stays bounded. The
+   `messages` table is untouched — the UI still shows the whole conversation.
+
+   **Compact first, warn second**: at the end of each turn — after the middleware had its chance —
+   the runner re-evaluates the memory margin on the post-turn thread state (what the next turn will
+   replay). If it is still under 15 %, the stream carries one `memory_warning` event and the
+   renderer shows an amber notice above the composer, naming the conversation's approximate memory
+   size. The warning is about the machine *now*, so it is never persisted and clears on the next
+   turn that carries none.
 
 Two more middlewares run alongside it: stale images and stale tool results are stripped from the
 replayed state before the model is called.
