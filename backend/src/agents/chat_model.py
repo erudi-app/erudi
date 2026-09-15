@@ -1,13 +1,20 @@
 """The ChatOpenAI seam: what Erudi changes about the stock client, and where.
 
 ``Erudi_Chat_OpenAI`` (built lazily by :func:`erudi_chat_openai_class`) carries
-exactly two behaviours, each on the narrowest hook that expresses it:
+four behaviours, each on the narrowest hook that expresses it:
 
 1. **The #573 two-phase streaming watchdog**, in ``_astream`` -- the single
    place ``ChatOpenAI`` routes async streaming through, and the only hook that
    receives the messages positionally (the first-chunk budget is computed from
    what is actually being sent). Details below.
-2. **The #554 reasoning extraction**, in ``_convert_chunk_to_generation_chunk``
+2. **The automatic output budget**, also in ``_astream``, and for the same
+   reason: it is the one hook holding the FINAL message list of a model call,
+   so the budget is recomputed per model hop of a tool turn, each one against
+   the history that hop actually sends. The arithmetic and the reasoning live
+   in ``src.agents.output_budget``; the single retry that corrects a budget
+   the engine's own context check rejected lives here, beside the call it
+   replays (see ``Retrying a call the engine's context check rejected``).
+3. **The #554 reasoning extraction**, in ``_convert_chunk_to_generation_chunk``
    -- the single place every raw streamed chunk dict is converted to a
    LangChain chunk, so it is the last point where the dedicated reasoning
    field the local servers emit (``delta.reasoning_content`` from llama-server
@@ -19,11 +26,25 @@ exactly two behaviours, each on the narrowest hook that expresses it:
    base method folds it into ``generation_info`` and langchain-core's stream
    loop folds that into the yielded message's ``response_metadata``, where the
    runner reads it (pinned in ``tests/test_stream_watchdog.py``).
+4. **The legacy token-cap key**, in ``_get_request_payload`` -- see
+   ``The wire name of the cap`` below.
 
-The two hooks are disjoint -- the conversion runs INSIDE the budgeted stream,
-so extraction never loosens the watchdog -- and both rest on upstream
-assumptions pinned by ``tests/test_stream_watchdog.py`` so a langchain-openai
-bump fails loudly instead of silently restoring the old behavior.
+The hooks are disjoint -- the conversion runs INSIDE the budgeted stream, so
+extraction never loosens the watchdog -- and all of them rest on upstream
+assumptions pinned by ``tests/test_stream_watchdog.py`` and
+``tests/test_output_budget.py`` so a langchain-openai bump fails loudly instead
+of silently restoring the old behavior.
+
+The wire name of the cap
+------------------------
+OpenAI deprecated ``max_tokens`` in favour of ``max_completion_tokens`` in
+2024, and stock ``ChatOpenAI`` renames the field on its way into the payload.
+Erudi does not talk to OpenAI: it talks to two local servers, and only one of
+them followed. llama-server accepts both names (``n_predict`` aliases each),
+but mlx_vlm.server 0.6.17 reads ``max_tokens`` alone -- and because its request
+schema DEFAULTS that field, the modern name is not rejected, it is silently
+replaced by the server's own default (2048). ``_get_request_payload`` therefore
+puts the cap back on the legacy key, the only one both children honour.
 
 Why the watchdog replaces the uniform timeout (#573)
 ----------------------------------------------------
@@ -72,6 +93,8 @@ import asyncio
 from functools import lru_cache
 from typing import Any, AsyncIterator, Iterable, Optional
 
+from src.agents.output_budget import compute_output_budget, output_budget_override
+from src.agents.overflow import parse_context_overflow
 from src.agents.reasoning_stream import REASONING_KWARG, extract_reasoning_delta
 from src.core.exceptions import GenerationTimeoutException
 from src.core.logging import logger
@@ -237,6 +260,65 @@ def first_chunk_budget_s(
     return min(max(FIRST_CHUNK_FLOOR_S, raw), ceiling)
 
 
+# --- Retrying a call the engine's context check rejected --------------------
+#
+# The output budget is sized from an ESTIMATE of the prompt (chars/4, see
+# src.agents.output_budget). llama-server clamps its own generation against
+# what is left of the window, so an over-estimate costs nothing there.
+# mlx_vlm.server does not: it validates `prompt + max_tokens <= window` against
+# the REAL tokenised prompt and answers 400. On text the estimate under-counts
+# -- Chinese and Japanese, roughly threefold -- the app would then reject its
+# own turn on a conversation that fits perfectly well.
+#
+# The rejection carries the cure: it names the exact prompt count. So the call
+# is retried once with a budget built from that number instead of an estimate.
+# The alternative, capping every budget with the watchdog's provable byte
+# bound, is safe but pessimistic in the wrong direction: that bound over-counts
+# English fourfold, and a measured 24 000-token budget collapsed to the 512
+# floor on an 8 000-token turn in a 32 k window. Precision beats pessimism, and
+# the rejection costs one instant local round-trip on the rare turn that hits it.
+#
+# Engine-agnostic by construction: the retry is triggered by the wire shape, so
+# a llama-server (which never produces it) never enters this path.
+PREFLIGHT_RETRY_MARGIN_TOKENS = 64
+
+
+def preflight_retry_budget(exc: Exception, window_tokens: Optional[int]) -> Optional[int]:
+    """The budget to retry ``exc``'s rejected call with, or ``None``: don't.
+
+    ``None`` means the failure is not a context check the budget can fix -- a
+    different error, an engine that clamps instead, an unparseable variant, no
+    known window, or a prompt that fills the window ON ITS OWN. That last case
+    is a GENUINE overflow: no budget makes it fit, so the exception must reach
+    the runner, whose curated turn tells the user the real numbers.
+
+    The retry keeps a small margin under the window rather than filling it to
+    the token: the count the server reports is for the prompt as it tokenised
+    it, and the retry sends the same messages, so the margin only has to cover
+    nothing at all -- it is there so an off-by-a-few in either direction costs
+    a few tokens of answer instead of a second rejection.
+    """
+    if not window_tokens or window_tokens <= 0:
+        return None
+    overflow = parse_context_overflow(exc)
+    if overflow is None or overflow.prompt_only_tokens is None:
+        return None
+    # Self-correcting: the rejection also NAMES the server's own limit
+    # ("MAX_KV_SIZE is N"). Today it equals the window we stamped at spawn,
+    # but if the two ever drift (an mlx_vlm bump, a spawn-time adjustment),
+    # the server's number is the one the next check will enforce -- computing
+    # against the smaller of the two cannot produce a second rejection.
+    if overflow.context_tokens is not None and overflow.context_tokens > 0:
+        window_tokens = min(window_tokens, overflow.context_tokens)
+    prompt_tokens = overflow.prompt_only_tokens
+    if prompt_tokens + 1 > window_tokens:
+        return None
+    # Below the normal 512 floor when the window is nearly full: a short honest
+    # answer beats an error, and the model stops at its own EOS well before the
+    # budget on most turns anyway.
+    return max(1, window_tokens - prompt_tokens - PREFLIGHT_RETRY_MARGIN_TOKENS)
+
+
 async def stream_with_two_phase_budget(
     source: AsyncIterator[Any],
     *,
@@ -313,11 +395,20 @@ def erudi_chat_openai_class():
         # prefill; None (unknown window) keeps the 900 s constant.
         effective_context_tokens: Optional[int] = None
 
-        async def _astream(self, messages, *args, **kwargs):
-            estimated = estimate_prompt_tokens(messages)
-            source = super()._astream(messages, *args, **kwargs)
-            async for chunk in stream_with_two_phase_budget(
-                source,
+        # Whether this client's ``max_tokens`` is a fallback the automatic
+        # budget may replace (chat turns and the summarization calls that ride
+        # the same client) or a DELIBERATE budget it must leave alone. The
+        # one-shot utility path sets this False: a conversation title runs on
+        # ~12 tokens on purpose (#266), and handing it the whole window would
+        # make it ramble for thousands of tokens before the sanitizer took its
+        # first four words. ``ainvoke`` on a ``streaming=True`` client routes
+        # through ``_astream``, so the distinction has to live here.
+        auto_output_budget: bool = True
+
+        def _budgeted_stream(self, messages, estimated, *args, **kwargs):
+            """One attempt at the model call, under both watchdog budgets."""
+            return stream_with_two_phase_budget(
+                super()._astream(messages, *args, **kwargs),
                 # Read from the module (not captured) so the budgets stay one
                 # source of truth -- and patchable in tests.
                 first_budget_s=first_chunk_budget_s(
@@ -326,8 +417,81 @@ def erudi_chat_openai_class():
                 inter_budget_s=INTER_CHUNK_BUDGET_S,
                 estimated_prompt_tokens=estimated,
                 model_name=self.model_name,
-            ):
+            )
+
+        async def _astream(self, messages, *args, **kwargs):
+            estimated = estimate_prompt_tokens(messages)
+            # What this call may generate: the window minus what the turn
+            # already occupies. Per model call, not per turn -- every hop of a
+            # tool turn sends a longer history and gets a smaller budget. A
+            # kwarg wins over the constructor's ``max_tokens`` in
+            # ``_get_request_payload`` (pinned); ``None`` leaves that value
+            # alone, which is what an engine with no reportable window gets.
+            budget = (
+                compute_output_budget(
+                    messages, self.effective_context_tokens, override=output_budget_override()
+                )
+                if self.auto_output_budget
+                else None
+            )
+            if budget is not None:
+                kwargs["max_tokens"] = budget
+
+            yielded = 0
+            try:
+                async for chunk in self._budgeted_stream(messages, estimated, *args, **kwargs):
+                    yielded += 1
+                    yield chunk
+                return
+            except Exception as exc:
+                # The budget was sized from an estimate; mlx_vlm.server checks
+                # the REAL prompt and rejects the whole call when the two do
+                # not fit together. Its rejection NAMES the exact prompt count,
+                # so the one thing missing is now in hand: retry once with a
+                # budget that fits for certain. Only before the first chunk --
+                # mid-stream there is nothing to retry, the user has already
+                # seen text. Only once, and only for that specific wire shape,
+                # so nothing else in the 400 space is silently replayed.
+                # An operator pin (ERUDI_MAX_TOKENS) is never substituted: it
+                # exists precisely to reproduce exact budgets, so a preflight
+                # rejection of the pinned value re-raises into the honest
+                # overflow turn instead of silently running a different one.
+                retry_budget = (
+                    preflight_retry_budget(exc, self.effective_context_tokens)
+                    if yielded == 0 and output_budget_override() is None
+                    else None
+                )
+                if retry_budget is None:
+                    raise
+                logger.info(
+                    f"Output budget overshot the engine's context check; retrying once "
+                    f"with the server's own prompt count: max_tokens={retry_budget}, "
+                    f"model={self.model_name}"
+                )
+
+            kwargs["max_tokens"] = retry_budget
+            # A FRESH watchdog clock on purpose: the rejection came from the
+            # preflight, before any prefill, so the first attempt spent
+            # essentially none of its budget. The retry is the attempt that
+            # actually prefills and must get the full budget its prompt size
+            # earns -- charging it for a wait that never happened would
+            # recreate the #573 kill on exactly the long turns this path exists
+            # for.
+            async for chunk in self._budgeted_stream(messages, estimated, *args, **kwargs):
                 yield chunk
+
+        def _get_request_payload(self, input_, *, stop=None, **kwargs):
+            """Send the token cap as ``max_tokens`` (see the module docstring).
+
+            Stock ``ChatOpenAI`` renames it to ``max_completion_tokens``, which
+            mlx_vlm.server silently replaces with its own default. Renaming it
+            back here covers every path that builds a payload -- streaming and
+            non-streaming alike -- and leaves the value itself untouched.
+            """
+            payload = super()._get_request_payload(input_, stop=stop, **kwargs)
+            if "max_completion_tokens" in payload:
+                payload["max_tokens"] = payload.pop("max_completion_tokens")
+            return payload
 
         def _convert_chunk_to_generation_chunk(
             self, chunk, default_chunk_class, base_generation_info

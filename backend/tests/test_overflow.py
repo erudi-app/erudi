@@ -20,6 +20,43 @@ class _FakeBadRequestError(Exception):
         self.body = body
 
 
+def test_the_mlx_detail_also_yields_the_prompt_alone():
+    # `prompt_tokens` carries what the REQUEST needed (prompt + generation),
+    # which is what the user-facing message quotes. The prompt ALONE is a
+    # different number and the one the output budget needs to recompute an
+    # exact retry, so it is captured separately (PR-E).
+    exc = Exception(
+        "Request needs 5037 context tokens (5029 prompt + 8 max generation), "
+        "but MAX_KV_SIZE is 4096."
+    )
+
+    overflow = parse_context_overflow(exc)
+
+    assert overflow.prompt_tokens == 5037
+    assert overflow.prompt_only_tokens == 5029
+    assert overflow.context_tokens == 4096
+
+
+def test_an_mlx_detail_without_the_breakdown_has_no_prompt_alone():
+    exc = Exception("Something went wrong, but MAX_KV_SIZE is 4096.")
+
+    overflow = parse_context_overflow(exc)
+
+    assert overflow is not None
+    assert overflow.prompt_only_tokens is None
+
+
+def test_the_llama_shape_carries_no_prompt_alone():
+    # llama-server clamps instead of rejecting on this axis, so nothing
+    # downstream recomputes a budget from its body.
+    exc = _FakeBadRequestError(
+        "Error code: 400",
+        body={"type": "exceed_context_size_error", "n_prompt_tokens": 9030, "n_ctx": 8192},
+    )
+
+    assert parse_context_overflow(exc).prompt_only_tokens is None
+
+
 def test_llama_overflow_body_yields_both_numbers():
     # The PRODUCTION shape: the openai SDK unwraps the wire envelope before
     # storing it (openai/_client.py: ``data = body.get("error", body)``), so
@@ -71,7 +108,9 @@ def test_mlx_overflow_detail_yields_both_numbers():
 
     overflow = parse_context_overflow(exc)
 
-    assert overflow == ContextOverflow(prompt_tokens=5037, context_tokens=4096)
+    assert overflow == ContextOverflow(
+        prompt_tokens=5037, context_tokens=4096, prompt_only_tokens=5029
+    )
 
 
 def test_mlx_overflow_unparseable_but_marked_yields_overflow_with_nones():

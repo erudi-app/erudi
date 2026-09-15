@@ -199,7 +199,7 @@ columns, `LLMResponse` computes six fields at read time (no database column, so 
 | `runnable` | Can the active engine run this catalog entry |
 | `supports_vision` | Image input, read from the artefact (`mmproj` projector for llama.cpp, `config.json` for MLX); `null` until downloaded |
 | `weights_available` | Do the weights still exist on disk — `false` marks an orphaned KB assistant |
-| `sampling_defaults` | Resolved per-model temperature, `top_p`, `max_tokens`, repetition penalty and the `max_tokens_cap`, plus the `source` that produced them |
+| `sampling_defaults` | Resolved per-model temperature, `top_p`, repetition penalty, the fallback `max_tokens` and the `max_tokens_cap` it is clamped to (both only matter when the engine cannot report its window — see [Output budget](conversations.md#output-budget)), plus the `source` that produced them |
 | `context_window` | The model's trained context window in tokens (`generation_hints.context_length`); `null` when unknown |
 | `allocated_context_window` | The window the engine's loaded child actually runs with; non-null only for the currently loaded model, resolved live and never persisted (see [Context windows](../dev/architecture/engines.md#context-windows)) |
 

@@ -49,6 +49,7 @@ def build_chat_model(
     repetition_penalty: float = DEFAULT_REPETITION_PENALTY,
     repetition_context_size: int = DEFAULT_REPETITION_CONTEXT_SIZE,
     disable_thinking: bool = False,
+    auto_output_budget: bool = True,
     sampling: Optional[SamplingDefaults] = None,
 ) -> ChatOpenAI:
     """Resolve the engine child for ``llm`` and wrap it as a ``ChatOpenAI``.
@@ -64,6 +65,11 @@ def build_chat_model(
 
     Params are set on the constructor (NOT via ``.bind`` — LangChain v1 rejects
     pre-bound models passed to ``create_agent``).
+
+    ``max_tokens`` is normally only the FALLBACK output budget: the client
+    recomputes a real one per model call from the window it is running in
+    (``src.agents.output_budget``). ``auto_output_budget=False`` turns that off
+    for the caller whose small budget is deliberate -- the one-shot title path.
     """
     # Deferred (#160): langchain_openai only loads on the first turn, not at
     # boot -- the subclass that inherits from it is built on the same first call.
@@ -147,6 +153,7 @@ def build_chat_model(
         # replace it.
         stream_chunk_timeout=None,
         effective_context_tokens=effective_window,
+        auto_output_budget=auto_output_budget,
         streaming=True,
         stream_usage=False,  # local servers may not emit usage in SSE; summarization triggers on count
     )

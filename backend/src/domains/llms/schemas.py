@@ -44,8 +44,11 @@ class SamplingDefaultsResponse(BaseModel):
     is the model-card sentence the values were read from (``model_card`` only;
     debugging aid, not displayed). ``top_k`` / ``min_p`` / ``presence_penalty``
     are None unless the captured block defines them (and are then the only case
-    the backend puts them on the wire). ``max_tokens_cap`` is the UI ceiling for
-    the max-tokens field: min(model context window, engine context window).
+    the backend puts them on the wire). ``max_tokens_cap`` is no longer a UI
+    field ceiling -- there is no max-tokens field: it is the model-and-engine
+    cap that ``max_tokens`` (the FALLBACK output budget, used only when the
+    engine cannot report the window it loaded with) is clamped to,
+    min(model context window, engine context window).
     """
 
     temperature: float

@@ -119,7 +119,6 @@ describe("ChatPage send flow", () => {
       llm_id: 7, // first local model is the default selection
       temperature: 0.2,
       top_p: 0.95,
-      max_tokens: 1024,
       custom_prompt: "",
       web_search_enabled: false, // inherited from the global setting (#310)
     });
@@ -132,8 +131,9 @@ describe("ChatPage send flow", () => {
       initialImagePaths: ["/tmp/img.png"],
       // Documents attached to the very first question ride the same state (#492).
       initialAttachments: [],
-      // Models without hints seed from the backend fallback, cap included (#388).
-      initialSettings: { temperature: 0.2, topP: 0.95, maxTokens: 1024, maxTokensCap: 32768 },
+      // Models without hints seed from the backend fallback (#388). The output
+      // budget is not among them: the backend derives it from the window.
+      initialSettings: { temperature: 0.2, topP: 0.95 },
       initialCustomPrompt: "",
     });
   });
@@ -151,9 +151,6 @@ describe("ChatPage send flow", () => {
     const [temperature, topP] = container.querySelectorAll('input[type="range"]');
     fireEvent.change(temperature, { target: { value: "0.8" } });
     fireEvent.change(topP, { target: { value: "0.5" } });
-    fireEvent.change(container.querySelector('input[type="number"]'), {
-      target: { value: "512" },
-    });
 
     // Save a custom prompt through the modal.
     fireEvent.click(screen.getByText("Customize Prompt"));
@@ -166,7 +163,6 @@ describe("ChatPage send flow", () => {
       llm_id: 42,
       temperature: 0.8,
       top_p: 0.5,
-      max_tokens: 512,
       custom_prompt: "Answer like a pirate",
       web_search_enabled: false,
     });
@@ -174,8 +170,6 @@ describe("ChatPage send flow", () => {
     expect(navigateMock.mock.calls[0][1].state.initialSettings).toEqual({
       temperature: 0.8,
       topP: 0.5,
-      maxTokens: 512,
-      maxTokensCap: 32768,
     });
   });
 

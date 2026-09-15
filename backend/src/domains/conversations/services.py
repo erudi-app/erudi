@@ -29,7 +29,7 @@ from src.agents.runner import (
     ERROR_SENTINEL,
     IMAGES_IGNORED_NOTICE,
 )
-from src.database.generation_hints import resolve_sampling_defaults
+from src.database.generation_hints import FALLBACK_MAX_TOKENS, resolve_sampling_defaults
 from src.domains.conversations.repository import ConversationRepository, MessageRepository
 from src.domains.llms.repository import detect_supports_vision
 from src.domains.user_settings.repository import User_Settings_Repository
@@ -392,7 +392,15 @@ class ConversationService:
                 if payload.temperature is not None
                 else conversation.temperature,
                 top_p=payload.top_p if payload.top_p is not None else conversation.top_p,
-                max_tokens=payload.max_new_tokens or conversation.max_tokens or 1024,
+                # Only the FALLBACK output budget. What the model actually gets
+                # is computed per model call from the window it is running in
+                # (``src.agents.output_budget``), and that overrides this value
+                # whenever the engine reports a window. This one is what an
+                # engine that reports none still runs with -- today's behaviour,
+                # unchanged. ``payload.max_new_tokens`` is deliberately not read:
+                # the control it came from is gone (the field is still accepted
+                # so an older client is not rejected).
+                max_tokens=conversation.max_tokens or FALLBACK_MAX_TOKENS,
             )
 
             # Safety net (#133/#212): unless the model is positively vision-

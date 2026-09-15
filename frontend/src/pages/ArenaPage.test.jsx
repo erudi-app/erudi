@@ -22,15 +22,15 @@ vi.mock("../components/MarkdownRenderer", () => ({
   default: ({ content }) => <div>{content}</div>,
 }));
 vi.mock("../components/modals/CustomizePromptModal", () => ({ default: () => null }));
-// #218: the panel header pushes slider/token edits live via onLiveChange (no
-// Apply step). The mock exposes a per-panel "edit" control that fires
-// onLiveChange with a distinctive settings triple so a test can prove the
-// edited value reaches the outgoing request.
+// #218: the panel header pushes slider edits live via onLiveChange (no Apply
+// step). The mock exposes a per-panel "edit" control that fires onLiveChange
+// with a distinctive settings pair so a test can prove the edited value
+// reaches the outgoing request.
 vi.mock("../components/HeaderBar", () => ({
   default: ({ currentModel, onLiveChange }) => (
     <div>
       <div>{`panel:${currentModel}`}</div>
-      <button onClick={() => onLiveChange?.({ temperature: 0.49, topP: 0.5, maxTokens: 256 })}>
+      <button onClick={() => onLiveChange?.({ temperature: 0.49, topP: 0.5 })}>
         {`edit:${currentModel}`}
       </button>
     </div>
@@ -132,14 +132,15 @@ describe("ArenaPage live settings (#218)", () => {
     const edited = bodyFor(1);
     expect(edited.temperature).toBe(0.49);
     expect(edited.top_p).toBe(0.5);
-    expect(edited.max_new_tokens).toBe(256);
+    // The output budget is not a panel setting any more: nothing sends it.
+    expect(edited.max_new_tokens).toBeUndefined();
 
     // ...while the untouched panel keeps its model's defaults (no cross-panel
     // leak): a model without hints seeds from the backend fallback (#388).
     const untouched = bodyFor(2);
     expect(untouched.temperature).toBe(0.2);
     expect(untouched.top_p).toBe(0.95);
-    expect(untouched.max_new_tokens).toBe(1024);
+    expect(untouched.max_new_tokens).toBeUndefined();
   });
 });
 

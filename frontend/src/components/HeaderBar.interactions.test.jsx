@@ -84,33 +84,28 @@ describe("HeaderBar model dropdown", () => {
 describe("HeaderBar apply and live edits", () => {
   it("commits the tuned values through onApply and closes the panel", async () => {
     const onApply = vi.fn();
-    renderBar({ onApply, initialTemperature: 0.3, initialTopP: 0.9, initialMaxTokens: 256 });
+    renderBar({ onApply, initialTemperature: 0.3, initialTopP: 0.9 });
     openSettings();
 
     const [temperature, topP] = await screen.findAllByRole("slider");
     fireEvent.change(temperature, { target: { value: "0.7" } });
     fireEvent.change(topP, { target: { value: "0.4" } });
-    fireEvent.change(screen.getByRole("spinbutton"), { target: { value: "2048" } });
 
     fireEvent.click(screen.getByText("Apply"));
 
-    expect(onApply).toHaveBeenCalledWith({ temperature: 0.7, topP: 0.4, maxTokens: 2048 });
+    expect(onApply).toHaveBeenCalledWith({ temperature: 0.7, topP: 0.4 });
     await waitFor(() => expect(screen.queryByText("Apply")).toBeNull());
   });
 
   it("pushes diversity edits live through onLiveChange", async () => {
     const onLiveChange = vi.fn();
-    renderBar({ onLiveChange, initialTemperature: 0.2, initialMaxTokens: 512 });
+    renderBar({ onLiveChange, initialTemperature: 0.2 });
     openSettings();
 
     const [, topP] = await screen.findAllByRole("slider");
     fireEvent.change(topP, { target: { value: "0.33" } });
 
-    expect(onLiveChange).toHaveBeenLastCalledWith({
-      temperature: 0.2,
-      topP: 0.33,
-      maxTokens: 512,
-    });
+    expect(onLiveChange).toHaveBeenLastCalledWith({ temperature: 0.2, topP: 0.33 });
     expect(screen.getByText("0.33")).toBeTruthy();
   });
 

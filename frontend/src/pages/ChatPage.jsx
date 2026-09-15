@@ -206,7 +206,6 @@ export default function ChatPage() {
             llm_id: llm.id,
             temperature: settings.temperature,
             top_p: settings.topP,
-            max_tokens: settings.maxTokens,
             custom_prompt: customPrompt,
             // null (global default not fetched yet) -> omit: the backend
             // copies the global setting at creation (#310).
@@ -573,30 +572,11 @@ export default function ChatPage() {
                         </div>
 
                         <div className="flex flex-col justify-center gap-6">
+                          {/* The output budget used to live here as a Max
+                              Tokens field. It is now derived by the backend
+                              from the context window the model runs in. */}
                           <div>
-                            <div className="grid grid-cols-2 items-start justify-items-start gap-x-6 gap-y-2 mb-2">
-                              <div>
-                                <span className="text-[0.72rem] uppercase tracking-wide font-semibold text-gray-300/80">
-                                  {t("chat:header.maxTokens")}
-                                </span>
-                              </div>
-                              {/* Controls row */}
-                              <div className="inline-flex items-center rounded-md bg-white/10 border border-white/20 shadow p-0 m-0 w-fit justify-self-start">
-                                <input
-                                  type="number"
-                                  min="1"
-                                  max={settings.maxTokensCap}
-                                  value={settings.maxTokens}
-                                  onChange={(e) =>
-                                    patchSettings({
-                                      maxTokens: parseInt(e.target.value || "0", 10),
-                                    })
-                                  }
-                                  className="bg-transparent border-0 outline-none w-28 text-sm font-semibold text-gray-100 text-center appearance-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none"
-                                />
-                              </div>
-                            </div>
-                            <div className="mt-4 flex items-center gap-3">
+                            <div className="flex items-center gap-3">
                               <span className="text-[0.72rem] uppercase tracking-wide font-semibold text-gray-300/80">
                                 {t("chat:header.webSearch")}
                               </span>

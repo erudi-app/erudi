@@ -4,8 +4,11 @@ import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 
 // #136 — the settings controls used to cap below what the backend accepts
-// (temperature 0-2, max_tokens up to the backend limit). The slider/input bounds
-// now match, and live edits above the old caps still reach onLiveChange (#218).
+// (temperature 0-2). The slider bounds now match, and live edits above the old
+// caps still reach onLiveChange (#218).
+//
+// The panel carries no output-budget control anymore: the budget is derived
+// backend-side from the context window the model runs in.
 
 import HeaderBar from "./HeaderBar.jsx";
 
@@ -40,15 +43,12 @@ describe("HeaderBar settings bounds (#136)", () => {
     expect(topP.getAttribute("max")).toBe("1");
   });
 
-  it("raises the max-tokens input cap", async () => {
+  it("offers no output-budget control", async () => {
     renderBar();
     openSettings();
 
-    const maxTokens = await screen.findByRole("spinbutton");
-    // The API's own upper bound; a model-derived cap comes through the
-    // maxTokensCap prop (#388, HeaderBar.maxTokensCap.test.jsx).
-    expect(maxTokens.getAttribute("max")).toBe("32768");
-    expect(maxTokens.getAttribute("min")).toBe("1");
+    await screen.findAllByRole("slider");
+    expect(screen.queryByRole("spinbutton")).toBeNull();
   });
 
   it("emits temperature above the old 1.0 cap via onLiveChange", async () => {
@@ -62,16 +62,5 @@ describe("HeaderBar settings bounds (#136)", () => {
     expect(onLiveChange).toHaveBeenLastCalledWith(expect.objectContaining({ temperature: 1.8 }));
     // The value badge reflects the above-1.0 value.
     expect(screen.getByText("1.80")).toBeTruthy();
-  });
-
-  it("emits max-tokens above the old 2000 cap via onLiveChange", async () => {
-    const onLiveChange = vi.fn();
-    renderBar({ onLiveChange });
-    openSettings();
-
-    const maxTokens = await screen.findByRole("spinbutton");
-    fireEvent.change(maxTokens, { target: { value: "5000" } });
-
-    expect(onLiveChange).toHaveBeenLastCalledWith(expect.objectContaining({ maxTokens: 5000 }));
   });
 });

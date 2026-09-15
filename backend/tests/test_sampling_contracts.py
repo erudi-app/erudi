@@ -209,6 +209,13 @@ class TestConversationCreateResolvesDefaults:
         ).json()
         assert (data["temperature"], data["top_p"], data["max_tokens"]) == (1.3, 0.95, 1024)
 
+    def test_the_stored_max_tokens_is_only_the_fallback_budget(self, client, hinted_llm):
+        # The column stays (inert): it is what a turn runs with when the engine
+        # cannot report the window it loaded with. Nothing writes it from the UI
+        # any more -- the creation-time resolution is all that fills it.
+        data = client.post("/erudi/conversations/", json={"llm_id": hinted_llm.id}).json()
+        assert data["max_tokens"] == 1024
+
     def test_unknown_model_with_omitted_values_is_404(self, client):
         assert client.post("/erudi/conversations/", json={"llm_id": 987654}).status_code == 404
 
@@ -239,6 +246,10 @@ class TestConversationCreateResolvesDefaults:
 
 
 # ---------------------------------------------------------------- arena
+
+
+class _FakeEngine(BaseEngine):
+    """Engine stub: generation_guard without spawning a model, no window."""
 
 
 def _capturing_factory(captured):
@@ -276,19 +287,104 @@ class TestArenaResolvesDefaults:
     async def test_explicit_values_win(self, test_db_session, hinted_llm, monkeypatch):
         captured = {}
         monkeypatch.setattr(agent_runner, "build_chat_model", _capturing_factory(captured))
-        payload = ArenaQueryPayload(question="q", temperature=1.1, top_p=0.4, max_new_tokens=33)
+        payload = ArenaQueryPayload(question="q", temperature=1.1, top_p=0.4)
         async for _ in ArenaService(test_db_session).query_llm_stream(hinted_llm.id, payload):
             pass
-        assert (captured["temperature"], captured["top_p"], captured["max_tokens"]) == (
-            1.1,
-            0.4,
-            33,
-        )
+        assert (captured["temperature"], captured["top_p"]) == (1.1, 0.4)
+
+    async def test_a_max_new_tokens_from_an_old_client_is_accepted_and_ignored(
+        self, test_db_session, hinted_llm, monkeypatch
+    ):
+        # The panel control is gone; the output budget comes from the window the
+        # model runs in. An older client still gets an answer, not a 422, and
+        # the number it sends changes nothing: the value the factory receives is
+        # the model's own fallback budget.
+        captured = {}
+        monkeypatch.setattr(agent_runner, "build_chat_model", _capturing_factory(captured))
+        payload = ArenaQueryPayload(question="q", max_new_tokens=33)
+        async for _ in ArenaService(test_db_session).query_llm_stream(hinted_llm.id, payload):
+            pass
+        assert captured["max_tokens"] == 1024
 
     def test_endpoint_accepts_a_bare_question(self, client, hinted_llm):
         with patch.object(agent_runner, "build_chat_model", _capturing_factory({})):
             resp = client.post(f"/erudi/arena/{hinted_llm.id}/query", json={"question": "q"})
         assert resp.status_code == 200
+
+    def test_endpoint_still_accepts_an_old_clients_max_new_tokens(self, client, hinted_llm):
+        with patch.object(agent_runner, "build_chat_model", _capturing_factory({})):
+            resp = client.post(
+                f"/erudi/arena/{hinted_llm.id}/query",
+                json={"question": "q", "max_new_tokens": 512},
+            )
+        assert resp.status_code == 200
+
+
+# ------------------------------------------------- the conversation turn
+
+
+class TestConversationTurnBudget:
+    """What a conversation turn hands the model factory as ``max_tokens``.
+
+    Only the FALLBACK budget: the real ceiling is computed per model call from
+    the window the child reports (``src.agents.output_budget``, covered by
+    ``tests/test_output_budget.py``). Here the contract is that nothing stale
+    -- neither a per-turn payload field nor a client-chosen number -- reaches
+    the request any more, and that an engine with no window still runs on the
+    conversation row's value exactly as before.
+    """
+
+    async def _captured_kwargs(self, db, llm, monkeypatch, payload, **conversation_kwargs):
+        from langgraph.checkpoint.memory import InMemorySaver
+
+        from src.domains.conversations.schemas import ConversationQuery
+
+        captured: dict = {}
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(agent_runner, "build_chat_model", _capturing_factory(captured))
+        service = ConversationService(db, InMemorySaver())
+        conversation = service.create_conversation(llm_id=llm.id, **conversation_kwargs)
+        async for _ in service.query_and_respond_stream(
+            conversation.id, ConversationQuery(**payload)
+        ):
+            pass
+        return captured
+
+    async def test_the_conversation_row_is_the_fallback_budget(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        captured = await self._captured_kwargs(
+            test_db_session,
+            mock_llm,
+            monkeypatch,
+            {"question": "q"},
+            temperature=0.7,
+            top_p=0.9,
+            max_tokens=777,
+        )
+        assert captured["max_tokens"] == 777
+
+    async def test_a_per_turn_max_new_tokens_is_accepted_and_ignored(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        captured = await self._captured_kwargs(
+            test_db_session,
+            mock_llm,
+            monkeypatch,
+            {"question": "q", "max_new_tokens": 4321},
+            temperature=0.7,
+            top_p=0.9,
+            max_tokens=777,
+        )
+        assert captured["max_tokens"] == 777
+
+    async def test_a_conversation_without_a_stored_value_falls_back_to_the_constant(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        captured = await self._captured_kwargs(
+            test_db_session, mock_llm, monkeypatch, {"question": "q"}
+        )
+        assert captured["max_tokens"] == FALLBACK_MAX_TOKENS
 
 
 # ---------------------------------------------------------------- downloads

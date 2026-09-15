@@ -105,7 +105,7 @@ describe("ChatPage publisher recommendation note (#388)", () => {
     renderPage();
     await screen.findByTitle("Qwen3 0.6B");
     openSettings();
-    await screen.findByRole("spinbutton");
+    await screen.findAllByRole("slider");
     expect(screen.queryByTestId("no-publisher-recommendation")).toBeNull();
     expect(screen.queryByText(NOTE)).toBeNull();
   });
@@ -117,7 +117,7 @@ describe("ChatPage publisher recommendation note (#388)", () => {
     renderPage();
     await screen.findByTitle("Qwen3 0.6B");
     openSettings();
-    await screen.findByRole("spinbutton");
+    await screen.findAllByRole("slider");
     expect(screen.queryByTestId("no-publisher-recommendation")).toBeNull();
 
     await pickModel("Llama 3.2 1B");

@@ -9,8 +9,11 @@ import {
 // Per-model sampling defaults (#388): the backend resolves them per row
 // (`sampling_defaults`: base generation_config > quant generation_config >
 // model card, else "none") and the UI seeds its sliders from that block.
-// Without one, the fallback is the exact triple the backend uses
-// (0.2 / 0.95 / 1024).
+// Without one, the fallback is the exact pair the backend uses (0.2 / 0.95).
+//
+// The block also carries `max_tokens` / `max_tokens_cap`, which this helper
+// deliberately drops: the output budget is computed by the backend from the
+// running context window, not chosen in the interface.
 
 const QWEN3 = {
   id: 1,
@@ -27,12 +30,15 @@ const QWEN3 = {
 
 describe("defaultsFor", () => {
   it("reads the model's resolved block into the UI's camelCase shape", () => {
-    expect(defaultsFor(QWEN3)).toEqual({
-      temperature: 0.6,
-      topP: 0.95,
-      maxTokens: 1024,
-      maxTokensCap: 8192,
-    });
+    expect(defaultsFor(QWEN3)).toEqual({ temperature: 0.6, topP: 0.95 });
+  });
+
+  it("ignores the block's output-budget keys", () => {
+    // They stay on the wire (the backend still uses them as its fallback), but
+    // nothing in the interface reads or shows them.
+    const d = defaultsFor(QWEN3);
+    expect(d).not.toHaveProperty("maxTokens");
+    expect(d).not.toHaveProperty("maxTokensCap");
   });
 
   it("falls back to the backend constants without a model or a block", () => {
@@ -49,21 +55,8 @@ describe("defaultsFor", () => {
   });
 
   it("falls back per key when a value is missing or not a number", () => {
-    const d = defaultsFor({
-      sampling_defaults: { temperature: "0.6", top_p: 0.5, max_tokens: null },
-    });
-    expect(d).toEqual({
-      temperature: FALLBACK_SAMPLING.temperature,
-      topP: 0.5,
-      maxTokens: FALLBACK_SAMPLING.maxTokens,
-      maxTokensCap: FALLBACK_SAMPLING.maxTokensCap,
-    });
-  });
-
-  it("never seeds max_tokens above the cap", () => {
-    const d = defaultsFor({ sampling_defaults: { max_tokens: 4096, max_tokens_cap: 2048 } });
-    expect(d.maxTokens).toBe(2048);
-    expect(d.maxTokensCap).toBe(2048);
+    const d = defaultsFor({ sampling_defaults: { temperature: "0.6", top_p: 0.5 } });
+    expect(d).toEqual({ temperature: FALLBACK_SAMPLING.temperature, topP: 0.5 });
   });
 });
 

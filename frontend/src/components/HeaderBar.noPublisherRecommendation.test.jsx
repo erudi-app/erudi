@@ -36,7 +36,7 @@ describe("HeaderBar noPublisherRecommendation", () => {
   it("shows nothing without the prop (a recommendation exists or is unknown)", async () => {
     render(<HeaderBar />);
     openSettings();
-    await screen.findByRole("spinbutton");
+    await screen.findAllByRole("slider");
     expect(screen.queryByTestId("no-publisher-recommendation")).toBeNull();
     expect(screen.queryByText(NOTE)).toBeNull();
   });

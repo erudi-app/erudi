@@ -8,7 +8,9 @@ Key Features:
 - **Stateless**: No conversation history or message storage.
 - **Streaming**: Real-time token generation via Server-Sent Events.
 - **KB-aware**: Automatically injects relevant context from attached Knowledge Bases.
-- **Customizable**: Supports temperature, top_p, max_tokens, and custom instructions.
+- **Customizable**: Supports temperature, top_p, and custom instructions. The output
+  budget is not a request parameter: the backend derives it from the context window
+  the model runs in (see docs/guides/conversations.md).
 
 Architecture:
     ┌──────────────┐
@@ -42,7 +44,6 @@ Example:
         "question": "Explain quantum entanglement in simple terms.",
         "temperature": 0.7,
         "top_p": 0.9,
-        "max_new_tokens": 512,
         "custom_prompt": "Use analogies suitable for a 10-year-old."
     }
     Response: StreamingResponse(text/plain) → "Imagine two magic coins..."
@@ -84,7 +85,7 @@ async def query_arena(
 
     Args:
         llm_id: Database ID of the LLM to query.
-        payload: Query request with question, temperature, top_p, max_tokens, custom_prompt.
+        payload: Query request with question, temperature, top_p, custom_prompt.
         service: ArenaService instance injected by FastAPI.
 
     Returns:
@@ -99,7 +100,6 @@ async def query_arena(
             "question": "What is the Heisenberg uncertainty principle?",
             "temperature": 0.7,
             "top_p": 0.9,
-            "max_new_tokens": 512,
             "custom_prompt": "Explain like I'm 5 years old."
         }
         Response: StreamingResponse → "Imagine you have a tiny ball..."

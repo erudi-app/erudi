@@ -1518,6 +1518,59 @@ async def test_events_mlx_overflow_yields_curated_turn_with_numbers(monkeypatch)
     assert text != runner_module.ERROR_MESSAGE
 
 
+async def test_events_a_real_overflow_survives_the_output_budget_retry(monkeypatch):
+    """The budget's retry must never swallow a genuine overflow (PR-E).
+
+    ``Erudi_Chat_OpenAI`` retries a call ONCE when mlx_vlm.server rejects it
+    only because the output budget was sized from an estimate that
+    under-counted the prompt. When the prompt fills the window ON ITS OWN, no
+    budget makes it fit -- the exception has to keep travelling so the runner
+    turns it into the curated turn with the real numbers. This test drives the
+    REAL client (not a fake model) so the retry code actually runs.
+    """
+    from langchain_openai import ChatOpenAI
+
+    from src.agents.chat_model import erudi_chat_openai_class
+
+    attempts = []
+    # The prompt alone (9000) exceeds the window (4096): unfixable by any budget.
+    rejection = _FakeBadRequestError(
+        "Request needs 9008 context tokens (9000 prompt + 8 max generation), "
+        "but MAX_KV_SIZE is 4096.",
+        body={},
+    )
+
+    async def _always_rejects(self, messages, *args, **kwargs):
+        attempts.append(kwargs.get("max_tokens"))
+        raise rejection
+        yield  # pragma: no cover  (makes this an async generator function)
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _always_rejects)
+    client = erudi_chat_openai_class()(
+        base_url="http://127.0.0.1:1/v1",
+        api_key="not-needed",
+        model="fake-model",
+        effective_context_tokens=4096,
+    )
+    _patch_model(monkeypatch, client)
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="eoverflow-retry",
+    )
+
+    assert len(attempts) == 1, "a prompt that alone fills the window is never retried"
+    text = _answers(events)
+    assert ERROR_SENTINEL in text
+    assert "9008" in text and "4096" in text
+    assert text != runner_module.ERROR_MESSAGE
+
+
 async def test_events_unrelated_bad_request_error_keeps_generic_error(monkeypatch):
     """A 400 that is NOT a context overflow (e.g. a bad sampling param) must
     keep today's generic error path -- the discrimination is strict."""
