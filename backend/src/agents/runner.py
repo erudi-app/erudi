@@ -129,6 +129,7 @@ def summarization_triggers(
     triggers.append(("messages", SUMMARY_TRIGGER_MESSAGES))
     return triggers
 
+
 # Hard cap on LangGraph super-steps per turn (#277). Without it the graph
 # defaults leave a runaway agent unbounded: a small model that keeps issuing the
 # identical tool call gets the identical result back and never converges (Qwen3
@@ -472,9 +473,7 @@ class AgentRunner:
                 # and hardware probes -> threadpool. ``from_engine`` never
                 # raises; an unaccountable model just carries None facts.
                 budget = (
-                    await run_in_threadpool(MemoryBudget.from_engine, engine)
-                    if summarize
-                    else None
+                    await run_in_threadpool(MemoryBudget.from_engine, engine) if summarize else None
                 )
                 middleware = self._build_middleware(model, budget) if summarize else []
                 if kb_context_block:

@@ -124,8 +124,7 @@ def total_memory_bytes(engine: Any) -> Optional[int]:
     except Exception as exc:
         # Degraded, not failed: the memory signal stays off for this run.
         logger.warning(
-            f"Hardware totals unreadable; memory signal disabled: "
-            f"{type(exc).__name__}: {exc}"
+            f"Hardware totals unreadable; memory signal disabled: " f"{type(exc).__name__}: {exc}"
         )
     _TOTALS_CACHE[engine] = total
     return total
@@ -159,9 +158,7 @@ class MemoryBudget:
             config_path = (path if path.is_dir() else path.parent) / "config.json"
             try:
                 if config_path.is_file():
-                    kv = kv_bytes_per_token(
-                        json.loads(config_path.read_text(encoding="utf-8"))
-                    )
+                    kv = kv_bytes_per_token(json.loads(config_path.read_text(encoding="utf-8")))
             except (OSError, ValueError) as exc:
                 # A corrupt config disables the signal for this model; the
                 # model itself keeps running, so one INFO record is enough.

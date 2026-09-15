@@ -54,9 +54,7 @@ def test_kv_bytes_per_token_defaults_kv_heads_to_attention_heads():
 def test_kv_bytes_per_token_reads_nested_text_config():
     # A VLM keeps its text model under text_config (same containers as the
     # context-window reader in generation_hints).
-    config = {
-        "text_config": {"num_hidden_layers": 24, "num_key_value_heads": 8, "head_dim": 128}
-    }
+    config = {"text_config": {"num_hidden_layers": 24, "num_key_value_heads": 8, "head_dim": 128}}
     assert kv_bytes_per_token(config) == 98304
 
 
