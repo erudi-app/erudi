@@ -2335,14 +2335,17 @@ def test_build_middleware_without_window_or_budget_keeps_the_messages_floor():
 
 
 class _StubBudget:
-    """Accounting stub: fixed margin + conversation bytes."""
+    """Accounting stub: margin (a value, or a callable of the token count)
+    plus fixed conversation bytes; records every margin evaluation."""
 
     def __init__(self, margin, conversation_bytes=1234):
         self._margin = margin
         self._bytes = conversation_bytes
+        self.margin_calls = []
 
     def memory_margin_fraction(self, conversation_tokens):
-        return self._margin
+        self.margin_calls.append(conversation_tokens)
+        return self._margin(conversation_tokens) if callable(self._margin) else self._margin
 
     def conversation_bytes(self, conversation_tokens):
         return self._bytes
@@ -2358,11 +2361,13 @@ def _patch_budget(monkeypatch, budget):
 
 
 async def test_memory_warning_emitted_once_after_the_answer(monkeypatch):
-    """Margin still under 15 % at end of turn (post-compaction state): ONE
-    ``memory_warning`` event, after the answer events."""
+    """Margin under 15 % even for the projected keep-tail (compaction cannot
+    restore it): ONE ``memory_warning`` event, after the answer events, and
+    the projection includes the summary allowance."""
     fake = ToolableFakeChatModel(messages=iter([AIMessage(content="hello")]))
     _patch_model(monkeypatch, fake)
-    _patch_budget(monkeypatch, _StubBudget(margin=0.10))
+    stub = _StubBudget(margin=0.10)
+    _patch_budget(monkeypatch, stub)
     runner = AgentRunner(checkpointer=InMemorySaver())
 
     events = await _events(
@@ -2381,6 +2386,35 @@ async def test_memory_warning_emitted_once_after_the_answer(monkeypatch):
     assert warnings[0]["conversation_bytes"] == 1234
     last_answer = max(i for i, e in enumerate(events) if e["t"] == "answer")
     assert events.index(warnings[0]) > last_answer
+    # The warn decision was taken on the PROJECTED post-compaction size: the
+    # keep-tail plus the summary allowance (>= 512 on this tiny thread).
+    assert any(tokens >= runner_module.SUMMARY_TOKEN_ALLOWANCE for tokens in stub.margin_calls)
+
+
+async def test_no_memory_warning_when_compaction_could_restore_the_margin(monkeypatch):
+    """[M1] The middleware only compacts on the NEXT turn's before_model, so
+    the honest question at end of turn is: would compaction down to the
+    keep-tail restore the margin? Here the CURRENT size is under the floor
+    but the projected keep-tail is comfortably fine -> no warning (compaction
+    will save this conversation; warning now would flicker for one turn)."""
+    fake = ToolableFakeChatModel(messages=iter([AIMessage(content="hello")]))
+    _patch_model(monkeypatch, fake)
+    # Tiny thread: current tokens are far below 100; the projection adds the
+    # 512-token summary allowance, so it lands above 100.
+    stub = _StubBudget(margin=lambda tokens: 0.05 if tokens <= 100 else 0.40)
+    _patch_budget(monkeypatch, stub)
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="mw5",
+        summarize=True,
+    )
+    assert not any(e["t"] == "memory_warning" for e in events)
 
 
 async def test_no_memory_warning_when_the_margin_is_fine(monkeypatch):

@@ -94,9 +94,13 @@ SUMMARY_TRIGGER_MESSAGES = 20
 SUMMARY_KEEP_MESSAGES = 10
 COMPACTION_WINDOW_FRACTION = 0.8
 # Shared floor of the memory signal AND the amber warning: under 15 % of
-# deterministic margin, compaction fires; if the margin is STILL under 15 %
-# at end of turn (compaction had its chance), the warning is emitted.
+# deterministic margin, compaction fires; the warning is emitted only when
+# even a compaction down to the keep-tail could not restore that margin
+# (see ``_memory_warning_event``).
 MEMORY_MARGIN_FLOOR = 0.15
+# Token allowance for the summary a compaction would insert, used when
+# projecting the post-compaction size the warning is judged on.
+SUMMARY_TOKEN_ALLOWANCE = 512
 
 
 def summarization_triggers(
@@ -114,9 +118,13 @@ def summarization_triggers(
 
     Deliberately never ``("fraction", ...)``: that form needs a
     ``model.profile`` our local chat clients do not carry (the middleware's
-    ``__init__`` would raise). The token counter stays
-    ``count_tokens_approximately`` -- the same counter the output budget uses,
-    so the two never disagree.
+    ``__init__`` would raise). The token counter passed stays
+    ``count_tokens_approximately`` -- the same base counter the output budget
+    uses. One nuance: langchain 1.3.9 recognizes that exact reference and
+    swaps it internally for a usage-metadata-scaling variant of the same
+    counter, so the middleware's counts can differ slightly from a raw
+    ``count_tokens_approximately`` call; both remain the same estimator
+    family, never a second tokenizer.
     """
     token_thresholds = []
     if isinstance(effective_window, int) and effective_window > 0:
@@ -730,14 +738,13 @@ class AgentRunner:
                         # and the next turn replays an empty assistant turn.
                         await self._write_curated_empty_turn(agent, run_config, curated)
                     yield {"t": "answer", "text": curated}
-                # Compact first, warn second (1.1.2): the summarization
-                # middleware ran INSIDE this turn, so by stream end it has had
-                # its chance -- evaluate the memory margin HERE, at end of
-                # turn, on the POST-turn thread state (the compacted state a
-                # follow-up will actually replay). If the margin is still
-                # under the floor, one ``memory_warning`` event goes out; the
-                # conversation service forwards it to the wire and never
-                # persists it (it is a statement about NOW, on THIS machine).
+                # Amber warning check (1.1.2), at end of turn on the
+                # POST-turn thread state: one ``memory_warning`` event goes
+                # out ONLY when even a compaction down to the keep-tail could
+                # not restore the memory margin (see ``_memory_warning_event``
+                # for the projection). The conversation service forwards it to
+                # the wire and never persists it (it is a statement about NOW,
+                # on THIS machine).
                 if stateful and budget is not None:
                     warning = await self._memory_warning_event(agent, run_config, budget)
                     if warning is not None:
@@ -933,13 +940,20 @@ class AgentRunner:
     async def _memory_warning_event(self, agent, run_config, budget) -> Optional[dict]:
         """The ``memory_warning`` event for this turn, or ``None``.
 
-        Reads the POST-turn thread state (what the next turn will replay,
-        summarization included), counts it with the SAME
-        ``count_tokens_approximately`` the compaction trigger uses, and asks
-        the deterministic accounting for the margin. Strictly under the shared
-        floor -> the event; anything else (fine margin, unaccountable model,
-        empty state) -> ``None``. Advisory only: a failure here is logged and
-        never sinks the turn.
+        Warn ONLY IF compaction cannot save this conversation. The
+        summarization middleware runs in ``before_model``, so the growth of
+        THIS turn is compacted on the NEXT turn -- judging the warning on the
+        current size would flag every conversation for exactly one turn and
+        then flicker off once compaction ran. Instead the post-turn thread
+        state is projected past an ideal compaction: the last
+        ``SUMMARY_KEEP_MESSAGES`` messages plus a
+        ``SUMMARY_TOKEN_ALLOWANCE``-token summary, counted with the SAME
+        ``count_tokens_approximately`` the compaction trigger uses. Only when
+        even THAT projected size leaves the margin strictly under the floor
+        does the warning go out -- the honest meaning of "compaction had its
+        chance": it cannot restore the margin. The event still reports the
+        CURRENT numbers (what the user's machine holds right now). Advisory
+        only: a failure here is logged and never sinks the turn.
         """
         from langchain_core.messages.utils import count_tokens_approximately
 
@@ -948,13 +962,20 @@ class AgentRunner:
             messages = (state.values or {}).get("messages", []) if state else []
             if not messages:
                 return None
-            conversation_tokens = count_tokens_approximately(messages)
-            margin = budget.memory_margin_fraction(conversation_tokens)
-            if margin is None or margin >= MEMORY_MARGIN_FLOOR:
+            projected_tokens = (
+                count_tokens_approximately(messages[-SUMMARY_KEEP_MESSAGES:])
+                + SUMMARY_TOKEN_ALLOWANCE
+            )
+            projected_margin = budget.memory_margin_fraction(projected_tokens)
+            if projected_margin is None or projected_margin >= MEMORY_MARGIN_FLOOR:
                 return None
+            conversation_tokens = count_tokens_approximately(messages)
+            current_margin = budget.memory_margin_fraction(conversation_tokens)
+            margin = current_margin if current_margin is not None else projected_margin
             logger.warning(
-                f"Memory margin still under the floor after compaction: "
-                f"margin={margin:.3f}, conversation_tokens={conversation_tokens}"
+                f"Memory margin under the floor even after a projected compaction: "
+                f"current_margin={margin:.3f}, projected_margin={projected_margin:.3f}, "
+                f"conversation_tokens={conversation_tokens}"
             )
             return {
                 "t": "memory_warning",

@@ -323,12 +323,13 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    state: old turns are dropped and replaced by a summary, so the agent's context stays bounded. The
    `messages` table is untouched — the UI still shows the whole conversation.
 
-   **Compact first, warn second**: at the end of each turn — after the middleware had its chance —
-   the runner re-evaluates the memory margin on the post-turn thread state (what the next turn will
-   replay). If it is still under 15 %, the stream carries one `memory_warning` event and the
-   renderer shows an amber notice above the composer, naming the conversation's approximate memory
-   size. The warning is about the machine *now*, so it is never persisted and clears on the next
-   turn that carries none.
+   **Warn only when compaction cannot save you**: the middleware compacts in `before_model`, so
+   this turn's growth is compacted on the *next* turn. At the end of each turn the runner therefore
+   projects the thread past an ideal compaction — the last 10 messages plus a 512-token summary
+   allowance — and emits one `memory_warning` event only if even that projected size still leaves
+   the memory margin under 15 %. The renderer then shows an amber notice above the composer with
+   the conversation's approximate memory size. The warning is about the machine *now*, so it is
+   never persisted and clears on the next turn that carries none.
 
 Two more middlewares run alongside it: stale images and stale tool results are stripped from the
 replayed state before the model is called.
