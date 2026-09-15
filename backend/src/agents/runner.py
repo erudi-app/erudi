@@ -67,6 +67,7 @@ from fastapi.concurrency import run_in_threadpool
 
 from src.agents.chat_model import INTER_CHUNK_BUDGET_S, PHASE_FIRST_CHUNK
 from src.agents.model_factory import build_chat_model
+from src.agents.overflow import ContextOverflow, parse_context_overflow
 from src.database.generation_hints import resolve_sampling_defaults
 from src.agents.think_splitter import ThinkSplitter
 from src.core import config
@@ -148,6 +149,35 @@ DECODE_TIMEOUT_MESSAGE = (
     f"{INTER_CHUNK_BUDGET_S:.0f} seconds, so the turn was stopped. Anything it had "
     "already written is kept above. Please try asking your question again."
 )
+
+
+# Curated turn for a context-window overflow (PR-G). Both local engines
+# reject an over-budget prompt with a precise 400 that names the real numbers
+# (src.agents.overflow.parse_context_overflow discriminates it from a generic
+# 400). Surfacing those numbers beats the catch-all apology below -- the user
+# learns exactly why and what to do -- and the app never silently truncates
+# or shifts the conversation to make it fit.
+CONTEXT_OVERFLOW_MESSAGE_TEMPLATE = (
+    f"{ERROR_SENTINEL} This conversation no longer fits the model's context window "
+    "(the request needs about {prompt_tokens} tokens; the window holds {context_tokens}). "
+    "Start a new conversation or send less at once."
+)
+CONTEXT_OVERFLOW_MESSAGE = (
+    f"{ERROR_SENTINEL} This conversation no longer fits the model's context window. "
+    "Start a new conversation or send less at once."
+)
+
+
+def _context_overflow_message(overflow: ContextOverflow) -> str:
+    """The curated turn a parsed ``ContextOverflow`` becomes: the numbers
+    when the wire error carried them, a numberless variant when it matched
+    but didn't parse (still an honest overflow message, just without figures)."""
+    if overflow.prompt_tokens is None or overflow.context_tokens is None:
+        return CONTEXT_OVERFLOW_MESSAGE
+    return CONTEXT_OVERFLOW_MESSAGE_TEMPLATE.format(
+        prompt_tokens=overflow.prompt_tokens,
+        context_tokens=overflow.context_tokens,
+    )
 
 
 def _stream_timeout_message(exc: GenerationTimeoutException) -> str:
@@ -740,24 +770,43 @@ class AgentRunner:
                     yield {"t": "answer", "text": text}
                 hop_text_buffer.clear()
                 yield {"t": "answer", "text": _stream_timeout_message(exc)}
-            except Exception:
-                # A stream that breaks because the inference child died shows
-                # up here as a connection error; the engine knows the exit
-                # code and the child's last lines, so ask it.
-                logger.exception(
-                    f"Agent streaming failed: llm={getattr(llm, 'id', '?')} "
-                    f"({getattr(llm, 'name', '?')}), thread_id={thread_id}"
-                    f"{_child_crash_suffix(engine)}"
-                )
-                if stateful:
-                    await self._repair_alternation(agent, run_config)
-                # Parity with the pre-#297 live stream: text buffered before the
-                # failure would already have been yielded, so flush it ahead of
-                # the sentinel instead of dropping it.
-                for text in hop_text_buffer:
-                    yield {"t": "answer", "text": text}
-                hop_text_buffer.clear()
-                yield {"t": "answer", "text": ERROR_MESSAGE}
+            except Exception as exc:
+                overflow = parse_context_overflow(exc)
+                if overflow is not None:
+                    # PR-G: the engine's own 400 already named the real
+                    # numbers -- nothing crashed, the app degraded on its
+                    # own, so WARNING (not exception) with the numbers and no
+                    # traceback (docs/logging.md).
+                    logger.warning(
+                        f"Agent stream hit a context-window overflow: llm={getattr(llm, 'id', '?')} "
+                        f"({getattr(llm, 'name', '?')}), thread_id={thread_id}, "
+                        f"prompt_tokens={overflow.prompt_tokens}, "
+                        f"context_tokens={overflow.context_tokens}"
+                    )
+                    if stateful:
+                        await self._repair_alternation(agent, run_config)
+                    for text in hop_text_buffer:
+                        yield {"t": "answer", "text": text}
+                    hop_text_buffer.clear()
+                    yield {"t": "answer", "text": _context_overflow_message(overflow)}
+                else:
+                    # A stream that breaks because the inference child died shows
+                    # up here as a connection error; the engine knows the exit
+                    # code and the child's last lines, so ask it.
+                    logger.exception(
+                        f"Agent streaming failed: llm={getattr(llm, 'id', '?')} "
+                        f"({getattr(llm, 'name', '?')}), thread_id={thread_id}"
+                        f"{_child_crash_suffix(engine)}"
+                    )
+                    if stateful:
+                        await self._repair_alternation(agent, run_config)
+                    # Parity with the pre-#297 live stream: text buffered before the
+                    # failure would already have been yielded, so flush it ahead of
+                    # the sentinel instead of dropping it.
+                    for text in hop_text_buffer:
+                        yield {"t": "answer", "text": text}
+                    hop_text_buffer.clear()
+                    yield {"t": "answer", "text": ERROR_MESSAGE}
 
     async def astream_oneshot(
         self,
