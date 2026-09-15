@@ -105,6 +105,23 @@ class TestSpawnContextAndArgv:
         )
         assert "-c" not in [str(x) for x in argv]
 
+    def test_build_spawn_argv_keeps_native_reasoning_extraction_on(self):
+        """#554: no ``--reasoning-format`` override. llama-server's default
+        (``auto``) extracts each family's chain-of-thought into the dedicated
+        ``delta.reasoning_content`` field, which ``Erudi_Chat_OpenAI`` carries
+        to the runner's ``thinking`` events -- overriding it to ``none`` would
+        put the raw tags back into the answer stream."""
+        argv = [
+            str(x)
+            for x in CPU_Engine._build_spawn_argv(
+                llama_server=Path("/bin/llama-server"),
+                model_gguf=Path("/m.gguf"),
+                alias="erudi-7",
+                port=8123,
+            )
+        ]
+        assert "--reasoning-format" not in argv
+
 
 # =====================================================================
 # UNIT — _select_gguf (inherited from BaseLlamaCppEngine)

@@ -12,6 +12,11 @@ size, a 120 s inter-chunk budget once tokens flow, and the honest error the
 first-chunk budget raises. No inference runs here -- the streams are fakes with
 budgets in the tens of milliseconds, so the proof is in the phase boundaries,
 not in wall-clock duration.
+
+``Erudi_Chat_OpenAI`` carries a second, disjoint override since #554 (the
+reasoning extraction in ``_convert_chunk_to_generation_chunk``); the last
+section pins that hook, its upstream assumptions, and its composition with the
+watchdog.
 """
 
 import asyncio
@@ -480,3 +485,137 @@ def test_chat_openai_still_owns_the_uniform_chunk_timeout_field():
     # ``stream_chunk_timeout=None`` silently stops disabling anything.
     assert field.default_factory is not None
     assert field.default_factory() == 120.0
+
+
+# ===================== the reasoning extraction hook (#554) =====================
+#
+# The second, disjoint override on ``Erudi_Chat_OpenAI``:
+# ``_convert_chunk_to_generation_chunk`` re-attaches the dedicated reasoning
+# field that both local servers stream (llama-server ``delta.reasoning_content``
+# under the default ``--reasoning-format auto``; mlx_vlm ``delta.reasoning``,
+# mirrored into ``reasoning_content`` on the pinned 0.6.17) and that upstream
+# ``_convert_delta_to_message_chunk`` drops on the floor. The raw chunk shapes
+# below are copied from the design-phase captures of both engines.
+
+
+def _llama_reasoning_chunk(text):
+    return {
+        "id": "chatcmpl-x",
+        "object": "chat.completion.chunk",
+        "model": "erudi-model",
+        "choices": [{"index": 0, "finish_reason": None, "delta": {"reasoning_content": text}}],
+    }
+
+
+def _mlx_reasoning_chunk(text):
+    return {
+        "id": "chatcmpl-x",
+        "object": "chat.completion.chunk",
+        "model": "/path/to/model",
+        "choices": [
+            {
+                "index": 0,
+                "finish_reason": None,
+                "delta": {
+                    "role": "assistant",
+                    "content": None,
+                    "reasoning_content": text,
+                    "reasoning": text,
+                    "tool_calls": None,
+                },
+            }
+        ],
+    }
+
+
+def _content_chunk(text, finish_reason=None):
+    return {
+        "id": "chatcmpl-x",
+        "object": "chat.completion.chunk",
+        "model": "erudi-model",
+        "choices": [{"index": 0, "finish_reason": finish_reason, "delta": {"content": text}}],
+    }
+
+
+def _convert(raw):
+    from langchain_core.messages import AIMessageChunk
+
+    return _model()._convert_chunk_to_generation_chunk(raw, AIMessageChunk, {})
+
+
+def test_the_conversion_hook_carries_llama_reasoning_onto_the_message_chunk():
+    generation_chunk = _convert(_llama_reasoning_chunk("Thinking Process"))
+    assert generation_chunk.message.additional_kwargs["reasoning_content"] == "Thinking Process"
+    assert generation_chunk.message.content == ""
+
+
+def test_the_conversion_hook_carries_mlx_reasoning_onto_the_message_chunk():
+    generation_chunk = _convert(_mlx_reasoning_chunk("step one"))
+    assert generation_chunk.message.additional_kwargs["reasoning_content"] == "step one"
+    assert generation_chunk.message.content == ""
+
+
+def test_a_content_chunk_gets_no_reasoning_kwarg():
+    generation_chunk = _convert(_content_chunk("The answer"))
+    assert "reasoning_content" not in generation_chunk.message.additional_kwargs
+    assert generation_chunk.message.content == "The answer"
+
+
+def test_the_conversion_hook_preserves_upstreams_none_result():
+    # ``{"type": "content.delta"}`` is upstream's beta-stream sentinel: the base
+    # method returns None and the override must not resurrect it.
+    assert _convert({"type": "content.delta"}) is None
+
+
+def test_finish_reason_still_lands_in_generation_info_through_the_override():
+    """#554 relies on finish_reason surviving WITHOUT stamping: the base method
+    folds ``choice.finish_reason`` into ``generation_info``, and langchain-core's
+    stream loop folds generation_info into the yielded message's
+    ``response_metadata`` (where the runner reads it). Pin the first half here
+    on the subclass; the runner tests pin the second half end to end."""
+    generation_chunk = _convert(_content_chunk("", finish_reason="length"))
+    assert generation_chunk.generation_info["finish_reason"] == "length"
+
+
+async def test_a_late_first_chunk_still_raises_with_both_overrides_active(monkeypatch):
+    """Composition pin: adding the #554 conversion hook must not loosen the
+    #573 watchdog -- extraction happens INSIDE the budgeted stream."""
+    from langchain_openai import ChatOpenAI
+
+    _tiny_budgets(monkeypatch)
+
+    async def _slow_parent(self, messages, *args, **kwargs):
+        await asyncio.sleep(0.3)
+        yield "never reached"
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _slow_parent)
+
+    subclass = erudi_chat_openai_class()
+    # Both behaviours live on the same class, on two disjoint hooks.
+    assert subclass._astream is not ChatOpenAI._astream
+    assert (
+        subclass._convert_chunk_to_generation_chunk
+        is not ChatOpenAI._convert_chunk_to_generation_chunk
+    )
+
+    with pytest.raises(GenerationTimeoutException) as excinfo:
+        async for _ in _model()._astream([_Msg("hi")]):
+            pass
+
+    assert excinfo.value.phase == PHASE_FIRST_CHUNK
+
+
+def test_chat_openai_still_exposes_the_chunk_conversion_hook_we_override():
+    """Pinned upstream assumption (langchain-openai 1.2.2): the sync
+    ``_convert_chunk_to_generation_chunk(self, chunk, default_chunk_class,
+    base_generation_info)`` is where every streamed Chat Completions chunk is
+    converted. A bump that renames or reshapes it would silently drop the
+    reasoning again -- fail HERE instead."""
+    from langchain_openai import ChatOpenAI
+
+    hook = ChatOpenAI._convert_chunk_to_generation_chunk
+    assert callable(hook)
+    assert not inspect.iscoroutinefunction(hook)
+    assert not inspect.isasyncgenfunction(hook)
+    parameters = list(inspect.signature(hook).parameters)
+    assert parameters[:4] == ["self", "chunk", "default_chunk_class", "base_generation_info"]
