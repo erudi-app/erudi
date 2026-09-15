@@ -25,6 +25,10 @@ from datetime import datetime
 from typing import Optional
 from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Float, Text, Boolean
 from sqlalchemy.orm import relationship, validates
+from src.agents.reasoning_effort import (
+    DEFAULT_REASONING_EFFORT,
+    REASONING_EFFORT_LEVELS,
+)
 from src.database.generation_hints import (
     FALLBACK_MAX_TOKENS,
     FALLBACK_TEMPERATURE,
@@ -85,6 +89,11 @@ class Conversation(Base):
     # user-settings default at creation; the conversation owns it afterwards
     # (a later global change never retro-affects existing conversations).
     web_search_enabled = Column(Boolean, default=False, nullable=False)
+    # How much the model may deliberate before answering (1.1.2), one of
+    # REASONING_EFFORT_LEVELS. Same lifecycle as the web-search toggle: copied
+    # from the GLOBAL user-settings default at creation, owned by the
+    # conversation afterwards.
+    reasoning_effort = Column(String(8), default=DEFAULT_REASONING_EFFORT, nullable=False)
 
     # Relationships — ordered by pk, NOT timestamp: PostgreSQL's now() is
     # frozen per transaction, so a user/assistant pair written in the same
@@ -151,6 +160,24 @@ class Conversation(Base):
         if not 1 <= max_tokens <= 32768:
             raise ValueError("Max tokens must be between 1 and 32768")
         return max_tokens
+
+    @validates("reasoning_effort")
+    def validate_reasoning_effort(self, key: str, reasoning_effort: str) -> str:
+        """Validate the reasoning effort is one of the five levels.
+
+        Args:
+            key: Column name ("reasoning_effort").
+            reasoning_effort: Level to validate.
+
+        Returns:
+            Validated level.
+
+        Raises:
+            ValueError: If the level is not in REASONING_EFFORT_LEVELS.
+        """
+        if reasoning_effort not in REASONING_EFFORT_LEVELS:
+            raise ValueError(f"Reasoning effort must be one of {REASONING_EFFORT_LEVELS}")
+        return reasoning_effort
 
     @hybrid_property
     def message_count(self) -> int:

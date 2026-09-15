@@ -6,6 +6,7 @@ mutations flushed (not committed) so the caller controls the transaction.
 
 from sqlalchemy.orm import Session
 
+from src.agents.reasoning_effort import DEFAULT_REASONING_EFFORT
 from src.entities.UserSettings import (
     DEFAULT_INFERENCE_BACKEND,
     DEFAULT_LANGUAGE,
@@ -64,6 +65,38 @@ class User_Settings_Repository:
         """
         logger.info(f"Updating UserSettings.web_search_enabled = {value}")
         settings.web_search_enabled = value
+        self.db.flush()
+        self.db.refresh(settings)
+        return settings
+
+    def get_default_reasoning_effort(self) -> str:
+        """The global default reasoning effort ("medium" until the user changes it).
+
+        Read-only, like ``get_web_search_enabled``: callers on hot paths
+        (conversation creation, arena turns) must not write, and a missing
+        singleton row IS the default.
+        """
+        settings = self.db.query(UserSettings).first()
+        value = settings.default_reasoning_effort if settings else None
+        return value or DEFAULT_REASONING_EFFORT
+
+    def set_default_reasoning_effort(self, settings: UserSettings, value: str) -> UserSettings:
+        """Update the global default reasoning effort (flushed, not committed).
+
+        Args:
+            settings: The singleton entity to update.
+            value: One of REASONING_EFFORT_LEVELS (validated by the entity).
+
+        Returns:
+            UserSettings: Updated entity.
+
+        Note:
+            Existing conversations keep the level they copied at creation --
+            this only changes what the NEXT conversation inherits (and what
+            arena turns, which have no conversation row, run at).
+        """
+        logger.info(f"Updating UserSettings.default_reasoning_effort = {value}")
+        settings.default_reasoning_effort = value
         self.db.flush()
         self.db.refresh(settings)
         return settings

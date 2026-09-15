@@ -8,6 +8,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.agents.reasoning_effort import DEFAULT_REASONING_EFFORT
 from src.database.generation_hints import (
     FALLBACK_MAX_TOKENS,
     FALLBACK_TEMPERATURE,
@@ -119,6 +120,7 @@ class ConversationRepository:
         max_tokens: int = FALLBACK_MAX_TOKENS,
         custom_prompt: str = "",
         web_search_enabled: bool = False,
+        reasoning_effort: str = DEFAULT_REASONING_EFFORT,
     ) -> Conversation:
         """
         Create a new conversation.
@@ -133,6 +135,8 @@ class ConversationRepository:
             web_search_enabled: Per-conversation web-search toggle (#310);
                 the service resolves it from the global default when the
                 caller does not pass an explicit value
+            reasoning_effort: Per-conversation reasoning effort (1.1.2), same
+                lifecycle as the web-search toggle
 
         Returns:
             The created Conversation
@@ -149,6 +153,7 @@ class ConversationRepository:
                 max_tokens=max_tokens,
                 custom_prompt=custom_prompt,
                 web_search_enabled=web_search_enabled,
+                reasoning_effort=reasoning_effort,
             )
             self.db.add(conversation)
             self.db.flush()  # Flush to get ID, no commit
@@ -168,6 +173,7 @@ class ConversationRepository:
         max_tokens: Optional[int] = None,
         custom_prompt: Optional[str] = None,
         web_search_enabled: Optional[bool] = None,
+        reasoning_effort: Optional[str] = None,
     ) -> Conversation:
         """
         Update an existing conversation.
@@ -181,6 +187,7 @@ class ConversationRepository:
             max_tokens: New max_tokens
             custom_prompt: New custom prompt
             web_search_enabled: New per-conversation web-search toggle (#310)
+            reasoning_effort: New per-conversation reasoning effort (1.1.2)
 
         Returns:
             Updated Conversation object
@@ -223,6 +230,10 @@ class ConversationRepository:
                 and web_search_enabled != conversation.web_search_enabled
             ):
                 conversation.web_search_enabled = web_search_enabled
+                updated = True
+
+            if reasoning_effort is not None and reasoning_effort != conversation.reasoning_effort:
+                conversation.reasoning_effort = reasoning_effort
                 updated = True
 
             if updated:

@@ -368,13 +368,15 @@ async def create_conversation(
             payload.max_tokens,
             payload.custom_prompt,
             payload.web_search_enabled,
+            payload.reasoning_effort,
         )
         db.commit()
         logger.info(
             f"Conversation created: id={conv.id}, llm_id={payload.llm_id}, "
             f"temperature={payload.temperature}, top_p={payload.top_p}, "
             f"max_tokens={payload.max_tokens}, "
-            f"web_search_enabled={conv.web_search_enabled}"
+            f"web_search_enabled={conv.web_search_enabled}, "
+            f"reasoning_effort={conv.reasoning_effort}"
         )
         return conv
     except Exception:
@@ -473,6 +475,7 @@ async def update_conversation(
             payload.max_tokens,
             payload.custom_prompt,
             payload.web_search_enabled,
+            payload.reasoning_effort,
         )
         db.commit()
         updated_fields = [
@@ -485,6 +488,7 @@ async def update_conversation(
                 ("max_tokens", payload.max_tokens),
                 ("custom_prompt", payload.custom_prompt),
                 ("web_search_enabled", payload.web_search_enabled),
+                ("reasoning_effort", payload.reasoning_effort),
             )
             if value is not None
         ]
