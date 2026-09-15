@@ -57,18 +57,49 @@ def _positive_int(value: Any) -> Optional[int]:
     return value if value > 0 else None
 
 
-def _scoped_fact(config: Dict[str, Any], key: str) -> Optional[int]:
-    """First positive integer for ``key``: top level, then the VLM containers."""
+def _scopes(config: Dict[str, Any]) -> list:
+    """The dicts a shape fact may live in: top level, then the VLM containers."""
     scopes = [config]
     for container in _SUB_CONFIG_CONTAINERS:
         sub = config.get(container)
         if isinstance(sub, dict):
             scopes.append(sub)
-    for scope in scopes:
+    return scopes
+
+
+def _scoped_fact(config: Dict[str, Any], key: str) -> Optional[int]:
+    """First positive integer for ``key`` across ``_scopes``."""
+    for scope in _scopes(config):
         n = _positive_int(scope.get(key))
         if n is not None:
             return n
     return None
+
+
+def _formula_cannot_model(config: Dict[str, Any]) -> bool:
+    """True when the full-attention KV formula would OVER-estimate this shape.
+
+    Two families are detected ([M3]): a positive ``sliding_window`` smaller
+    than the trained window (Gemma lineage -- sliding layers cap their cache
+    at the window, not at the conversation), unless ``use_sliding_window`` is
+    explicitly false (Qwen lineage ships the key disabled) or the window
+    slides over nothing (as large as the trained window); and MLA
+    (``kv_lora_rank``, DeepSeek lineage -- compressed latents, not per-head
+    K/V). An over-estimate (4-7x measured on those shapes) would fire
+    compaction far too early and silently amputate context, which is worse
+    than no signal -- so the KV fact is refused and only the 80 % window
+    signal protects those models.
+    """
+    if _scoped_fact(config, "kv_lora_rank") is not None:
+        return True
+    sliding = _scoped_fact(config, "sliding_window")
+    if sliding is None:
+        return False
+    for scope in _scopes(config):
+        if scope.get("use_sliding_window") is False:
+            return False
+    trained_window = _scoped_fact(config, "max_position_embeddings")
+    return trained_window is None or sliding < trained_window
 
 
 def kv_bytes_per_token(config: Any) -> Optional[int]:
@@ -78,9 +109,13 @@ def kv_bytes_per_token(config: Any) -> Optional[int]:
     fallbacks only: ``num_key_value_heads`` absent falls back to
     ``num_attention_heads`` (transformers' own default — MHA, not a guess) and
     ``head_dim`` absent derives as ``hidden_size // num_attention_heads`` (the
-    architectural definition). Any fact still missing answers ``None``.
+    architectural definition). Any fact still missing answers ``None``, and so
+    does a shape the formula would over-estimate — sliding-window or MLA
+    caches, see ``_formula_cannot_model``.
     """
     if not isinstance(config, dict):
+        return None
+    if _formula_cannot_model(config):
         return None
     layers = _scoped_fact(config, "num_hidden_layers")
     attention_heads = _scoped_fact(config, "num_attention_heads")

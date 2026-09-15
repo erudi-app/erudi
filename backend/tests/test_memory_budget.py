@@ -73,6 +73,73 @@ def test_kv_bytes_per_token_missing_facts_answer_none(config):
     assert kv_bytes_per_token(config) is None
 
 
+# [M3] Shapes the full-attention formula cannot model answer None: an
+# over-estimate (4-7x on sliding-window or MLA caches) would fire compaction
+# far too early and silently amputate context -- worse than no signal.
+
+
+def test_kv_bytes_per_token_none_on_sliding_window_smaller_than_the_window():
+    # Gemma lineage: per-layer sliding window far below the trained window.
+    config = {
+        "num_hidden_layers": 26,
+        "num_key_value_heads": 4,
+        "head_dim": 256,
+        "sliding_window": 4096,
+        "max_position_embeddings": 32768,
+    }
+    assert kv_bytes_per_token(config) is None
+
+
+def test_kv_bytes_per_token_keeps_signal_when_sliding_window_is_disabled():
+    # Qwen2 lineage: sliding_window present but use_sliding_window is false --
+    # the cache IS full attention, the formula holds.
+    config = {
+        "num_hidden_layers": 24,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "sliding_window": 32768,
+        "use_sliding_window": False,
+        "max_position_embeddings": 32768,
+    }
+    assert kv_bytes_per_token(config) == 98304
+
+
+def test_kv_bytes_per_token_keeps_signal_when_sliding_window_covers_the_window():
+    # A sliding window as large as the trained window slides over nothing.
+    config = {
+        "num_hidden_layers": 24,
+        "num_key_value_heads": 8,
+        "head_dim": 128,
+        "sliding_window": 32768,
+        "max_position_embeddings": 32768,
+    }
+    assert kv_bytes_per_token(config) == 98304
+
+
+def test_kv_bytes_per_token_none_on_mla():
+    # DeepSeek lineage: MLA stores compressed latents, not per-head K/V.
+    config = {
+        "num_hidden_layers": 27,
+        "num_key_value_heads": 16,
+        "head_dim": 128,
+        "kv_lora_rank": 512,
+    }
+    assert kv_bytes_per_token(config) is None
+
+
+def test_kv_bytes_per_token_none_on_nested_sliding_window():
+    config = {
+        "text_config": {
+            "num_hidden_layers": 26,
+            "num_key_value_heads": 4,
+            "head_dim": 256,
+            "sliding_window": 512,
+            "max_position_embeddings": 131072,
+        }
+    }
+    assert kv_bytes_per_token(config) is None
+
+
 # ===================== Artifact size =====================
 
 
