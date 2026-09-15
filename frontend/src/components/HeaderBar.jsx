@@ -13,15 +13,10 @@ const TWO_DECIMALS = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
 export default function HeaderBar({
   initialTemperature = 0.2,
   initialTopP = 0.2,
-  initialMaxTokens = 1024,
-  // Ceiling of the max-tokens field (#388): min(model context window, engine
-  // window) resolved by the backend per model; the API's own upper bound
-  // when the consumer has no model to derive it from.
-  maxTokensCap = 32768,
   onApply,
-  // Optional live callback (#218): when provided, every slider/token edit is
-  // pushed to the parent immediately, so the displayed value is the value used
-  // at send time. onApply stays intact for consumers (ConversationPage) that
+  // Optional live callback (#218): when provided, every slider edit is pushed
+  // to the parent immediately, so the displayed value is the value used at
+  // send time. onApply stays intact for consumers (ConversationPage) that
   // deliberately commit-and-persist on an explicit Apply instead.
   onLiveChange,
   onCustomizePrompt,
@@ -60,7 +55,6 @@ export default function HeaderBar({
   const [isOpen, setIsOpen] = useState(false);
   const [temperature, setTemperature] = useState(initialTemperature);
   const [topP, setTopP] = useState(initialTopP);
-  const [maxTokens, setMaxTokens] = useState(initialMaxTokens);
   const [webSearch, setWebSearch] = useState(initialWebSearch);
 
   // Sync internal state with props when they change
@@ -75,10 +69,6 @@ export default function HeaderBar({
   useEffect(() => {
     setTopP(initialTopP);
   }, [initialTopP]);
-
-  useEffect(() => {
-    setMaxTokens(initialMaxTokens);
-  }, [initialMaxTokens]);
 
   const rootRef = useRef(null);
   const dropdownRef = useRef(null);
@@ -135,7 +125,7 @@ export default function HeaderBar({
   const isNarrow = isSm || isXs;
 
   const handleApply = () => {
-    onApply?.({ temperature, topP, maxTokens });
+    onApply?.({ temperature, topP });
     setIsOpen(false);
   };
 
@@ -182,7 +172,6 @@ export default function HeaderBar({
       : "w-9 h-9 rounded-xl";
   const labelText = isXs ? "text-[0.65rem]" : isSm ? "text-[0.7rem]" : "text-[0.72rem]";
   const statText = isXs ? "text-[10px]" : "text-[11px]";
-  const numberWidth = isXs ? "w-20" : isSm ? "w-24" : "w-28";
   const primaryBtn = isXs
     ? "px-4 py-1.5 text-[0.8rem]"
     : isSm
@@ -381,7 +370,7 @@ export default function HeaderBar({
                         onChange={(e) => {
                           const value = parseFloat(e.target.value);
                           setTemperature(value);
-                          onLiveChange?.({ temperature: value, topP, maxTokens });
+                          onLiveChange?.({ temperature: value, topP });
                         }}
                         className="hb-range w-full rounded-full bg-white/5 cursor-pointer"
                         style={sliderBg(temperature, 2)}
@@ -414,7 +403,7 @@ export default function HeaderBar({
                         onChange={(e) => {
                           const value = parseFloat(e.target.value);
                           setTopP(value);
-                          onLiveChange?.({ temperature, topP: value, maxTokens });
+                          onLiveChange?.({ temperature, topP: value });
                         }}
                         className="hb-range w-full rounded-full bg-white/5 cursor-pointer"
                         style={sliderBg(topP)}
@@ -432,85 +421,25 @@ export default function HeaderBar({
                 </div>
 
                 <div className="flex flex-col justify-center gap-6">
-                  <div>
-                    {/* Labels row */}
-                    <div className="grid grid-cols-2 items-start justify-items-start gap-x-6 gap-y-2 mb-2">
-                      <div>
-                        <span
-                          className={`${labelText} uppercase tracking-wide font-semibold text-gray-300/80`}
-                        >
-                          {t("chat:header.maxTokens")}
-                        </span>
-                      </div>
-                      {/* <div className="flex items-center gap-2">
-                        <span
-                          className={`${labelText} uppercase tracking-wide font-semibold text-gray-300/80`}
-                        >
-                          Low-Memory
-                        </span>
-                        <TooltipIcon id="quantize" side="bottom-left" />
-                      </div> */}
-
-                      {/* Controls row */}
-                      <div className="inline-flex items-center rounded-md bg-white/10 border border-white/20 shadow p-0 m-0">
-                        <input
-                          type="number"
-                          min="1"
-                          max={maxTokensCap}
-                          value={maxTokens}
-                          onChange={(e) => {
-                            const value = parseInt(e.target.value || "0", 10);
-                            setMaxTokens(value);
-                            onLiveChange?.({ temperature, topP, maxTokens: value });
-                          }}
-                          className={`bg-transparent border-0 outline-none ${numberWidth} text-sm font-semibold text-gray-100 text-center appearance-none [appearance:textfield] [&::-webkit-outer-spin-button]:appearance-none [&::-webkit-inner-spin-button]:appearance-none`}
-                        />
-                      </div>
-
-                      {/* <div>
-                        <button
-                          type="button"
-                          onClick={() => setQuantize(!quantize)}
-                          className={`relative inline-flex h-6 w-11 items-center rounded-full transition-colors ${
-                            quantize
-                              ? "bg-emerald-600 hover:bg-emerald-700"
-                              : "bg-white/20 hover:bg-white/30"
-                          }`}
-                        >
-                          <span
-                            className={`inline-block h-4 w-4 transform rounded-full bg-white transition-transform ${
-                              quantize ? "translate-x-6" : "translate-x-1"
-                            }`}
-                          />
-                        </button>
-                      </div> */}
-                    </div>
-                    {showWebSearch && (
-                      <div className="mt-4 flex items-center gap-3">
-                        <span
-                          className={`${labelText} uppercase tracking-wide font-semibold text-gray-300/80`}
-                        >
-                          {t("chat:header.webSearch")}
-                        </span>
-                        <TooltipIcon id="web-search" side={isNarrow ? "bottom-right" : "right"} />
-                        <div className="ml-auto">
-                          {webSearchDisabled ? (
-                            <Tooltip
-                              content={webSearchDisabledTooltip}
-                              side={isNarrow ? "bottom-right" : "right"}
-                              width={isXs ? "w-40" : isSm ? "w-52" : "w-64"}
-                            >
-                              <ToggleSwitch
-                                checked={webSearch}
-                                onChange={(next) => {
-                                  setWebSearch(next);
-                                  onWebSearchChange?.(next);
-                                }}
-                                label={t("chat:header.webSearchToggle")}
-                                disabled
-                              />
-                            </Tooltip>
-                          ) : (
+                  {/* The output budget used to live here as a Max Tokens field.
+                      It is now derived by the backend from the context window
+                      the model runs in, so this column starts at the web-search
+                      toggle (and is empty in the Arena, which has none). */}
+                  {showWebSearch && (
+                    <div className="flex items-center gap-3">
+                      <span
+                        className={`${labelText} uppercase tracking-wide font-semibold text-gray-300/80`}
+                      >
+                        {t("chat:header.webSearch")}
+                      </span>
+                      <TooltipIcon id="web-search" side={isNarrow ? "bottom-right" : "right"} />
+                      <div className="ml-auto">
+                        {webSearchDisabled ? (
+                          <Tooltip
+                            content={webSearchDisabledTooltip}
+                            side={isNarrow ? "bottom-right" : "right"}
+                            width={isXs ? "w-40" : isSm ? "w-52" : "w-64"}
+                          >
                             <ToggleSwitch
                               checked={webSearch}
                               onChange={(next) => {
@@ -518,12 +447,22 @@ export default function HeaderBar({
                                 onWebSearchChange?.(next);
                               }}
                               label={t("chat:header.webSearchToggle")}
+                              disabled
                             />
-                          )}
-                        </div>
+                          </Tooltip>
+                        ) : (
+                          <ToggleSwitch
+                            checked={webSearch}
+                            onChange={(next) => {
+                              setWebSearch(next);
+                              onWebSearchChange?.(next);
+                            }}
+                            label={t("chat:header.webSearchToggle")}
+                          />
+                        )}
                       </div>
-                    )}
-                  </div>
+                    </div>
+                  )}
 
                   <div className={`flex ${actionsLayout} gap-3 w-full`}>
                     <div
@@ -577,8 +516,6 @@ export default function HeaderBar({
 HeaderBar.propTypes = {
   initialTemperature: PropTypes.number,
   initialTopP: PropTypes.number,
-  initialMaxTokens: PropTypes.number,
-  maxTokensCap: PropTypes.number,
   onApply: PropTypes.func.isRequired,
   onLiveChange: PropTypes.func,
   onCustomizePrompt: PropTypes.func.isRequired,

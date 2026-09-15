@@ -34,23 +34,11 @@ vi.mock("../components/TypingIndicator", () => ({ default: () => null }));
 vi.mock("../components/MarkdownRenderer", () => ({ default: () => null }));
 vi.mock("../components/modals/CustomizePromptModal", () => ({ default: () => null }));
 vi.mock("../components/HeaderBar", () => ({
-  default: ({
-    currentModel,
-    initialTemperature,
-    initialTopP,
-    initialMaxTokens,
-    maxTokensCap,
-    onModelChange,
-    onApply,
-  }) => (
+  default: ({ currentModel, initialTemperature, initialTopP, onModelChange, onApply }) => (
     <div>
-      <div data-testid="header">
-        {`${currentModel}|${initialTemperature}|${initialTopP}|${initialMaxTokens}|${maxTokensCap}`}
-      </div>
+      <div data-testid="header">{`${currentModel}|${initialTemperature}|${initialTopP}`}</div>
       <button onClick={() => onModelChange("qwen3")}>PICK_QWEN3</button>
-      <button onClick={() => onApply({ temperature: 1.3, topP: 0.9, maxTokens: 512 })}>
-        TOUCH
-      </button>
+      <button onClick={() => onApply({ temperature: 1.3, topP: 0.9 })}>TOUCH</button>
     </div>
   ),
 }));
@@ -109,35 +97,32 @@ afterEach(() => {
 });
 
 describe("ConversationPage sampling on model switch (#388)", () => {
-  it("hydrates from the conversation row and caps max tokens on the conversation's model", async () => {
+  it("hydrates from the conversation row", async () => {
     render(<ConversationPage />);
-    await waitFor(() => expect(header()).toBe("plain|0.7|0.9|512|32768"));
+    await waitFor(() => expect(header()).toBe("plain|0.7|0.9"));
   });
 
   it("re-defaults the sampling to the new model's values and persists them with llm_id", async () => {
     render(<ConversationPage />);
-    await waitFor(() => expect(header()).toBe("plain|0.7|0.9|512|32768"));
+    await waitFor(() => expect(header()).toBe("plain|0.7|0.9"));
 
     fireEvent.click(screen.getByText("PICK_QWEN3"));
 
-    await waitFor(() => expect(header()).toBe("qwen3|0.6|0.95|1024|8192"));
+    await waitFor(() => expect(header()).toBe("qwen3|0.6|0.95"));
     await waitFor(() => expect(patchBodies()).toHaveLength(1));
-    expect(patchBodies()[0]).toEqual({
-      llm_id: 1,
-      temperature: 0.6,
-      top_p: 0.95,
-      max_tokens: 1024,
-    });
+    // No max_tokens: the row's value is only the backend's fallback budget and
+    // nothing in the interface writes it.
+    expect(patchBodies()[0]).toEqual({ llm_id: 1, temperature: 0.6, top_p: 0.95 });
   });
 
   it("re-defaults even after the user touched the sliders", async () => {
     render(<ConversationPage />);
-    await waitFor(() => expect(header()).toBe("plain|0.7|0.9|512|32768"));
+    await waitFor(() => expect(header()).toBe("plain|0.7|0.9"));
 
     fireEvent.click(screen.getByText("TOUCH"));
-    await waitFor(() => expect(header()).toBe("plain|1.3|0.9|512|32768"));
+    await waitFor(() => expect(header()).toBe("plain|1.3|0.9"));
 
     fireEvent.click(screen.getByText("PICK_QWEN3"));
-    await waitFor(() => expect(header()).toBe("qwen3|0.6|0.95|1024|8192"));
+    await waitFor(() => expect(header()).toBe("qwen3|0.6|0.95"));
   });
 });

@@ -130,7 +130,6 @@ describe("ConversationPage orphaned conversation (#225)", () => {
       llm_id: 1,
       temperature: 0.2,
       top_p: 0.95,
-      max_tokens: 1024,
     });
   });
 

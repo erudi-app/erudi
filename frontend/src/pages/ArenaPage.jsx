@@ -182,7 +182,6 @@ export default function ArenaPage() {
         llmId: llm.id,
         temperature: panel.temperature,
         topP: panel.topP,
-        maxNewTokens: panel.maxTokens,
         customPrompt: panel.customPrompt,
         signal: abortRef.current.signal,
         onStreamChunk: (chunk) => {
@@ -292,8 +291,6 @@ export default function ArenaPage() {
           <HeaderBar
             initialTemperature={panel.temperature}
             initialTopP={panel.topP}
-            initialMaxTokens={panel.maxTokens}
-            maxTokensCap={panel.maxTokensCap}
             // #218: settings take effect at send time. Slider/token edits flow
             // straight into the panel state via onLiveChange, so the displayed
             // value is the value the next run sends - no silent Apply divergence.

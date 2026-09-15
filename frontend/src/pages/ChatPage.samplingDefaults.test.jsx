@@ -8,8 +8,9 @@ import { MemoryRouter } from "react-router-dom";
 // sliders seed from the selected model's `sampling_defaults`, re-default on
 // every model switch whether or not they were touched (maintainer decision
 // 1), keep a touched value while the model stays the same, and the creation
-// POST sends what the panel shows. The settings ceilings
-// follow the model too (temperature up to 2, max tokens up to the cap).
+// POST sends what the panel shows. There is no output-budget control: the
+// backend derives it from the context window the model runs in, so the panel
+// neither shows it nor sends it.
 
 const { tracedFetchMock, navigateMock } = vi.hoisted(() => ({
   tracedFetchMock: vi.fn(),
@@ -81,7 +82,6 @@ const pickModel = async (name) => {
 };
 const sliders = () => screen.getAllByRole("slider");
 const temperatureSlider = () => sliders()[0];
-const maxTokensInput = () => screen.getByRole("spinbutton");
 
 beforeEach(() => {
   tracedFetchMock.mockReset();
@@ -101,19 +101,15 @@ describe("ChatPage per-model sampling defaults (#388)", () => {
 
     await waitFor(() => expect(temperatureSlider().value).toBe("0.6"));
     expect(screen.getByText("0.60")).toBeTruthy();
-    expect(maxTokensInput().value).toBe("1024");
   });
 
-  it("caps the controls on the model: temperature up to 2, max tokens up to the cap", async () => {
+  it("caps temperature on the backend's own bound and offers no output budget", async () => {
     renderPage();
     await screen.findByTitle("Qwen3 0.6B");
     openSettings();
 
     expect(temperatureSlider().getAttribute("max")).toBe("2");
-    await waitFor(() => expect(maxTokensInput().getAttribute("max")).toBe("8192"));
-
-    await pickModel("Plain Model");
-    await waitFor(() => expect(maxTokensInput().getAttribute("max")).toBe("32768"));
+    expect(screen.queryByRole("spinbutton")).toBeNull();
   });
 
   it("follows the model on switch while the sliders are untouched", async () => {
@@ -157,7 +153,10 @@ describe("ChatPage per-model sampling defaults (#388)", () => {
       String(url).endsWith("/conversations/")
     );
     const body = JSON.parse(opts.body);
-    expect([body.temperature, body.top_p, body.max_tokens]).toEqual([1.3, 0.95, 1024]);
+    expect([body.temperature, body.top_p]).toEqual([1.3, 0.95]);
+    // The conversation is created without an output budget: the backend
+    // resolves the fallback column from the model's own defaults.
+    expect(body).not.toHaveProperty("max_tokens");
   });
 
   it("creates the conversation with the model's defaults when untouched", async () => {
@@ -174,6 +173,6 @@ describe("ChatPage per-model sampling defaults (#388)", () => {
     );
     const body = JSON.parse(opts.body);
     expect(body.llm_id).toBe(7);
-    expect([body.temperature, body.top_p, body.max_tokens]).toEqual([0.6, 0.95, 1024]);
+    expect([body.temperature, body.top_p]).toEqual([0.6, 0.95]);
   });
 });

@@ -3,19 +3,21 @@
 // The backend resolves, per catalog row, the sampling a fresh conversation or
 // arena panel should start from (`sampling_defaults`: what the publisher ships
 // in the base repo's generation_config.json, else the quant repo's, else what
-// the base model card recommends in prose — the winning stage is `source`) and
-// the ceiling of the max-tokens field (`max_tokens_cap` = min(model context
-// window, engine window)). The UI seeds its sliders from that block and never
-// hard-codes a per-model value itself.
+// the base model card recommends in prose — the winning stage is `source`).
+// The UI seeds its sliders from that block and never hard-codes a per-model
+// value itself.
+//
+// `max_tokens` / `max_tokens_cap` are deliberately NOT read here. How long an
+// answer may get is not a setting any more: the backend computes it per model
+// call from the context window the model is running in (see
+// docs/guides/conversations.md, "Output budget"), so there is no field to seed
+// and no ceiling to enforce in the interface.
 //
 // The fallback mirrors the backend's constants (src/database/generation_hints.py):
-// 0.2 / 0.95 / 1024, validated by the #129 eval campaign, and the API's own
-// max_tokens upper bound as the cap.
+// 0.2 / 0.95, validated by the #129 eval campaign.
 export const FALLBACK_SAMPLING = Object.freeze({
   temperature: 0.2,
   topP: 0.95,
-  maxTokens: 1024,
-  maxTokensCap: 32768,
 });
 
 // `sampling_defaults.source` when the publisher gives no usable sampling
@@ -35,19 +37,9 @@ export function defaultsFor(model) {
   if (!block || typeof block !== "object") {
     return { ...FALLBACK_SAMPLING };
   }
-  const maxTokensCap = Math.max(
-    1,
-    Math.trunc(numberOr(block.max_tokens_cap, FALLBACK_SAMPLING.maxTokensCap))
-  );
-  const maxTokens = Math.max(
-    1,
-    Math.trunc(numberOr(block.max_tokens, FALLBACK_SAMPLING.maxTokens))
-  );
   return {
     temperature: numberOr(block.temperature, FALLBACK_SAMPLING.temperature),
     topP: numberOr(block.top_p, FALLBACK_SAMPLING.topP),
-    maxTokens: Math.min(maxTokens, maxTokensCap),
-    maxTokensCap,
   };
 }
 

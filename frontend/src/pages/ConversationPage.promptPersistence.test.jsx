@@ -102,7 +102,8 @@ describe("ConversationPage prompt persistence (#136)", () => {
     // Current settings (loaded from the conversation) ride along unchanged.
     expect(body.temperature).toBe(0.7);
     expect(body.top_p).toBe(0.9);
-    expect(body.max_tokens).toBe(512);
+    // The output budget is not among them: it is derived backend-side.
+    expect(body).not.toHaveProperty("max_tokens");
   });
 
   it("persists an empty prompt when the user clears it in the modal", async () => {

@@ -221,7 +221,6 @@ export default function ConversationPage() {
         llm_id: model.id,
         temperature: next.temperature,
         top_p: next.topP,
-        max_tokens: next.maxTokens,
       }),
     });
   };
@@ -250,7 +249,6 @@ export default function ConversationPage() {
         body: JSON.stringify({
           temperature: newSettings.temperature,
           top_p: newSettings.topP,
-          max_tokens: newSettings.maxTokens,
           // ?? (not ||): an explicit empty string means "clear the prompt"
           // and must be persisted as-is, not swallowed by the state fallback.
           custom_prompt: newCustomPrompt ?? customPrompt,
@@ -401,7 +399,6 @@ export default function ConversationPage() {
             attachments: attachmentPaths,
             temperature: settingsToUse.temperature,
             top_p: settingsToUse.topP,
-            max_new_tokens: settingsToUse.maxTokens,
             custom_prompt: customPromptToUse,
           }),
         });
@@ -653,10 +650,12 @@ export default function ConversationPage() {
         // Load conversation parameters
         if (convDetailRes.ok) {
           const conversation = await convDetailRes.json();
+          // `max_tokens` is deliberately not read: the output budget is
+          // computed backend-side from the running context window, and the
+          // column is only that computation's fallback.
           setSettings({
             temperature: conversation.temperature,
             topP: conversation.top_p,
-            maxTokens: conversation.max_tokens,
           });
           setWebSearch(Boolean(conversation.web_search_enabled));
           setCustomPrompt(conversation.custom_prompt || "");
@@ -888,8 +887,6 @@ export default function ConversationPage() {
           <HeaderBar
             initialTemperature={settings.temperature}
             initialTopP={settings.topP}
-            initialMaxTokens={settings.maxTokens}
-            maxTokensCap={defaultsFor(models.find((m) => m.id === conversationLlmId)).maxTokensCap}
             noPublisherRecommendation={hasNoPublisherRecommendation(
               models.find((m) => m.id === conversationLlmId)
             )}

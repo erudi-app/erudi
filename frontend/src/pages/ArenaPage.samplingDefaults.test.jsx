@@ -25,25 +25,11 @@ vi.mock("../components/MarkdownRenderer", () => ({
 vi.mock("../components/modals/CustomizePromptModal", () => ({ default: () => null }));
 // Header mock surfacing the sampling the panel hands it, plus a model switch.
 vi.mock("../components/HeaderBar", () => ({
-  default: ({
-    currentModel,
-    initialTemperature,
-    initialTopP,
-    initialMaxTokens,
-    maxTokensCap,
-    onModelChange,
-    onLiveChange,
-  }) => (
+  default: ({ currentModel, initialTemperature, initialTopP, onModelChange, onLiveChange }) => (
     <div>
-      <div data-testid="panel">
-        {`${currentModel}|${initialTemperature}|${initialTopP}|${initialMaxTokens}|${maxTokensCap}`}
-      </div>
+      <div data-testid="panel">{`${currentModel}|${initialTemperature}|${initialTopP}`}</div>
       <button onClick={() => onModelChange("plain")}>{`switch:${currentModel}`}</button>
-      <button
-        onClick={() =>
-          onLiveChange({ temperature: 1.3, topP: initialTopP, maxTokens: initialMaxTokens })
-        }
-      >
+      <button onClick={() => onLiveChange({ temperature: 1.3, topP: initialTopP })}>
         {`touch:${currentModel}`}
       </button>
     </div>
@@ -100,17 +86,17 @@ afterEach(() => {
 describe("ArenaPage per-model sampling defaults (#388)", () => {
   it("seeds each panel from its model; a model without hints gets the fallback", async () => {
     await renderArena();
-    expect(panels()).toEqual(["qwen3|0.6|0.95|1024|8192", "plain|0.2|0.95|1024|32768"]);
+    expect(panels()).toEqual(["qwen3|0.6|0.95", "plain|0.2|0.95"]);
   });
 
   it("resets a panel's sampling to the new model's defaults on switch, even when touched", async () => {
     await renderArena();
 
     fireEvent.click(screen.getByText("touch:qwen3"));
-    await waitFor(() => expect(panels()[0]).toBe("qwen3|1.3|0.95|1024|8192"));
+    await waitFor(() => expect(panels()[0]).toBe("qwen3|1.3|0.95"));
 
     fireEvent.click(screen.getByText("switch:qwen3"));
-    await waitFor(() => expect(panels()[0]).toBe("plain|0.2|0.95|1024|32768"));
+    await waitFor(() => expect(panels()[0]).toBe("plain|0.2|0.95"));
   });
 
   it("gives a new panel its model's defaults", async () => {
@@ -119,7 +105,7 @@ describe("ArenaPage per-model sampling defaults (#388)", () => {
     fireEvent.click(screen.getByTitle("Add chat panel"));
     await waitFor(() => expect(panels()).toHaveLength(3));
     // The third panel cycles back onto models[0].
-    expect(panels()[2]).toBe("qwen3|0.6|0.95|1024|8192");
+    expect(panels()[2]).toBe("qwen3|0.6|0.95");
   });
 
   it("sends the model's defaults in the arena payload", async () => {
@@ -132,11 +118,10 @@ describe("ArenaPage per-model sampling defaults (#388)", () => {
       JSON.parse(
         tracedFetchMock.mock.calls.find(([url]) => String(url).includes(`/arena/${llmId}/`))[1].body
       );
-    expect([bodyFor(1).temperature, bodyFor(1).top_p, bodyFor(1).max_new_tokens]).toEqual([
-      0.6, 0.95, 1024,
-    ]);
-    expect([bodyFor(2).temperature, bodyFor(2).top_p, bodyFor(2).max_new_tokens]).toEqual([
-      0.2, 0.95, 1024,
-    ]);
+    expect([bodyFor(1).temperature, bodyFor(1).top_p]).toEqual([0.6, 0.95]);
+    expect([bodyFor(2).temperature, bodyFor(2).top_p]).toEqual([0.2, 0.95]);
+    // No output budget travels with the turn: the backend derives it from the
+    // context window the model runs in.
+    expect(bodyFor(1).max_new_tokens).toBeUndefined();
   });
 });
