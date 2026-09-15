@@ -1,0 +1,11 @@
+{#- Synthetic gpt-oss-shaped template: the model's reasoning depth is a
+    template variable, so binding reasoning_effort changes the render. -#}
+{%- if reasoning_effort is defined and reasoning_effort %}
+{{- '<|start|>system<|message|>Reasoning: ' + reasoning_effort + '<|end|>' }}
+{%- endif %}
+{%- for message in messages %}
+{{- '<|start|>' + message['role'] + '<|message|>' + message['content'] + '<|end|>' }}
+{%- endfor %}
+{%- if add_generation_prompt %}
+{{- '<|start|>assistant<|channel|>analysis<|message|>' }}
+{%- endif %}

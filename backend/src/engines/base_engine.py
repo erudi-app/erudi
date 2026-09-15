@@ -170,6 +170,30 @@ class BaseEngine(ABC, metaclass=EngineMeta):
                 return window
         return None
 
+    @classmethod
+    def chat_template_caps(cls, llm_id: Any = None) -> dict:
+        """What the CURRENTLY LOADED child reported about its chat template.
+
+        llama.cpp engines stamp the server's ``chat_template_caps`` map on the
+        handle during the one ``/props`` read at spawn -- nine booleans
+        evaluated by llama.cpp's own symbolic execution of the template, of
+        which ``supports_reasoning_effort`` drives the reasoning-effort lever.
+        Engines whose server reports nothing (MLX) return an empty map, and so
+        does a child that is down or serving another model.
+
+        ``llm_id`` guards exactly that: capabilities belong to the artifact the
+        child was spawned for, so a caller planning a turn for a DIFFERENT
+        model gets nothing rather than the loaded model's answers.
+        """
+        if llm_id is not None and cls._model_id != llm_id:
+            return {}
+        model = cls._model
+        if isinstance(model, dict):
+            caps = model.get("chat_template_caps")
+            if isinstance(caps, dict):
+                return caps
+        return {}
+
     # Stored model links that download fine but FAIL TO RUN on this engine
     # (e.g. a quantized checkpoint the loader can't read). Overridden per engine.
     # is_runnable() uses it to ban such models from the catalog for this hardware.
