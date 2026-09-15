@@ -399,3 +399,81 @@ class TestWebSearchPromptSection:
     def test_web_only_prompt_carries_no_arbitration_clause(self):
         prompt = build_agent_system_prompt(_Llm(param_size=7.0), web_search=True)
         assert "search_knowledge_base" not in prompt
+
+
+# ===================== reasoning-effort section (1.1.2) =====================
+
+
+class TestReasoningEffortSection:
+    """Where the graded reasoning instruction sits, and what it costs when absent.
+
+    The section is the fallback channel for an effort level the model's chat
+    template carries no native lever for. It takes ONE slot everywhere -- after
+    the tool regime (how to use the tools comes first), before the user's own
+    instructions (which stay the last word) -- so a level means the same thing
+    on a plain, a systematic and an agentic turn.
+    """
+
+    _SECTION = "Think thoroughly before answering."
+
+    def test_no_section_leaves_the_plain_prompt_byte_identical(self):
+        llm = _Llm(name="Qwen 7B", param_size=7.0)
+        assert build_agent_system_prompt(llm, effort_section=None) == build_agent_system_prompt(llm)
+
+    def test_no_section_leaves_every_composed_prompt_byte_identical(self):
+        llm = _Llm(name="Qwen 7B", param_size=7.0)
+        for build in (build_kb_system_prompt, build_kb_agentic_system_prompt):
+            assert build(llm, effort_section=None) == build(llm)
+        assert build_agent_system_prompt(
+            llm, web_search=True, effort_section=None
+        ) == build_agent_system_prompt(llm, web_search=True)
+
+    def test_the_plain_prompt_appends_the_section_after_the_persona(self):
+        llm = _Llm(name="Qwen 7B", param_size=7.0)
+        prompt = build_agent_system_prompt(llm, effort_section=self._SECTION)
+        assert prompt == build_agent_system_prompt(llm) + "\n\n" + self._SECTION
+
+    def test_the_plain_prompt_keeps_the_custom_instructions_last(self):
+        prompt = build_agent_system_prompt(
+            _Llm(param_size=7.0), effort_section=self._SECTION, custom_prompt="Be terse."
+        )
+        assert prompt.index(self._SECTION) < prompt.index("Additional instructions: Be terse.")
+
+    def test_the_section_sits_between_the_tool_regime_and_the_custom_prompt(self):
+        prompt = build_kb_agentic_system_prompt(
+            _Llm(name="Agent 7B", param_size=7.0),
+            web_search=True,
+            effort_section=self._SECTION,
+            custom_prompt="Be terse.",
+            starred_messages=["retenir ceci"],
+        )
+        assert prompt.index("search_knowledge_base tool") < prompt.index(self._SECTION)
+        assert prompt.index("web_search tool") < prompt.index(self._SECTION)
+        assert prompt.index(self._SECTION) < prompt.index("Additional instructions: Be terse.")
+        assert prompt.index("Be terse.") < prompt.index("retenir ceci")
+
+    def test_the_systematic_prompt_takes_the_same_slot(self):
+        prompt = build_kb_system_prompt(
+            _Llm(name="Analyste 4B", param_size=4.0),
+            effort_section=self._SECTION,
+            custom_prompt="Be terse.",
+        )
+        assert prompt.index("excerpts") < prompt.index(self._SECTION)
+        assert prompt.index(self._SECTION) < prompt.index("Additional instructions: Be terse.")
+
+
+class TestPlanTurnCarriesTheEffortSection:
+    """Every turn mode hands the section to its prompt builder."""
+
+    def _plan(self, llm, **kwargs):
+        from src.agents.kb_mode import plan_turn
+
+        return plan_turn(llm, question="q", retrieve=lambda: [], **kwargs)
+
+    def test_plain_turn(self):
+        plan = self._plan(_Llm(param_size=7.0), effort_section="SECTION-MARKER")
+        assert "SECTION-MARKER" in plan.system_prompt
+
+    def test_plain_turn_without_a_section_is_unchanged(self):
+        llm = _Llm(param_size=7.0)
+        assert self._plan(llm).system_prompt == build_agent_system_prompt(llm)
