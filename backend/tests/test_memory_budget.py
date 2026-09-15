@@ -114,15 +114,20 @@ def test_total_memory_bytes_cpu_uses_system_ram():
     assert total_memory_bytes(engine) == 8 * 1024**3
 
 
-def test_total_memory_bytes_cuda_uses_vram():
+def test_total_memory_bytes_cuda_signal_is_off():
+    # Discrete GPUs run with the memory signal OFF: under partial offload the
+    # weights split between VRAM and RAM in proportions we cannot know, so any
+    # VRAM-only accounting is dishonest (a partially offloaded model would
+    # read as saturating the card while running fine). llama's own fit already
+    # bounded the allocation at load.
     engine = _engine_with_flat_data(
         {"backend_type": "cuda", "total_memory_gb": 64.0, "vram_total_gb": 12.0}
     )
-    assert total_memory_bytes(engine) == 12 * 1024**3
+    assert total_memory_bytes(engine) is None
 
 
 def test_total_memory_bytes_missing_total_is_none():
-    engine = _engine_with_flat_data({"backend_type": "cuda"})
+    engine = _engine_with_flat_data({"backend_type": "cpu"})
     assert total_memory_bytes(engine) is None
 
 
@@ -213,6 +218,47 @@ def test_from_engine_mlx_directory(tmp_path, monkeypatch):
     assert budget.weights_bytes == 5000 + config_bytes
     assert budget.kv_token_bytes == 98304
     assert budget.total_bytes == 16 * 1024**3
+
+
+def test_from_engine_gguf_with_config_on_cpu_is_fully_alive(tmp_path):
+    # The app's downloader fetches a repo's small aux files alongside the
+    # .gguf, so most GGUF folders DO carry a config.json: the memory signal
+    # is alive on the CPU engine (one honest RAM pool).
+    gguf = tmp_path / "model-q4.gguf"
+    gguf.write_bytes(b"g" * 4000)
+    (tmp_path / "config.json").write_text(
+        json.dumps({"num_hidden_layers": 24, "num_key_value_heads": 8, "head_dim": 128}),
+        encoding="utf-8",
+    )
+    engine = _loaded_engine({"backend_type": "cpu", "total_memory_gb": 8.0}, gguf)
+    try:
+        budget = MemoryBudget.from_engine(engine)
+    finally:
+        engine._model = None
+    assert budget.kv_token_bytes == 98304
+    assert budget.total_bytes == 8 * 1024**3
+    assert budget.memory_margin_fraction(100) is not None
+
+
+def test_from_engine_cuda_never_accounts(tmp_path):
+    # [H1] Even with every fact readable, a CUDA engine's budget cannot warn:
+    # its pool is None by policy (partial offload, see total_memory_bytes).
+    gguf = tmp_path / "model-q4.gguf"
+    gguf.write_bytes(b"g" * 4000)
+    (tmp_path / "config.json").write_text(
+        json.dumps({"num_hidden_layers": 24, "num_key_value_heads": 8, "head_dim": 128}),
+        encoding="utf-8",
+    )
+    engine = _loaded_engine(
+        {"backend_type": "cuda", "total_memory_gb": 64.0, "vram_total_gb": 12.0}, gguf
+    )
+    try:
+        budget = MemoryBudget.from_engine(engine)
+    finally:
+        engine._model = None
+    assert budget.total_bytes is None
+    assert budget.memory_margin_fraction(100) is None
+    assert budget.tokens_at_margin(0.15) is None
 
 
 def test_from_engine_gguf_without_config_disables_the_kv_fact(tmp_path):

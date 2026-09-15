@@ -248,7 +248,7 @@ cannot exercise at all.*
 
 - [ ] When I load a model whose full window cannot fit the **card's VRAM**, then the engine reduces the window against the VRAM (the `context size reduced` line shows in the log) and the model still loads — the measurement is of the GPU, not of system RAM.
 - [ ] When even the minimum context cannot fit the card, then the load fails with an **explicit readable error**, not a hang.
-- [ ] When the machine has far more system RAM than VRAM (e.g. 64 GB RAM, 8 GB card), then the **memory saturation notice** fires on the card's budget, never on system RAM.
+- [ ] When the machine has far more system RAM than VRAM (e.g. 64 GB RAM, 8 GB card), then the **memory saturation notice** never appears — it does not apply on discrete GPUs in this release (with partial offload the weights split between card and RAM in unknowable proportions, so no single-pool accounting is honest there); the 80 % window signal and the engine's own fit-at-load are what protect the card.
 - [ ] When a model is loaded at a large window, then the VRAM shown by the system monitor at ready matches the expected weights-plus-cache footprint, and no out-of-memory happens later mid-conversation.
 
 **Inference engine**

@@ -310,10 +310,13 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    - **the memory signal** — the machine's deterministic memory margin would drop under **15 %**
      (`backend/src/engines/memory_budget.py`): on-disk weights size plus a per-token KV-cache cost
      (`2 × layers × kv_heads × head_dim × 2 bytes f16`, read from the local artifact's
-     `config.json`) against the engine family's memory pool — unified memory on Apple Silicon, VRAM
-     on CUDA, system RAM on CPU. The accounting deliberately never reads the OS's "available"
-     memory (macOS compression and swap make it non-deterministic); a model whose facts cannot be
-     read (a GGUF file usually ships no `config.json`) simply runs without the memory signal.
+     `config.json`) against the machine's single memory pool — unified memory on Apple Silicon,
+     system RAM on the CPU engine. On discrete GPUs (CUDA) the memory signal is **off by policy**:
+     partial layer offload splits the weights between VRAM and system RAM in proportions the app
+     cannot know, so no single-pool accounting is honest there — the window signal and llama's own
+     fit-at-load protect those machines. The accounting deliberately never reads the OS's
+     "available" memory (macOS compression and swap make it non-deterministic); a model whose facts
+     cannot be read simply runs without the memory signal.
 
    When no window is readable, the trigger falls back to the 20-message floor — which always rides
    along with OR semantics anyway. Compaction keeps the last 10 messages, rewriting the checkpointer

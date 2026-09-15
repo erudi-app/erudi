@@ -12,15 +12,18 @@ that do not move during a chat:
 * **KV cache**: per-token cost from the model's own ``config.json``,
   ``2 (K and V) x layers x kv_heads x head_dim x 2 bytes (f16)``, multiplied by
   the conversation's token count by the caller;
-* **denominator**: the engine family's memory pool — unified memory on Apple
-  Silicon, VRAM on CUDA, system RAM on CPU (``get_flat_hardware_data``).
+* **denominator**: the engine family's memory pool, ONLY where a single pool
+  makes the accounting honest — unified memory on Apple Silicon, system RAM on
+  the CPU engine (``get_flat_hardware_data``). On CUDA the signal is OFF by
+  policy: see ``total_memory_bytes``.
 
 The deliberate blind spot — the OS and other processes — is absorbed by the
 margin floor the callers compare against (15 % in ``src.agents.runner``).
 
 Any fact that cannot be read answers ``None`` and the signal is simply OFF for
-that model (a GGUF artifact usually ships no ``config.json``, so the KV fact is
-underivable there); a number is never guessed.
+that model (the app's downloader fetches a repo's small aux files next to the
+``.gguf``, so most GGUF folders do carry a ``config.json`` — but one without it
+runs with the signal off); a number is never guessed.
 """
 
 from __future__ import annotations
@@ -107,9 +110,18 @@ def artifact_bytes(model_path: Path) -> Optional[int]:
 
 
 def total_memory_bytes(engine: Any) -> Optional[int]:
-    """The engine family's memory pool, in bytes: VRAM on CUDA, the (unified or
-    system) RAM total otherwise. Memoized per engine class -- totals are fixed
-    for the life of the process. ``None`` when the total cannot be read."""
+    """The engine family's memory pool, in bytes -- ONLY where the accounting
+    is honest: unified memory on Apple Silicon, system RAM on the CPU engine.
+
+    On CUDA the answer is ``None`` by policy, which keeps the memory signal
+    OFF there: llama-server can offload part of the layers to the card and
+    keep the rest in system RAM, in proportions this process cannot know, so
+    a VRAM-only denominator would read a partially offloaded model as
+    saturating the card while it runs fine -- and compact every turn forever.
+    The window signal still protects those machines, and llama's own fit
+    already bounded the KV allocation against the card at load.
+
+    Memoized per engine class -- totals are fixed for the life of the process."""
     if engine is None:
         return None
     if engine in _TOTALS_CACHE:
@@ -117,10 +129,10 @@ def total_memory_bytes(engine: Any) -> Optional[int]:
     total: Optional[int] = None
     try:
         flat = engine.get_flat_hardware_data() or {}
-        key = "vram_total_gb" if flat.get("backend_type") == "cuda" else "total_memory_gb"
-        gb = flat.get(key)
-        if isinstance(gb, (int, float)) and not isinstance(gb, bool) and gb > 0:
-            total = int(gb * 1024**3)
+        if flat.get("backend_type") != "cuda":
+            gb = flat.get("total_memory_gb")
+            if isinstance(gb, (int, float)) and not isinstance(gb, bool) and gb > 0:
+                total = int(gb * 1024**3)
     except Exception as exc:
         # Degraded, not failed: the memory signal stays off for this run.
         logger.warning(
@@ -144,9 +156,10 @@ class MemoryBudget:
 
         Reads the live handle's ``model_path`` (stamped at spawn by every
         engine family): the artifact size on disk, the ``config.json`` beside
-        it (the directory's own for MLX; a GGUF file rarely has one — the KV
-        fact is then ``None`` and the signal off), and the family's memory
-        total. Never raises: an unreadable fact is a ``None`` field.
+        it (the directory's own for MLX; the aux file the downloader saved
+        next to a ``.gguf`` — absent, the KV fact is ``None`` and the signal
+        off), and the family's memory total. Never raises: an unreadable fact
+        is a ``None`` field.
         """
         handle = getattr(engine, "_model", None)
         raw_path = handle.get("model_path") if isinstance(handle, dict) else None
