@@ -122,8 +122,8 @@ screens, the shared chrome, and non-functional behavior.
 
 **Compaction & memory**
 - [ ] When a conversation reaches about **80 % of the allocated window**, then it is compacted automatically — the on-screen history is untouched, later answers still refer to earlier turns, and `backend.log` records the summarization.
-- [ ] When the **machine's memory** nears saturation (under ~15 % margin), then compaction fires on that signal even well below 80 % of the window.
-- [ ] When compaction was not enough, then — and only then — an **amber notice** appears in the conversation saying the machine's memory is getting saturated and quoting how much this conversation represents; it never appears **before** compaction has tried.
+- [ ] *(Apple Silicon)* When the **machine's memory** nears saturation (under ~15 % margin), then compaction fires on that signal even well below 80 % of the window — the memory signal exists only on MLX, whose cache grows with usage; the llama.cpp engines allocate theirs in full at load.
+- [ ] *(Apple Silicon)* When even compacting down to the last few turns could not restore the memory margin, then — and only then — an **amber notice** appears in the conversation saying the machine's memory is nearly saturated and quoting how much this conversation represents; it never appears while compaction can still absorb the pressure.
 - [ ] When I ask about something that only existed in a **compacted-away** turn, then the answer still knows it (the summary carried it).
 - [ ] When a conversation is fresh and short, then compaction never fires.
 - [ ] When the amber memory notice is shown, then it is **translated** (fr/es/zh — not English-only), it never lands in the answer bubble or in what the copy button copies, and it does **not** stick to the conversation after a reload once the pressure is gone.
@@ -248,7 +248,7 @@ cannot exercise at all.*
 
 - [ ] When I load a model whose full window cannot fit the **card's VRAM**, then the engine reduces the window against the VRAM (the `context size reduced` line shows in the log) and the model still loads — the measurement is of the GPU, not of system RAM.
 - [ ] When even the minimum context cannot fit the card, then the load fails with an **explicit readable error**, not a hang.
-- [ ] When the machine has far more system RAM than VRAM (e.g. 64 GB RAM, 8 GB card), then the **memory saturation notice** never appears — it does not apply on discrete GPUs in this release (with partial offload the weights split between card and RAM in unknowable proportions, so no single-pool accounting is honest there); the 80 % window signal and the engine's own fit-at-load are what protect the card.
+- [ ] When the machine has far more system RAM than VRAM (e.g. 64 GB RAM, 8 GB card), then the **memory saturation notice** never appears — the notice is Apple-Silicon-only in this release: on the llama.cpp engines the KV cache is allocated in full at load and the engine's own fit already guaranteed it fits, so memory use does not grow with the conversation and there is nothing for a per-turn notice to measure (partial offload would also make any single-pool accounting dishonest on a discrete card); the 80 % window signal still protects long conversations.
 - [ ] When a model is loaded at a large window, then the VRAM shown by the system monitor at ready matches the expected weights-plus-cache footprint, and no out-of-memory happens later mid-conversation.
 
 **Inference engine**

@@ -307,16 +307,17 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    - **the window signal** — the conversation's token size reaches **80 % of the allocated context
      window** (`BaseEngine.effective_context_tokens()`, the window the loaded child actually runs
      with);
-   - **the memory signal** — the machine's deterministic memory margin would drop under **15 %**
-     (`backend/src/engines/memory_budget.py`): on-disk weights size plus a per-token KV-cache cost
-     (`2 × layers × kv_heads × head_dim × 2 bytes f16`, read from the local artifact's
-     `config.json`) against the machine's single memory pool — unified memory on Apple Silicon,
-     system RAM on the CPU engine. On discrete GPUs (CUDA) the memory signal is **off by policy**:
-     partial layer offload splits the weights between VRAM and system RAM in proportions the app
-     cannot know, so no single-pool accounting is honest there — the window signal and llama's own
-     fit-at-load protect those machines. The accounting deliberately never reads the OS's
-     "available" memory (macOS compression and swap make it non-deterministic); a model whose facts
-     cannot be read simply runs without the memory signal.
+   - **the memory signal** (**Apple Silicon only**) — the machine's deterministic memory margin
+     would drop under **15 %** (`backend/src/engines/memory_budget.py`): on-disk weights size plus
+     a per-token KV-cache cost (`2 × layers × kv_heads × head_dim × 2 bytes f16`, read from the
+     local artifact's `config.json`) against the unified-memory total. The signal exists only on
+     MLX because only MLX grows its KV cache lazily with usage; on both llama.cpp engines (CPU and
+     CUDA) the cache is allocated **in full at load** and the engine's own fit already guaranteed
+     it fits — memory use does not grow with the conversation, so there is nothing per-token to
+     measure (and on a discrete card, partial layer offload would make any single-pool accounting
+     dishonest anyway). The accounting deliberately never reads the OS's "available" memory (macOS
+     compression and swap make it non-deterministic); a model whose facts cannot be read simply
+     runs without the memory signal.
 
    When no window is readable, the trigger falls back to the 20-message floor — which always rides
    along with OR semantics anyway. Compaction keeps the last 10 messages, rewriting the checkpointer

@@ -12,10 +12,13 @@ that do not move during a chat:
 * **KV cache**: per-token cost from the model's own ``config.json``,
   ``2 (K and V) x layers x kv_heads x head_dim x 2 bytes (f16)``, multiplied by
   the conversation's token count by the caller;
-* **denominator**: the engine family's memory pool, ONLY where a single pool
-  makes the accounting honest — unified memory on Apple Silicon, system RAM on
-  the CPU engine (``get_flat_hardware_data``). On CUDA the signal is OFF by
-  policy: see ``total_memory_bytes``.
+* **denominator**: the Apple Silicon unified-memory total
+  (``get_flat_hardware_data``) — the signal is **MLX-only**. On both llama.cpp
+  engines (CPU and CUDA) the KV cache is allocated in full at load: memory use
+  does not grow with the conversation, and the engine's own fit already
+  guaranteed the allocation fits, so there is nothing per-token to measure —
+  the signal is OFF by policy there (see ``total_memory_bytes``, which also
+  names the partial-offload reason on discrete cards).
 
 The deliberate blind spot — the OS and other processes — is absorbed by the
 margin floor the callers compare against (15 % in ``src.agents.runner``).
@@ -170,32 +173,37 @@ def artifact_bytes(model_path: Path) -> Optional[int]:
 
 
 def total_memory_bytes(engine: Any) -> Optional[int]:
-    """The engine family's memory pool, in bytes -- ONLY where the accounting
-    is honest: unified memory on Apple Silicon, system RAM on the CPU engine.
+    """The memory pool the signal accounts against, in bytes -- MLX ONLY: the
+    Apple Silicon unified-memory total.
 
-    On CUDA the answer is ``None`` by policy, which keeps the memory signal
-    OFF there: llama-server can offload part of the layers to the card and
-    keep the rest in system RAM, in proportions this process cannot know, so
-    a VRAM-only denominator would read a partially offloaded model as
-    saturating the card while it runs fine -- and compact every turn forever.
-    The window signal still protects those machines, and llama's own fit
-    already bounded the KV allocation against the card at load.
+    On both llama.cpp engines (CPU and CUDA) the answer is ``None`` by
+    policy, which keeps the memory signal OFF there. The real reason: their
+    KV cache is allocated IN FULL at load -- memory use does not grow with
+    the conversation at all, and the engine's own fit already guaranteed the
+    allocation fits at load time, so a per-conversation-token accounting
+    would model a phenomenon that does not exist on those engines. (On a
+    discrete card, partial layer offload would additionally split the weights
+    between VRAM and system RAM in proportions this process cannot know,
+    making any single-pool denominator dishonest.) Only MLX grows its cache
+    lazily with usage, so only MLX has something to measure. The engine is
+    identified by ``FORMAT_TAG`` -- the cache behaviour is a property of the
+    child server family, not of the machine.
 
     Memoized per engine class -- totals are fixed for the life of the process.
-    Only a resolved answer is memoized: an unreadable total is retried on the
-    next call and logged once ([L4])."""
+    Only a resolved answer is memoized (a real total, or the policy ``None``):
+    an unreadable total is retried on the next call and logged once ([L4])."""
     if engine is None:
         return None
     if engine in _TOTALS_CACHE:
         return _TOTALS_CACHE[engine]
+    if getattr(engine, "FORMAT_TAG", None) != "mlx":
+        # Policy, not a failure: memoized so nothing ever re-probes.
+        _TOTALS_CACHE[engine] = None
+        return None
     total: Optional[int] = None
     failure: Optional[str] = None
     try:
         flat = engine.get_flat_hardware_data() or {}
-        if flat.get("backend_type") == "cuda":
-            # Policy, not a failure: memoized so the probe never re-runs.
-            _TOTALS_CACHE[engine] = None
-            return None
         gb = flat.get("total_memory_gb")
         if isinstance(gb, (int, float)) and not isinstance(gb, bool) and gb > 0:
             total = int(gb * 1024**3)

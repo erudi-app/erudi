@@ -180,8 +180,10 @@ def test_artifact_bytes_plain_gguf_is_just_the_file(tmp_path):
 # ===================== Denominator per engine family =====================
 
 
-def _engine_with_flat_data(flat: dict):
+def _engine_with_flat_data(flat: dict, format_tag: str = "mlx"):
     class _Engine(BaseEngine):
+        FORMAT_TAG = format_tag
+
         @classmethod
         def get_flat_hardware_data(cls):
             return flat
@@ -194,40 +196,40 @@ def test_total_memory_bytes_mlx_uses_unified_memory():
     assert total_memory_bytes(engine) == 16 * 1024**3
 
 
-def test_total_memory_bytes_cpu_uses_system_ram():
-    engine = _engine_with_flat_data({"backend_type": "cpu", "total_memory_gb": 8.0})
-    assert total_memory_bytes(engine) == 8 * 1024**3
-
-
-def test_total_memory_bytes_cuda_signal_is_off():
-    # Discrete GPUs run with the memory signal OFF: under partial offload the
-    # weights split between VRAM and RAM in proportions we cannot know, so any
-    # VRAM-only accounting is dishonest (a partially offloaded model would
-    # read as saturating the card while running fine). llama's own fit already
-    # bounded the allocation at load.
-    engine = _engine_with_flat_data(
-        {"backend_type": "cuda", "total_memory_gb": 64.0, "vram_total_gb": 12.0}
-    )
-    assert total_memory_bytes(engine) is None
+def test_total_memory_bytes_llama_cpp_engines_signal_is_off():
+    # The memory signal is MLX-ONLY: on both llama.cpp engines (CPU and CUDA)
+    # the KV cache is allocated IN FULL at load -- memory use does not grow
+    # with the conversation, and the engine's own fit already guaranteed the
+    # allocation fits. There is nothing per-token to measure; on a discrete
+    # card, partial offload would additionally make any single-pool
+    # accounting dishonest.
+    for flat in (
+        {"backend_type": "cpu", "total_memory_gb": 8.0},
+        {"backend_type": "cuda", "total_memory_gb": 64.0, "vram_total_gb": 12.0},
+    ):
+        engine = _engine_with_flat_data(flat, format_tag="gguf")
+        assert total_memory_bytes(engine) is None
 
 
 def test_total_memory_bytes_missing_total_is_none():
-    engine = _engine_with_flat_data({"backend_type": "cpu"})
+    engine = _engine_with_flat_data({"backend_type": "mlx"})
     assert total_memory_bytes(engine) is None
 
 
 def test_total_memory_bytes_none_is_retried_not_memoized():
     # [L4] A total that could not be read is retried on the next call (only a
-    # real value is memoized).
+    # resolved answer is memoized).
     calls = []
 
     class _Engine(BaseEngine):
+        FORMAT_TAG = "mlx"
+
         @classmethod
         def get_flat_hardware_data(cls):
             calls.append(1)
             if len(calls) == 1:
                 return {}  # first probe: nothing readable
-            return {"backend_type": "cpu", "total_memory_gb": 4.0}
+            return {"backend_type": "mlx", "total_memory_gb": 4.0}
 
     assert total_memory_bytes(_Engine) is None
     assert total_memory_bytes(_Engine) == 4 * 1024**3
@@ -238,10 +240,12 @@ def test_total_memory_bytes_is_memoized_per_engine_class():
     calls = []
 
     class _Engine(BaseEngine):
+        FORMAT_TAG = "mlx"
+
         @classmethod
         def get_flat_hardware_data(cls):
             calls.append(1)
-            return {"backend_type": "cpu", "total_memory_gb": 4.0}
+            return {"backend_type": "mlx", "total_memory_gb": 4.0}
 
     assert total_memory_bytes(_Engine) == 4 * 1024**3
     assert total_memory_bytes(_Engine) == 4 * 1024**3
@@ -300,8 +304,8 @@ def test_conversation_bytes_only_needs_the_kv_fact():
 # ===================== from_engine =====================
 
 
-def _loaded_engine(flat: dict, model_path):
-    engine = _engine_with_flat_data(flat)
+def _loaded_engine(flat: dict, model_path, format_tag: str = "mlx"):
+    engine = _engine_with_flat_data(flat, format_tag)
     engine._model = {"model_path": str(model_path)}
     return engine
 
@@ -323,53 +327,38 @@ def test_from_engine_mlx_directory(tmp_path, monkeypatch):
     assert budget.total_bytes == 16 * 1024**3
 
 
-def test_from_engine_gguf_with_config_on_cpu_is_fully_alive(tmp_path):
-    # The app's downloader fetches a repo's small aux files alongside the
-    # .gguf, so most GGUF folders DO carry a config.json: the memory signal
-    # is alive on the CPU engine (one honest RAM pool).
+def test_from_engine_llama_cpp_never_warns_even_with_full_facts(tmp_path):
+    # [H1 refined] The downloader saves config.json next to the .gguf, so the
+    # KV fact IS derivable -- but a llama.cpp engine's budget still cannot
+    # warn: its pool is None by policy (upfront KV allocation, the fit
+    # settled it at load; see total_memory_bytes).
     gguf = tmp_path / "model-q4.gguf"
     gguf.write_bytes(b"g" * 4000)
     (tmp_path / "config.json").write_text(
         json.dumps({"num_hidden_layers": 24, "num_key_value_heads": 8, "head_dim": 128}),
         encoding="utf-8",
     )
-    engine = _loaded_engine({"backend_type": "cpu", "total_memory_gb": 8.0}, gguf)
-    try:
-        budget = MemoryBudget.from_engine(engine)
-    finally:
-        engine._model = None
-    assert budget.kv_token_bytes == 98304
-    assert budget.total_bytes == 8 * 1024**3
-    assert budget.memory_margin_fraction(100) is not None
-
-
-def test_from_engine_cuda_never_accounts(tmp_path):
-    # [H1] Even with every fact readable, a CUDA engine's budget cannot warn:
-    # its pool is None by policy (partial offload, see total_memory_bytes).
-    gguf = tmp_path / "model-q4.gguf"
-    gguf.write_bytes(b"g" * 4000)
-    (tmp_path / "config.json").write_text(
-        json.dumps({"num_hidden_layers": 24, "num_key_value_heads": 8, "head_dim": 128}),
-        encoding="utf-8",
-    )
-    engine = _loaded_engine(
-        {"backend_type": "cuda", "total_memory_gb": 64.0, "vram_total_gb": 12.0}, gguf
-    )
-    try:
-        budget = MemoryBudget.from_engine(engine)
-    finally:
-        engine._model = None
-    assert budget.total_bytes is None
-    assert budget.memory_margin_fraction(100) is None
-    assert budget.tokens_at_margin(0.15) is None
+    for flat in (
+        {"backend_type": "cpu", "total_memory_gb": 8.0},
+        {"backend_type": "cuda", "total_memory_gb": 64.0, "vram_total_gb": 12.0},
+    ):
+        engine = _loaded_engine(flat, gguf, format_tag="gguf")
+        try:
+            budget = MemoryBudget.from_engine(engine)
+        finally:
+            engine._model = None
+        assert budget.kv_token_bytes == 98304  # the fact reads fine
+        assert budget.total_bytes is None  # the policy keeps the signal off
+        assert budget.memory_margin_fraction(100) is None
+        assert budget.tokens_at_margin(0.15) is None
 
 
 def test_from_engine_gguf_without_config_disables_the_kv_fact(tmp_path):
-    # A GGUF artifact ships no config.json: the KV fact is underivable, the
-    # memory signal is off (weights and total still resolve).
+    # A GGUF folder downloaded without its config.json: the KV fact is
+    # underivable, the signal off no matter the engine (weights still resolve).
     gguf = tmp_path / "model-q4.gguf"
     gguf.write_bytes(b"g" * 4000)
-    engine = _loaded_engine({"backend_type": "cpu", "total_memory_gb": 8.0}, gguf)
+    engine = _loaded_engine({"backend_type": "cpu", "total_memory_gb": 8.0}, gguf, "gguf")
     try:
         budget = MemoryBudget.from_engine(engine)
     finally:
