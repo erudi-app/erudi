@@ -234,6 +234,30 @@ async def test_a_cjk_turn_is_retried_once_with_the_exact_budget(monkeypatch):
     assert attempts[1] == window - real_prompt - PREFLIGHT_RETRY_MARGIN_TOKENS
 
 
+async def test_an_operator_pin_is_never_substituted_by_the_retry(monkeypatch):
+    # ERUDI_MAX_TOKENS exists to reproduce EXACT budgets: if the pinned value
+    # overflows the preflight, the honest answer is the overflow error, never
+    # a silently different budget than the one the operator pinned.
+    from langchain_openai import ChatOpenAI
+
+    window = 32768
+    attempts = []
+
+    async def _server(self, messages, *args, **kwargs):
+        attempts.append(kwargs.get("max_tokens"))
+        raise _PreflightRejection(prompt=30000, generation=kwargs["max_tokens"], window=window)
+        yield  # pragma: no cover
+
+    monkeypatch.setenv("ERUDI_MAX_TOKENS", "30000")
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    client = _client(max_tokens=1234, effective_context_tokens=window)
+
+    with pytest.raises(_PreflightRejection):
+        _ = [c async for c in client._astream([HumanMessage(_CJK)])]
+
+    assert attempts == [30000], "no retry: the pin reached the wire once and the 400 re-raised"
+
+
 async def test_an_english_turn_is_never_retried(monkeypatch):
     from langchain_openai import ChatOpenAI
 

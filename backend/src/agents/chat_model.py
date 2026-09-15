@@ -303,6 +303,13 @@ def preflight_retry_budget(exc: Exception, window_tokens: Optional[int]) -> Opti
     overflow = parse_context_overflow(exc)
     if overflow is None or overflow.prompt_only_tokens is None:
         return None
+    # Self-correcting: the rejection also NAMES the server's own limit
+    # ("MAX_KV_SIZE is N"). Today it equals the window we stamped at spawn,
+    # but if the two ever drift (an mlx_vlm bump, a spawn-time adjustment),
+    # the server's number is the one the next check will enforce -- computing
+    # against the smaller of the two cannot produce a second rejection.
+    if overflow.context_tokens is not None and overflow.context_tokens > 0:
+        window_tokens = min(window_tokens, overflow.context_tokens)
     prompt_tokens = overflow.prompt_only_tokens
     if prompt_tokens + 1 > window_tokens:
         return None
@@ -445,9 +452,13 @@ def erudi_chat_openai_class():
                 # mid-stream there is nothing to retry, the user has already
                 # seen text. Only once, and only for that specific wire shape,
                 # so nothing else in the 400 space is silently replayed.
+                # An operator pin (ERUDI_MAX_TOKENS) is never substituted: it
+                # exists precisely to reproduce exact budgets, so a preflight
+                # rejection of the pinned value re-raises into the honest
+                # overflow turn instead of silently running a different one.
                 retry_budget = (
                     preflight_retry_budget(exc, self.effective_context_tokens)
-                    if yielded == 0
+                    if yielded == 0 and output_budget_override() is None
                     else None
                 )
                 if retry_budget is None:

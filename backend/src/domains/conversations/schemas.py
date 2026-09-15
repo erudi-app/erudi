@@ -129,7 +129,9 @@ class ConversationCreate(ConversationBase):
         llm_id: Inherited from ConversationBase.
         temperature: Sampling temperature (0.0-2.0, default 0.2).
         top_p: Nucleus sampling threshold (0.0-1.0, default 0.5).
-        max_tokens: Maximum tokens to generate (1-32768, default 1024).
+        max_tokens: Legacy fallback ceiling, used ONLY when the engine
+            cannot report a context window; with a window, the output
+            budget is automatic and this value is ignored.
         custom_prompt: Custom system prompt override (max 4096 chars).
 
     Example:
@@ -190,7 +192,8 @@ class ConversationUpdate(ConversationBase):
         name: Optional conversation name.
         temperature: Optional temperature override.
         top_p: Optional top_p override.
-        max_tokens: Optional max_tokens override.
+        max_tokens: Legacy fallback ceiling (window-less engines only);
+            persisted but ignored whenever the engine reports a window.
         custom_prompt: Optional system prompt override.
 
     Example:
