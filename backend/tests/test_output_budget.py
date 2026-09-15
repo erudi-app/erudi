@@ -286,6 +286,55 @@ async def test_without_a_window_the_stream_keeps_the_resolved_value(monkeypatch)
     assert "max_tokens" not in captured
 
 
+async def test_a_client_with_a_deliberate_budget_keeps_it(monkeypatch):
+    """One-shot utility calls own their budget; the window must not raise it.
+
+    ``ainvoke`` on a ``streaming=True`` client routes through ``_astream`` too,
+    so conversation titles (a ~12-token budget, #266) would otherwise be handed
+    the whole window and ramble for thousands of tokens before the sanitizer
+    took the first four words.
+    """
+    from langchain_openai import ChatOpenAI
+
+    captured: dict = {}
+
+    async def _capture(self, messages, *args, **kwargs):
+        captured.update(kwargs)
+        yield "chunk"
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _capture)
+    client = _client(max_tokens=12, effective_context_tokens=32768, auto_output_budget=False)
+
+    assert [c async for c in client._astream([HumanMessage("hi")])] == ["chunk"]
+    assert "max_tokens" not in captured
+
+
+def test_the_factory_opts_a_client_out_of_the_budget(monkeypatch):
+    from src.agents.model_factory import build_chat_model
+    from src.core import config
+
+    class _Engine:
+        @staticmethod
+        def get_model_and_tokenizer(llm_id, link):
+            return ({"base_url": "http://127.0.0.1:8080", "alias": "a"}, {})
+
+        @staticmethod
+        def _payload_model_value(handle):
+            return "m"
+
+    class _Llm:
+        id = 7
+        link = "/fake"
+        name = "Test"
+
+    monkeypatch.setattr(config, "LLM_Engine", _Engine)
+
+    assert build_chat_model(_Llm(), temperature=0.3, top_p=0.8, max_tokens=55).auto_output_budget
+    assert not build_chat_model(
+        _Llm(), temperature=0.3, top_p=0.8, max_tokens=12, auto_output_budget=False
+    ).auto_output_budget
+
+
 async def test_the_environment_override_wins_over_the_computed_budget(monkeypatch):
     from langchain_openai import ChatOpenAI
 

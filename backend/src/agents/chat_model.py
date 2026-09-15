@@ -333,6 +333,16 @@ def erudi_chat_openai_class():
         # prefill; None (unknown window) keeps the 900 s constant.
         effective_context_tokens: Optional[int] = None
 
+        # Whether this client's ``max_tokens`` is a fallback the automatic
+        # budget may replace (chat turns and the summarization calls that ride
+        # the same client) or a DELIBERATE budget it must leave alone. The
+        # one-shot utility path sets this False: a conversation title runs on
+        # ~12 tokens on purpose (#266), and handing it the whole window would
+        # make it ramble for thousands of tokens before the sanitizer took its
+        # first four words. ``ainvoke`` on a ``streaming=True`` client routes
+        # through ``_astream``, so the distinction has to live here.
+        auto_output_budget: bool = True
+
         async def _astream(self, messages, *args, **kwargs):
             estimated = estimate_prompt_tokens(messages)
             # What this call may generate: the window minus what the turn
@@ -341,10 +351,14 @@ def erudi_chat_openai_class():
             # kwarg wins over the constructor's ``max_tokens`` in
             # ``_get_request_payload`` (pinned); ``None`` leaves that value
             # alone, which is what an engine with no reportable window gets.
-            budget = compute_output_budget(
-                messages,
-                self.effective_context_tokens,
-                override=output_budget_override(),
+            budget = (
+                compute_output_budget(
+                    messages,
+                    self.effective_context_tokens,
+                    override=output_budget_override(),
+                )
+                if self.auto_output_budget
+                else None
             )
             if budget is not None:
                 kwargs["max_tokens"] = budget

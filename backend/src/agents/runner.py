@@ -793,6 +793,10 @@ class AgentRunner:
                     # splitter below is the safety net for models/engines where
                     # chat-template-level suppression does not apply.
                     disable_thinking=True,
+                    # ...and that tiny budget is the point: the caller sized it
+                    # for a 2-4 word title, so the automatic window-sized budget
+                    # must not replace it.
+                    auto_output_budget=False,
                     sampling=resolve_sampling_defaults(llm),
                 )
             except Exception:
