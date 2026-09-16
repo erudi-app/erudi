@@ -1,0 +1,15 @@
+{
+  "profile": "nominal",
+  "notes": "EXAMPLE, not a machine's real configuration, and UNVERIFIED: no rule here has ever run on Windows. Realistic profile: a browser with the declared tabs, a chat app idle, a terminal running several sessions of a coding-agent CLI, idle for the whole run. Copy to workloads/local-nominal-windows.json, fill in the <placeholders> (%LOCALAPPDATA% and other environment variables are expanded) and pass it with --workload.",
+  "groups": [
+    {"name": "browser", "exe_prefixes": ["<install prefix, e.g. C:/Program Files/Vendor/Browser/Application/>", "<second prefix, e.g. %LOCALAPPDATA%/Vendor/Browser/Application/>"], "include_descendants": true,
+     "declared": {"tabs": 4, "tabs_open": ["<tab 1>", "<tab 2>", "<tab 3>", "<tab 4>"]}},
+    {"name": "chat_app", "exe_prefixes": ["<install prefix, e.g. %LOCALAPPDATA%/Something/>"], "exe_basenames": ["<executable name, e.g. something.exe>"], "declared": {"state": "idle"}},
+    {"name": "terminal", "exe_basenames": ["<terminal executable, e.g. WindowsTerminal.exe>", "OpenConsole.exe"], "declared": {"tabs": 5}},
+    {"name": "coding_agent_cli", "exe_basenames": ["<agent CLI executable, e.g. something.exe>"], "argv0_basenames": ["<argv[0] basename of your agent CLI>"], "sessions": true,
+     "declared": {"state": "idle during the whole run"},
+     "notes": "A terminal coding-agent CLI. A session is a process of that CLI whose parent is not one."},
+    {"name": "coding_agent_children", "descendants_of": "coding_agent_cli",
+     "notes": "Descendants of a session that are not the CLI itself (MCP servers, node, shells)."}
+  ]
+}

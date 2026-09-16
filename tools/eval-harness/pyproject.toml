@@ -1,0 +1,21 @@
+# Test environment only. The CLI itself runs from the PEP 723 header in
+# erudi_eval.py (`uv run erudi_eval.py ...`); this file lets
+# `uv run --with pytest pytest tests/` resolve the same dependencies.
+[project]
+name = "erudi-eval"
+version = "0.1.0"
+requires-python = ">=3.12"
+dependencies = [
+    "psutil>=5.9",
+    "websocket-client>=1.6",
+    "nvidia-ml-py>=12; sys_platform != 'darwin'",
+]
+
+[tool.uv]
+package = false
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+# Remove pytest temp dirs (fake app data, copied binaries) when the session ends.
+tmp_path_retention_policy = "none"
