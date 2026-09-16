@@ -344,6 +344,60 @@ describe("mergeRecentErrors", () => {
     expect(entries[1].count).toBe(6);
   });
 
+  it("keeps two different bugs apart when they throw the same text", () => {
+    // A session entry keeps its stack outside the message, so the message
+    // alone cannot tell two components' identical TypeErrors apart. Folding
+    // them would sum their counts under the first stack and lose the second
+    // bug entirely.
+    const entries = mergeRecentErrors({
+      backend: null,
+      appLog: [],
+      sessionErrors: [
+        {
+          timestamp: "2026-09-05T11:00:00.000Z",
+          origin: "window.onerror",
+          message: "Cannot read properties of undefined (reading 'x')",
+          stack: "TypeError: ...\n    at ChatPage",
+          count: 2,
+        },
+        {
+          timestamp: "2026-09-05T11:05:00.000Z",
+          origin: "window.onerror",
+          message: "Cannot read properties of undefined (reading 'x')",
+          stack: "TypeError: ...\n    at ArenaPage",
+          count: 3,
+        },
+      ],
+    });
+    expect(entries).toHaveLength(2);
+    const byStack = Object.fromEntries(entries.map((e) => [e.stack, e]));
+    expect(byStack["TypeError: ...\n    at ChatPage"].count).toBe(2);
+    expect(byStack["TypeError: ...\n    at ArenaPage"].count).toBe(3);
+    expect(byStack["TypeError: ...\n    at ArenaPage"].timestamp).toBe("2026-09-05T11:05:00.000Z");
+  });
+
+  it("sums the members' own counts, not the number of members", () => {
+    // Every member already carries a count above 1, so a fold that counted
+    // rows (2) instead of summing (5) would be caught here.
+    const same = {
+      origin: "window.onerror",
+      message: "render loop",
+      stack: "Error: render loop\n    at Widget",
+    };
+    const entries = mergeRecentErrors({
+      backend: null,
+      appLog: [],
+      sessionErrors: [
+        { ...same, timestamp: "2026-09-05T11:00:00.000Z", count: 2 },
+        { ...same, timestamp: "2026-09-05T11:01:00.000Z", count: 3 },
+      ],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].count).toBe(5);
+    expect(entries[0].timestamp).toBe("2026-09-05T11:01:00.000Z");
+    expect(entries[0].stack).toBe("Error: render loop\n    at Widget");
+  });
+
   it("keeps the session buffer's count when its app-log twin repeats", () => {
     // The session entry folds into the file record first (Math.max), then the
     // fold runs: the surviving count must still carry what the session knew.
