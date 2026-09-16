@@ -167,11 +167,17 @@ export function mergeRecentErrors({
  * `limit` and out of the copied report, and they read as three problems
  * instead of one thing happening three times.
  *
- * Identity is `source` + `level` + `message`: a record is only folded into a
- * record of the same kind, so a backend line never absorbs the app's echo of
- * it, and a WARNING never merges into an ERROR of the same text. Counts are
- * summed rather than maxed, so the session buffer's own count (already folded
- * into its app-log twin above) keeps contributing what it is worth.
+ * Identity is `source` + `level` + `message` + `stack`: a record is only
+ * folded into a record of the same kind, so a backend line never absorbs the
+ * app's echo of it, and a WARNING never merges into an ERROR of the same text.
+ * The stack is part of it because a session entry keeps its stack OUTSIDE the
+ * message, where backend and app-log records carry the distinguishing text
+ * inside it: two different bugs throwing the same generic text ("Cannot read
+ * properties of undefined") from two components must stay two rows, while
+ * two occurrences of the same bug (same build, same stack) still fold.
+ * Counts are summed rather than maxed, so the session buffer's own count
+ * (already folded into its app-log twin above) keeps contributing what it is
+ * worth.
  *
  * The surviving entry carries the NEWEST timestamp and that record's request
  * id: the question a reader asks of a repeated error is when it last
@@ -186,7 +192,12 @@ export function mergeRecentErrors({
 function collapseRepeats(entries) {
   const byIdentity = new Map();
   for (const entry of entries) {
-    const identity = JSON.stringify([entry.source, entry.level, entry.message]);
+    const identity = JSON.stringify([
+      entry.source,
+      entry.level,
+      entry.message,
+      entry.stack ?? null,
+    ]);
     const seen = byIdentity.get(identity);
     if (!seen) {
       byIdentity.set(identity, { ...entry, count: entry.count ?? 1 });
@@ -197,9 +208,6 @@ function collapseRepeats(entries) {
       seen.timestamp = entry.timestamp;
       seen.requestId = entry.requestId ?? null;
     }
-    // A stack is worth keeping wherever it came from; the first one wins so a
-    // later stackless repeat cannot erase it.
-    if (!seen.stack && entry.stack) seen.stack = entry.stack;
   }
   return [...byIdentity.values()];
 }
