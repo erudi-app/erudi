@@ -852,6 +852,11 @@ def test_fail_open_when_git_itself_fails(tmp_path):
     fake_git = fake_bin / "git"
     fake_git.write_text("#!/bin/sh\necho 'broken' >&2\nexit 1\n")
     fake_git.chmod(fake_git.stat().st_mode | stat.S_IXUSR | stat.S_IXGRP | stat.S_IXOTH)
+    # Windows resolves `git` through PATHEXT, not the extension-less shell
+    # script above, so give it a failing git.bat on the same PATH entry; the
+    # doctrine under test (every git call fails, the command still goes
+    # through) must hold on the platform where shelling out is most fragile.
+    (fake_bin / "git.bat").write_text("@echo off\r\necho broken 1>&2\r\nexit /b 1\r\n")
 
     result = run_hook(
         repo,
