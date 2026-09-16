@@ -176,7 +176,15 @@ def run_hook(repo, command, state_dir, session_id="sess-1", cwd=None, env_overri
     )
 
 
-PR_CREATE = 'gh pr create --title "feat: something" --body "does a thing"'
+# Carries an issue reference so the `issue-link` check stays silent on it: it
+# is the shared invocation for every test that is about some *other* check, and
+# a normal pull request references the issue it addresses. Tests that exercise
+# `issue-link` itself use PR_CREATE_NO_ISSUE.
+PR_CREATE = 'gh pr create --title "feat: something" --body "does a thing (#1)"'
+
+# The same invocation with no issue reference at all, for the `issue-link`
+# check.
+PR_CREATE_NO_ISSUE = 'gh pr create --title "feat: something" --body "does a thing"'
 
 # The shape that actually opens most pull requests: one compound command in
 # which the commit does not exist yet when the hook runs.
@@ -492,7 +500,7 @@ def test_jargon_ignores_ordinary_numbered_technical_prose(tmp_path, body):
     # style, not internal labels. A pattern that fires on these teaches
     # contributors to ignore the hook.
     repo = make_repo(tmp_path)
-    command = 'gh pr create --title "perf: tokenizer" --body ' + json.dumps(body)
+    command = 'gh pr create --title "perf: tokenizer (#1)" --body ' + json.dumps(body)
     result = run_hook(repo, command, tmp_path / "state")
     assert result.returncode == 0
     assert result.stderr == ""
@@ -500,7 +508,7 @@ def test_jargon_ignores_ordinary_numbered_technical_prose(tmp_path, body):
 
 def test_lowercase_wave_is_not_jargon(tmp_path):
     repo = make_repo(tmp_path)
-    command = 'gh pr create --title "fix: audio" --body "the wave 2 harmonic was clipped"'
+    command = 'gh pr create --title "fix: audio (#1)" --body "the wave 2 harmonic was clipped"'
     result = run_hook(repo, command, tmp_path / "state")
     assert result.returncode == 0
     assert result.stderr == ""
@@ -578,6 +586,65 @@ def test_jargon_reads_commit_messages_under_fill(tmp_path):
     assert result.returncode == 2
     assert "[jargon]" in result.stderr
     assert "Wave 3" in result.stderr
+
+
+# --- issue-link: a pull request that references no issue --------------------
+
+
+def test_issue_link_silent_with_an_issue_number(tmp_path):
+    # A `#123` in the body is a reference; issue-link stays silent. The clean
+    # branch keeps every other check silent too, so exit 0 is unambiguous.
+    repo = make_repo(tmp_path, branch_files=CLEAN_BRANCH_FILES)
+    command = 'gh pr create --title "feat: add module" --body "Adds a module. Closes #123."'
+    result = run_hook(repo, command, tmp_path / "state")
+    assert result.returncode == 0
+    assert result.stderr == ""
+
+
+def test_issue_link_silent_with_an_issues_url(tmp_path):
+    # A bare issues URL counts as a reference just as a `#123` does.
+    repo = make_repo(tmp_path, branch_files=CLEAN_BRANCH_FILES)
+    command = (
+        'gh pr create --title "feat: add module" '
+        '--body "Fixes https://github.com/erudi-app/erudi/issues/42"'
+    )
+    result = run_hook(repo, command, tmp_path / "state")
+    assert result.returncode == 0
+    assert result.stderr == ""
+
+
+def test_issue_link_fires_when_neither_reference_is_present(tmp_path):
+    repo = make_repo(tmp_path, branch_files=CLEAN_BRANCH_FILES)
+    result = run_hook(repo, PR_CREATE_NO_ISSUE, tmp_path / "state")
+    assert result.returncode == 2
+    assert "[issue-link]" in result.stderr
+
+
+def test_issue_link_is_independent_of_the_other_checks(tmp_path):
+    # CLEAN_BRANCH_FILES ships code with both a test and a doc, so every
+    # path-based check is satisfied. With a body that references no issue,
+    # issue-link is the only thing that may fire.
+    repo = make_repo(tmp_path, branch_files=CLEAN_BRANCH_FILES)
+    result = run_hook(repo, PR_CREATE_NO_ISSUE, tmp_path / "state")
+    assert result.returncode == 2
+    assert "[issue-link]" in result.stderr
+    assert "[docs]" not in result.stderr
+    assert "[backend-tests]" not in result.stderr
+    assert "[frontend-tests]" not in result.stderr
+    assert "[migration]" not in result.stderr
+
+
+def test_issue_link_one_shot_contract_blocks_then_passes(tmp_path):
+    repo = make_repo(tmp_path, branch_files=CLEAN_BRANCH_FILES)
+    state_dir = tmp_path / "state"
+
+    first = run_hook(repo, PR_CREATE_NO_ISSUE, state_dir)
+    assert first.returncode == 2
+    assert "[issue-link]" in first.stderr
+
+    second = run_hook(repo, PR_CREATE_NO_ISSUE, state_dir)
+    assert second.returncode == 0
+    assert second.stderr == ""
 
 
 # --- each of the six path-based ids stays silent when its dependency dir is absent
@@ -707,7 +774,10 @@ def test_locale_change_in_english_only_fires_i18n_alone(tmp_path):
 
 def test_clean_pr_exits_zero_with_no_output(tmp_path):
     repo = make_repo(tmp_path, branch_files=CLEAN_BRANCH_FILES)
-    command = 'gh pr create --title "feat: add module" --body "Adds a module with tests and docs."'
+    command = (
+        'gh pr create --title "feat: add module" '
+        '--body "Adds a module with tests and docs. Closes #1."'
+    )
     result = run_hook(repo, command, tmp_path / "state")
     assert result.returncode == 0
     assert result.stderr == ""
@@ -917,7 +987,9 @@ def test_settings_hook_commands_are_guarded_by_a_file_test():
     # these scripts -- an old tag, a bisect step -- refuses every single Bash
     # command, including the checkout that would undo it.
     commands = _settings_hook_commands()
-    assert len(commands) == 2
+    # The readiness double-check (PreToolUse), the merge double-check
+    # (PreToolUse), and the CI-watch reminder (PostToolUse).
+    assert len(commands) == 3
     for command in commands:
         assert command.startswith("if [ -f "), command
         assert "python3" in command

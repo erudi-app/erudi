@@ -78,6 +78,14 @@ JARGON_PATTERNS = [
     re.compile(r"\bbug[-\s]?bash\b", re.IGNORECASE),
 ]
 
+# An issue reference in the PR title/body: a `#123` cross-reference, or a bare
+# GitHub issues URL. Either one is enough to consider the pull request linked;
+# the `issue-link` check fires only when neither appears.
+ISSUE_REFERENCE_PATTERNS = [
+    re.compile(r"#\d+"),
+    re.compile(r"https://github\.com/[^/\s]+/[^/\s]+/issues/\d+"),
+]
+
 SKIP_ENV_VAR = "ERUDI_SKIP_PR_HOOKS"
 
 STATE_DIR_NAME = "erudi-pr-readiness"
@@ -407,6 +415,21 @@ def check_jargon(ctx):
     return {"matches": matches}
 
 
+def check_issue_link(ctx):
+    # A text check, like `jargon`: it reads only the PR title/body the hook has
+    # already extracted, makes no network call, and has no directory
+    # dependency. When no text is available at all (a heredoc body the parser
+    # cannot see, or an empty --fill) there is nothing to assess, so it stays
+    # silent -- the fail-open direction for a double-check.
+    text = ctx.pr_text
+    if not text:
+        return None
+    for pattern in ISSUE_REFERENCE_PATTERNS:
+        if pattern.search(text):
+            return None
+    return {}
+
+
 def msg_docs(_result):
     return (
         "This change touches code under backend/src, frontend/src or "
@@ -470,6 +493,14 @@ def msg_jargon(result):
     )
 
 
+def msg_issue_link(_result):
+    return (
+        "This pull request references no issue. If it closes or relates to "
+        "one, add it (a '#123', or 'Closes #123'). If standing alone is "
+        "intentional, re-run the command."
+    )
+
+
 CHECKS = [
     ("docs", check_docs, msg_docs),
     ("backend-tests", check_backend_tests, msg_backend_tests),
@@ -478,6 +509,7 @@ CHECKS = [
     ("i18n", check_i18n, msg_i18n),
     ("requirements", check_requirements, msg_requirements),
     ("jargon", check_jargon, msg_jargon),
+    ("issue-link", check_issue_link, msg_issue_link),
 ]
 
 

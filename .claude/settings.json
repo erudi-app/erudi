@@ -7,6 +7,10 @@
           {
             "type": "command",
             "command": "if [ -f \"${CLAUDE_PROJECT_DIR:-.}/scripts/dev/pr_readiness_hook.py\" ]; then python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/dev/pr_readiness_hook.py\"; fi"
+          },
+          {
+            "type": "command",
+            "command": "if [ -f \"${CLAUDE_PROJECT_DIR:-.}/scripts/dev/pr_merge_reminder.py\" ]; then python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/dev/pr_merge_reminder.py\"; fi"
           }
         ]
       }

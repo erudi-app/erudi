@@ -1,8 +1,8 @@
-"""Recognise a real `gh pr create` invocation inside a Bash command string.
+"""Recognise a real `gh pr create` or `gh pr merge` invocation in a command.
 
-Shared by the two hooks in this directory, which both have to answer the same
-question before doing anything: does this command actually open a pull
-request?
+Shared by the hooks in this directory, which all have to answer the same kind
+of question before doing anything: does this command actually open (or merge)
+a pull request?
 
 Matching the raw command string against `gh pr create` is not an answer, it is
 a bug. `grep -rn "gh pr create" scripts/` contains the words and opens
@@ -10,7 +10,7 @@ nothing; so does `echo "gh pr create" >> notes.md`, and so does the test file
 that exercises these very hooks. A hook that fires on those is worse than
 noise for the readiness check, which has a one-shot budget per branch: a
 grep spends the budget, and the real invocation that follows sails through
-unasked.
+unasked. `gh pr merge` is recognised the same way, for the same reason.
 
 So the command is tokenized the way a shell would, split into segments on
 `;`, `&&`, `||`, `|`, `&` and parentheses, and each segment is examined as an
@@ -44,11 +44,29 @@ ENV_ASSIGNMENT = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*=")
 
 SUBCOMMAND = ("pr", "create")
 
+MERGE_SUBCOMMAND = ("pr", "merge")
+
 # Spellings of `gh pr create` that open no pull request: help text, a hand-off
 # to the browser, and a rehearsal.
 NON_CREATING_FLAGS = ("--help", "-h", "--web", "-w", "--dry-run")
 
+# Spellings of `gh pr merge` that merge nothing: only the help text.
+NON_MERGING_FLAGS = ("--help", "-h")
+
 BASE_FLAGS = ("--base", "-B")
+
+# `gh pr merge` flags that consume the following token as their value, so the
+# positional pull-request argument is never confused with one of their values.
+MERGE_VALUE_FLAGS = (
+    "--body",
+    "-b",
+    "--body-file",
+    "-F",
+    "--subject",
+    "-t",
+    "--match-head-commit",
+    "--author-email",
+)
 
 
 def tokenize(text):
@@ -105,7 +123,16 @@ def flag_present(tokens, names):
     return False
 
 
-def segment_creates_pull_request(tokens):
+def _segment_invokes(tokens, subcommand, excluded_flags):
+    """True when the segment is a real `gh <subcommand>` invocation.
+
+    Skips leading environment assignments, requires the program to be `gh`
+    (or a path ending in `/gh`), and requires the words before the first flag
+    to be exactly `subcommand`. `excluded_flags` names the spellings that turn
+    the invocation into something other than the action being recognised
+    (help text, a browser hand-off, a rehearsal); their presence disqualifies
+    the segment.
+    """
     index = 0
     while index < len(tokens) and ENV_ASSIGNMENT.match(tokens[index]):
         index += 1
@@ -122,10 +149,18 @@ def segment_creates_pull_request(tokens):
         if token.startswith("-"):
             break
         words.append(token)
-    if tuple(words[: len(SUBCOMMAND)]) != SUBCOMMAND:
+    if tuple(words[: len(subcommand)]) != subcommand:
         return False
 
-    return not flag_present(tokens, NON_CREATING_FLAGS)
+    return not flag_present(tokens, excluded_flags)
+
+
+def segment_creates_pull_request(tokens):
+    return _segment_invokes(tokens, SUBCOMMAND, NON_CREATING_FLAGS)
+
+
+def segment_merges_pull_request(tokens):
+    return _segment_invokes(tokens, MERGE_SUBCOMMAND, NON_MERGING_FLAGS)
 
 
 def find_pr_create_segment(command):
@@ -135,6 +170,20 @@ def find_pr_create_segment(command):
     boolean means a caller reading `--title`/`--body`/`--base` reads them off
     the invocation itself, never off whatever else shares the command line.
     """
+    return _find_segment(command, segment_creates_pull_request)
+
+
+def find_pr_merge_segment(command):
+    """Return the tokens of the first segment that merges a pull request.
+
+    None when the command merges none. Same discipline as its `create`
+    sibling: a real `gh pr merge` invocation, never the three words quoted in
+    an argument, a filename or another program's search string.
+    """
+    return _find_segment(command, segment_merges_pull_request)
+
+
+def _find_segment(command, predicate):
     if not isinstance(command, str) or "gh" not in command:
         return None
     try:
@@ -142,8 +191,37 @@ def find_pr_create_segment(command):
     except ValueError:
         return None
     for segment in split_segments(tokens):
-        if segment_creates_pull_request(segment):
+        if predicate(segment):
             return segment
+    return None
+
+
+def pr_argument_from_segment(tokens):
+    """The positional pull-request argument of a `gh pr merge` segment.
+
+    A number, a URL or a branch name, or None when the segment names no pull
+    request and the caller should fall back to the current branch. Value-
+    taking flags (`--body`, `--subject`, ...) are stepped over so their values
+    are never mistaken for the positional argument.
+    """
+    index = 0
+    while index < len(tokens) and ENV_ASSIGNMENT.match(tokens[index]):
+        index += 1
+    # Step over the program name and the subcommand words.
+    index += 1
+    seen = 0
+    while (
+        index < len(tokens) and seen < len(MERGE_SUBCOMMAND) and not tokens[index].startswith("-")
+    ):
+        index += 1
+        seen += 1
+    while index < len(tokens):
+        token = tokens[index]
+        if token.startswith("-"):
+            _, consumed = flag_value(tokens, index, MERGE_VALUE_FLAGS)
+            index += consumed if consumed else 1
+            continue
+        return token
     return None
 
 
