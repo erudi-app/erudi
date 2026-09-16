@@ -27,7 +27,17 @@ from pathlib import Path
 
 import pytest
 
-pytestmark = pytest.mark.integration
+pytestmark = [
+    pytest.mark.integration,
+    # These tests fake `gh` on PATH, which a shell=False subprocess call does
+    # not resolve reliably on Windows (a real gh.exe on the runner wins). The
+    # hook uses the real gh there; its fire/silent logic is platform-agnostic
+    # and fully exercised on POSIX.
+    pytest.mark.skipif(
+        sys.platform == "win32",
+        reason="fake gh on PATH is unreliable on Windows; logic covered on POSIX",
+    ),
+]
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 HOOK = REPO_ROOT / "scripts" / "dev" / "pr_merge_reminder.py"
