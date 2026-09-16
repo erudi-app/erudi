@@ -127,7 +127,11 @@ def renderer_rows(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
             "phase": r["phase"],
             "page": r.get("page"),
             "trigger": r.get("trigger"),
-            "js_heap_used_mb": round((m.get("JSHeapUsedSize") or 0) / MB, 1),
+            # An unreadable heap stays blank: 0.0 would be the substitute-zero
+            # this report forbids everywhere else.
+            "js_heap_used_mb": (
+                round(m["JSHeapUsedSize"] / MB, 1) if m.get("JSHeapUsedSize") is not None else None
+            ),
             "nodes": m.get("Nodes"),
             "documents": m.get("Documents"),
             "listeners": m.get("JSEventListeners"),

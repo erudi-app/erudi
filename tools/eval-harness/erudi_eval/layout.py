@@ -127,8 +127,12 @@ def app_version(layout: AppLayout) -> dict[str, str | None]:
         import subprocess
 
         try:
+            # -LiteralPath with a doubled-quote escape: --app-path is user
+            # input, and a stray apostrophe must not break out of the string.
+            exe_quoted = str(layout.main_exe).replace("'", "''")
             version = subprocess.run(
-                ["powershell", "-NoProfile", "-Command", f"(Get-Item '{layout.main_exe}').VersionInfo.ProductVersion"],
+                ["powershell", "-NoProfile", "-Command",
+                 f"(Get-Item -LiteralPath '{exe_quoted}').VersionInfo.ProductVersion"],
                 capture_output=True, text=True, timeout=20,
             ).stdout.strip() or None
         except (OSError, subprocess.SubprocessError):

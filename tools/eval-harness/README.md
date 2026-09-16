@@ -22,7 +22,7 @@ uv run erudi_eval.py selftest
 macOS:
 
 ```bash
-cd rewrite/eval-harness
+cd tools/eval-harness
 uv run erudi_eval.py selftest
 uv run erudi_eval.py run                       # full scenario, launches and quits the app
 uv run erudi_eval.py run --cleanup             # same, then deletes what the harness created
@@ -41,7 +41,7 @@ uv run erudi_eval.py run --app-path "D:\Apps\Erudi\Erudi.exe"
 Linux:
 
 ```bash
-cd rewrite/eval-harness
+cd tools/eval-harness
 uv run erudi_eval.py selftest
 uv run erudi_eval.py run --app-path ~/Applications/Erudi-1.1.2.AppImage
 ```

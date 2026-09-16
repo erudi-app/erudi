@@ -176,11 +176,20 @@ def find_main_pid(procs: list[ProcInfo], ctx: DiscoveryContext) -> int | None:
     tops = [p for p in candidates if p.ppid not in cand_pids]
     if tops:
         return sorted(tops, key=lambda p: (p.create_time, p.pid))[0].pid
-    # Fallback: parent of a bundled backend executable.
+    # Fallback: parent of a bundled backend executable. The parent must itself
+    # be a binary of this install: when the Electron main dies before the
+    # backend (every quit traverses that window), the backend is re-parented to
+    # launchd/init, whose pid would otherwise be returned as "the main" --
+    # adopting every user process into membership and aiming quit's signal
+    # outside the app tree.
     for p in procs:
         if BACKEND_STEM in identity_stems(p) and _under_install(p, ctx) and p.ppid in by_pid:
             parent = by_pid[p.ppid]
-            if BACKEND_STEM not in identity_stems(parent):
+            if (
+                parent.pid > 1
+                and BACKEND_STEM not in identity_stems(parent)
+                and (not ctx.install_dirs or _under_install(parent, ctx))
+            ):
                 return parent.pid
     return None
 

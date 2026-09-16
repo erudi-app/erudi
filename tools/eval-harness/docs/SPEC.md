@@ -153,7 +153,7 @@ Default models (catalog `link`, override with `--model-link`):
 
 ## Outputs
 
-`results/<run-id>/` with `run-id = <UTC timestamp>-<os>-<arch>-<build flavour>`:
+`results/<run-id>/` with `run-id = <UTC timestamp>-<arch>-<build flavour>-<profile>`:
 - `system.json` (preflight), `config.json` (effective CLI/config)
 - `samples.jsonl` (one line per sample: ts, phase, target/effective interval, `sample_cost_ms`, per-process records with category, machine context block, `harness` block, `top_other` every 5 s)
 - `renderer.jsonl`, `events.jsonl` (phase marks, lifecycle events, turn metrics, downloads, errors)

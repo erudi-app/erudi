@@ -105,3 +105,17 @@ def test_explicit_main_pid_must_be_an_erudi_main_binary():
     assert find_main_pid(procs, wrong) == auto
     right = DiscoveryContext(install_dirs=ctx.install_dirs, data_root=ctx.data_root, api_port=ctx.api_port, main_pid=auto)
     assert find_main_pid(procs, right) == auto
+
+
+def test_orphaned_backend_never_elects_launchd_as_main():
+    """The main died first (every quit traverses that window): the backend is
+    re-parented to launchd/init. The parent-of-backend fallback must not return
+    pid 1 -- membership would adopt every user process and quit would signal
+    outside the app tree."""
+    procs = [
+        ProcInfo(1, 0, "launchd", "/sbin/launchd", ("/sbin/launchd",)),
+        ProcInfo(30, 1, "backend", "/Applications/Erudi.app/Contents/Resources/backend/backend", ("backend",)),
+        ProcInfo(40, 1, "Safari", "/Applications/Safari.app/Contents/MacOS/Safari", ("Safari",)),
+    ]
+    ctx = DiscoveryContext(install_dirs=("/Applications/Erudi.app",))
+    assert find_main_pid(procs, ctx) is None

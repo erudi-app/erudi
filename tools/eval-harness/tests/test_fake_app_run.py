@@ -89,8 +89,17 @@ def fake_app(tmp_path):
 def test_run_attach_against_fake_app(fake_app, tmp_path):
     root, port = fake_app["root"], fake_app["port"]
     results = tmp_path / "results"
+    # The stress corpus is not committed (real runs point it at large local
+    # documents), so the test builds its own: the committed standard corpus
+    # plus two generated stress files, in a temp corpus dir.
+    corpus = tmp_path / "corpus"
+    shutil.copytree(HERE.parent / "corpus" / "standard", corpus / "standard")
+    (corpus / "stress").mkdir()
+    for name in ("stress_a.txt", "stress_b.txt"):
+        (corpus / "stress" / name).write_text(f"Generated stress document {name}. " * 200)
     argv = [
         "run", "--attach",
+        "--corpus-dir", str(corpus),
         "--app-path", str(fake_app["install"]),
         "--main-pid", str(fake_app["main"].pid),
         "--api-port", str(port),
