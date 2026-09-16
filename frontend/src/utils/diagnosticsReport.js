@@ -83,6 +83,9 @@ const UNCAUGHT_NAMESPACE = "[renderer:renderer:uncaught]";
  *   records and the echoes are dropped; when it did not answer, the echoes
  *   are the only copy of its last words and are kept.
  *
+ * Records that say the same thing are then folded into one entry carrying a
+ * repeat count — see `collapseRepeats` below.
+ *
  * @param {object} sources - The three sources.
  * @param {object} [sources.backend] - `/erudi/diagnostics/` response, or null.
  * @param {Array} [sources.appLog] - Records from `diagnostics:appLogTail`.
@@ -150,8 +153,55 @@ export function mergeRecentErrors({
   // environmental record never occupies a slot a real error could otherwise
   // hold within `limit`. WARNINGs are untouched -- see the file banner above.
   const visible = entries.filter((entry) => !isHiddenFromDiagnostics(entry));
-  visible.sort((a, b) => (timeKey(a) < timeKey(b) ? -1 : timeKey(a) > timeKey(b) ? 1 : 0));
-  return limit ? visible.slice(-limit) : visible;
+  const collapsed = collapseRepeats(visible);
+  collapsed.sort((a, b) => (timeKey(a) < timeKey(b) ? -1 : timeKey(a) > timeKey(b) ? 1 : 0));
+  return limit ? collapsed.slice(-limit) : collapsed;
+}
+
+/**
+ * Fold records that say the same thing into one entry carrying a repeat count.
+ *
+ * A backend that retries something noisy writes the same line several times
+ * (three identical "Xet Storage is enabled for this repo" warnings in one
+ * session, for instance). Listed one per row they push real errors out of
+ * `limit` and out of the copied report, and they read as three problems
+ * instead of one thing happening three times.
+ *
+ * Identity is `source` + `level` + `message`: a record is only folded into a
+ * record of the same kind, so a backend line never absorbs the app's echo of
+ * it, and a WARNING never merges into an ERROR of the same text. Counts are
+ * summed rather than maxed, so the session buffer's own count (already folded
+ * into its app-log twin above) keeps contributing what it is worth.
+ *
+ * The surviving entry carries the NEWEST timestamp and that record's request
+ * id: the question a reader asks of a repeated error is when it last
+ * happened, and the id has to name the occurrence the timestamp does or the
+ * two point at different turns.
+ *
+ * Collapsing happens before the `limit` slice so folding actually frees slots.
+ *
+ * @param {Array<object>} entries - Visible entries, any order.
+ * @returns {Array<object>} One entry per distinct record, `count` summed.
+ */
+function collapseRepeats(entries) {
+  const byIdentity = new Map();
+  for (const entry of entries) {
+    const identity = JSON.stringify([entry.source, entry.level, entry.message]);
+    const seen = byIdentity.get(identity);
+    if (!seen) {
+      byIdentity.set(identity, { ...entry, count: entry.count ?? 1 });
+      continue;
+    }
+    seen.count += entry.count ?? 1;
+    if (timeKey(entry) > timeKey(seen)) {
+      seen.timestamp = entry.timestamp;
+      seen.requestId = entry.requestId ?? null;
+    }
+    // A stack is worth keeping wherever it came from; the first one wins so a
+    // later stackless repeat cannot erase it.
+    if (!seen.stack && entry.stack) seen.stack = entry.stack;
+  }
+  return [...byIdentity.values()];
 }
 
 /**
