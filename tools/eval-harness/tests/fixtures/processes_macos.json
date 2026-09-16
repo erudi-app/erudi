@@ -1,0 +1,27 @@
+{
+  "_note": "Modelled on docs/APP_REFERENCE.md (process tree) and a probe of a Python multiprocessing spawn on macOS; not recorded from a real Erudi install (the app was not installed on the build machine).",
+  "context": {
+    "install_dirs": ["/Applications/Erudi.app"],
+    "data_root": "/Users/u/Library/Application Support/erudi/backend/prod",
+    "api_port": 27182
+  },
+  "processes": [
+    {"pid": 1, "ppid": 0, "name": "launchd", "exe": "/sbin/launchd", "cmdline": ["/sbin/launchd"], "expect": null},
+    {"pid": 500, "ppid": 1, "name": "Erudi", "exe": "/Applications/Erudi.app/Contents/MacOS/Erudi", "cmdline": ["/Applications/Erudi.app/Contents/MacOS/Erudi", "--remote-debugging-port=9222"], "expect": "electron_main"},
+    {"pid": 501, "ppid": 500, "name": "Erudi Helper (GPU)", "exe": "/Applications/Erudi.app/Contents/Frameworks/Erudi Helper (GPU).app/Contents/MacOS/Erudi Helper (GPU)", "cmdline": ["/Applications/Erudi.app/Contents/Frameworks/Erudi Helper (GPU).app/Contents/MacOS/Erudi Helper (GPU)", "--type=gpu-process", "--user-data-dir=/Users/u/Library/Application Support/Erudi"], "expect": "electron_gpu"},
+    {"pid": 502, "ppid": 500, "name": "Erudi Helper", "exe": "/Applications/Erudi.app/Contents/Frameworks/Erudi Helper.app/Contents/MacOS/Erudi Helper", "cmdline": ["/Applications/Erudi.app/Contents/Frameworks/Erudi Helper.app/Contents/MacOS/Erudi Helper", "--type=utility", "--utility-sub-type=network.mojom.NetworkService"], "expect": "electron_utility"},
+    {"pid": 503, "ppid": 500, "name": "Erudi Helper (Renderer)", "exe": "/Applications/Erudi.app/Contents/Frameworks/Erudi Helper (Renderer).app/Contents/MacOS/Erudi Helper (Renderer)", "cmdline": ["/Applications/Erudi.app/Contents/Frameworks/Erudi Helper (Renderer).app/Contents/MacOS/Erudi Helper (Renderer)", "--type=renderer", "--enable-sandbox"], "expect": "electron_renderer"},
+    {"pid": 504, "ppid": 500, "name": "chrome_crashpad_handler", "exe": "/Applications/Erudi.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Helpers/chrome_crashpad_handler", "cmdline": ["/Applications/Erudi.app/Contents/Frameworks/Electron Framework.framework/Versions/A/Helpers/chrome_crashpad_handler", "--no-rate-limit"], "expect": "electron_utility"},
+    {"pid": 510, "ppid": 500, "name": "backend", "exe": "/Applications/Erudi.app/Contents/Resources/backend/backend", "cmdline": ["/Applications/Erudi.app/Contents/Resources/backend/backend", "--port", "27182"], "expect": "backend"},
+    {"pid": 511, "ppid": 510, "name": "backend", "exe": "/Applications/Erudi.app/Contents/Resources/backend/backend", "cmdline": ["/Applications/Erudi.app/Contents/Resources/backend/backend", "-B", "-s", "-c", "from multiprocessing.resource_tracker import main;main(6)"], "expect": "backend"},
+    {"pid": 512, "ppid": 510, "name": "backend", "exe": "/Applications/Erudi.app/Contents/Resources/backend/backend", "cmdline": ["/Applications/Erudi.app/Contents/Resources/backend/backend", "--multiprocessing-fork", "tracker_fd=6", "pipe_handle=8"], "expect": "inference"},
+    {"pid": 520, "ppid": 1, "name": "postgres", "exe": "/Applications/Erudi.app/Contents/Resources/backend/_internal/pgserver/pginstall/bin/postgres", "cmdline": ["/Applications/Erudi.app/Contents/Resources/backend/_internal/pgserver/pginstall/bin/postgres", "-D", "/Users/u/Library/Application Support/erudi/backend/prod/data/postgres", "-k", "/tmp/pgsock"], "expect": "database"},
+    {"pid": 521, "ppid": 520, "name": "postgres", "exe": "/Applications/Erudi.app/Contents/Resources/backend/_internal/pgserver/pginstall/bin/postgres", "cmdline": ["postgres: checkpointer   "], "expect": "database"},
+    {"pid": 522, "ppid": 520, "name": "postgres", "exe": "/Applications/Erudi.app/Contents/Resources/backend/_internal/pgserver/pginstall/bin/postgres", "cmdline": ["postgres: postgres erudi 127.0.0.1(50000) idle"], "expect": "database"},
+    {"pid": 530, "ppid": 510, "name": "pg_ctl", "exe": "/Applications/Erudi.app/Contents/Resources/backend/_internal/pgserver/pginstall/bin/pg_ctl", "cmdline": ["/Applications/Erudi.app/Contents/Resources/backend/_internal/pgserver/pginstall/bin/pg_ctl", "-w", "-D", "/Users/u/Library/Application Support/erudi/backend/prod/data/postgres", "stop"], "expect": "transient"},
+    {"pid": 600, "ppid": 1, "name": "postgres", "exe": "/Users/u/Work/erudi/backend/venv/lib/python3.12/site-packages/pgserver/pginstall/bin/postgres", "cmdline": ["/Users/u/Work/erudi/backend/venv/lib/python3.12/site-packages/pgserver/pginstall/bin/postgres", "-D", "/Users/u/Work/erudi/backend/data/postgres"], "expect": null},
+    {"pid": 601, "ppid": 600, "name": "postgres", "exe": "/Users/u/Work/erudi/backend/venv/lib/python3.12/site-packages/pgserver/pginstall/bin/postgres", "cmdline": ["postgres: checkpointer"], "expect": null},
+    {"pid": 700, "ppid": 1, "name": "Google Chrome Helper (Renderer)", "exe": "/Applications/Google Chrome.app/Contents/Frameworks/Google Chrome Framework.framework/Helpers/Google Chrome Helper (Renderer).app/Contents/MacOS/Google Chrome Helper (Renderer)", "cmdline": ["Google Chrome Helper (Renderer)", "--type=renderer"], "expect": null},
+    {"pid": 800, "ppid": 1, "name": "postgres", "exe": "/opt/homebrew/opt/postgresql@16/bin/postgres", "cmdline": ["/opt/homebrew/opt/postgresql@16/bin/postgres", "-D", "/opt/homebrew/var/postgresql@16"], "expect": null}
+  ]
+}

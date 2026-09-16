@@ -1,0 +1,222 @@
+{
+ "_note": "Recorded read-only from a running Erudi 1.1.2 (macOS 26, Apple M4) on 2026-09-15; home dir anonymised, secrets redacted, postgres children trimmed.",
+ "context": {
+  "install_dirs": [
+   "/Applications/Erudi.app"
+  ],
+  "data_root": "/Users/u/Library/Application Support/erudi/backend/prod",
+  "api_port": 27182
+ },
+ "processes": [
+  {
+   "pid": 1,
+   "ppid": 0,
+   "name": "launchd",
+   "exe": "/sbin/launchd",
+   "cmdline": [
+    "/sbin/launchd"
+   ],
+   "expect": null
+  },
+  {
+   "pid": 15532,
+   "ppid": 1,
+   "name": "Erudi",
+   "exe": "/Applications/Erudi.app/Contents/MacOS/Erudi",
+   "cmdline": [
+    "/Applications/Erudi.app/Contents/MacOS/Erudi",
+    "--remote-debugging-port=9222"
+   ],
+   "expect": "electron_main",
+   "expect_role": "main"
+  },
+  {
+   "pid": 15542,
+   "ppid": 15532,
+   "name": "Erudi Helper",
+   "exe": "/Applications/Erudi.app/Contents/Frameworks/Erudi Helper.app/Contents/MacOS/Erudi Helper",
+   "cmdline": [
+    "/Applications/Erudi.app/Contents/Frameworks/Erudi Helper.app/Contents/MacOS/Erudi Helper",
+    "--type=gpu-process",
+    "--user-data-dir=/Users/u/Library/Application Support/erudi",
+    "--gpu-preferences=WAAAAAAAAAAgAQAEAAAAAAAAAAAAAGAAQAAAAAAAAAADAAAAAAAAADgAAAAAAAAAAAAAAAAAAAACAAAAAAAAAAAAAAAAAAAAKAAAAAAAAAAoAAAAAAAAAAgAAAAAAAAADAAAAAEAAAAAAAAAAAAAAAgAAAAAAAAACAAAAAAAAAA=",
+    "--shared-files",
+    "--field-trial-handle=1718379636,r,12974434965044798955,2477061191013450042,262144",
+    "--enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma",
+    "--disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation",
+    "--variations-seed-version",
+    "--pseudonymization-salt-handle=1935764596,r,12664207949532871439,1859635291025007204,4",
+    "--trace-process-track-uuid=3190708988185955192",
+    "--seatbelt-client=28"
+   ],
+   "expect": "electron_gpu",
+   "expect_role": "gpu"
+  },
+  {
+   "pid": 15543,
+   "ppid": 15532,
+   "name": "Erudi Helper",
+   "exe": "/Applications/Erudi.app/Contents/Frameworks/Erudi Helper.app/Contents/MacOS/Erudi Helper",
+   "cmdline": [
+    "/Applications/Erudi.app/Contents/Frameworks/Erudi Helper.app/Contents/MacOS/Erudi Helper",
+    "--type=utility",
+    "--utility-sub-type=network.mojom.NetworkService",
+    "--lang=fr",
+    "--service-sandbox-type=network",
+    "--user-data-dir=/Users/u/Library/Application Support/erudi",
+    "--shared-files",
+    "--field-trial-handle=1718379636,r,12974434965044798955,2477061191013450042,262144",
+    "--enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma",
+    "--disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation",
+    "--variations-seed-version",
+    "--pseudonymization-salt-handle=1935764596,r,12664207949532871439,1859635291025007204,4",
+    "--trace-process-track-uuid=3190708989122997041",
+    "--seatbelt-client=28"
+   ],
+   "expect": "electron_utility",
+   "expect_role": "utility:NetworkService"
+  },
+  {
+   "pid": 15547,
+   "ppid": 15532,
+   "name": "Erudi Helper (Renderer)",
+   "exe": "/Applications/Erudi.app/Contents/Frameworks/Erudi Helper (Renderer).app/Contents/MacOS/Erudi Helper (Renderer)",
+   "cmdline": [
+    "/Applications/Erudi.app/Contents/Frameworks/Erudi Helper (Renderer).app/Contents/MacOS/Erudi Helper (Renderer)",
+    "--type=renderer",
+    "--user-data-dir=/Users/u/Library/Application Support/erudi",
+    "--app-path=/Applications/Erudi.app/Contents/Resources/app.asar",
+    "--enable-sandbox",
+    "--remote-debugging-port=9222",
+    "--lang=fr",
+    "--num-raster-threads=4",
+    "--enable-zero-copy",
+    "--enable-gpu-memory-buffer-compositor-resources",
+    "--enable-main-frame-before-activation",
+    "--renderer-client-id=4",
+    "--launch-time-ticks=227393766119",
+    "--shared-files",
+    "--field-trial-handle=1718379636,r,12974434965044798955,2477061191013450042,262144",
+    "--enable-features=PdfUseShowSaveFilePicker,ScreenCaptureKitPickerScreen,ScreenCaptureKitStreamPickerSonoma",
+    "--disable-features=DropInputEventsWhilePaintHolding,LocalNetworkAccessChecks,ScreenAIOCREnabled,SpareRendererForSitePerProcess,TimeoutHangingVideoCaptureStarts,TraceSiteInstanceGetProcessCreation",
+    "--variations-seed-version",
+    "--pseudonymization-salt-handle=1935764596,r,12664207949532871439,1859635291025007204,4",
+    "--trace-process-track-uuid=3190708990060038890",
+    "--seatbelt-client=50"
+   ],
+   "expect": "electron_renderer",
+   "expect_role": "renderer"
+  },
+  {
+   "pid": 15557,
+   "ppid": 15532,
+   "name": "backend",
+   "exe": "/Applications/Erudi.app/Contents/Resources/backend/backend",
+   "cmdline": [
+    "/Applications/Erudi.app/Contents/Resources/backend/backend",
+    "--port",
+    "27182"
+   ],
+   "expect": "backend",
+   "expect_role": "backend"
+  },
+  {
+   "pid": 15585,
+   "ppid": 1,
+   "name": "postgres",
+   "exe": "/Applications/Erudi.app/Contents/Resources/backend/_internal/pgserver/pginstall/bin/postgres",
+   "cmdline": [
+    "/Applications/Erudi.app/Contents/Resources/backend/_internal/pgserver/pginstall/bin/postgres",
+    "-D",
+    "/Users/u/Library/Application Support/erudi/backend/prod/data/postgres",
+    "-h",
+    "",
+    "-k",
+    "/var/folders/fw/pdp1gm7s2snc095m56hvhtpm0000gn/T/erudi-pg-5d38835ea0"
+   ],
+   "expect": "database",
+   "expect_role": "postmaster"
+  },
+  {
+   "pid": 15586,
+   "ppid": 15585,
+   "name": "postgres",
+   "exe": "/Applications/Erudi.app/Contents/Resources/backend/_internal/pgserver/pginstall/bin/postgres",
+   "cmdline": [
+    "postgres: checkpointer ",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "expect": "database",
+   "expect_role": "pg_child"
+  },
+  {
+   "pid": 15587,
+   "ppid": 15585,
+   "name": "postgres",
+   "exe": "/Applications/Erudi.app/Contents/Resources/backend/_internal/pgserver/pginstall/bin/postgres",
+   "cmdline": [
+    "postgres: background writer ",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "expect": "database",
+   "expect_role": "pg_child"
+  },
+  {
+   "pid": 15589,
+   "ppid": 15585,
+   "name": "postgres",
+   "exe": "/Applications/Erudi.app/Contents/Resources/backend/_internal/pgserver/pginstall/bin/postgres",
+   "cmdline": [
+    "postgres: walwriter ",
+    "",
+    "",
+    "",
+    "",
+    "",
+    ""
+   ],
+   "expect": "database",
+   "expect_role": "pg_child"
+  },
+  {
+   "pid": 19578,
+   "ppid": 15557,
+   "name": "backend",
+   "exe": "/Applications/Erudi.app/Contents/Resources/backend/backend",
+   "cmdline": [
+    "/Applications/Erudi.app/Contents/Resources/backend/backend",
+    "-B",
+    "-S",
+    "-I",
+    "-c",
+    "from multiprocessing.resource_tracker import main;main(29)"
+   ],
+   "expect": "backend",
+   "expect_role": "mp_helper"
+  },
+  {
+   "pid": 19579,
+   "ppid": 15557,
+   "name": "backend",
+   "exe": "/Applications/Erudi.app/Contents/Resources/backend/backend",
+   "cmdline": [
+    "/Applications/Erudi.app/Contents/Resources/backend/backend",
+    "--multiprocessing-fork",
+    "tracker_fd=30",
+    "pipe_handle=32"
+   ],
+   "expect": "inference",
+   "expect_role": "mlx_child"
+  }
+ ]
+}

@@ -1,0 +1,14 @@
+{
+  "profile": "clean",
+  "notes": "EXAMPLE, not a machine's real configuration. Reference macOS profile: after a reboot, only the terminal running the harness (and at most one idle coding-agent CLI session, declared). Groups marked expect_absent produce a warning if they run. Copy to workloads/local-clean-mac.json and fill in the <placeholders> for your machine.",
+  "groups": [
+    {"name": "browser", "exe_contains": ["<path fragment of your browser install>", "<second fragment if the main process runs from a code-signature clone>"], "include_descendants": true, "expect_absent": true},
+    {"name": "chat_app", "exe_prefixes": ["<install prefix of your chat app>"], "expect_absent": true},
+    {"name": "terminal", "exe_prefixes": ["<install prefix of your terminal>"], "optional": true},
+    {"name": "coding_agent_cli", "argv0_basenames": ["<argv[0] basename of your agent CLI>"], "exe_contains": ["<path fragment of your agent CLI install>"], "sessions": true, "optional": true,
+     "declared": {"max_sessions": 1, "state": "idle"},
+     "notes": "A terminal coding-agent CLI; a session is a process of that CLI whose parent is not one."},
+    {"name": "coding_agent_children", "descendants_of": "coding_agent_cli"},
+    {"name": "coding_agent_orphans", "cmdline_contains": ["<command-line fragment of the servers your agent CLI leaves behind>"], "orphaned": true, "optional": true}
+  ]
+}

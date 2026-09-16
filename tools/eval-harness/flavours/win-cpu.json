@@ -1,0 +1,18 @@
+{
+  "name": "win-cpu",
+  "os": "windows",
+  "backend_type": "cpu",
+  "engine": "CPU_Engine",
+  "default_model_link": "Qwen/Qwen3-4B-GGUF",
+  "model_note": "Qwen3 4B GGUF, thinking + tools, ~2.5 GB",
+  "inference_process": {
+    "role": "llama_server",
+    "description": "llama-server.exe from resources\\backend\\_internal\\artifacts\\llama-cpp\\cpu\\bin, child of backend.exe",
+    "executable_basenames": ["llama-server.exe"]
+  },
+  "per_process_gpu_memory": "none",
+  "gpu_note": "CPU build: no GPU memory is measured, and none is expected. Inference memory is ordinary process memory.",
+  "extra_checks": ["threads", "ngl_zero"],
+  "workload_file": "nominal-windows.json",
+  "notes": "UNVERIFIED: written from the Erudi source (cpu_engine.py forces -ngl 0 and passes --threads) and docs/APP_REFERENCE.md; never run on Windows."
+}
