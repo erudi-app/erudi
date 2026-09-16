@@ -1,0 +1,23 @@
+{
+  "_note": "Modelled on docs/APP_REFERENCE.md and AppImage runtime behaviour; the lowercase `erudi` executable name inside the mount is an assumption from package.json name. Not recorded from a real Linux install.",
+  "context": {
+    "install_dirs": ["/tmp/.mount_ErudiAb12Cd"],
+    "data_root": "/home/u/.local/share/erudi/backend/prod",
+    "api_port": 27182
+  },
+  "processes": [
+    {"pid": 1, "ppid": 0, "name": "systemd", "exe": "/usr/lib/systemd/systemd", "cmdline": ["/sbin/init"], "expect": null},
+    {"pid": 3000, "ppid": 2900, "name": "Erudi-1.1.0.App", "exe": "/home/u/Applications/Erudi-1.1.0.AppImage", "cmdline": ["/home/u/Applications/Erudi-1.1.0.AppImage", "--remote-debugging-port=9222"], "expect": null},
+    {"pid": 3001, "ppid": 3000, "name": "erudi", "exe": "/tmp/.mount_ErudiAb12Cd/erudi", "cmdline": ["/tmp/.mount_ErudiAb12Cd/erudi", "--remote-debugging-port=9222", "--no-sandbox"], "expect": "electron_main"},
+    {"pid": 3002, "ppid": 3001, "name": "erudi", "exe": "/tmp/.mount_ErudiAb12Cd/erudi", "cmdline": ["/tmp/.mount_ErudiAb12Cd/erudi", "--type=zygote", "--no-zygote-sandbox", "--no-sandbox"], "expect": "electron_utility"},
+    {"pid": 3003, "ppid": 3002, "name": "erudi", "exe": "/tmp/.mount_ErudiAb12Cd/erudi", "cmdline": ["/tmp/.mount_ErudiAb12Cd/erudi --type=gpu-process --no-sandbox"], "expect": "electron_gpu"},
+    {"pid": 3004, "ppid": 3002, "name": "erudi", "exe": "/tmp/.mount_ErudiAb12Cd/erudi", "cmdline": ["/tmp/.mount_ErudiAb12Cd/erudi", "--type=renderer", "--no-sandbox"], "expect": "electron_renderer"},
+    {"pid": 3005, "ppid": 3001, "name": "erudi", "exe": "/tmp/.mount_ErudiAb12Cd/erudi", "cmdline": ["/tmp/.mount_ErudiAb12Cd/erudi", "--type=gpu-process", "--no-sandbox"], "expect": "electron_gpu"},
+    {"pid": 3010, "ppid": 3001, "name": "backend", "exe": "/tmp/.mount_ErudiAb12Cd/resources/backend/backend", "cmdline": ["/tmp/.mount_ErudiAb12Cd/resources/backend/backend", "--port", "27182"], "expect": "backend"},
+    {"pid": 3020, "ppid": 1, "name": "postgres", "exe": "/tmp/.mount_ErudiAb12Cd/resources/backend/_internal/pgserver/pginstall/bin/postgres", "cmdline": ["/tmp/.mount_ErudiAb12Cd/resources/backend/_internal/pgserver/pginstall/bin/postgres", "-D", "/home/u/.local/share/erudi/backend/prod/data/postgres"], "expect": "database"},
+    {"pid": 3021, "ppid": 3020, "name": "postgres", "exe": "/tmp/.mount_ErudiAb12Cd/resources/backend/_internal/pgserver/pginstall/bin/postgres", "cmdline": ["postgres: walwriter"], "expect": "database"},
+    {"pid": 3030, "ppid": 3010, "name": "llama-server", "exe": "/tmp/.mount_ErudiAb12Cd/resources/backend/_internal/artifacts/llama-cpp/cpu/bin/llama-server", "cmdline": ["/tmp/.mount_ErudiAb12Cd/resources/backend/_internal/artifacts/llama-cpp/cpu/bin/llama-server", "--port", "27200", "--api-key", "abc"], "expect": "inference"},
+    {"pid": 3040, "ppid": 3010, "name": "initdb", "exe": "/tmp/.mount_ErudiAb12Cd/resources/backend/_internal/pgserver/pginstall/bin/initdb", "cmdline": ["/tmp/.mount_ErudiAb12Cd/resources/backend/_internal/pgserver/pginstall/bin/initdb", "-D", "/home/u/.local/share/erudi/backend/prod/data/postgres"], "expect": "transient"},
+    {"pid": 4000, "ppid": 1, "name": "postgres", "exe": "/usr/lib/postgresql/16/bin/postgres", "cmdline": ["/usr/lib/postgresql/16/bin/postgres", "-D", "/var/lib/postgresql/16/main"], "expect": null}
+  ]
+}

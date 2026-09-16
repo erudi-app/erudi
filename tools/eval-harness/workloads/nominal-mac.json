@@ -1,0 +1,18 @@
+{
+  "profile": "nominal",
+  "notes": "EXAMPLE, not a machine's real configuration. Realistic macOS profile: a browser with the declared tabs, a chat app idle, a terminal running several sessions of a coding-agent CLI, idle for the whole run. Copy this file to workloads/local-nominal-mac.json, replace every <placeholder> with the paths on your machine, then pass it with --workload. A group whose placeholders are left in place is reported as 'not configured' and matches nothing.",
+  "groups": [
+    {"name": "browser", "exe_contains": ["<path fragment of your browser install, e.g. /Google Chrome.app/>", "<second fragment if the main process runs from a code-signature clone>"], "include_descendants": true,
+     "declared": {"tabs": 4, "tabs_open": ["<tab 1>", "<tab 2>", "<tab 3>", "<tab 4>"]},
+     "notes": "Tab count and contents cannot be verified from outside the browser: reported as declared. Descendants (extension native hosts) are attributed to the browser. Some browsers run their main process from a clone under /private/var/folders/..., which an /Applications prefix alone would miss."},
+    {"name": "chat_app", "exe_prefixes": ["<install prefix of your chat app, e.g. /Applications/Something.app/>"], "declared": {"state": "idle"}},
+    {"name": "terminal", "exe_prefixes": ["<install prefix of your terminal, e.g. /Applications/Something.app/>"], "declared": {"windows_or_tabs": 5}},
+    {"name": "coding_agent_cli", "argv0_basenames": ["<argv[0] basename of your agent CLI>"], "exe_contains": ["<path fragment of your agent CLI install>"], "sessions": true,
+     "declared": {"state": "idle during the whole run"},
+     "notes": "A terminal coding-agent CLI. A session is a process of that CLI whose parent is not one. Such a CLI often has an executable named after its version while argv[0] is the CLI name, so both rules are useful."},
+    {"name": "coding_agent_children", "descendants_of": "coding_agent_cli",
+     "notes": "Every descendant of a session that is not itself the CLI (MCP servers, node, shells) is attributed to this group. The harness and what it starts are never included."},
+    {"name": "coding_agent_orphans", "cmdline_contains": ["<command-line fragment of the servers your agent CLI leaves behind, e.g. /.some-cli/plugins/>"], "orphaned": true, "optional": true,
+     "notes": "Servers spawned by past sessions and left re-parented to launchd: they survive their session and keep consuming memory."}
+  ]
+}

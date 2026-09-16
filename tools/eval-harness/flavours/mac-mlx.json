@@ -1,0 +1,18 @@
+{
+  "name": "mac-mlx",
+  "os": "darwin",
+  "backend_type": "mlx",
+  "engine": "MLX_Engine",
+  "default_model_link": "lmstudio-community/Qwen3-4B-MLX-4bit",
+  "model_note": "Qwen3 4B MLX 4bit, thinking + tools, ~2.3 GB",
+  "inference_process": {
+    "role": "mlx_child",
+    "description": "a multiprocessing spawn of the frozen backend executable, child of the backend, listening on 27300-27399",
+    "executable_basenames": []
+  },
+  "per_process_gpu_memory": "unified",
+  "gpu_note": "Apple unified memory: GPU allocations are already inside phys_footprint; there is no separate VRAM figure to report.",
+  "extra_checks": [],
+  "workload_file": "nominal-mac.json",
+  "notes": "Verified on macOS 26.5 (Apple M4) with Erudi 1.1.2."
+}

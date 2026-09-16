@@ -1,0 +1,6 @@
+.venv/
+__pycache__/
+.pytest_cache/
+results/
+workloads/local-*.json
+corpus/**/arxiv_*.pdf

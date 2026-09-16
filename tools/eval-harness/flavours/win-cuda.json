@@ -1,0 +1,18 @@
+{
+  "name": "win-cuda",
+  "os": "windows",
+  "backend_type": "cuda",
+  "engine": "CUDA_Engine",
+  "default_model_link": "Qwen/Qwen3-4B-GGUF",
+  "model_note": "Qwen3 4B GGUF, thinking + tools, ~2.5 GB",
+  "inference_process": {
+    "role": "llama_server",
+    "description": "llama-server.exe from resources\\backend\\_internal\\artifacts\\llama-cpp\\cuda\\bin, child of backend.exe",
+    "executable_basenames": ["llama-server.exe"]
+  },
+  "per_process_gpu_memory": "nvml",
+  "gpu_note": "Per-process VRAM comes from NVML or nvidia-smi and is often [N/A] under the WDDM driver model: the report says when it is unavailable rather than guessing.",
+  "extra_checks": ["ngl", "gpu_detail"],
+  "workload_file": "nominal-windows.json",
+  "notes": "UNVERIFIED: written from the Erudi source (cuda_engine.py injects -ngl <gpu_layers> and --threads) and docs/APP_REFERENCE.md; never run on Windows."
+}

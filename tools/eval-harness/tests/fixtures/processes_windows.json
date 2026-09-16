@@ -1,0 +1,23 @@
+{
+  "_note": "Modelled on docs/APP_REFERENCE.md; not recorded from a real Windows install.",
+  "context": {
+    "install_dirs": ["C:\\Users\\u\\AppData\\Local\\Programs\\Erudi"],
+    "data_root": "C:\\Users\\u\\AppData\\Local\\erudi\\backend\\prod",
+    "api_port": 27182
+  },
+  "processes": [
+    {"pid": 4, "ppid": 0, "name": "System", "exe": "", "cmdline": [], "expect": null},
+    {"pid": 1000, "ppid": 900, "name": "Erudi.exe", "exe": "C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\Erudi.exe", "cmdline": ["C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\Erudi.exe", "--remote-debugging-port=9222"], "expect": "electron_main"},
+    {"pid": 1001, "ppid": 1000, "name": "Erudi.exe", "exe": "C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\Erudi.exe", "cmdline": ["C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\Erudi.exe", "--type=crashpad-handler", "--user-data-dir=C:\\Users\\u\\AppData\\Roaming\\Erudi"], "expect": "electron_utility"},
+    {"pid": 1002, "ppid": 1000, "name": "Erudi.exe", "exe": "C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\Erudi.exe", "cmdline": ["C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\Erudi.exe", "--type=gpu-process"], "expect": "electron_gpu"},
+    {"pid": 1003, "ppid": 1000, "name": "Erudi.exe", "exe": "C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\Erudi.exe", "cmdline": ["C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\Erudi.exe", "--type=utility", "--utility-sub-type=network.mojom.NetworkService"], "expect": "electron_utility"},
+    {"pid": 1004, "ppid": 1000, "name": "Erudi.exe", "exe": "C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\Erudi.exe", "cmdline": ["C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\Erudi.exe", "--type=renderer"], "expect": "electron_renderer"},
+    {"pid": 1010, "ppid": 1000, "name": "backend.exe", "exe": "C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\resources\\backend\\backend.exe", "cmdline": ["C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\resources\\backend\\backend.exe", "--port", "27182"], "expect": "backend"},
+    {"pid": 1020, "ppid": 1010, "name": "postgres.exe", "exe": "C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\resources\\backend\\_internal\\pgserver\\pginstall\\bin\\postgres.exe", "cmdline": ["C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\resources\\backend\\_internal\\pgserver\\pginstall\\bin\\postgres.exe", "-D", "C:\\Users\\u\\AppData\\Local\\erudi\\backend\\prod\\data\\postgres"], "expect": "database"},
+    {"pid": 1021, "ppid": 1020, "name": "postgres.exe", "exe": "C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\resources\\backend\\_internal\\pgserver\\pginstall\\bin\\postgres.exe", "cmdline": ["C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\resources\\backend\\_internal\\pgserver\\pginstall\\bin\\postgres.exe", "--forkchild=\"backend\"", "1234"], "expect": "database"},
+    {"pid": 1030, "ppid": 1010, "name": "llama-server.exe", "exe": "C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\resources\\backend\\_internal\\artifacts\\llama-cpp\\cuda\\bin\\llama-server.exe", "cmdline": ["C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\resources\\backend\\_internal\\artifacts\\llama-cpp\\cuda\\bin\\llama-server.exe", "--port", "27201", "--alias", "erudi-12", "--api-key", "SECRET123"], "expect": "inference"},
+    {"pid": 1040, "ppid": 1010, "name": "pg_dump.exe", "exe": "C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\resources\\backend\\_internal\\pgserver\\pginstall\\bin\\pg_dump.exe", "cmdline": ["C:\\Users\\u\\AppData\\Local\\Programs\\Erudi\\resources\\backend\\_internal\\pgserver\\pginstall\\bin\\pg_dump.exe", "-Fc"], "expect": "transient"},
+    {"pid": 1050, "ppid": 1010, "name": "conhost.exe", "exe": "C:\\Windows\\System32\\conhost.exe", "cmdline": ["\\??\\C:\\Windows\\system32\\conhost.exe", "0x4"], "expect": "transient"},
+    {"pid": 2000, "ppid": 600, "name": "postgres.exe", "exe": "C:\\Program Files\\PostgreSQL\\16\\bin\\postgres.exe", "cmdline": ["C:\\Program Files\\PostgreSQL\\16\\bin\\postgres.exe", "-D", "C:\\Program Files\\PostgreSQL\\16\\data"], "expect": null}
+  ]
+}

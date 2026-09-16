@@ -1,0 +1,11 @@
+{
+  "profile": "clean",
+  "notes": "EXAMPLE, not a machine's real configuration, and UNVERIFIED: no rule here has ever run on Windows. Reference profile: after a reboot, only the terminal running the harness. Copy to workloads/local-clean-windows.json and fill in the <placeholders>.",
+  "groups": [
+    {"name": "browser", "exe_prefixes": ["<install prefix, e.g. C:/Program Files/Vendor/Browser/Application/>", "<second prefix, e.g. %LOCALAPPDATA%/Vendor/Browser/Application/>"], "include_descendants": true, "expect_absent": true},
+    {"name": "chat_app", "exe_prefixes": ["<install prefix of your chat app>"], "exe_basenames": ["<executable name, e.g. something.exe>"], "expect_absent": true},
+    {"name": "terminal", "exe_basenames": ["<terminal executable, e.g. WindowsTerminal.exe>", "OpenConsole.exe"], "optional": true},
+    {"name": "coding_agent_cli", "exe_basenames": ["<agent CLI executable>"], "argv0_basenames": ["<argv[0] basename of your agent CLI>"], "sessions": true, "optional": true, "declared": {"max_sessions": 1, "state": "idle"}},
+    {"name": "coding_agent_children", "descendants_of": "coding_agent_cli"}
+  ]
+}
