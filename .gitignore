@@ -93,3 +93,8 @@ erudi-landing-loaded.yaml
 # Local-only security report — details the app's attack surface; never commit it
 # to the public repo (findings are tracked in issue #89).
 security_best_practices_report.md
+
+# Claude Code: personal, machine-local settings (the shared ones are tracked in
+# .claude/settings.json) and locally created worktrees
+.claude/settings.local.json
+.claude/worktrees/

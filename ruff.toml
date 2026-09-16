@@ -1,5 +1,6 @@
 # Repository-wide ruff settings, for the Python that lives outside backend/ --
-# today that is scripts/ci/smoke_boot.py and nothing else.
+# today that is scripts/ci/smoke_boot.py and the dev-tooling modules in
+# scripts/dev/.
 #
 # Ruff picks the NEAREST config above each file rather than merging them, so
 # backend/ruff.toml keeps full control of backend/ (its own rule selection and

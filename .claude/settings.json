@@ -1,0 +1,30 @@
+{
+  "hooks": {
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f \"${CLAUDE_PROJECT_DIR:-.}/scripts/dev/pr_readiness_hook.py\" ]; then python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/dev/pr_readiness_hook.py\"; fi"
+          },
+          {
+            "type": "command",
+            "command": "if [ -f \"${CLAUDE_PROJECT_DIR:-.}/scripts/dev/pr_merge_reminder.py\" ]; then python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/dev/pr_merge_reminder.py\"; fi"
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "if [ -f \"${CLAUDE_PROJECT_DIR:-.}/scripts/dev/ci_watch_reminder.py\" ]; then python3 \"${CLAUDE_PROJECT_DIR:-.}/scripts/dev/ci_watch_reminder.py\"; fi"
+          }
+        ]
+      }
+    ]
+  }
+}
