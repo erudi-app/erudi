@@ -30,6 +30,14 @@ def category_totals(processes: list[dict[str, Any]], primary: str) -> dict[str, 
     return {k: round(v, 3) for k, v in totals.items()}
 
 
+def incomplete_categories(processes: list[dict[str, Any]], primary: str) -> list[str]:
+    """Categories whose total under-reports because a member's primary metric
+    could not be read. The per-metric rule (an unreadable value is an error,
+    never a substitute) cannot hold for a sum -- so the sum says when it is
+    short instead of pretending completeness."""
+    return sorted({p["category"] for p in processes if p["metrics"].get(primary) is None})
+
+
 @dataclass
 class DiscoveryState:
     layout: AppLayout
@@ -171,6 +179,7 @@ class Sampler(threading.Thread):
             "main_pid": self.state.main_pid,
             "processes": records,
             "totals_mb": category_totals(records, memory.PRIMARY_METRIC),
+            "totals_incomplete": incomplete_categories(records, memory.PRIMARY_METRIC),
             "system": {**self.machine.read(), "gpu": {k: v for k, v in gpu.items() if k != "per_pid_mb"}},
         }
         if time.monotonic() - self._top_other_at >= TOP_OTHER_EVERY_S:

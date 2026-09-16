@@ -120,3 +120,15 @@ def test_copy_logs_only_this_runs_lines(tmp_path):
 def test_clean_env_drops_the_harness_virtualenv():
     env = clean_env({"VIRTUAL_ENV": "/h/.venv", "PATH": "/h/.venv/bin:/usr/bin", "PYTHONPATH": "/x", "UV_CACHE_DIR": "/c", "HOME": "/Users/u"})
     assert env == {"PATH": "/usr/bin", "HOME": "/Users/u"}
+
+
+def test_attach_on_linux_without_install_is_refused(monkeypatch, capsys):
+    """With no install dir to scope discovery, any process named erudi could be
+    elected main and quit-signalled: attach must demand --app-path instead."""
+    from erudi_eval import cli
+    from erudi_eval import layout as layout_mod
+
+    real = layout_mod.resolve_layout
+    monkeypatch.setattr(layout_mod, "resolve_layout", lambda app_path=None: real(app_path, os_name="linux", env={}))
+    assert cli.main(["run", "--attach"]) == 2
+    assert "--app-path" in capsys.readouterr().err

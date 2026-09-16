@@ -1,7 +1,7 @@
 import json
 
 from erudi_eval import compare, report
-from erudi_eval.sampler import category_totals
+from erudi_eval.sampler import category_totals, incomplete_categories
 from erudi_eval.util import MB, write_json
 
 PRIMARY = "phys_footprint"
@@ -18,7 +18,7 @@ def proc(pid, category, mb, peak_mb=None, errors=None, name="p"):
 
 
 def sample(phase, procs, t):
-    return {"ts": "x", "t": t, "phase": phase, "primary_metric": PRIMARY, "processes": procs, "totals_mb": category_totals(procs, PRIMARY), "system": {}}
+    return {"ts": "x", "t": t, "phase": phase, "primary_metric": PRIMARY, "processes": procs, "totals_mb": category_totals(procs, PRIMARY), "totals_incomplete": incomplete_categories(procs, PRIMARY), "system": {}}
 
 
 def test_category_totals_derived():
@@ -143,3 +143,18 @@ def test_machine_context_baseline_deltas_top_and_boot_memory(tmp_path):
     md = context_report.render_machine_context(ctx, table) + context_report.render_boot(bm, table)
     for needle in ("### Memory", "### Swap and paging", "### CPU, disk, power and harness cost", "### Baseline vs phase", "at baseline", "Chrome", "Peak during boot: app_total 700.0 MB", "Boot sampling: target 1.0 s"):
         assert needle in md, needle
+
+def test_incomplete_categories_mark_underreported_sums():
+    """A member whose primary metric could not be read makes its category's sum
+    short: the sample says which, and the per-phase table carries the count."""
+    from erudi_eval.report import memory_by_phase
+
+    procs = [proc(1, "electron_main", 100), proc(2, "inference", 2000), proc(4, "database", None)]
+    assert incomplete_categories(procs, PRIMARY) == ["database"]
+    phases = memory_by_phase([sample("idle_after_boot", procs, 1.0)])
+    cats = phases["idle_after_boot"]
+    assert cats["database"]["incomplete_samples"] == 1
+    assert cats["app_total"]["incomplete_samples"] == 1  # any short category taints the total
+    assert "incomplete_samples" not in cats["inference_total"]  # inference itself was read
+    clean = memory_by_phase([sample("idle_after_boot", [proc(1, "electron_main", 100)], 1.0)])
+    assert "incomplete_samples" not in clean["idle_after_boot"]["app_total"]

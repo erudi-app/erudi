@@ -23,8 +23,14 @@ def _load_json(path: Path, default: Any) -> Any:
 
 
 def memory_by_phase(samples: list[dict[str, Any]]) -> dict[str, dict[str, dict[str, float]]]:
-    """{phase: {category|derived: {mean_mb, peak_mb, samples}}} over per-sample category totals."""
+    """{phase: {category|derived: {mean_mb, peak_mb, samples[, incomplete_samples]}}}
+    over per-sample category totals. ``incomplete_samples`` counts the samples
+    whose total for that category under-reports because a member process's
+    primary metric could not be read (``totals_incomplete`` on the sample) --
+    without it the headline table would silently substitute zero for the
+    unreadable share. The derived sums inherit the mark from any category."""
     acc: dict[str, dict[str, list[float]]] = defaultdict(lambda: defaultdict(list))
+    short: dict[str, dict[str, int]] = defaultdict(lambda: defaultdict(int))
     order: list[str] = []
     for s in samples:
         totals = s.get("totals_mb")
@@ -33,12 +39,23 @@ def memory_by_phase(samples: list[dict[str, Any]]) -> dict[str, dict[str, dict[s
         phase = s.get("phase", "none")
         if phase not in order:
             order.append(phase)
+        missing = set(s.get("totals_incomplete") or ())
         for key in (*CATEGORIES, *DERIVED):
             acc[phase][key].append(float(totals.get(key, 0.0)))
+            # inference_total derives from inference alone; the other two sums
+            # are touched by any short category.
+            derived_short = bool(missing) if key in ("app_total", "app_overhead") else "inference" in missing
+            if key in missing or (key in DERIVED and derived_short):
+                short[phase][key] += 1
     out = {}
     for phase in order:
         out[phase] = {
-            key: {"mean_mb": round(sum(v) / len(v), 1), "peak_mb": round(max(v), 1), "samples": len(v)}
+            key: {
+                "mean_mb": round(sum(v) / len(v), 1),
+                "peak_mb": round(max(v), 1),
+                "samples": len(v),
+                **({"incomplete_samples": short[phase][key]} if short[phase].get(key) else {}),
+            }
             for key, v in acc[phase].items()
         }
     return out
@@ -288,9 +305,17 @@ def render_markdown(s: dict[str, Any]) -> str:
     out.append("\n## Memory per phase (mean / peak MB)\n")
     cols = ["electron_main", "electron_renderer", "electron_gpu", "electron_utility", "backend", "database", "inference", "embedding", "transient", "app_overhead", "inference_total", "app_total"]
     rows = []
+    any_short = False
     for phase, cats in s["memory"].items():
-        rows.append([phase, next(iter(cats.values()))["samples"]] + [f"{cats[c]['mean_mb']:.0f} / {cats[c]['peak_mb']:.0f}" for c in cols])
+        cells = []
+        for c in cols:
+            mark = "*" if cats[c].get("incomplete_samples") else ""
+            any_short = any_short or bool(mark)
+            cells.append(f"{cats[c]['mean_mb']:.0f} / {cats[c]['peak_mb']:.0f}{mark}")
+        rows.append([phase, next(iter(cats.values()))["samples"]] + cells)
     out.append(_table(["phase", "samples", *cols], rows))
+    if any_short:
+        out.append("\n`*` under-reported: at least one member process's primary metric could not be read in some samples of that phase (counts in `summary.json` -> `memory.<phase>.<category>.incomplete_samples`).\n")
 
     out.append("\n### System-wide\n")
     out.append(_table(["phase", "min available MB", "max swap used MB", "pressure", "max commit MB", "max GPU used MB"],

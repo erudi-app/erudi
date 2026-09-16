@@ -92,8 +92,16 @@ def cmd_run(args: argparse.Namespace) -> int:
         api_port=args.api_port, cdp_port=args.cdp_port, main_pid=args.main_pid, data_root=args.data_root,
         backend_log_dir=args.backend_log_dir, capture_log=args.capture_log,
     )
+    layout = resolve_layout(args.app_path)
+    if args.attach and layout.os_name == "linux" and not layout.app_path:
+        # With no install to scope discovery, any process whose name stem is
+        # "erudi" anywhere on the machine could be elected main -- and quit
+        # would signal it. macOS and Windows always resolve an install dir;
+        # only Linux can reach attach unscoped, so refuse instead.
+        print("attach on Linux needs --app-path (no AppImage found to scope process discovery)", file=sys.stderr)
+        return 2
     try:
-        run = Run(cfg, resolve_layout(args.app_path), run_id=args.run_id)
+        run = Run(cfg, layout, run_id=args.run_id)
     except (ValueError, OSError) as e:  # a broken or mismatched workload file must not start a run
         print(f"workload: {e}", file=sys.stderr)
         return 2
