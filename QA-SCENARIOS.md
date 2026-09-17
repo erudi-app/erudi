@@ -10,7 +10,8 @@ is deliberate so anyone — not just a developer — can run the pass.
 
 Each screen lists the **happy path** first, then **edge cases & errors** — don't
 skip the edge block, that's where regressions hide. Covered: the five app
-screens, the shared chrome, and non-functional behavior.
+screens, the session controls and slash commands, the shared chrome, and
+non-functional behavior.
 
 ---
 
@@ -32,6 +33,7 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When a model is **gated** (from a Hugging Face search hit), then the card shows a "gated" tag.
 - [ ] When I browse the **bundled catalog**, then no card links to a gated repository at all — Erudi downloads anonymously, so a gated link would 401 whoever clicked it *(gated repos are dropped at snapshot time, not flagged)*.
 - [ ] When a model is **under ~4B parameters**, then its card — catalog, explore and installed alike — carries the note that tool use, knowledge-base search and multi-step reasoning are unreliable below ~4B; a 7B or unknown-size card carries no such note.
+- [ ] When I view a model card, then it shows the model's **publication date** (when the publisher released it); a model with no readable date simply shows none (not a broken or wrong date).
 - [ ] When a category carousel has more than 4 models, then a "See all" control expands it to a grid (and back).
 - [ ] When I apply a **size filter** or **"Fits my machine"** and nothing matches, then I see "No models match these filters. Widen the size range or turn off 'Fits my machine'."
 - [ ] When there are no base models at all, then the browse area shows "No base models available" (not a crash).
@@ -52,6 +54,7 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I type a prompt and press Enter, then it sends; Shift+Enter inserts a newline.
 - [ ] When I send a prompt, then a new conversation is created and I am taken to it, where the reply **streams token by token**.
 - [ ] When I adjust Creativity / Diversity or customize the prompt, then those settings carry into the conversation.
+- [ ] When I turn on the **ephemeral** toggle before starting a conversation, then it opens with a visible **ephemeral badge** marking that it will not be kept.
 
 **Per-model sampling defaults**
 - [ ] When I select a model whose publisher ships sampling values, then Creativity / Diversity start at **that model's** values rather than a global 0.2 / 0.95 (Qwen3 starts at 0.6 / 0.95, Qwen2.5 at 0.7 / 0.8).
@@ -100,9 +103,9 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When conversation **titles and the automatic summary** are produced, then they never contain reasoning fragments or thinking markers, whatever the model.
 
 **Reasoning effort**
-- [ ] When I open a conversation's settings panel, then a **Reasoning effort** control offers five levels — None, Low, Medium, High, Xhigh — starting at the value of the global Settings default at the conversation's creation time.
+- [ ] When I open a new conversation, then its **reasoning effort** starts at the **default for that model** (not a blanket Medium), reachable and adjustable as a **5-notch graduated slider** — None, Low, Medium, High, Xhigh — through `/effort` or `/config`.
+- [ ] When I create conversations on **two different models**, then each opens at its own model's default effort, and pinning one model's default (via `/config global`) does not move the other's.
 - [ ] When I change the effort in an open conversation, then it persists immediately (survives a reload) and **takes effect on the next turn** — no Apply needed.
-- [ ] When I change the **global default** in Settings, then existing conversations keep their own effort unchanged; only conversations created afterwards inherit the new default.
 - [ ] When I use a model whose own template understands effort levels, then the five levels visibly change how much the model reasons — None shows no strip at all, Xhigh reasons markedly longer than Low.
 - [ ] When I use a thinking model that only knows **on/off** (e.g. Qwen3), then None genuinely suppresses the reasoning, Medium is the model's natural behavior with nothing added, and High/Xhigh lengthen the reasoning best-effort through instructions.
 - [ ] When I use a **non-thinking** model at Medium or above, then it reasons step by step **inside the strip** (never in the answer) and the answer stays clean; at None it behaves exactly as before this version *(prompt-instructed: a very small model may not comply — acceptance = the strip appears when it complies, and nothing leaks into the answer when it does not)*.
@@ -119,6 +122,9 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] *(Apple Silicon)* When the same oversized turn is sent on MLX, then it is **refused cleanly before generation** with the same honest treatment — never accepted into minutes of silent gibberish.
 - [ ] When `ERUDI_CTX` is set in the environment, then the window is pinned to exactly that value (dev/QA escape hatch) and the engine log says the user's value was respected.
 - [ ] When the app boots **offline** on a fresh install (catalog seeded from the bundled snapshot), then model info cards already show context windows — the values shipped with the snapshot.
+- [ ] *(Apple Silicon)* When the machine's memory tightens during a long conversation, then the **working window** the app plans against for the next turn shrinks to the smaller of the model's allocated window and what memory can safely hold — visible in `/context` and in `backend.log`; it never silently plans past what the GPU can hold.
+- [ ] *(llama.cpp)* When a llama.cpp model's window must shrink to free memory, then it does so by **respawning the child while I am idle** — the pause reloads the model transparently (a short reload; the prompt cache is rebuilt), the next turn uses the smaller window, and no in-flight turn is ever interrupted.
+- [ ] When a model reports **no readable window** through the usual path (a mis-packaged artifact), then it is treated as a **defective artifact with an honest load error** — never loaded silently with an unknown window; the app always knows the window it plans against.
 
 **Compaction & memory**
 - [ ] When a conversation reaches about **80 % of the allocated window**, then it is compacted automatically — the on-screen history is untouched, later answers still refer to earlier turns, and `backend.log` records the summarization.
@@ -127,6 +133,11 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When I ask about something that only existed in a **compacted-away** turn, then the answer still knows it — the summary lists user-stated facts first, by design *(summary quality is model-bound: acceptance = the fact survives on a mid-size model; a very small summarizer may still lose it)*.
 - [ ] When a conversation is fresh and short, then compaction never fires.
 - [ ] When the amber memory notice is shown, then it is **translated** (fr/es/zh — not English-only), it never lands in the answer bubble or in what the copy button copies, and it does **not** stick to the conversation after a reload once the pressure is gone.
+- [ ] When a conversation crosses the **compaction threshold** (a percentage of the working window, adjustable in `/config`), then compaction fires — the trigger is counted **in tokens** against the working window, not in a fixed number of messages.
+- [ ] When the engine cannot report a window at all (the rare defective-artifact case), then and only then does a **message-count fallback** guard compaction — never in the normal path, where the trigger is purely token-based.
+- [ ] When compaction keeps the most recent turns, then it keeps them by a **token budget**, and a **single message larger than that budget is kept whole** — never dropped or truncated to fit.
+- [ ] When compaction is running, then a **transient animated status** shows it is happening; when it finishes, a **clickable separator** marks in the thread where the summary took over, and that marker survives a reload.
+- [ ] *(Apple Silicon)* When a model sits **near the machine's usable GPU budget** (its weights close to the working-set limit), then the memory signal and amber notice reflect that honestly — the accounting is against the GPU's usable working set, not total system RAM — so a model that comfortably fits never raises a false alarm, and one that is genuinely tight is caught before it fails.
 
 **Knowledge-Base / agentic behavior**
 - [ ] When the model has a KB attached and is **tool-capable (agentic)**, then on a document question the model **calls the KB search tool itself** before answering, and the answer references the source.
@@ -167,11 +178,62 @@ screens, the shared chrome, and non-functional behavior.
 **Edge cases & errors**
 - [ ] When I hover a message, then copy and star controls appear; a starred message stays starred after reload and is fed back as context on later turns.
 - [ ] When I delete the conversation I'm viewing, then it's removed and I'm redirected to `/erudi/chat`; deleting a different one keeps me in place.
+- [ ] When a conversation is **ephemeral** and I leave it (navigate away, open another conversation, or quit), then it is **purged from the database and the checkpointer** on the way out — reopening its URL finds nothing, and nothing about it survives a relaunch.
 - [ ] When I quit and relaunch and reopen the conversation, then its full history is intact.
 - [ ] When generation **fails** or the connection **drops** mid-reply, then a red error message shows and any partial reply is kept.
 - [ ] When a **long conversation** on a **big model / small machine** reaches the point where the model needs more than two minutes just to read the history before writing its first word (e.g. a 9B model on a 16 GB laptop, a dozen long turns in), then the answer still arrives — the turn is no longer cut at exactly two minutes of silence. If it genuinely never starts, the red turn says the model did not start answering for a prompt of that size and suggests sending less, instead of a generic error.
 - [ ] When an answer contains a **markdown image pointing at a web address** (ask the model to reply with exactly `![logo](https://example.com/logo.png)`), then no picture is fetched or shown — at most a broken-image placeholder — because the window loads no remote images, so no site learns my address from an answer on screen.
-- [ ] When the conversation's assigned model was **deleted**, then the conversation survives with no model assigned: sending is **blocked**, the header model picker shows a red "Please select a model" attention state, and **explicitly picking** an installed model unblocks sending (no auto-fallback).
+- [ ] When the conversation's assigned model was **deleted**, then the conversation survives with no model assigned: sending is **blocked**, the header shows a red "Please select a model" attention state, and **explicitly picking** an installed model via `/model` unblocks sending (no auto-fallback).
+- [ ] When I paste a **very long message** (well past the old 32k input cap), then it is accepted and handled by the honest overflow path — no ugly low-level `422` error; if it exceeds the window, the same honest "prompt size vs window" message applies.
+- [ ] When a turn errors, then the red bubble stays **readable** and offers a **"details" affordance** to reveal the exact underlying error, instead of dumping raw internals inline.
+- [ ] *(Apple Silicon)* When a model that is too tight for the machine hits a **GPU out-of-memory** during a tool-call turn, then the turn ends with an **honest message** that the model is too large for this machine's memory — never a silent crash, a red generic error, or minutes of gibberish.
+- [ ] When I start conversations in **different languages**, then each **title** is in the language of my message — an English prompt gets an English title, not a French one (no language bias in the title generator).
+
+**Long-conversation rendering (renderer)**
+- [ ] When I scroll a **very long conversation** (hundreds of turns), then scrolling stays smooth and renderer memory does not balloon — the thread is virtualized.
+- [ ] When a reply is **streaming**, then only the streaming bubble updates per token — the rest of the thread does not re-render, and the stream stays fluid even on a long conversation.
+- [ ] When I use browser **find (Cmd/Ctrl+F)**, **select-all**, or **copy** across a long conversation, then it works across the whole conversation, not only the on-screen part.
+- [ ] When a new turn arrives at the bottom, then the view **auto-follows** to it as before, and I can scroll up without being yanked back down mid-read.
+- [ ] When I open the **catalog** with hundreds of model cards, then it scrolls smoothly (the card list is virtualized too).
+- [ ] When I navigate a long conversation with a **screen reader**, then messages remain reachable (a11y preserved through virtualization).
+- [ ] *(Windows/Linux, llama.cpp)* When I **return to an older conversation** and send a turn, then the first token comes back quickly — the host-side prompt cache is kept (`--cache-ram`), not a cold re-read of the whole history.
+
+## Session controls & slash commands — the chat composer
+
+**Header replacement**
+- [ ] When I open a conversation, then the header reads a static **"You are chatting with <model name>"** — there is no model dropdown in the header any more.
+- [ ] When I click the **settings icon** in the conversation header, then a panel opens whose contents are **one button per applicable command** (Model, Config, Compact, Effort, Context…); each button opens that command's popup.
+- [ ] When I want to change the model, then I use **/model** (or the Model button) — a selection popup — and picking a model switches the conversation to it.
+
+**Typing a command**
+- [ ] When I type **`/`** at the start of the composer, then a styled **drop-up** lists the available commands (`/config`, `/context`, `/compact`, `/effort`, `/model`) with a one-line description each.
+- [ ] When the drop-up is showing and I press **Enter**, then the **first suggestion** is confirmed and its popup opens.
+- [ ] When I type `/con`, then the drop-up narrows to the matching commands and I can arrow through them and confirm with Enter or a click.
+- [ ] When the message is **exactly** `/config` (or `/config global`, etc.) and I confirm, then the command runs — nothing is sent to the model.
+- [ ] When I type a command **inside a sentence** ("please /compact this for me"), then it is treated as a **normal message** and sent to the model — a command only fires when the message is exactly `/name [arguments]`, nothing before or after.
+- [ ] When I read the command names in another interface language, then the **names stay in English** (fixed identifiers); the popups and their descriptions are translated.
+- [ ] When any command popup opens, then it carries a **subtitle** and a **`?` tooltip** next to each field explaining what it does.
+
+**/config**
+- [ ] When I run **/config**, then one popup shows every adjustable parameter of the current conversation with its current value: reasoning effort as a **5-notch graduated slider** (None → Low → Medium → High → Xhigh), web search as a switch, creativity and diversity as sliders with their real bounds, the compaction threshold as a slider, and custom instructions (the existing instructions modal). There is **no** "defaults for new conversations" section.
+- [ ] When I change a value and close **/config**, then it takes effect on the next turn, and the header settings panel reflects the same value (the two entry points never disagree).
+- [ ] When I run **/config global**, then the current values are saved as the defaults **for the current model** (the popup explains this) — a **different** model's defaults are left untouched, so a model's own recommended sampling values are never overwritten by another's.
+
+**/effort**
+- [ ] When I run **/effort**, then a popup opens on the **5-notch slider** at the conversation's current effort; changing it persists (survives a reload) and takes effect on the next turn.
+
+**/compact**
+- [ ] When I run **/compact**, then a **confirmation popup** explains what compaction will do; confirming runs the summarization immediately (the same one that fires automatically) — the on-screen history is untouched and later answers still refer to earlier turns.
+- [ ] When I dismiss the confirmation, then nothing is compacted.
+
+**/model**
+- [ ] When I run **/model**, then a **model-selection popup** lists my installed models and picking one switches the conversation's model; the header line updates to the new model's name.
+
+**/context**
+- [ ] When I run **/context**, then a panel renders context usage as a **grid of small blocks** colored by category, with a legend giving each category's token count and percentage — the free space as empty blocks and the auto-compaction reserve marked distinctly (the familiar developer-tool presentation, matched block-for-block).
+- [ ] When I read the legend, then the categories are **system prompt, tools, messages, summary, free space, autocompaction buffer**, each with tokens and percent.
+- [ ] When the machine reduced the model's window at load, then the panel shows the **allocated** window with a short note that the model supports more but the machine bounded it — never a smaller-than-the-card number left unexplained.
+- [ ] When I read the counts, then they are presented as **estimates** — the panel does not claim an exactness it does not have.
 
 ## Arena — `/erudi/arena`
 
@@ -211,6 +273,15 @@ screens, the shared chrome, and non-functional behavior.
 - [ ] When ingestion **fails** (network/HTTP), then an error dialog shows the reason.
 - [ ] When the selected base model **already has a KB**, then submitting **updates** the existing KB with the new files instead of creating a new assistant.
 
+**Embeddings run without the torch stack (footprint)**
+- [ ] When I create an assistant and ask a document question, then ingestion and retrieval work exactly as before — embeddings now come from a **dedicated child** (`llama-server --embeddings` on Windows/Linux, `mlx_vlm.server` on Apple Silicon), not from the in-process sentence-transformers stack.
+- [ ] When retrieval is compared to the previous version on the **same KB** (golden questions), then answers ground on the same passages — no regression from the engine swap.
+- [ ] When the embedding child has been **idle**, then it is unloaded to free memory, and the next KB operation transparently reloads it.
+- [ ] When I inspect the installed app, then on Windows/Linux the **torch/transformers tree is gone**, and on Apple Silicon torch/sklearn/sentence-transformers are gone (transformers stays as an mlx-vlm dependency) — with no loss of KB function.
+- [ ] *(Apple Silicon)* When the KB embeds, then the app serves `intfloat/multilingual-e5-small` **as-is** through mlx_vlm — vectors match the previous output, so **no reindex** is needed.
+- [ ] *(Windows/Linux)* When the KB embeds, then the app serves the **published GGUF (F16)** through `llama-server --embeddings` — 384-dim, mean-pooled, L2-normalized, with the `query:`/`passage:` prefixes applied.
+- [ ] When chunking counts tokens, then it uses the pure `tokenizers` package (no HF `transformers`) and produces the same chunk boundaries as before.
+
 ## Settings — `/erudi/settings`
 
 - [ ] When I click the **gear icon** at the bottom of the left rail, then the Settings page opens and the gear shows the active highlight.
@@ -221,10 +292,12 @@ screens, the shared chrome, and non-functional behavior.
 **Default reasoning effort**
 - [ ] When I open Settings on a fresh install, then a **Default reasoning effort** card shows **Medium** selected among None / Low / Medium / High / Xhigh, and the copy says it sets the starting value for new conversations (each conversation keeps its own control afterwards).
 - [ ] When I change the default, then it persists across an app relaunch and only affects conversations created afterwards.
+- [ ] When I open conversations on **different models**, then each opens at that **model's** default effort rather than a blanket Medium, and running `/config global` on a model pins its default without touching another model's.
 
 **Automatic updates**
 - [ ] When I open Settings on a fresh install, then the **Automatic updates** toggle is **on** and the copy says the request goes to this project's GitHub releases and carries nothing but my version and platform.
 - [ ] When I turn Automatic updates **off** and relaunch, then it is still off and `erudi-backend.log` says `Updater: automatic updates are turned off; no check will run` — with it on, the same file says `checking now, then every 4 hours` instead.
+- [ ] When I open the Automatic updates controls, then they split into **two independent opt-ins** — one to **check and notify** about a new version, one to **download and install** it automatically — each persisted on its own; the privacy copy states what each one does and sends. Turning off auto-install while leaving check-and-notify on means I am told about updates but nothing installs until I act.
 
 **Update Erudi (the manual controls)**
 
@@ -291,6 +364,8 @@ the card only appears where the setting does something.*
 - [ ] When something the app itself gets wrong happens silently (not offline, not a service outage) — for example the backend returns a real 500 — then a small badge appears on the bug icon showing **1**; opening Diagnostics lists that error and the badge disappears, with no popup, toast or sound at any point.
 - [ ] When I trigger a **Hugging Face download while offline**, then the download modal still tells me it failed, but the failure appears on **neither** the Diagnostics page's recent-errors list **nor** the copied report **nor** the bug icon's badge — an unreachable network is not counted as a defect anywhere.
 - [ ] When more than nine new errors accumulate before I next open Diagnostics, then the badge reads **9+** rather than the exact count.
+- [ ] When the recent-errors list would show the **same error on consecutive rows**, then they collapse into a single row with a repeat count — no run of identical lines slips through.
+- [ ] When I **update or reinstall** the app, then Diagnostics shows only the **current install's** recent history — stale entries from a previous install are not carried over as if they were current.
 
 ## Shared chrome (sidebar, connection, downloads)
 
@@ -298,6 +373,7 @@ the card only appears where the setting does something.*
 - [ ] When I click the bug icon, then the Diagnostics page opens (the web contact page is offered from inside that page, not by the icon).
 - [ ] When a download is in progress, then the bug icon is hidden; navigation stays enabled and the progress widget follows me across screens.
 - [ ] When I navigate to an unknown route, then I am redirected to the Models screen.
+- [ ] When I type in the **conversation search** field in the sidebar, then the conversation list filters by **title and content** as I type (a light ILIKE match, no index, no semantic search), with matched snippets highlighted; clearing the field restores the full list.
 
 ## Security — localhost hardening
 
@@ -348,6 +424,7 @@ the card only appears where the setting does something.*
 - [ ] When the backend dies **after** load, then API calls fail per-screen with a visible error.
 - [ ] When the interface throws an **uncaught error** while rendering, then the window shows a recoverable screen (title, explanation, **Reload**, the report block) instead of going white, the error is in `erudi-backend.log` under `renderer:uncaught`, and it is listed on the Diagnostics page.
 - [ ] When something fails **repeatedly** — a poll that keeps rejecting, a render loop — then the log gains **one** entry with a repeat count, not thousands of identical lines, and the app stays responsive.
+- [ ] When the app boots, then the embedded PostgreSQL comes up tuned for a **single desktop user** (modest shared_buffers / max_connections / WAL rather than server defaults), and an existing data folder from a **previous version** still boots and migrates without loss.
 
 **Graphics card Erudi cannot use**
 
@@ -424,6 +501,7 @@ tool path explicitly — a working chat proves nothing about it.*
 
 **Updates & first run**
 - [ ] When I run a **packaged** build and a newer release is published, then a banner shows "downloading…", then "ready — restart to install", and it installs on click or next quit.
+- [ ] When the app starts on a **newly-installed version** (just updated), then a banner shows that release's **notes** — fetched on demand from the GitHub release body, with a link fallback when the body cannot be fetched — and it is dismissable; on later launches of the same version it does not reappear.
 - [ ] When a release is still a **draft**, then my installed build is **not** offered that update.
 - [ ] When **Automatic updates** is off in Settings and a newer release is published, then no banner appears, nothing is downloaded and quitting installs nothing; turning the toggle back on starts a check at once — the "downloading…" banner appears without a relaunch.
 - [ ] When I dismiss the update banner, then the **Update Erudi** card in Settings still knows the update is there and offers to install it.
