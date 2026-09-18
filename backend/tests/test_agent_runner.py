@@ -1438,6 +1438,72 @@ async def test_events_stream_timeout_logs_one_warning_with_the_budget(monkeypatc
     assert message.isascii()
 
 
+class _ChildQueueTimeoutModel(ToolableFakeChatModel):
+    """A model whose stream surfaces mlx_vlm.server's RAW token-queue timeout.
+
+    The child's timeout is aligned above the parent's first-chunk ceiling, so
+    this should not happen in practice -- but if it ever does, the raw
+    ``Increase MLX_VLM_TOKEN_QUEUE_TIMEOUT ...`` text must not reach the user.
+    """
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        raise RuntimeError(
+            "Timed out waiting for 600s for the next generated token. "
+            "Increase MLX_VLM_TOKEN_QUEUE_TIMEOUT for long prefills, "
+            "or reduce the prompt size."
+        )
+        yield  # pragma: no cover  (makes this an async generator function)
+
+
+async def test_events_child_token_queue_timeout_maps_to_the_prefill_turn(monkeypatch):
+    """Defense in depth (#573 alignment): a leaked child token-queue timeout is
+    mapped to the SAME curated prefill turn as the parent watchdog, so the user
+    never sees the internal env var name."""
+    _patch_model(monkeypatch, _ChildQueueTimeoutModel(messages=iter([])))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="echildto",
+    )
+
+    text = _answers(events)
+    assert ERROR_SENTINEL in text
+    # The curated prefill wording (reused from the parent watchdog path).
+    assert "start answering" in text
+    assert "read" in text
+    # The raw env var name must never reach the user.
+    assert "MLX_VLM_TOKEN_QUEUE_TIMEOUT" not in text
+    assert text != runner_module.ERROR_MESSAGE
+    assert "Traceback" not in text
+
+
+async def test_events_child_token_queue_timeout_logs_one_warning(monkeypatch, caplog):
+    """The child out-waited the parent watchdog -- worth exactly one WARNING
+    (docs/logging.md: at the handler, at the level of what happened)."""
+    _patch_model(monkeypatch, _ChildQueueTimeoutModel(messages=iter([])))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        await _events(
+            runner,
+            llm=_Llm(),
+            user_message="hi",
+            system_prompt="s",
+            params=_PARAMS,
+            thread_id="echildto2",
+        )
+
+    records = [r for r in caplog.records if "token-queue timeout" in r.getMessage()]
+    assert len(records) == 1
+    assert records[0].levelno == logging.WARNING
+    assert records[0].getMessage().isascii()
+
+
 # ===== Honest context-overflow errors (PR-G) =====
 #
 # Both local engines reject an over-budget prompt with a precise 400 that

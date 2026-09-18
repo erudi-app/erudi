@@ -65,7 +65,12 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 
 from fastapi.concurrency import run_in_threadpool
 
-from src.agents.chat_model import INTER_CHUNK_BUDGET_S, PHASE_FIRST_CHUNK
+from src.agents.chat_model import (
+    INTER_CHUNK_BUDGET_S,
+    PHASE_FIRST_CHUNK,
+    first_chunk_ceiling_s,
+    is_child_prefill_timeout,
+)
 from src.agents.model_factory import build_chat_model
 from src.agents.overflow import ContextOverflow, parse_context_overflow
 from src.agents.reasoning_effort import NO_REASONING_PLAN, EffortPlan
@@ -905,6 +910,36 @@ class AgentRunner:
                         yield {"t": "answer", "text": text}
                     hop_text_buffer.clear()
                     yield {"t": "answer", "text": _context_overflow_message(overflow)}
+                elif is_child_prefill_timeout(exc):
+                    # Defense in depth (#573 alignment): the MLX child's
+                    # token-queue timeout is sized ABOVE the parent's first-chunk
+                    # ceiling (src.engines.mlx_engine), so this branch should
+                    # never fire -- but if mlx_vlm.server's raw "Increase
+                    # MLX_VLM_TOKEN_QUEUE_TIMEOUT ..." error ever surfaces, the
+                    # child out-waited the parent (worth a WARNING) and the user
+                    # must get the SAME curated prefill turn, never the internal
+                    # env var name. Reported at WARNING with no traceback: the
+                    # app degraded on its own (docs/logging.md).
+                    window_probe = getattr(engine, "effective_context_tokens", None)
+                    window = window_probe() if callable(window_probe) else None
+                    ceiling = first_chunk_ceiling_s(window)
+                    logger.warning(
+                        f"Child token-queue timeout surfaced past the aligned budget: "
+                        f"llm={getattr(llm, 'id', '?')} ({getattr(llm, 'name', '?')}), "
+                        f"thread_id={thread_id}, ceiling_s={ceiling:.0f}"
+                    )
+                    if stateful:
+                        await self._repair_alternation(agent, run_config)
+                    for text in hop_text_buffer:
+                        yield {"t": "answer", "text": text}
+                    hop_text_buffer.clear()
+                    # Reuse the parent watchdog's curated first-chunk turn.
+                    yield {
+                        "t": "answer",
+                        "text": PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
+                            sentinel=ERROR_SENTINEL, minutes=max(1, round(ceiling / 60))
+                        ),
+                    }
                 else:
                     # A stream that breaks because the inference child died shows
                     # up here as a connection error; the engine knows the exit

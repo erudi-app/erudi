@@ -36,6 +36,8 @@ from src.agents.chat_model import (
     erudi_chat_openai_class,
     estimate_prompt_tokens,
     first_chunk_budget_s,
+    first_chunk_ceiling_s,
+    is_child_prefill_timeout,
     stream_with_two_phase_budget,
 )
 from src.agents.model_factory import build_chat_model
@@ -225,6 +227,66 @@ def test_the_absolute_backstop_caps_a_million_token_window():
 def test_a_small_window_never_lowers_the_ceiling():
     # max(900, ...) by design: a 4096 window keeps the field-proven ceiling.
     assert first_chunk_budget_s(10_000_000, effective_window_tokens=4096) == FIRST_CHUNK_CEILING_S
+
+
+# ===================== first_chunk_ceiling_s (extracted) =====================
+#
+# ``first_chunk_ceiling_s`` is the single source of truth for the ceiling: the
+# budget clamps to it, and the MLX spawn sizes the child's token-queue timeout
+# ABOVE it so a long cold prefill is owned by the parent's curated watchdog and
+# not the child's raw error (src.engines.mlx_engine). The budget tests above
+# already pin the budget end to end; these pin the extracted helper directly.
+
+
+def test_the_ceiling_is_900_without_a_window():
+    assert first_chunk_ceiling_s(None) == FIRST_CHUNK_CEILING_S
+    assert first_chunk_ceiling_s(0) == FIRST_CHUNK_CEILING_S
+
+
+def test_a_small_window_keeps_the_900_ceiling():
+    assert first_chunk_ceiling_s(4096) == FIRST_CHUNK_CEILING_S
+
+
+def test_a_big_window_scales_the_ceiling_to_a_full_window_prefill():
+    assert first_chunk_ceiling_s(32_768) == pytest.approx(
+        FIRST_CHUNK_BASE_S + 32_768 / CONSERVATIVE_PREFILL_TOKENS_PER_SEC
+    )
+
+
+def test_the_ceiling_is_capped_by_the_absolute_backstop():
+    assert first_chunk_ceiling_s(1_048_576) == chat_model_module.FIRST_CHUNK_ABSOLUTE_MAX_S
+
+
+def test_the_budget_never_exceeds_the_ceiling_for_that_window():
+    # The budget clamps to exactly this helper's value.
+    for window in (4096, 32_768, 131_072, None):
+        assert first_chunk_budget_s(10_000_000, effective_window_tokens=window) == pytest.approx(
+            first_chunk_ceiling_s(window)
+        )
+
+
+# ===================== the child token-queue timeout marker =====================
+#
+# Defense in depth for the #573 alignment: the MLX child's token-queue timeout
+# is sized above the parent's first-chunk ceiling, so the parent's curated turn
+# normally owns a long prefill. If mlx_vlm.server's raw error ever surfaces, the
+# runner maps it to that same curated turn instead of showing the user the
+# internal env var name.
+
+_RAW_CHILD_TIMEOUT = (
+    "Timed out waiting for 600s for the next generated token. "
+    "Increase MLX_VLM_TOKEN_QUEUE_TIMEOUT for long prefills, or reduce the prompt size."
+)
+
+
+def test_the_raw_child_timeout_text_is_recognized():
+    assert is_child_prefill_timeout(RuntimeError(_RAW_CHILD_TIMEOUT)) is True
+
+
+def test_an_unrelated_error_is_not_a_child_timeout():
+    assert is_child_prefill_timeout(RuntimeError("connection reset by peer")) is False
+    assert is_child_prefill_timeout(ValueError("MAX_KV_SIZE is 4096")) is False
+    assert is_child_prefill_timeout(None) is False
 
 
 def test_a_prompt_below_the_raised_ceiling_keeps_its_own_budget():

@@ -589,6 +589,117 @@ class TestMlxVlmServerRunnerHelper:
 
 
 @pytest.mark.unit
+class TestChildRuntimeEnv:
+    """`_apply_child_runtime_env` turns on APC and aligns the token-queue timeout.
+
+    mlx-vlm reads `APC_ENABLED`/`APC_BLOCK_SIZE`/`APC_NUM_BLOCKS` and
+    `MLX_VLM_TOKEN_QUEUE_TIMEOUT` from the environment at import/init, so the
+    runner sets them into the child's own `os.environ` BEFORE importing the
+    server. The values are explicit parameters (not inherited from the parent),
+    so this factored helper is unit-testable without a spawn.
+    """
+
+    def _fresh_env(self, monkeypatch) -> dict:
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        fake_env: dict = {}
+        # Patch the module's own `os.environ` so the helper writes into an
+        # isolated dict and never pollutes the real process environment.
+        monkeypatch.setattr(runner.os, "environ", fake_env)
+        return fake_env
+
+    def test_enables_apc_and_pins_the_block_size(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        env = self._fresh_env(monkeypatch)
+        runner._apply_child_runtime_env(apc_num_blocks=2048, token_queue_timeout_s=1401.0)
+        assert env["APC_ENABLED"] == "1"
+        # The parent sizes the pool as ceil(window / this), so the two must agree.
+        assert env["APC_BLOCK_SIZE"] == str(runner.APC_BLOCK_SIZE_TOKENS) == "16"
+
+    def test_sizes_the_pool_and_aligns_the_timeout_when_known(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        env = self._fresh_env(monkeypatch)
+        runner._apply_child_runtime_env(apc_num_blocks=2048, token_queue_timeout_s=1401.0)
+        assert env["APC_NUM_BLOCKS"] == "2048"
+        assert float(env["MLX_VLM_TOKEN_QUEUE_TIMEOUT"]) == pytest.approx(1401.0)
+
+    def test_falls_back_to_upstream_defaults_when_unknown(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        env = self._fresh_env(monkeypatch)
+        # None window -> no APC_NUM_BLOCKS override (upstream's 2048 default);
+        # None timeout -> no MLX_VLM_TOKEN_QUEUE_TIMEOUT override (upstream 600s).
+        runner._apply_child_runtime_env(apc_num_blocks=None, token_queue_timeout_s=None)
+        assert env["APC_ENABLED"] == "1"
+        assert env["APC_BLOCK_SIZE"] == "16"
+        assert "APC_NUM_BLOCKS" not in env
+        assert "MLX_VLM_TOKEN_QUEUE_TIMEOUT" not in env
+
+    def test_runner_applies_runtime_env_before_main(self, monkeypatch):
+        """The env must be applied before main() imports the server: mlx-vlm
+        reads these knobs at import/init time."""
+        import sys
+
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        order: list[str] = []
+        monkeypatch.setattr(runner, "_apply_child_runtime_env", lambda *a, **k: order.append("env"))
+        monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
+        monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
+        fake_main = MagicMock(side_effect=lambda: order.append("main"))
+        monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
+        monkeypatch.setattr(sys, "argv", ["pytest"])
+
+        runner.run_mlx_vlm_server(["mlx_vlm.server", "--port", "9080"], None, 2048, 1401.0)
+
+        assert order.index("env") < order.index("main")
+
+    def test_runner_forwards_the_apc_and_timeout_parameters(self, monkeypatch):
+        import sys
+
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        captured: dict = {}
+        monkeypatch.setattr(
+            runner,
+            "_apply_child_runtime_env",
+            lambda nb, to: captured.update(num_blocks=nb, timeout=to),
+        )
+        monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
+        monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
+        monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: MagicMock())
+        monkeypatch.setattr(sys, "argv", ["pytest"])
+
+        runner.run_mlx_vlm_server(["mlx_vlm.server"], None, 4096, 1401.0)
+
+        assert captured == {"num_blocks": 4096, "timeout": 1401.0}
+
+    def test_runner_defaults_the_new_params_to_none(self, monkeypatch):
+        """Existing callers (and tests) pass only argv/log_path; the new params
+        default to None so nothing breaks."""
+        import sys
+
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        captured: dict = {}
+        monkeypatch.setattr(
+            runner,
+            "_apply_child_runtime_env",
+            lambda nb, to: captured.update(num_blocks=nb, timeout=to),
+        )
+        monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
+        monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
+        monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: MagicMock())
+        monkeypatch.setattr(sys, "argv", ["pytest"])
+
+        runner.run_mlx_vlm_server(["mlx_vlm.server"])
+
+        assert captured == {"num_blocks": None, "timeout": None}
+
+
+@pytest.mark.unit
 class TestGemmaEndOfTurnStopPatch:
     """`_patch_gemma_end_of_turn_stop` adds Gemma's `<end_of_turn>` to the server's
     stop-token set (#249).
@@ -1042,6 +1153,69 @@ class TestSpawnContextBound:
         handle, argv = self._spawn(model_dir)
         assert "--max-kv-size" not in argv
         assert handle["context_tokens"] is None
+
+
+@pytest.mark.unit
+class TestSpawnApcAndTimeout:
+    """`_spawn_child` sizes the APC pool from the window and aligns the child's
+    token-queue timeout above the parent's first-chunk watchdog ceiling.
+
+    Both values ride into the child as explicit `mp.Process` args
+    (argv, log_path, apc_num_blocks, token_queue_timeout_s), so the runner sets
+    them into the child's env before importing mlx-vlm. Automatic Prefix Caching
+    lets a 2nd+ turn prefill only the suffix; the aligned timeout keeps a long
+    cold prefill owned by the parent's curated turn, not the child's raw error.
+    """
+
+    def _spawn_capture_args(self, tmp_path, config: dict | None):
+        model_dir = tmp_path / "model"
+        model_dir.mkdir(exist_ok=True)
+        if config is not None:
+            (model_dir / "config.json").write_text(json.dumps(config), encoding="utf-8")
+        captured: dict = {}
+
+        def _fake_process(*, target, args, daemon):
+            captured["args"] = tuple(args)
+            return MagicMock(pid=4321)
+
+        with patch("src.engines.mlx_engine.mp.Process", side_effect=_fake_process):
+            handle = MLX_Engine._spawn_child(model_path=model_dir, alias="erudi-x", port=9087)
+        return handle, captured["args"]
+
+    @pytest.mark.parametrize(
+        "window,expected_blocks",
+        [(4096, 256), (32768, 2048), (131072, 8192)],
+    )
+    def test_apc_pool_is_ceil_window_over_block_size(self, tmp_path, window, expected_blocks):
+        from src.engines._mlx_vlm_server_runner import APC_BLOCK_SIZE_TOKENS
+
+        assert APC_BLOCK_SIZE_TOKENS == 16
+        _handle, args = self._spawn_capture_args(tmp_path, {"max_position_embeddings": window})
+        # args = (argv, log_path, apc_num_blocks, token_queue_timeout_s)
+        assert args[2] == expected_blocks
+
+    @pytest.mark.parametrize("window", [4096, 32768, 131072])
+    def test_child_timeout_outlives_the_parent_ceiling(self, tmp_path, window):
+        from src.agents.chat_model import first_chunk_ceiling_s
+
+        _handle, args = self._spawn_capture_args(tmp_path, {"max_position_embeddings": window})
+        ceiling = first_chunk_ceiling_s(window)
+        token_queue_timeout = args[3]
+        # The child must outlast the parent's curated watchdog ceiling, so the
+        # parent owns a long prefill -- never the child's raw timeout error.
+        assert token_queue_timeout > ceiling
+        assert token_queue_timeout == pytest.approx(ceiling + 60.0)
+
+    def test_unknown_window_falls_back_to_defaults_but_still_aligns_timeout(self, tmp_path):
+        from src.agents.chat_model import first_chunk_ceiling_s
+
+        _handle, args = self._spawn_capture_args(tmp_path, {"architectures": ["FooModel"]})
+        # No derivable window -> mlx-vlm's own 2048-block APC default (no override).
+        assert args[2] is None
+        # ...but the child (default 600s) would still die before the parent's
+        # 900s ceiling, so the timeout is aligned even without a window.
+        assert args[3] == pytest.approx(first_chunk_ceiling_s(None) + 60.0)
+        assert args[3] > first_chunk_ceiling_s(None)
 
 
 @pytest.mark.unit
