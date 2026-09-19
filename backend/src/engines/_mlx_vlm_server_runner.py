@@ -246,6 +246,43 @@ def _patch_gemma_end_of_turn_stop() -> bool:
     return True
 
 
+def _patch_qwen_dense_make_cache() -> bool:
+    """Give dense qwen2/qwen3 a ``make_cache`` so MLX Automatic Prefix Caching
+    engages for them (upstream Blaizzy/mlx-vlm#2312).
+
+    Their ``Model``/``LanguageModel`` define no ``make_cache``, so the APC
+    self-check resolves to ``mode=None`` and prefix caching silently
+    self-disables -- every turn re-prefills the whole prompt. They are
+    full-attention decoders like ``llama`` (no sliding window), so one
+    ``KVCache`` per layer is the correct block-mode layout. Mirrors ``llama``:
+    define it on ``Model`` and let ``LanguageModel`` share the same method.
+
+    Fills only a class that lacks ``make_cache``, so it is a no-op once one
+    ships upstream, and idempotent across re-runs (the second call finds the
+    method already there).
+
+    Returns:
+        True if applied (or already present), False if mlx-vlm's qwen modules
+        could not be imported (non-MLX hosts, CI).
+    """
+    try:
+        from mlx_vlm.models.cache import KVCache
+        from mlx_vlm.models.qwen2 import language as _qwen2
+        from mlx_vlm.models.qwen3 import language as _qwen3
+    except Exception:
+        return False
+
+    def make_cache(self):
+        return [KVCache() for _ in self.layers]
+
+    for module in (_qwen2, _qwen3):
+        for cls_name in ("Model", "LanguageModel"):
+            cls = getattr(module, cls_name, None)
+            if cls is not None and not hasattr(cls, "make_cache"):
+                cls.make_cache = make_cache
+    return True
+
+
 def _import_mlx_vlm_server_main():
     """Import and return `mlx_vlm.server.cli.main`.
 
@@ -356,6 +393,10 @@ def run_mlx_vlm_server(
     # Register Gemma's <end_of_turn> as a stop token so generation halts at the
     # end of the answer instead of streaming the literal token + garbage (#249).
     _record_unapplied_patch("_patch_gemma_end_of_turn_stop", _patch_gemma_end_of_turn_stop())
+    # Give dense qwen2/qwen3 a make_cache so APC prefix caching engages for them
+    # instead of silently self-disabling (upstream Blaizzy/mlx-vlm#2312); a no-op
+    # once that lands upstream.
+    _record_unapplied_patch("_patch_qwen_dense_make_cache", _patch_qwen_dense_make_cache())
     main = _import_mlx_vlm_server_main()
     main()
 

@@ -587,6 +587,69 @@ class TestMlxVlmServerRunnerHelper:
 
         assert order.index("tied-lm-head") < order.index("main")
 
+    def test_runner_applies_qwen_make_cache_patch_before_main(self, monkeypatch):
+        """Dense qwen2/qwen3 gain a make_cache in-child before main() loads a
+        model, so MLX Automatic Prefix Caching resolves to block mode for them
+        instead of silently self-disabling (upstream Blaizzy/mlx-vlm#2312).
+
+        Sibling patches are stubbed so this test never imports the real mlx-vlm.
+        """
+        import sys
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        order: list[str] = []
+        monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
+        monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
+        monkeypatch.setattr(
+            runner,
+            "_patch_qwen_dense_make_cache",
+            lambda: order.append("qwen-make-cache") or True,
+        )
+        fake_main = MagicMock(side_effect=lambda: order.append("main"))
+        monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
+        monkeypatch.setattr(sys, "argv", ["pytest"])
+
+        runner.run_mlx_vlm_server(["mlx_vlm.server", "--port", "9080"])
+
+        assert order.index("qwen-make-cache") < order.index("main")
+
+    @pytest.mark.mlx_only
+    def test_qwen_dense_make_cache_patch_attaches_block_cache(self):
+        """On a real mlx-vlm, the patch gives dense qwen2/qwen3 a make_cache
+        that returns one KVCache per layer (the APC block-mode layout). It is
+        idempotent and never overrides a make_cache once one ships upstream."""
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        assert runner._patch_qwen_dense_make_cache() is True
+
+        from mlx_vlm.models.cache import KVCache
+        from mlx_vlm.models.qwen2 import language as q2
+        from mlx_vlm.models.qwen3 import language as q3
+
+        for mod in (q2, q3):
+            assert hasattr(mod.Model, "make_cache")
+            assert hasattr(mod.LanguageModel, "make_cache")
+
+        cfg = q2.ModelConfig.from_dict(
+            {
+                "model_type": "qwen2",
+                "hidden_size": 64,
+                "intermediate_size": 128,
+                "num_attention_heads": 4,
+                "num_key_value_heads": 2,
+                "num_hidden_layers": 2,
+                "rms_norm_eps": 1e-05,
+                "vocab_size": 128,
+                "max_position_embeddings": 512,
+                "tie_word_embeddings": False,
+            }
+        )
+        # The APC self-check reaches the loaded model's `language_model`, a
+        # LanguageModel instance, so exercise make_cache on that class directly.
+        cache = q2.LanguageModel(cfg).make_cache()
+        assert len(cache) == 2
+        assert all(isinstance(c, KVCache) for c in cache)
+
 
 @pytest.mark.unit
 class TestChildRuntimeEnv:
