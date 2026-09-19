@@ -511,6 +511,7 @@ class TestRunnerRedirectsBeforeStarting:
         [
             "_patch_gemma3_tied_lm_head_quant",
             "_patch_gemma_end_of_turn_stop",
+            "_patch_qwen_dense_make_cache",
         ],
     )
     def test_a_patch_that_did_not_apply_is_recorded(self, monkeypatch, patch_name):
@@ -526,6 +527,7 @@ class TestRunnerRedirectsBeforeStarting:
         for name in (
             "_patch_gemma3_tied_lm_head_quant",
             "_patch_gemma_end_of_turn_stop",
+            "_patch_qwen_dense_make_cache",
         ):
             monkeypatch.setattr(runner, name, lambda *, applied=name != patch_name: applied)
 
@@ -544,6 +546,7 @@ class TestRunnerRedirectsBeforeStarting:
         for name in (
             "_patch_gemma3_tied_lm_head_quant",
             "_patch_gemma_end_of_turn_stop",
+            "_patch_qwen_dense_make_cache",
         ):
             monkeypatch.setattr(runner, name, lambda: True)
 
