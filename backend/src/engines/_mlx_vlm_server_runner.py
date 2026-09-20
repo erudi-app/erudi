@@ -19,7 +19,7 @@ The two-function split (`_import_mlx_vlm_server_main` + `run_mlx_vlm_server`)
 keeps the heavy `mlx_vlm.server` import lazy and — critically — patchable from
 unit tests that run on Linux CI where `mlx-vlm` is not installed.
 
-In-child patches (pinned mlx-vlm 0.6.13)
+In-child patches (pinned mlx-vlm 0.6.17)
 ----------------------------------------
 Two monkeypatches are applied before the server starts. The server's native
 reasoning split is deliberately NOT patched: mlx-vlm streaming chain-of-thought
@@ -62,12 +62,22 @@ mlx-vlm bump that moves what they patch must not pass unnoticed.
 
 Contract
 --------
-`run_mlx_vlm_server(argv, log_path)` replaces `sys.argv` with the supplied list and calls
-the real `mlx_vlm.server.cli.main()`. The first element of `argv` is the
-conventional program name; the rest are the CLI flags that mlx-vlm's argparse
-expects (`--model`, `--host`, `--port`, `--log-level`, ...). `main()` parses
-them, exports the matching env vars (e.g. `MLX_VLM_PRELOAD_MODEL` from
-`--model`), and launches `uvicorn.run("mlx_vlm.server:app", ...)`.
+`run_mlx_vlm_server(argv, log_path, apc_num_blocks, token_queue_timeout_s)`
+replaces `sys.argv` with the supplied list and calls the real
+`mlx_vlm.server.cli.main()`. The first element of `argv` is the conventional
+program name; the rest are the CLI flags that mlx-vlm's argparse expects
+(`--model`, `--host`, `--port`, `--log-level`, ...). `main()` parses them,
+exports the matching env vars (e.g. `MLX_VLM_PRELOAD_MODEL` from `--model`), and
+launches `uvicorn.run("mlx_vlm.server:app", ...)`.
+
+The last two parameters are the runtime knobs this build turns on, applied to
+the child's own `os.environ` BEFORE the server is imported (mlx-vlm reads them
+at import/init): `apc_num_blocks` sizes the Automatic Prefix Caching pool so a
+2nd+ turn prefills only the suffix of the conversation, and
+`token_queue_timeout_s` lifts the child's per-token wait above the parent's
+first-chunk watchdog ceiling so a long cold prefill is owned by the parent's
+curated turn. Both default to `None` (mlx-vlm's own defaults) for callers and
+tests that only pass `argv`/`log_path`.
 
 Once invoked, this function blocks for the lifetime of the HTTP server,
 exiting only when the child process is terminated by the parent.
@@ -75,9 +85,16 @@ exiting only when the child process is terminated by the parent.
 
 from __future__ import annotations
 
+import os
 from typing import List, Optional
 
 from src.engines.mlx_child_log import child_warning, redirect_stdio_to
+
+# Automatic Prefix Caching (APC) block size, in tokens. The parent sizes the
+# APC pool to cover the child's allocated window as ``ceil(window / this)``
+# (``src.engines.mlx_engine._spawn_child``), so the two MUST agree -- this is
+# the single source of truth for the block size, exported to the parent.
+APC_BLOCK_SIZE_TOKENS = 16
 
 
 def _patch_gemma3_tied_lm_head_quant() -> bool:
@@ -242,7 +259,53 @@ def _import_mlx_vlm_server_main():
     return _main
 
 
-def run_mlx_vlm_server(argv: List[str], log_path: Optional[str] = None) -> None:
+def _apply_child_runtime_env(
+    apc_num_blocks: Optional[int], token_queue_timeout_s: Optional[float]
+) -> None:
+    """Set this build's mlx-vlm runtime knobs into the child's own environment.
+
+    mlx-vlm reads these at import/init, so they must land in ``os.environ``
+    BEFORE ``mlx_vlm.server`` is imported. Applied as an explicit dict (values
+    computed by the parent and passed in, never inherited) so a frozen child
+    that re-execs the binary still gets them, and so the mapping is unit-testable
+    without a spawn.
+
+    - ``APC_ENABLED`` / ``APC_BLOCK_SIZE`` / ``APC_NUM_BLOCKS`` turn on Automatic
+      Prefix Caching, so a 2nd+ turn prefills only the suffix of the
+      conversation instead of the whole history. The pool is sized by the parent
+      to cover the allocated window (``ceil(window / APC_BLOCK_SIZE_TOKENS)``,
+      already memory-bounded by ``--max-kv-size``); a ``None`` count leaves
+      mlx-vlm's own default (2048 blocks), for a child spawned without a window.
+      The pool fills lazily and mlx-vlm's own ``APC_MAX_POOL_TENSORS`` + Metal
+      memory-pressure guard bound it. NB: this pool counts toward Erudi's
+      resident memory and will be accounted in ``memory_budget`` in a later PR
+      (not touched here).
+    - ``MLX_VLM_TOKEN_QUEUE_TIMEOUT`` lifts the child's per-token wait above the
+      parent's first-chunk watchdog ceiling so a long cold prefill trips the
+      parent's curated timeout, not the child's raw error; ``None`` leaves
+      mlx-vlm's own default (600 s).
+
+    Uses ``os.environ.update`` (not ``os.environ[name] = ...``) on purpose: these
+    are knobs the parent WRITES for the mlx-vlm child, not configuration the
+    backend itself reads, so they do not belong in ``backend/.env.example``.
+    """
+    env = {
+        "APC_ENABLED": "1",
+        "APC_BLOCK_SIZE": str(APC_BLOCK_SIZE_TOKENS),
+    }
+    if apc_num_blocks is not None:
+        env["APC_NUM_BLOCKS"] = str(int(apc_num_blocks))
+    if token_queue_timeout_s is not None:
+        env["MLX_VLM_TOKEN_QUEUE_TIMEOUT"] = str(float(token_queue_timeout_s))
+    os.environ.update(env)
+
+
+def run_mlx_vlm_server(
+    argv: List[str],
+    log_path: Optional[str] = None,
+    apc_num_blocks: Optional[int] = None,
+    token_queue_timeout_s: Optional[float] = None,
+) -> None:
     """Child-process entry: set `sys.argv = argv` then run `mlx_vlm.server`'s main().
 
     Args:
@@ -254,6 +317,12 @@ def run_mlx_vlm_server(argv: List[str], log_path: Optional[str] = None) -> None:
             ``mlx_child_log.prepare_child_log``). ``None`` leaves the
             descriptors inherited from the backend, which is what unit tests
             and any caller without a writable log directory get.
+        apc_num_blocks: Automatic Prefix Caching pool size in blocks, sized by
+            the parent to cover the allocated window; ``None`` leaves mlx-vlm's
+            2048-block default. See ``_apply_child_runtime_env``.
+        token_queue_timeout_s: The child's per-token wait, sized by the parent
+            above its own first-chunk watchdog ceiling; ``None`` leaves
+            mlx-vlm's 600 s default. See ``_apply_child_runtime_env``.
 
     Returns:
         None. This call blocks for the lifetime of the HTTP server.
@@ -273,6 +342,10 @@ def run_mlx_vlm_server(argv: List[str], log_path: Optional[str] = None) -> None:
             # last words. Reported on the inherited stderr, which the Electron
             # main process writes to the app log.
             print(f"[WARNING] mlx-vlm child output capture disabled: {exc}", file=sys.stderr)
+    # APC on + the aligned token-queue timeout, BEFORE the server is imported:
+    # mlx-vlm reads both from the environment at import/init time (the APC pool
+    # in `apc.from_env`, the timeout in `server.runtime_config`).
+    _apply_child_runtime_env(apc_num_blocks, token_queue_timeout_s)
     # Applied in-child before the server loads any model so quantized
     # tied-embeddings Gemma3 checkpoints (270m/1b text-only via the native
     # gemma3_text route, and multimodal gemma3) load cleanly on 0.6.13 (#273).

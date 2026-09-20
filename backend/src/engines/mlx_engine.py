@@ -89,6 +89,7 @@ Warning:
 
 from __future__ import annotations
 
+import math
 import multiprocessing as mp
 import os
 import platform
@@ -156,7 +157,8 @@ class MLX_Engine(BaseChatServerEngine):
     # ======================= SUBPROCESS HTTP SERVER (mlx_vlm.server) =======================
     #
     # Inference goes through a subprocess `mlx_vlm.server` (OpenAI-compatible HTTP),
-    # spawned via `mp.Process(target=run_mlx_vlm_server, args=(argv, log_path))`.
+    # spawned via `mp.Process(target=run_mlx_vlm_server,
+    # args=(argv, log_path, apc_num_blocks, token_queue_timeout_s))`.
     # mlx-vlm is a superset of mlx-lm: it serves plain text models through the same
     # endpoint, carries its own tool-calling parser (no mlx_lm.server EOS-flush drop,
     # so agentic tool use works on Apple Silicon), and accepts image input. The
@@ -367,6 +369,36 @@ class MLX_Engine(BaseChatServerEngine):
         # behaviour), never an invented number. The hot PATCH /v1/settings
         # path is deliberately not used in this release (spawn-time only).
         context_tokens = cls._trained_window_of(model_path)
+        # Automatic Prefix Caching pool + the aligned child token-queue timeout,
+        # both derived from the window here (the one moment the artifact and the
+        # child are in hand) and passed to the child as explicit args. Deferred
+        # imports keep the engine layer off the agent stack at boot and match
+        # this file's other function-scoped imports; `first_chunk_ceiling_s` is
+        # langchain-free at import (`chat_model` defers `langchain_openai`), so
+        # there is no import cycle.
+        from src.agents.chat_model import first_chunk_ceiling_s
+        from src.engines._mlx_vlm_server_runner import APC_BLOCK_SIZE_TOKENS
+
+        # Size the APC pool to exactly cover the allocated window (already
+        # memory-bounded by --max-kv-size above), so a 2nd+ turn reuses the
+        # cached prefix instead of re-prefilling the whole history. The pool
+        # fills lazily and mlx-vlm's own guards bound it; no derivable window
+        # leaves mlx-vlm's 2048-block default. NB: this pool counts toward our
+        # resident memory and will be accounted in memory_budget in a later PR.
+        apc_num_blocks: Optional[int] = (
+            math.ceil(context_tokens / APC_BLOCK_SIZE_TOKENS)
+            if context_tokens is not None
+            else None
+        )
+        # Lift the child's per-token wait above the parent's first-chunk
+        # watchdog ceiling for this window (the SAME `first_chunk_ceiling_s` the
+        # parent clamps its budget to), so a legitimately long cold prefill is
+        # ended by the parent's curated turn (src.agents.runner) -- never by the
+        # child's raw "Increase MLX_VLM_TOKEN_QUEUE_TIMEOUT" error. +60s margin
+        # so the child comfortably outlives the ceiling; computed even without a
+        # window, since the child's own 600s default is below the 900s ceiling
+        # `first_chunk_ceiling_s(None)` returns.
+        token_queue_timeout_s: float = first_chunk_ceiling_s(context_tokens) + 60.0
         # Before the roll below, so a file the PREVIOUS child on this port left
         # behind is older than this mark and cannot be read as ours.
         started_at = time.time()
@@ -411,7 +443,11 @@ class MLX_Engine(BaseChatServerEngine):
             "--api-key",
             api_key,
         ]
-        proc = mp.Process(target=run_mlx_vlm_server, args=(argv, log_path), daemon=False)
+        proc = mp.Process(
+            target=run_mlx_vlm_server,
+            args=(argv, log_path, apc_num_blocks, token_queue_timeout_s),
+            daemon=False,
+        )
         try:
             proc.start()
         except Exception as exc:

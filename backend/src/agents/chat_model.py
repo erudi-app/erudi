@@ -237,6 +237,27 @@ def estimate_prompt_tokens(messages: Optional[Iterable[Any]]) -> int:
     return tokens + text_bytes
 
 
+def first_chunk_ceiling_s(effective_window_tokens: Optional[int] = None) -> float:
+    """The upper bound on the first-chunk budget for a child with this window.
+
+    ``max(FIRST_CHUNK_CEILING_S, BASE + W/RATE)`` so a legitimately full
+    ALLOCATED window is never mistaken for a hang, capped at
+    ``FIRST_CHUNK_ABSOLUTE_MAX_S``; ``None`` or a non-positive window (window
+    unknown) keeps the field-proven 900 s, and a small window never cuts below
+    it. The one source of truth for the ceiling: ``first_chunk_budget_s``
+    clamps to it, and the MLX spawn sizes the child's ``token_queue_timeout``
+    ABOVE it (``src.engines.mlx_engine``) so a long cold prefill is owned by
+    the parent's curated watchdog turn, not the child's raw timeout error.
+    """
+    ceiling = FIRST_CHUNK_CEILING_S
+    if effective_window_tokens is not None and effective_window_tokens > 0:
+        ceiling = max(
+            ceiling,
+            FIRST_CHUNK_BASE_S + effective_window_tokens / CONSERVATIVE_PREFILL_TOKENS_PER_SEC,
+        )
+    return min(ceiling, FIRST_CHUNK_ABSOLUTE_MAX_S)
+
+
 def first_chunk_budget_s(
     estimated_prompt_tokens: int, effective_window_tokens: Optional[int] = None
 ) -> float:
@@ -247,17 +268,37 @@ def first_chunk_budget_s(
     full-window prefill (``max(900, BASE + W/RATE)``) so a legitimate
     window-filling prompt is never killed mid-prefill, while ``None`` (window
     unknown) keeps the field-proven 900 s. The ceiling only ever rises with
-    the window -- a small window never cuts below 900 s.
+    the window -- a small window never cuts below 900 s (see
+    ``first_chunk_ceiling_s``).
     """
-    ceiling = FIRST_CHUNK_CEILING_S
-    if effective_window_tokens is not None and effective_window_tokens > 0:
-        ceiling = max(
-            ceiling,
-            FIRST_CHUNK_BASE_S + effective_window_tokens / CONSERVATIVE_PREFILL_TOKENS_PER_SEC,
-        )
-    ceiling = min(ceiling, FIRST_CHUNK_ABSOLUTE_MAX_S)
+    ceiling = first_chunk_ceiling_s(effective_window_tokens)
     raw = FIRST_CHUNK_BASE_S + estimated_prompt_tokens / CONSERVATIVE_PREFILL_TOKENS_PER_SEC
     return min(max(FIRST_CHUNK_FLOOR_S, raw), ceiling)
+
+
+# --- The MLX child's raw token-queue timeout (defense in depth) -------------
+#
+# mlx_vlm.server bounds its per-token wait with MLX_VLM_TOKEN_QUEUE_TIMEOUT and,
+# on expiry, raises a RuntimeError whose text tells the operator to raise that
+# env var. The MLX spawn sizes that timeout ABOVE the parent's first-chunk
+# ceiling (``src.engines.mlx_engine``), so a long prefill is normally ended by
+# the parent's curated watchdog turn first. This marker lets the runner catch
+# the raw error if it ever surfaces anyway and map it to that same curated turn,
+# so the internal env var name never reaches the user.
+_CHILD_TOKEN_QUEUE_TIMEOUT_MARKER = "MLX_VLM_TOKEN_QUEUE_TIMEOUT"
+
+
+def is_child_prefill_timeout(exc: object) -> bool:
+    """True iff ``exc`` is mlx_vlm.server's raw token-queue timeout.
+
+    Duck-typed on ``str(exc)`` and defensive (never raises), like
+    ``src.agents.overflow.parse_context_overflow``: the marker is the stable
+    part of the wire contract, the wording around it is not.
+    """
+    try:
+        return _CHILD_TOKEN_QUEUE_TIMEOUT_MARKER in str(exc)
+    except Exception:
+        return False
 
 
 # --- Retrying a call the engine's context check rejected --------------------
