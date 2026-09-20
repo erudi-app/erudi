@@ -12,13 +12,15 @@ that do not move during a chat:
 * **KV cache**: per-token cost from the model's own ``config.json``,
   ``2 (K and V) x layers x kv_heads x head_dim x 2 bytes (f16)``, multiplied by
   the conversation's token count by the caller;
-* **denominator**: the Apple Silicon unified-memory total
-  (``get_flat_hardware_data``) — the signal is **MLX-only**. On both llama.cpp
-  engines (CPU and CUDA) the KV cache is allocated in full at load: memory use
-  does not grow with the conversation, and the engine's own fit already
-  guaranteed the allocation fits, so there is nothing per-token to measure —
-  the signal is OFF by policy there (see ``total_memory_bytes``, which also
-  names the partial-offload reason on discrete cards).
+* **denominator**: the GPU's usable working set on Apple Silicon —
+  ``MEMORY_SIGNAL_SAFETY_FRACTION`` of the engine's
+  ``max_recommended_working_set_bytes`` (Metal's recommended working set, well
+  below total RAM). The signal is **MLX-only**. On both llama.cpp engines (CPU
+  and CUDA) the KV cache is allocated in full at load: memory use does not grow
+  with the conversation, and the engine's own fit already guaranteed the
+  allocation fits, so there is nothing per-token to measure — the signal is OFF
+  by policy there (see ``total_memory_bytes``, which also names the
+  partial-offload reason on discrete cards).
 
 The deliberate blind spot — the OS and other processes — is absorbed by the
 margin floor the callers compare against (15 % in ``src.agents.runner``).
@@ -44,6 +46,11 @@ from src.core.logging import logger
 # default (KV quantization is opt-in and not exposed in this release).
 _KV_BYTES_PER_VALUE = 2
 _KV_TENSORS_PER_TOKEN = 2  # K and V
+
+# The GPU working set is the hard ceiling on Apple Silicon; this reserves ~10%
+# of it for the OS, WindowServer and other GPU consumers, so the signal counts
+# against what the model can actually claim, not the whole working set.
+MEMORY_SIGNAL_SAFETY_FRACTION = 0.9
 
 # Where a VLM keeps its text model's shape facts. Mirrors the containers the
 # context-window reader accepts (``generation_hints._CONTEXT_CONTAINERS``), so
@@ -173,8 +180,14 @@ def artifact_bytes(model_path: Path) -> Optional[int]:
 
 
 def total_memory_bytes(engine: Any) -> Optional[int]:
-    """The memory pool the signal accounts against, in bytes -- MLX ONLY: the
-    Apple Silicon unified-memory total.
+    """The memory pool the signal accounts against, in bytes -- MLX ONLY:
+    ``MEMORY_SIGNAL_SAFETY_FRACTION`` of the GPU's usable working set.
+
+    The denominator is NOT total system RAM: on Apple Silicon Metal caps the
+    GPU at a recommended working set well below RAM (~74 %), so counting
+    against total RAM makes the signal fire far too late (#601). The engine's
+    ``max_recommended_working_set_bytes`` reports that working set; the safety
+    fraction reserves headroom for the OS and other GPU consumers.
 
     On both llama.cpp engines (CPU and CUDA) the answer is ``None`` by
     policy, which keeps the memory signal OFF there. The real reason: their
@@ -203,10 +216,9 @@ def total_memory_bytes(engine: Any) -> Optional[int]:
     total: Optional[int] = None
     failure: Optional[str] = None
     try:
-        flat = engine.get_flat_hardware_data() or {}
-        gb = flat.get("total_memory_gb")
-        if isinstance(gb, (int, float)) and not isinstance(gb, bool) and gb > 0:
-            total = int(gb * 1024**3)
+        working_set = engine.max_recommended_working_set_bytes()
+        if isinstance(working_set, int) and not isinstance(working_set, bool) and working_set > 0:
+            total = int(MEMORY_SIGNAL_SAFETY_FRACTION * working_set)
     except Exception as exc:
         failure = f"{type(exc).__name__}: {exc}"
     if total is not None:
@@ -216,7 +228,7 @@ def total_memory_bytes(engine: Any) -> Optional[int]:
         # retries ([L4]) and would otherwise repeat this record each turn.
         _TOTALS_WARNED.add(engine)
         logger.warning(
-            f"Memory total unreadable ({failure or 'no readable total'}); "
+            f"GPU working set unreadable ({failure or 'no readable working set'}); "
             f"memory signal off until it resolves"
         )
     return total

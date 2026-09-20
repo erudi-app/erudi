@@ -121,7 +121,14 @@ COMPACTION_WINDOW_FRACTION = 0.8
 # Shared floor of the memory signal AND the amber warning: under 15 % of
 # deterministic margin, compaction fires; the warning is emitted only when
 # even a compaction down to the keep-tail could not restore that margin
-# (see ``_memory_warning_event``).
+# (see ``_memory_warning_event``). The floor stays 15 % on top of the
+# corrected denominator: the margin is now measured against the GPU's usable
+# working set, not total RAM (see memory_budget.total_memory_bytes), which is
+# already ~2.4x smaller. Issue #601 asked to raise it to 30 %, but that was
+# against the old total-RAM denominator; raising it on top of the smaller,
+# honest one would over-trigger (spurious compactions and amber notices). To
+# be confirmed in the 1.1.3 QA pass -- if auto-compaction fires too late on
+# the saturation scenario, raise the floor then.
 MEMORY_MARGIN_FLOOR = 0.15
 # Token allowance for the summary a compaction would insert, used when
 # projecting the post-compaction size the warning is judged on.

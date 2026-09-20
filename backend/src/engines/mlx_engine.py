@@ -1258,3 +1258,32 @@ class MLX_Engine(BaseChatServerEngine):
         """
         # get_performance_evaluation() already returns flat structure
         return cls.get_performance_evaluation()
+
+    @classmethod
+    def max_recommended_working_set_bytes(cls) -> Optional[int]:
+        """The GPU's usable working set in bytes, or ``None`` if unavailable.
+
+        On Apple Silicon Metal caps the GPU at a recommended working set well
+        below total unified memory (~74 % of RAM; mlx-vlm pins the wired limit
+        to it on every generation). That working set -- not total RAM -- is the
+        hard ceiling the compaction memory signal accounts against, so
+        ``memory_budget.total_memory_bytes`` reads it here (#601).
+
+        Kept deliberately off ``get_flat_hardware_data`` /
+        ``get_performance_evaluation``: this fact does not belong in the
+        persisted HardwareProfile schema; a dedicated method keeps the hardware
+        knowledge in the engine without polluting the profile.
+
+        The ``mlx`` import is lazy (nothing at module import time may require
+        mlx) and any failure answers ``None`` -- this may be called on a host
+        where the query is unavailable.
+        """
+        try:
+            import mlx.core as mx
+
+            return int(mx.device_info()["max_recommended_working_set_size"])
+        except Exception:
+            # No record here on purpose: the caller
+            # (memory_budget.total_memory_bytes) writes the single degraded
+            # record and simply leaves the memory signal off when this is None.
+            return None
