@@ -8,6 +8,7 @@ never a guessed number.
 """
 
 import json
+import logging
 
 import pytest
 
@@ -180,7 +181,9 @@ def test_artifact_bytes_plain_gguf_is_just_the_file(tmp_path):
 # ===================== Denominator per engine family =====================
 
 
-def _engine_with_flat_data(flat: dict, format_tag: str = "mlx"):
+def _engine_with_flat_data(flat: dict, format_tag: str = "mlx", working_set_bytes=None):
+    ws = working_set_bytes
+
     class _Engine(BaseEngine):
         FORMAT_TAG = format_tag
 
@@ -188,12 +191,23 @@ def _engine_with_flat_data(flat: dict, format_tag: str = "mlx"):
         def get_flat_hardware_data(cls):
             return flat
 
+        @classmethod
+        def max_recommended_working_set_bytes(cls):
+            return ws
+
     return _Engine
 
 
-def test_total_memory_bytes_mlx_uses_unified_memory():
-    engine = _engine_with_flat_data({"backend_type": "mlx", "total_memory_gb": 16.0})
-    assert total_memory_bytes(engine) == 16 * 1024**3
+def test_total_memory_bytes_mlx_uses_working_set_not_total_ram():
+    # The denominator is the GPU's usable working set (0.9 x the recommended
+    # working set), NOT total_memory_gb. On Apple Silicon Metal caps the GPU at
+    # ~74 % of RAM, so total RAM is a ~2.4x-too-large denominator (#601).
+    working_set = 12_700_000_000  # ~12.7 GB on a 16 GB M4, not the 16 GiB total
+    engine = _engine_with_flat_data(
+        {"backend_type": "mlx", "total_memory_gb": 16.0},
+        working_set_bytes=working_set,
+    )
+    assert total_memory_bytes(engine) == int(0.9 * working_set)
 
 
 def test_total_memory_bytes_llama_cpp_engines_signal_is_off():
@@ -211,28 +225,44 @@ def test_total_memory_bytes_llama_cpp_engines_signal_is_off():
         assert total_memory_bytes(engine) is None
 
 
-def test_total_memory_bytes_missing_total_is_none():
-    engine = _engine_with_flat_data({"backend_type": "mlx"})
-    assert total_memory_bytes(engine) is None
-
-
-def test_total_memory_bytes_none_is_retried_not_memoized():
-    # [L4] A total that could not be read is retried on the next call (only a
-    # resolved answer is memoized).
+def test_total_memory_bytes_missing_working_set_disables_signal_and_warns_once(caplog):
+    # An unreadable working set -> None (signal off), and the degraded record
+    # is written once even though every later call retries ([L4]).
     calls = []
 
     class _Engine(BaseEngine):
         FORMAT_TAG = "mlx"
 
         @classmethod
-        def get_flat_hardware_data(cls):
+        def max_recommended_working_set_bytes(cls):
+            calls.append(1)
+            return None
+
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        assert total_memory_bytes(_Engine) is None
+        assert total_memory_bytes(_Engine) is None
+    assert len(calls) == 2  # retried, not memoized
+    warned = [r for r in caplog.records if "memory signal off" in r.getMessage()]
+    assert len(warned) == 1
+
+
+def test_total_memory_bytes_none_working_set_is_retried_not_memoized():
+    # [L4] A working set that could not be read is retried on the next call
+    # (only a resolved answer is memoized).
+    calls = []
+
+    class _Engine(BaseEngine):
+        FORMAT_TAG = "mlx"
+
+        @classmethod
+        def max_recommended_working_set_bytes(cls):
             calls.append(1)
             if len(calls) == 1:
-                return {}  # first probe: nothing readable
-            return {"backend_type": "mlx", "total_memory_gb": 4.0}
+                return None  # first probe: nothing readable
+            return 10 * 1024**3
 
     assert total_memory_bytes(_Engine) is None
-    assert total_memory_bytes(_Engine) == 4 * 1024**3
+    assert total_memory_bytes(_Engine) == int(0.9 * 10 * 1024**3)
     assert len(calls) == 2
 
 
@@ -243,12 +273,12 @@ def test_total_memory_bytes_is_memoized_per_engine_class():
         FORMAT_TAG = "mlx"
 
         @classmethod
-        def get_flat_hardware_data(cls):
+        def max_recommended_working_set_bytes(cls):
             calls.append(1)
-            return {"backend_type": "mlx", "total_memory_gb": 4.0}
+            return 8 * 1024**3
 
-    assert total_memory_bytes(_Engine) == 4 * 1024**3
-    assert total_memory_bytes(_Engine) == 4 * 1024**3
+    assert total_memory_bytes(_Engine) == int(0.9 * 8 * 1024**3)
+    assert total_memory_bytes(_Engine) == int(0.9 * 8 * 1024**3)
     assert len(calls) == 1
 
 
@@ -264,6 +294,23 @@ def test_margin_and_conversation_bytes_hand_computed():
     assert budget.conversation_bytes(1024) == GIB
     assert budget.memory_margin_fraction(1024) == pytest.approx(5 / 16)
     assert budget.used_fraction(1024) == pytest.approx(11 / 16)
+
+
+def test_margin_is_lower_against_working_set_than_against_total_ram():
+    # Same weights + KV, two denominators. The corrected working-set budget
+    # (0.9 x ~12.7 GB usable) is far smaller than total RAM (16 GiB), so it
+    # reports a smaller margin and reaches its floor at fewer tokens -- the fix
+    # for the signal firing too late (#601).
+    weights = 8 * GIB
+    kv = 1024**2  # 1 MiB/token
+    total_ram = 16 * GIB
+    working_set = int(0.9 * 12_700_000_000)
+    tokens = 1024
+    ram_budget = MemoryBudget(weights_bytes=weights, kv_token_bytes=kv, total_bytes=total_ram)
+    ws_budget = MemoryBudget(weights_bytes=weights, kv_token_bytes=kv, total_bytes=working_set)
+    assert ws_budget.used_fraction(tokens) > ram_budget.used_fraction(tokens)
+    assert ws_budget.memory_margin_fraction(tokens) < ram_budget.memory_margin_fraction(tokens)
+    assert ws_budget.tokens_at_margin(0.15) < ram_budget.tokens_at_margin(0.15)
 
 
 def test_margin_fifteen_percent_boundary():
@@ -304,8 +351,8 @@ def test_conversation_bytes_only_needs_the_kv_fact():
 # ===================== from_engine =====================
 
 
-def _loaded_engine(flat: dict, model_path, format_tag: str = "mlx"):
-    engine = _engine_with_flat_data(flat, format_tag)
+def _loaded_engine(flat: dict, model_path, format_tag: str = "mlx", working_set=None):
+    engine = _engine_with_flat_data(flat, format_tag, working_set_bytes=working_set)
     engine._model = {"model_path": str(model_path)}
     return engine
 
@@ -316,7 +363,10 @@ def test_from_engine_mlx_directory(tmp_path, monkeypatch):
         json.dumps({"num_hidden_layers": 24, "num_key_value_heads": 8, "head_dim": 128}),
         encoding="utf-8",
     )
-    engine = _loaded_engine({"backend_type": "mlx", "total_memory_gb": 16.0}, tmp_path)
+    working_set = 12 * 1024**3
+    engine = _loaded_engine(
+        {"backend_type": "mlx", "total_memory_gb": 16.0}, tmp_path, working_set=working_set
+    )
     try:
         budget = MemoryBudget.from_engine(engine)
     finally:
@@ -324,7 +374,7 @@ def test_from_engine_mlx_directory(tmp_path, monkeypatch):
     config_bytes = (tmp_path / "config.json").stat().st_size
     assert budget.weights_bytes == 5000 + config_bytes
     assert budget.kv_token_bytes == 98304
-    assert budget.total_bytes == 16 * 1024**3
+    assert budget.total_bytes == int(0.9 * working_set)
 
 
 def test_from_engine_llama_cpp_never_warns_even_with_full_facts(tmp_path):

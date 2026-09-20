@@ -138,6 +138,7 @@ non-functional behavior.
 - [ ] When compaction keeps the most recent turns, then it keeps them by a **token budget**, and a **single message larger than that budget is kept whole** — never dropped or truncated to fit.
 - [ ] When compaction is running, then a **transient animated status** shows it is happening; when it finishes, a **clickable separator** marks in the thread where the summary took over, and that marker survives a reload.
 - [ ] *(Apple Silicon)* When a model sits **near the machine's usable GPU budget** (its weights close to the working-set limit), then the memory signal and amber notice reflect that honestly — the accounting is against the GPU's usable working set, not total system RAM — so a model that comfortably fits never raises a false alarm, and one that is genuinely tight is caught before it fails.
+- [ ] *(Apple Silicon)* When the memory signal is measured, then it is accounted against the **GPU's usable working set** (0.9 x the recommended working set), not total system RAM, and compaction still fires at the **15 % margin floor** — this timing is **to be confirmed on the saturation scenario**: if auto-compaction fires too late there, the floor is the lever to raise.
 
 **Knowledge-Base / agentic behavior**
 - [ ] When the model has a KB attached and is **tool-capable (agentic)**, then on a document question the model **calls the KB search tool itself** before answering, and the answer references the source.
