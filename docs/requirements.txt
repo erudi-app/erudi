@@ -14,4 +14,4 @@ mkdocstrings[python]==1.0.6
 mkdocstrings-python==2.0.8
 griffe==2.3.0
 # Floor set by zensical (pymdown-extensions>=11.0); pin exact for reproducibility.
-pymdown-extensions==11.0.2
+pymdown-extensions==12.0.1
