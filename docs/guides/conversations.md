@@ -420,26 +420,33 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
 
 2. **Summarization middleware (compaction).** `SummarizationMiddleware`
    (`backend/src/agents/runner.py`, `_build_middleware`) runs on the **same local model**. It fires
-   on **two signals, whichever comes first**, recomputed on every turn (the middleware is built
-   after the inference child spawned, so both are fresh for this model on this machine):
+   when the conversation reaches **80 % of the working context window**, or on a **20-message
+   floor** — OR semantics, whichever comes first — recomputed on every turn (the middleware is built
+   after the inference child spawned, so the window is fresh for this model on this machine).
 
-   - **the window signal** — the conversation's token size reaches **80 % of the allocated context
-     window** (`BaseEngine.effective_context_tokens()`, the window the loaded child actually runs
-     with);
-   - **the memory signal** (**Apple Silicon only**) — the machine's deterministic memory margin
-     would drop under **15 %** (`backend/src/engines/memory_budget.py`): on-disk weights size plus
-     a per-token KV-cache cost (`2 × layers × kv_heads × head_dim × 2 bytes f16`, read from the
-     local artifact's `config.json`) against the unified-memory total. The signal exists only on
-     MLX because only MLX grows its KV cache lazily with usage; on both llama.cpp engines (CPU and
-     CUDA) the cache is allocated **in full at load** and the engine's own fit already guaranteed
-     it fits — memory use does not grow with the conversation, so there is nothing per-token to
-     measure (and on a discrete card, partial layer offload would make any single-pool accounting
-     dishonest anyway). The accounting deliberately never reads the OS's "available" memory (macOS
-     compression and swap make it non-deterministic); a model whose facts cannot be read simply
-     runs without the memory signal.
+   The **working context window** is the single canonical window the memory-aware parts of a turn
+   share (`backend/src/engines/working_window.py`, `working_context_tokens`): the **smaller** of
 
-   When no window is readable, the trigger falls back to the 20-message floor — which always rides
-   along with OR semantics anyway. Compaction keeps the last 10 messages, rewriting the checkpointer
+   - **the allocated context window** (`BaseEngine.effective_context_tokens()`, the window the
+     loaded child actually runs with), and
+   - **the memory ceiling** (**Apple Silicon only**) — the conversation token count at which the
+     machine's deterministic memory margin would drop under **15 %**
+     (`backend/src/engines/memory_budget.py`): on-disk weights size plus a per-token KV-cache cost
+     (`2 × layers × kv_heads × head_dim × 2 bytes f16`, read from the local artifact's
+     `config.json`) against the unified-memory total. The ceiling exists only on MLX because only
+     MLX grows its KV cache lazily with usage; on both llama.cpp engines (CPU and CUDA) the cache is
+     allocated **in full at load** and the engine's own fit already guaranteed it fits — memory use
+     does not grow with the conversation, so there is nothing per-token to measure (and on a
+     discrete card, partial layer offload would make any single-pool accounting dishonest anyway).
+     The accounting deliberately never reads the OS's "available" memory (macOS compression and swap
+     make it non-deterministic); a model whose facts cannot be read simply runs without the memory
+     ceiling.
+
+   over whichever of the two is known. When only the allocated window is known — the common case,
+   and every llama.cpp engine — the working window is the allocated window; when the weights alone
+   already blow the 15 % margin, compaction fires as early as it can. When neither window is
+   readable, the trigger falls back to the 20-message floor — which always rides along with OR
+   semantics anyway. Compaction keeps the last 10 messages, rewriting the checkpointer
    state: old turns are dropped and replaced by a summary, so the agent's context stays bounded. The
    `messages` table is untouched — the UI still shows the whole conversation.
 

@@ -2575,8 +2575,8 @@ def test_curated_empty_answer_messages_are_one_ascii_line_without_the_sentinel()
 
 
 def test_summarization_triggers_with_window():
-    """W_eff known: the window signal is 80 % of the ALLOCATED window, OR'd
-    with the 20-message floor."""
+    """A known working window: the token signal is 80 % of it, OR'd with the
+    20-message floor."""
     assert runner_module.summarization_triggers(10000) == [
         ("tokens", 8000),
         ("messages", runner_module.SUMMARY_TRIGGER_MESSAGES),
@@ -2589,35 +2589,102 @@ def test_summarization_triggers_without_window_is_messages_only():
     ]
 
 
-def test_summarization_triggers_memory_ceiling_folds_into_the_token_signal():
-    # Whichever token threshold comes FIRST wins (min), still OR'd with the floor.
-    assert runner_module.summarization_triggers(10000, memory_token_ceiling=5000) == [
-        ("tokens", 5000),
-        ("messages", 20),
-    ]
-    assert runner_module.summarization_triggers(10000, memory_token_ceiling=12000) == [
-        ("tokens", 8000),
-        ("messages", 20),
-    ]
-    assert runner_module.summarization_triggers(None, memory_token_ceiling=5000) == [
-        ("tokens", 5000),
-        ("messages", 20),
-    ]
-    # Weights alone already blow the floor: compact as aggressively as possible.
-    assert runner_module.summarization_triggers(None, memory_token_ceiling=-3) == [
+def test_summarization_triggers_clamps_a_tiny_window_to_at_least_one():
+    # int(0.8 * 1) == 0; the token signal must never be a non-positive count.
+    assert runner_module.summarization_triggers(1) == [
         ("tokens", 1),
         ("messages", 20),
     ]
+
+
+# The compaction trigger is now sized from the ONE canonical working window
+# (``min(allocated, memory_ceiling)`` over the known candidates), folded at the
+# call site by ``canonical_working_window`` and handed in as a single value.
+# These pin the fold + trigger together, exactly as ``_build_middleware`` runs
+# them.
+
+
+def _compaction_tokens(allocated, memory):
+    # Mirror ``_build_middleware`` exactly: a KNOWN memory ceiling is clamped up
+    # to >= 1 before folding (the compact-ASAP safety net for the corner where
+    # the weights alone already blow the 15 % floor), then canonical_working
+    # takes the min.
+    from src.engines.working_window import canonical_working_window
+
+    if memory is not None:
+        memory = max(1, memory)
+    working = canonical_working_window(allocated, memory)
+    triggers = dict(runner_module.summarization_triggers(working))
+    return triggers.get("tokens")
+
+
+def test_compaction_matches_the_old_min_formula_when_memory_does_not_bite():
+    # memory_ceiling >= allocated: the new int(0.8 * working) MUST equal the old
+    # min(int(0.8 * allocated), memory_ceiling) exactly.
+    allocated, memory = 10000, 12000
+    old = min(int(0.8 * allocated), memory)
+
+    assert _compaction_tokens(allocated, memory) == old == 8000
+
+
+def test_compaction_fires_earlier_when_memory_bites():
+    # memory_ceiling < allocated: trigger on int(0.8 * min(allocated, memory)).
+    allocated, memory = 10000, 5000
+
+    assert _compaction_tokens(allocated, memory) == int(0.8 * min(allocated, memory)) == 4000
+
+
+def test_compaction_without_a_memory_ceiling_is_the_allocated_window():
+    assert _compaction_tokens(10000, None) == int(0.8 * 10000) == 8000
+
+
+def test_compaction_with_no_window_but_a_memory_ceiling_triggers_on_memory():
+    assert _compaction_tokens(None, 5000) == int(0.8 * 5000) == 4000
+
+
+def test_compaction_with_neither_signal_has_no_token_trigger():
+    assert _compaction_tokens(None, None) is None
+    from src.engines.working_window import canonical_working_window
+
+    assert runner_module.summarization_triggers(canonical_working_window(None, None)) == [
+        ("messages", 20)
+    ]
+
+
+def test_compaction_fires_asap_when_the_weights_blow_the_floor():
+    # A non-positive ceiling means the weights alone already exceed the 15 %
+    # floor. The call site clamps it up to 1, so the working window is 1 and
+    # compaction fires as early as it can -- the historical safety net, kept
+    # until the reactive memory brake replaces it (PR3.4).
+    assert _compaction_tokens(10000, -3) == 1
+    assert _compaction_tokens(10000, 0) == 1
+    assert _compaction_tokens(None, -3) == 1
 
 
 def test_build_middleware_composes_the_two_signal_trigger(monkeypatch):
     from langchain.agents.middleware import SummarizationMiddleware
 
     monkeypatch.setattr(_FakeEngine, "effective_context_tokens", classmethod(lambda cls: 10000))
+    # Memory bites (5000 < 10000): the working window is the 5000 ceiling, and
+    # compaction fires at 80 % of it -- int(0.8 * 5000) == 4000, earlier than
+    # the ceiling itself (the safe direction).
     budget = SimpleNamespace(tokens_at_margin=lambda margin: 5000)
     built = AgentRunner()._build_middleware(ToolableFakeChatModel(messages=iter([])), budget)
     mw = next(m for m in built if isinstance(m, SummarizationMiddleware))
-    assert mw.trigger == [("tokens", 5000), ("messages", 20)]
+    assert mw.trigger == [("tokens", 4000), ("messages", 20)]
+
+
+def test_build_middleware_keeps_the_compact_asap_net_on_weights_overflow(monkeypatch):
+    # The weights alone already blow the 15 % floor: tokens_at_margin comes back
+    # non-positive. The call site clamps it up to 1 so the trigger is ("tokens",
+    # 1) -- compact ASAP, exactly as before PR3.1.
+    from langchain.agents.middleware import SummarizationMiddleware
+
+    monkeypatch.setattr(_FakeEngine, "effective_context_tokens", classmethod(lambda cls: 10000))
+    budget = SimpleNamespace(tokens_at_margin=lambda margin: -3)
+    built = AgentRunner()._build_middleware(ToolableFakeChatModel(messages=iter([])), budget)
+    mw = next(m for m in built if isinstance(m, SummarizationMiddleware))
+    assert mw.trigger == [("tokens", 1), ("messages", 20)]
 
 
 def test_build_middleware_without_window_or_budget_keeps_the_messages_floor():

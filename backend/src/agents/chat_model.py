@@ -433,8 +433,21 @@ def erudi_chat_openai_class():
         # the factory at build time (the client is rebuilt every turn, right
         # after the engine resolved the model, so the value is fresh across
         # model swaps). It raises the first-chunk ceiling to a full-window
-        # prefill; None (unknown window) keeps the 900 s constant.
+        # prefill; None (unknown window) keeps the 900 s constant. This is the
+        # TIME/BOUND value: the first-chunk watchdog and the preflight retry
+        # read it RAW, never the memory-folded working window below.
         effective_context_tokens: Optional[int] = None
+
+        # The MEMORY value: the ONE canonical working window
+        # (``src.engines.working_window`` -- min of the allocated window and the
+        # memory ceiling, over the known candidates), stamped by the factory
+        # alongside ``effective_context_tokens``. ONLY the output budget reads
+        # it, so an answer is sized against what the machine can actually hold,
+        # not the raw allocation. ``None`` (a client built without it) falls
+        # back to the allocated window in ``_astream`` -- which is exactly
+        # ``canonical_working_window(allocated, None)``, the working window when
+        # the memory ceiling is unknown -- so an unstamped client still budgets.
+        working_context_tokens: Optional[int] = None
 
         # Whether this client's ``max_tokens`` is a fallback the automatic
         # budget may replace (chat turns and the summarization calls that ride
@@ -468,10 +481,17 @@ def erudi_chat_openai_class():
             # kwarg wins over the constructor's ``max_tokens`` in
             # ``_get_request_payload`` (pinned); ``None`` leaves that value
             # alone, which is what an engine with no reportable window gets.
+            # The budget is a MEMORY consumer: it is sized from the working
+            # window, not the raw allocation. A client with no working window
+            # stamped falls back to the allocated one -- identical to
+            # canonical_working_window(allocated, None).
+            budget_window = (
+                self.working_context_tokens
+                if self.working_context_tokens is not None
+                else self.effective_context_tokens
+            )
             budget = (
-                compute_output_budget(
-                    messages, self.effective_context_tokens, override=output_budget_override()
-                )
+                compute_output_budget(messages, budget_window, override=output_budget_override())
                 if self.auto_output_budget
                 else None
             )

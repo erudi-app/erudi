@@ -18,6 +18,7 @@ from typing import TYPE_CHECKING, Optional
 
 from src.agents.chat_model import erudi_chat_openai_class
 from src.agents.reasoning_effort import EffortPlan
+from src.engines.working_window import working_context_tokens
 from src.core import config
 from src.core.logging import logger
 from src.database.generation_hints import (
@@ -99,6 +100,15 @@ def build_chat_model(
     window_probe = getattr(engine, "effective_context_tokens", None)
     effective_window = window_probe() if callable(window_probe) else None
 
+    # The MEMORY value for the SAME client: the ONE canonical working window
+    # (min of the allocated window and the memory ceiling, over the known
+    # candidates -- src.engines.working_window). Only the output budget reads
+    # it; the first-chunk watchdog and preflight retry keep the raw allocated
+    # window above. ``working_context_tokens`` calls ``MemoryBudget.from_engine``
+    # (disk I/O to read the loaded artifact + its config.json), which is safe
+    # here because this factory runs in a threadpool per turn.
+    working_window = working_context_tokens(engine)
+
     # Extra sampling params absent from the OpenAI wire schema. mlx_vlm.server reads
     # the HF names natively; llama.cpp engines translate them to their wire names
     # (repeat_penalty / repeat_last_n) via ``_translate_payload_kwargs``. Sent via
@@ -170,6 +180,7 @@ def build_chat_model(
         # replace it.
         stream_chunk_timeout=None,
         effective_context_tokens=effective_window,
+        working_context_tokens=working_window,
         auto_output_budget=auto_output_budget,
         streaming=True,
         stream_usage=False,  # local servers may not emit usage in SSE; summarization triggers on count
