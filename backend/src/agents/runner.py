@@ -80,6 +80,7 @@ from src.core import config
 from src.core.exceptions import EngineException, GenerationTimeoutException
 from src.core.logging import logger
 from src.engines.memory_budget import MemoryBudget
+from src.engines.working_window import canonical_working_window
 
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -135,18 +136,16 @@ MEMORY_MARGIN_FLOOR = 0.15
 SUMMARY_TOKEN_ALLOWANCE = 512
 
 
-def summarization_triggers(
-    effective_window: Optional[int], memory_token_ceiling: Optional[int] = None
-) -> list:
+def summarization_triggers(working_window: Optional[int]) -> list:
     """The OR-semantics trigger list for ``SummarizationMiddleware``.
 
-    ``effective_window`` is the ALLOCATED window (80 % of it becomes the token
-    threshold); ``memory_token_ceiling`` is the conversation token count at
-    which the memory margin hits its floor (``MemoryBudget.tokens_at_margin``,
-    possibly negative when the weights alone blow it -- clamped to 1 so
-    compaction fires as early as it can). The two fold into ONE ``tokens``
-    entry (min: whichever signal comes first) so the middleware sees at most
-    one token threshold plus the message floor.
+    ``working_window`` is the ONE canonical working context window
+    (``src.engines.working_window.canonical_working_window`` -- the minimum of
+    the allocated window and the memory ceiling, over whichever candidates are
+    known). Its 80 % (``COMPACTION_WINDOW_FRACTION``) becomes the token
+    threshold, OR'd with the ``SUMMARY_TRIGGER_MESSAGES`` message floor. The
+    memory fold happens at the call site, so this function sees a single value:
+    ``None`` (no window and no memory signal) leaves the message floor alone.
 
     Deliberately never ``("fraction", ...)``: that form needs a
     ``model.profile`` our local chat clients do not carry (the middleware's
@@ -158,14 +157,13 @@ def summarization_triggers(
     ``count_tokens_approximately`` call; both remain the same estimator
     family, never a second tokenizer.
     """
-    token_thresholds = []
-    if isinstance(effective_window, int) and effective_window > 0:
-        token_thresholds.append(int(COMPACTION_WINDOW_FRACTION * effective_window))
-    if memory_token_ceiling is not None:
-        token_thresholds.append(max(1, memory_token_ceiling))
     triggers: list = []
-    if token_thresholds:
-        triggers.append(("tokens", max(1, min(token_thresholds))))
+    if (
+        isinstance(working_window, int)
+        and not isinstance(working_window, bool)
+        and working_window > 0
+    ):
+        triggers.append(("tokens", max(1, int(COMPACTION_WINDOW_FRACTION * working_window))))
     triggers.append(("messages", SUMMARY_TRIGGER_MESSAGES))
     return triggers
 
@@ -1090,12 +1088,27 @@ class AgentRunner:
             if memory_budget is not None
             else None
         )
+        # Compact-ASAP safety net: a non-positive ceiling means the weights
+        # alone already blow the 15 % floor. Clamp it up to 1 so the working
+        # window is 1 and compaction fires as early as it can -- replacing N
+        # messages with one summary shrinks the live KV, which is exactly what
+        # relieves a weights-dominated machine. This clamp is DELIBERATELY only
+        # on the compaction path: the output budget (working_context_tokens,
+        # which does NOT clamp) keeps sizing from the allocated window in this
+        # corner, precisely what it did before PR3.1. Both views get unified
+        # when the reactive memory brake lands (PR3.4).
+        if memory_token_ceiling is not None:
+            memory_token_ceiling = max(1, memory_token_ceiling)
+        # Fold the allocated window and the memory ceiling into the ONE
+        # canonical working window (the memory consumer's value); the raw
+        # allocated window stays with the time/bound consumers elsewhere.
+        working_window = canonical_working_window(effective_window, memory_token_ceiling)
         return [
             _StripStaleImagesMiddleware(),
             _StripStaleToolResults(),
             _Logged_Summarization_Middleware(
                 model=model,
-                trigger=summarization_triggers(effective_window, memory_token_ceiling),
+                trigger=summarization_triggers(working_window),
                 keep=("messages", SUMMARY_KEEP_MESSAGES),
                 token_counter=count_tokens_approximately,
                 summary_prompt=SUMMARY_PROMPT,

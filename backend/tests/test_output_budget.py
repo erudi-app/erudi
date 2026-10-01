@@ -525,6 +525,136 @@ async def test_the_stream_budgets_the_call_from_the_window_and_the_messages(monk
     assert captured["max_tokens"] != 1234
 
 
+# ===================== working window vs. allocated window (PR3.1) =====================
+#
+# The output budget is a MEMORY consumer: it is sized from the ONE canonical
+# working window (min of the allocated window and the memory ceiling), NOT the
+# raw allocated window. The watchdog and the preflight retry are TIME/BOUND
+# consumers and keep reading the raw allocated window. These pin that split on
+# a single client that carries BOTH values.
+
+
+async def test_the_budget_prefers_the_working_window_over_the_allocated_window(monkeypatch):
+    from langchain_openai import ChatOpenAI
+
+    captured: dict = {}
+
+    async def _capture(self, messages, *args, **kwargs):
+        captured.update(kwargs)
+        yield "chunk"
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _capture)
+    messages = [HumanMessage(_text(200))]
+    client = _client(max_tokens=1234, effective_context_tokens=32768, working_context_tokens=8000)
+
+    assert [c async for c in client._astream(messages)] == ["chunk"]
+    # Sized from the 8000 working window, NOT the 32768 allocation.
+    assert captured["max_tokens"] == compute_output_budget(messages, 8000)
+    assert captured["max_tokens"] != compute_output_budget(messages, 32768)
+
+
+async def test_the_budget_falls_back_to_the_allocated_window_without_a_working_window(monkeypatch):
+    # A client built with only the allocated window stamped still budgets, from
+    # that window -- identical to canonical_working_window(allocated, None).
+    from langchain_openai import ChatOpenAI
+
+    captured: dict = {}
+
+    async def _capture(self, messages, *args, **kwargs):
+        captured.update(kwargs)
+        yield "chunk"
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _capture)
+    messages = [HumanMessage(_text(200))]
+    client = _client(max_tokens=1234, effective_context_tokens=32768)
+
+    assert [c async for c in client._astream(messages)] == ["chunk"]
+    assert captured["max_tokens"] == compute_output_budget(messages, 32768)
+
+
+async def test_the_watchdog_reads_the_allocated_window_not_the_working_one(monkeypatch):
+    # #573 ceiling scales with the PHYSICAL prefill the child must do, which is
+    # the raw allocation -- a memory-shrunk working window must not shorten it.
+    from langchain_openai import ChatOpenAI
+
+    from src.agents import chat_model as chat_model_module
+
+    seen: dict = {}
+
+    def _spy(estimated, effective_window_tokens=None):
+        seen["window"] = effective_window_tokens
+        return 0.3
+
+    monkeypatch.setattr(chat_model_module, "first_chunk_budget_s", _spy)
+
+    async def _fast(self, messages, *args, **kwargs):
+        yield "a"
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _fast)
+    client = _client(max_tokens=1234, effective_context_tokens=32768, working_context_tokens=8000)
+
+    assert [c async for c in client._astream([_Msg("hi")])] == ["a"]
+    assert seen["window"] == 32768
+
+
+async def test_the_preflight_retry_reads_the_allocated_window_not_the_working_one(monkeypatch):
+    # The retry fits `prompt + max_tokens` against the child's REAL window, the
+    # raw allocation -- sizing the retry from the smaller working window would
+    # hand back a budget below what the child can actually take.
+    from langchain_openai import ChatOpenAI
+
+    from src.agents import chat_model as chat_model_module
+
+    window = 32768
+    seen: dict = {}
+    real = chat_model_module.preflight_retry_budget
+
+    def _spy(exc, window_tokens):
+        seen["window"] = window_tokens
+        return real(exc, window_tokens)
+
+    monkeypatch.setattr(chat_model_module, "preflight_retry_budget", _spy)
+
+    async def _server(self, messages, *args, **kwargs):
+        if not seen.get("raised"):
+            seen["raised"] = True
+            raise _PreflightRejection(prompt=30000, generation=kwargs["max_tokens"], window=window)
+        yield "answer"
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    client = _client(max_tokens=1234, effective_context_tokens=window, working_context_tokens=8000)
+
+    assert [c async for c in client._astream([HumanMessage(_CJK)])] == ["answer"]
+    assert seen["window"] == window
+
+
+def test_the_factory_stamps_both_the_allocated_and_working_windows(monkeypatch):
+    from types import SimpleNamespace
+
+    from src.agents.model_factory import build_chat_model
+    from src.core import config
+    from src.engines import working_window as ww
+
+    class _WindowedEngine(_Engine):
+        @staticmethod
+        def effective_context_tokens():
+            return 40_960
+
+    monkeypatch.setattr(config, "LLM_Engine", _WindowedEngine)
+    # Force a memory ceiling below the allocation: the working window folds to
+    # it, the allocated window is left untouched.
+    monkeypatch.setattr(
+        ww.MemoryBudget,
+        "from_engine",
+        staticmethod(lambda engine: SimpleNamespace(tokens_at_margin=lambda margin: 8000)),
+    )
+
+    chat = build_chat_model(_Llm(), temperature=0.3, top_p=0.8, max_tokens=55)
+
+    assert chat.effective_context_tokens == 40_960
+    assert chat.working_context_tokens == 8000
+
+
 async def test_without_a_window_the_stream_keeps_the_resolved_value(monkeypatch):
     from langchain_openai import ChatOpenAI
 

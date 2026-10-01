@@ -684,9 +684,13 @@ class BaseEngine(ABC, metaclass=EngineMeta):
 
     @classmethod
     def _should_cleanup(cls) -> bool:
-        # Active-marker contract: `_last_used = None` means a generation is
-        # in flight (set by `generation_guard`). Returning False here is what
-        # blocks the idle monitor from reaping the model mid-generation.
+        # `_last_used is None` means the model was never loaded or was just
+        # cleaned up (`cleanup()` is the only writer that nulls it;
+        # `generation_guard` only ever stamps a fresh timestamp, on release).
+        # Returning False here just declines to reap when there is nothing
+        # loaded to reap. The mid-generation reap protection is NOT this
+        # sentinel: it is the shared generation LOCK, which `_cleanup_tick`
+        # acquires too, so cleanup cannot run while a generation holds it.
         if cls._last_used is None or cls._model is None:
             return False
         idle_time = datetime.now() - cls._last_used

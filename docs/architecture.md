@@ -54,8 +54,9 @@ Routers are mounted under the `/erudi` prefix in `register_routers`
 - **Entities**: `Conversation`, `Message`
 - **Conversation state**: held by the LangGraph checkpointer, not rebuilt from the
   message table; older turns are compacted by a summarization middleware when the
-  conversation reaches 80 % of the allocated context window or the machine's memory
-  margin runs low (see the [Conversations guide](guides/conversations.md))
+  conversation reaches 80 % of the working context window (the smaller of the
+  allocated window and the Apple-Silicon memory ceiling; see the
+  [Conversations guide](guides/conversations.md))
 - [Reference](reference/conversations.md)
 
 ### 2. LLMs

@@ -18,7 +18,7 @@ Architecture:
     │  1. Select engine (MLX_Engine/CUDA_Engine/CPU_Engine)       │
     │  2. Create SQLAlchemy tables                                │
     │  3. Seed database with default models                       │
-    │  4. Start cleanup task (30s interval)                       │
+    │  4. Start cleanup task (300s interval)                      │
     └─────────────────────────────────────────────────────────────┘
                               ↓
     ┌─────────────────────────────────────────────────────────────┐
