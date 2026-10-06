@@ -1,7 +1,7 @@
 """The ChatOpenAI seam: what Erudi changes about the stock client, and where.
 
 ``Erudi_Chat_OpenAI`` (built lazily by :func:`erudi_chat_openai_class`) carries
-four behaviours, each on the narrowest hook that expresses it:
+five behaviours, each on the narrowest hook that expresses it:
 
 1. **The #573 two-phase streaming watchdog**, in ``_astream`` -- the single
    place ``ChatOpenAI`` routes async streaming through, and the only hook that
@@ -28,6 +28,12 @@ four behaviours, each on the narrowest hook that expresses it:
    runner reads it (pinned in ``tests/test_stream_watchdog.py``).
 4. **The legacy token-cap key**, in ``_get_request_payload`` -- see
    ``The wire name of the cap`` below.
+5. **The abandoned-stream flag**, also in ``_astream``: every attempt is
+   consumed under ``contextlib.aclosing`` so a closed or cancelled call closes
+   its HTTP response at once, and a call that did not end normally then calls
+   ``abandon_hook`` -- bound by the factory to the engine handle the client was
+   built against -- so the MLX engine sends a barrier before its next prefix
+   cache reset (``src.engines.mlx_engine``).
 
 The hooks are disjoint -- the conversion runs INSIDE the budgeted stream, so
 extraction never loosens the watchdog -- and all of them rest on upstream
@@ -90,8 +96,9 @@ estimated prompt size, then an honest error turn).
 from __future__ import annotations
 
 import asyncio
+import contextlib
 from functools import lru_cache
-from typing import Any, AsyncIterator, Iterable, Optional
+from typing import Any, AsyncIterator, Callable, Iterable, Optional
 
 from src.agents.output_budget import compute_output_budget, output_budget_override
 from src.agents.overflow import parse_context_overflow
@@ -425,6 +432,7 @@ def erudi_chat_openai_class():
     assumptions both rest on are pinned by ``tests/test_stream_watchdog.py``.
     """
     from langchain_openai import ChatOpenAI
+    from pydantic import Field
 
     class Erudi_Chat_OpenAI(ChatOpenAI):
         """``ChatOpenAI`` with the #573 watchdog and the #554 reasoning carry."""
@@ -458,6 +466,30 @@ def erudi_chat_openai_class():
         # first four words. ``ainvoke`` on a ``streaming=True`` client routes
         # through ``_astream``, so the distinction has to live here.
         auto_output_budget: bool = True
+
+        # Called when a model call's stream did not end normally (closed by
+        # its consumer, cancelled, timed out, failed -- or rejected by the
+        # preflight and retried, which costs one barrier and is accepted for
+        # simplicity), AFTER the inner HTTP stream is closed. The factory binds
+        # it to the engine handle captured at build time
+        # (``engine.note_stream_abandoned(handle)``), so a finalizer that runs
+        # after a model swap still flags the child the stream ran against.
+        # The MLX engine then sends a barrier request before its next prefix
+        # cache reset (``src.engines.mlx_engine``). ``None``: nothing to tell.
+        abandon_hook: Optional[Callable[[], None]] = Field(default=None, exclude=True)
+
+        def _notify_abandoned(self) -> None:
+            hook = self.abandon_hook
+            if hook is None:
+                return
+            try:
+                hook()
+            except Exception:
+                # Runs in a ``finally``: a failure here must never replace the
+                # exception (or the cancellation) the stream is ending with.
+                # The runner flags the same handle again when its turn ends
+                # abnormally; this record says the client-level flag was lost.
+                logger.warning("Flagging an abandoned model stream failed", exc_info=True)
 
         def _budgeted_stream(self, messages, estimated, *args, **kwargs):
             """One attempt at the model call, under both watchdog budgets."""
@@ -498,48 +530,67 @@ def erudi_chat_openai_class():
             if budget is not None:
                 kwargs["max_tokens"] = budget
 
-            yielded = 0
+            # Every attempt is consumed under ``aclosing``: when this
+            # generator is closed (GeneratorExit at the yield) or cancelled,
+            # the watchdog's ``finally`` closes the HTTP response NOW --
+            # never later from a garbage-collector finalizer -- so the child
+            # cancels the request at once. Only after that is the abandon
+            # hook called.
+            ended_normally = False
             try:
-                async for chunk in self._budgeted_stream(messages, estimated, *args, **kwargs):
-                    yielded += 1
-                    yield chunk
-                return
-            except Exception as exc:
-                # The budget was sized from an estimate; mlx_vlm.server checks
-                # the REAL prompt and rejects the whole call when the two do
-                # not fit together. Its rejection NAMES the exact prompt count,
-                # so the one thing missing is now in hand: retry once with a
-                # budget that fits for certain. Only before the first chunk --
-                # mid-stream there is nothing to retry, the user has already
-                # seen text. Only once, and only for that specific wire shape,
-                # so nothing else in the 400 space is silently replayed.
-                # An operator pin (ERUDI_MAX_TOKENS) is never substituted: it
-                # exists precisely to reproduce exact budgets, so a preflight
-                # rejection of the pinned value re-raises into the honest
-                # overflow turn instead of silently running a different one.
-                retry_budget = (
-                    preflight_retry_budget(exc, self.effective_context_tokens)
-                    if yielded == 0 and output_budget_override() is None
-                    else None
-                )
-                if retry_budget is None:
-                    raise
-                logger.info(
-                    f"Output budget overshot the engine's context check; retrying once "
-                    f"with the server's own prompt count: max_tokens={retry_budget}, "
-                    f"model={self.model_name}"
-                )
+                yielded = 0
+                try:
+                    async with contextlib.aclosing(
+                        self._budgeted_stream(messages, estimated, *args, **kwargs)
+                    ) as stream:
+                        async for chunk in stream:
+                            yielded += 1
+                            yield chunk
+                    ended_normally = True
+                    return
+                except Exception as exc:
+                    # The budget was sized from an estimate; mlx_vlm.server
+                    # checks the REAL prompt and rejects the whole call when
+                    # the two do not fit together. Its rejection NAMES the
+                    # exact prompt count, so the one thing missing is now in
+                    # hand: retry once with a budget that fits for certain.
+                    # Only before the first chunk -- mid-stream there is
+                    # nothing to retry, the user has already seen text. Only
+                    # once, and only for that specific wire shape, so nothing
+                    # else in the 400 space is silently replayed. An operator
+                    # pin (ERUDI_MAX_TOKENS) is never substituted: it exists
+                    # precisely to reproduce exact budgets, so a preflight
+                    # rejection of the pinned value re-raises into the honest
+                    # overflow turn instead of silently running a different one.
+                    retry_budget = (
+                        preflight_retry_budget(exc, self.effective_context_tokens)
+                        if yielded == 0 and output_budget_override() is None
+                        else None
+                    )
+                    if retry_budget is None:
+                        raise
+                    logger.info(
+                        f"Output budget overshot the engine's context check; retrying once "
+                        f"with the server's own prompt count: max_tokens={retry_budget}, "
+                        f"model={self.model_name}"
+                    )
 
-            kwargs["max_tokens"] = retry_budget
-            # A FRESH watchdog clock on purpose: the rejection came from the
-            # preflight, before any prefill, so the first attempt spent
-            # essentially none of its budget. The retry is the attempt that
-            # actually prefills and must get the full budget its prompt size
-            # earns -- charging it for a wait that never happened would
-            # recreate the #573 kill on exactly the long turns this path exists
-            # for.
-            async for chunk in self._budgeted_stream(messages, estimated, *args, **kwargs):
-                yield chunk
+                kwargs["max_tokens"] = retry_budget
+                # A FRESH watchdog clock on purpose: the rejection came from
+                # the preflight, before any prefill, so the first attempt
+                # spent essentially none of its budget. The retry is the
+                # attempt that actually prefills and must get the full budget
+                # its prompt size earns -- charging it for a wait that never
+                # happened would recreate the #573 kill on exactly the long
+                # turns this path exists for.
+                async with contextlib.aclosing(
+                    self._budgeted_stream(messages, estimated, *args, **kwargs)
+                ) as stream:
+                    async for chunk in stream:
+                        yield chunk
+            finally:
+                if not ended_normally:
+                    self._notify_abandoned()
 
         def _get_request_payload(self, input_, *, stop=None, **kwargs):
             """Send the token cap as ``max_tokens`` (see the module docstring).

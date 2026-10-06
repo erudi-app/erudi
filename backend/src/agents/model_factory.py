@@ -14,6 +14,7 @@ langchain's single uniform ``stream_chunk_timeout``.
 
 from __future__ import annotations
 
+import functools
 from typing import TYPE_CHECKING, Optional
 
 from src.agents.chat_model import erudi_chat_openai_class
@@ -141,6 +142,14 @@ def build_chat_model(
     translate = getattr(engine, "_translate_payload_kwargs", lambda kw: kw)
     extra_body = translate(raw_kwargs)
 
+    # A stream that does not end normally flags the child it ran against
+    # (``Erudi_Chat_OpenAI.abandon_hook``; the MLX engine then sends a barrier
+    # before its next prefix-cache reset). Bound NOW to this handle, never
+    # re-read from the engine later: a stream finalized after a model swap
+    # must flag its own child, not whichever child is loaded by then.
+    note_abandoned = getattr(engine, "note_stream_abandoned", None)
+    abandon_hook = functools.partial(note_abandoned, handle) if callable(note_abandoned) else None
+
     # Log the extra_body AS SENT (post-translation, so llama.cpp's wire names
     # show up), one key=value per entry on the same line: the optional profile
     # keys (top_k / min_p / presence_penalty, #388) are otherwise invisible in
@@ -182,6 +191,7 @@ def build_chat_model(
         effective_context_tokens=effective_window,
         working_context_tokens=working_window,
         auto_output_budget=auto_output_budget,
+        abandon_hook=abandon_hook,
         streaming=True,
         stream_usage=False,  # local servers may not emit usage in SSE; summarization triggers on count
     )
