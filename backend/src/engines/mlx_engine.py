@@ -617,9 +617,9 @@ class MLX_Engine(BaseChatServerEngine):
         It proves a cancelled request has settled only because the child runs
         one sequence at a time (``MLX_VLM_MAX_NUM_SEQS=1``, see the section
         comment above). Bounded by the first-chunk ceiling for this child's
-        window: the
-        barrier may queue behind the last step of a cancelled prefill, and
-        that step can legitimately last as long as a long prefill does.
+        window: the barrier may queue behind the last step of a cancelled
+        prefill, and that step can legitimately last as long as a long
+        prefill does.
         """
         from src.agents.chat_model import first_chunk_ceiling_s
 
