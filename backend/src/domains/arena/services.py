@@ -16,6 +16,7 @@ this endpoint); the runner's engine guard serializes them on the single-model
 engine, so model swaps don't thrash the subprocess.
 """
 
+import contextlib
 import time
 from typing import AsyncGenerator, Dict, Any
 
@@ -194,24 +195,30 @@ class ArenaService:
         if attachment_notice:
             response += attachment_notice
             yield attachment_notice
-        async for token in self.runner.astream_text(
-            llm=llm,
-            user_message=self._build_user_message(
-                prepend_attachment_block(attachments.block, payload.question), payload.images
-            ),
-            system_prompt=plan.system_prompt,
-            params=params,
-            thread_id=None,
-            summarize=False,
-            kb_context_block=plan.kb_context_block,
-            kb_language_line=plan.kb_language_line,
-            tools=plan.tools,
-            context=plan.context,
-            supports_vision=supports_vision,
-            effort_plan=effort_plan,
-        ):
-            response += token
-            yield token
+        # ``aclosing``: a client that goes away closes the runner (and the
+        # generation guard it holds) now, not whenever the garbage collector
+        # finalizes the generator.
+        async with contextlib.aclosing(
+            self.runner.astream_text(
+                llm=llm,
+                user_message=self._build_user_message(
+                    prepend_attachment_block(attachments.block, payload.question), payload.images
+                ),
+                system_prompt=plan.system_prompt,
+                params=params,
+                thread_id=None,
+                summarize=False,
+                kb_context_block=plan.kb_context_block,
+                kb_language_line=plan.kb_language_line,
+                tools=plan.tools,
+                context=plan.context,
+                supports_vision=supports_vision,
+                effort_plan=effort_plan,
+            )
+        ) as tokens:
+            async for token in tokens:
+                response += token
+                yield token
 
         duration_ms = (time.perf_counter() - start_s) * 1000
         logger.info(

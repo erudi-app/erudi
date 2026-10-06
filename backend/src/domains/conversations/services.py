@@ -12,6 +12,7 @@ consumes them directly on the event loop); all synchronous SQLAlchemy work is
 wrapped in ``run_in_threadpool`` so DB commits never block the loop.
 """
 
+import contextlib
 import json
 import re
 import time
@@ -438,40 +439,49 @@ class ConversationService:
                 assistant_response += attachment_notice
                 yield _ndjson({"t": "answer", "text": attachment_notice})
 
-            async for event in self.runner.astream_text(
-                llm=llm,
-                user_message=user_message,
-                system_prompt=plan.system_prompt,
-                params=params,
-                thread_id=str(conversation_id),
-                summarize=True,
-                kb_context_block=plan.kb_context_block,
-                kb_language_line=plan.kb_language_line,
-                tools=plan.tools,
-                context=plan.context,
-                supports_vision=supports_vision,
-                effort_plan=effort_plan,
-                emit_events=True,
-            ):
-                if event["t"] == "answer":
-                    text = event["text"]
-                    # Persistence is unchanged: the full answer text (including a
-                    # sentinel error string, if any) is accumulated for the DB.
-                    assistant_response += text
-                    if text.startswith(ERROR_SENTINEL):
-                        yield _ndjson(build_stream_error_event(event))
-                    else:
+            # ``aclosing``: Starlette never closes a body iterator, so a client
+            # that goes away would otherwise leave the runner (and LangGraph,
+            # and the generation guard it holds) to the garbage collector.
+            # Closing this generator now closes the whole chain at once.
+            async with contextlib.aclosing(
+                self.runner.astream_text(
+                    llm=llm,
+                    user_message=user_message,
+                    system_prompt=plan.system_prompt,
+                    params=params,
+                    thread_id=str(conversation_id),
+                    summarize=True,
+                    kb_context_block=plan.kb_context_block,
+                    kb_language_line=plan.kb_language_line,
+                    tools=plan.tools,
+                    context=plan.context,
+                    supports_vision=supports_vision,
+                    effort_plan=effort_plan,
+                    emit_events=True,
+                )
+            ) as events:
+                async for event in events:
+                    if event["t"] == "answer":
+                        text = event["text"]
+                        # Persistence is unchanged: the full answer text
+                        # (including a sentinel error string, if any) is
+                        # accumulated for the DB.
+                        assistant_response += text
+                        if text.startswith(ERROR_SENTINEL):
+                            yield _ndjson(build_stream_error_event(event))
+                        else:
+                            yield _ndjson(event)
+                    elif event["t"] == "memory_warning":
+                        # Wire only, NEVER the persisted trace (1.1.2): the
+                        # warning describes the machine's memory NOW -- an old
+                        # conversation reopened on a bigger machine must not
+                        # replay it as if it still applied.
                         yield _ndjson(event)
-                elif event["t"] == "memory_warning":
-                    # Wire only, NEVER the persisted trace (1.1.2): the
-                    # warning describes the machine's memory NOW -- an old
-                    # conversation reopened on a bigger machine must not
-                    # replay it as if it still applied.
-                    yield _ndjson(event)
-                else:
-                    # thinking / tool_call / tool_result -> wire AND replay trace.
-                    trace.append(event)
-                    yield _ndjson(event)
+                    else:
+                        # thinking / tool_call / tool_result -> wire AND
+                        # replay trace.
+                        trace.append(event)
+                        yield _ndjson(event)
             await _persist_assistant_once()
             yield _ndjson({"t": "done"})
         except Exception:
@@ -530,15 +540,18 @@ class ConversationService:
 
         generated_title = ""
         try:
-            async for chunk in self.runner.astream_oneshot(
-                llm=llm,
-                prompt_text=prompt_text,
-                temperature=temperature,
-                top_p=top_p,
-                max_tokens=12,
-            ):
-                generated_title += chunk
-                yield chunk
+            async with contextlib.aclosing(
+                self.runner.astream_oneshot(
+                    llm=llm,
+                    prompt_text=prompt_text,
+                    temperature=temperature,
+                    top_p=top_p,
+                    max_tokens=12,
+                )
+            ) as chunks:
+                async for chunk in chunks:
+                    generated_title += chunk
+                    yield chunk
         finally:
             final_title = _sanitize_title(generated_title) or "New Conversation"
             duration_ms = (time.perf_counter() - start_s) * 1000

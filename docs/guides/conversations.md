@@ -446,14 +446,45 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    and every llama.cpp engine — the working window is the allocated window; when the weights alone
    already blow the 15 % margin, compaction fires as early as it can. When neither window is
    readable, the trigger falls back to the 20-message floor — which always rides along with OR
-   semantics anyway. Compaction keeps the last 10 messages, rewriting the checkpointer
-   state: old turns are dropped and replaced by a summary, so the agent's context stays bounded. The
-   `messages` table is untouched — the UI still shows the whole conversation.
+   semantics anyway. Compaction rewrites the checkpointer state: old turns are dropped and replaced
+   by a summary, so the agent's context stays bounded. The `messages` table is untouched — the UI
+   still shows the whole conversation.
+
+   **What a compaction keeps** is bounded twice (`compaction_cutoff` in `runner.py`): at most the
+   last **10 messages** *and* at most a **token budget** of
+   `max(1, min(0.4 × W, 0.8 × W − summary_cap(W) − 256))` tokens, `W` being the working window —
+   whichever keeps less. One bound alone would loop: ten long messages can by themselves exceed
+   the 80 % trigger, and a token budget made of many short messages can leave 20 messages, which
+   re-fires the message floor. With both, the state left behind sits under `0.8 × W − 256`, so the
+   next model call does not compact again. A last message larger than the budget on its own is kept
+   whole (it is summarized on a later turn), and an assistant message is never separated from its
+   tool results — a turn with many parallel tool calls can therefore keep more than either bound.
+   In the corner where the loaded model alone already exceeds the memory floor (`W = 1`), every
+   model call compacts down to the last message. Without a known window the keep is the last 10
+   messages. Both the trigger and the keep count tokens with the same `chars / 4` estimator.
+
+   **The summary itself is bounded**: the summary client is capped at
+   `summary_cap(W) = clamp(W / 8, 128, 1024)` tokens, with no automatic output budget. It reads up
+   to `max(256, min(max(4000, 0.8 × W − cap), W − 2 × cap − 256, (allocated − 2 × cap − 512) / 3))`
+   tokens of the history being summarized — sized from the working window, and kept inside the
+   allocated window even when `chars / 4` under-counts threefold (Chinese, Japanese). The **previous
+   summary is always part of what the summarizer reads**, prepended on top of that budget, so the
+   facts it carries survive every compaction.
+
+   **A failed summary never erases memory.** A transient failure of the summary call (the child
+   unreachable or dead, a timeout, HTTP 408/409/429/5xx) fails the turn with the history intact: no
+   summary is written and the next turn retries. A deterministic failure (a context overflow or
+   another 4xx) — or a history where no user turn fits the summarizer's budget because one answer
+   alone exceeds it — is retried once with oversized messages truncated (and the budget halved after
+   a rejection); if that fails too, the compaction writes a placeholder that **carries the previous
+   summary** followed by "Later messages of this conversation could not be summarized." The
+   conversation keeps working, and `backend.log` carries one warning per failed attempt.
 
    **Warn only when compaction cannot save you**: the middleware compacts in `before_model`, so
    this turn's growth is compacted on the *next* turn. At the end of each turn the runner therefore
-   projects the thread past an ideal compaction — the last 10 messages plus a 512-token summary
-   allowance — and emits one `memory_warning` event only if even that projected size still leaves
+   projects the thread past an ideal compaction — the tail `compaction_cutoff` would keep plus a
+   `summary_cap(W)`-token summary (the last 10 messages plus a 512-token allowance when no window is
+   known) — and emits one `memory_warning` event only if even that projected size still leaves
    the memory margin under 15 %. The renderer then shows an amber notice above the composer with
    the conversation's approximate memory size. The warning is about the machine *now*, so it is
    never persisted and clears on the next turn that carries none.
@@ -464,6 +495,25 @@ replayed state before the model is called.
 If a turn fails mid-super-step and leaves a dangling user message in the checkpointer, the runner
 appends an error assistant message so the thread keeps alternating roles — otherwise the next turn
 would send two consecutive user messages and the chat template would reject it.
+
+### The prefix cache holds one conversation (Apple Silicon)
+
+On Apple Silicon the inference child keeps a **prefix cache**: a turn re-reads only the part of the
+prompt the previous turn did not already process. That cache belongs to **one conversation at a
+time**. Every turn claims it for its conversation (the Arena claims it for itself; titles claim
+nothing), and it is **reset** when another conversation claims it and when compaction rewrites the
+history — a cached prefix is then never another conversation's, and never a history that no longer
+exists. `backend.log` records each reset as `Prefix cache reset: reason=<conversation_change|arena|compaction>`.
+
+The cost is deliberate: **switching conversation re-reads the history** of the conversation you
+switch to on its first turn (a longer wait before the first word), and alternating between two
+conversations pays that on every switch. Staying in one conversation keeps the cache warm.
+
+A reset never fails a turn: when the child cannot be reached it is deferred (one warning) and
+retried on the next turn. When a turn was stopped mid-generation, the next reset first sends a
+one-token request so the stopped request is fully settled before the cache is cleared, and a reset
+in progress is always finished before the next turn, title or idle unload starts. The llama.cpp
+engines (CPU, CUDA) manage their own cache and are untouched by this.
 
 ## The system prompt and the KB budget
 

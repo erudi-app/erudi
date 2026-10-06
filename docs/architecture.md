@@ -192,8 +192,17 @@ Conversations and Arena share one streaming primitive, `AgentRunner`
 
 - **Conversations** run with a `thread_id`, summarization enabled, and the LangGraph
   checkpointer, so history is restored from the checkpointer (only the new message is
-  sent) and older turns are summarized in the agent state.
+  sent) and older turns are summarized in the agent state. A compaction keeps at most
+  10 messages and at most a token budget of the working window, and its summary is
+  capped (see the [Conversations guide](guides/conversations.md)).
 - **Arena** runs stateless: no `thread_id`, no summarization, no checkpointer.
+
+Each conversation or Arena turn claims the engine's prefix cache for itself
+(`claim_prefix`); on Apple Silicon the cache holds one conversation at a time and is
+reset on a conversation change and after a compaction (see
+[Engines](dev/architecture/engines.md#prefix-cache-mlx)). The generators between the
+service and LangGraph are consumed under `contextlib.aclosing`, so a stream its consumer
+closes is torn down inside the generation guard.
 
 A turn is captured as structured events — `answer`, `thinking`, `tool_call`,
 `tool_result` — which the conversation service frames as NDJSON. Arena projects the same
