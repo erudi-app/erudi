@@ -77,7 +77,9 @@ at import/init): `apc_num_blocks` sizes the Automatic Prefix Caching pool so a
 `token_queue_timeout_s` lifts the child's per-token wait above the parent's
 first-chunk watchdog ceiling so a long cold prefill is owned by the parent's
 curated turn. Both default to `None` (mlx-vlm's own defaults) for callers and
-tests that only pass `argv`/`log_path`.
+tests that only pass `argv`/`log_path`. The same helper always caps the running
+batch at one sequence (`MLX_VLM_MAX_NUM_SEQS=1`), which the prefix-cache
+barrier relies on (see `_apply_child_runtime_env`).
 
 Once invoked, this function blocks for the lifetime of the HTTP server,
 exiting only when the child process is terminated by the parent.
@@ -284,6 +286,17 @@ def _apply_child_runtime_env(
       parent's first-chunk watchdog ceiling so a long cold prefill trips the
       parent's curated timeout, not the child's raw error; ``None`` leaves
       mlx-vlm's own default (600 s).
+    - ``MLX_VLM_MAX_NUM_SEQS=1``: one sequence in the running batch at a time.
+      The prefix-cache barrier (``MLX_Engine._send_barrier``) relies on it.
+      mlx-vlm's GPU loop admits new requests BEFORE it drains cancellations
+      (``server/generation.py``: ``_collect_pending_requests``, then
+      ``_drain_cancellations``), and its batch is unbounded by default, so a
+      barrier could run in the same step as a cancelled request whose
+      cancellation is not registered yet, finish, and let the reset clear
+      blocks that request still holds. With a capacity of
+      ``max(0, 1 - len(active))`` the barrier is only admitted once the
+      cancelled request has left the batch. Nothing is lost: Erudi already
+      serializes every request to the child behind the generation guard.
 
     Uses ``os.environ.update`` (not ``os.environ[name] = ...``) on purpose: these
     are knobs the parent WRITES for the mlx-vlm child, not configuration the
@@ -292,6 +305,7 @@ def _apply_child_runtime_env(
     env = {
         "APC_ENABLED": "1",
         "APC_BLOCK_SIZE": str(APC_BLOCK_SIZE_TOKENS),
+        "MLX_VLM_MAX_NUM_SEQS": "1",
     }
     if apc_num_blocks is not None:
         env["APC_NUM_BLOCKS"] = str(int(apc_num_blocks))
@@ -342,9 +356,10 @@ def run_mlx_vlm_server(
             # last words. Reported on the inherited stderr, which the Electron
             # main process writes to the app log.
             print(f"[WARNING] mlx-vlm child output capture disabled: {exc}", file=sys.stderr)
-    # APC on + the aligned token-queue timeout, BEFORE the server is imported:
-    # mlx-vlm reads both from the environment at import/init time (the APC pool
-    # in `apc.from_env`, the timeout in `server.runtime_config`).
+    # APC on, the aligned token-queue timeout and the one-sequence batch,
+    # BEFORE the server is imported: mlx-vlm reads them from the environment
+    # (the APC pool in `apc.from_env`, the timeout in `server.runtime_config`,
+    # the batch cap when its generation loop starts).
     _apply_child_runtime_env(apc_num_blocks, token_queue_timeout_s)
     # Applied in-child before the server loads any model so quantized
     # tied-embeddings Gemma3 checkpoints (270m/1b text-only via the native

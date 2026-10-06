@@ -29,7 +29,9 @@ Exit paths, all of which end with the child task finished:
 * the consumer is closed (``aclose``/GeneratorExit, e.g. a caller's
   ``aclosing``) or cancelled (anyio or native) or raises: the child is
   cancelled once and awaited, shielded; a native cancellation of the consumer
-  that arrived during that wait is re-raised afterwards.
+  that arrived during that wait is re-raised afterwards. If the child fails
+  while unwinding (anything but its cancellation), that failure is one
+  WARNING with its traceback; the consumer's own exit still propagates.
 
 The queue holds ONE item: the child runs at most one item ahead of the
 consumer, as backpressure. The child runs in a copy of the consumer's
@@ -43,6 +45,7 @@ import asyncio
 import contextlib
 from typing import Any, AsyncIterator, Callable
 
+from src.core.logging import logger
 from src.engines.base_engine import wait_shielded
 
 # Marks the end of a source that was exhausted normally.
@@ -66,6 +69,8 @@ async def isolated_stream(make_source: Callable[[], AsyncIterator[Any]]) -> Asyn
     producer = asyncio.create_task(_produce())
     pending_get: "asyncio.Future | None" = None
     finished = False
+    # Whether the child's own failure was re-raised to the consumer.
+    delivered = False
     try:
         while True:
             if pending_get is None:
@@ -92,6 +97,7 @@ async def isolated_stream(make_source: Callable[[], AsyncIterator[Any]]) -> Asyn
                 raise asyncio.CancelledError()
             exc = producer.exception()
             if exc is not None:
+                delivered = True
                 raise exc
             finished = True
             return
@@ -101,10 +107,14 @@ async def isolated_stream(make_source: Callable[[], AsyncIterator[Any]]) -> Asyn
         if not finished and not producer.done():
             producer.cancel()
         cancelled = await wait_shielded(producer)
-        if not producer.cancelled():
-            # Mark the outcome retrieved: a failure was already re-raised
-            # above, or the consumer is leaving for its own reason, which is
-            # the one that propagates.
-            producer.exception()
+        if not delivered and not producer.cancelled() and producer.exception() is not None:
+            # The consumer is leaving for its own reason (closed, cancelled,
+            # failed), which is the one that propagates; the source failed
+            # while unwinding (e.g. a checkpointer write during LangGraph's
+            # teardown). Recorded once here, never swallowed in silence.
+            logger.warning(
+                "The agent stream failed while closing after its consumer left",
+                exc_info=producer.exception(),
+            )
         if cancelled:
             raise asyncio.CancelledError()

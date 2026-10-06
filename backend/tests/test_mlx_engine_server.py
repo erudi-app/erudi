@@ -625,6 +625,19 @@ class TestChildRuntimeEnv:
         assert env["APC_NUM_BLOCKS"] == "2048"
         assert float(env["MLX_VLM_TOKEN_QUEUE_TIMEOUT"]) == pytest.approx(1401.0)
 
+    @pytest.mark.parametrize("num_blocks,timeout", [(2048, 1401.0), (None, None)])
+    def test_admits_one_sequence_at_a_time(self, monkeypatch, num_blocks, timeout):
+        """The prefix-cache barrier's proof relies on it: mlx-vlm admits new
+        requests BEFORE draining cancellations, so with an unbounded batch a
+        barrier could share a step with a cancelled request still holding
+        cache blocks. One sequence at a time admits the barrier only once the
+        cancelled request has left the batch."""
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        env = self._fresh_env(monkeypatch)
+        runner._apply_child_runtime_env(apc_num_blocks=num_blocks, token_queue_timeout_s=timeout)
+        assert env["MLX_VLM_MAX_NUM_SEQS"] == "1"
+
     def test_falls_back_to_upstream_defaults_when_unknown(self, monkeypatch):
         from src.engines import _mlx_vlm_server_runner as runner
 

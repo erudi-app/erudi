@@ -516,9 +516,13 @@ class MLX_Engine(BaseChatServerEngine):
     # server-side before the next GPU step, but one cancelled during its LAST
     # prefill step finishes that step and releases its blocks AFTER the
     # cancellation -- possibly after a reset issued meanwhile. Hence the
-    # barrier: after an abandon, a 1-token request goes first; the GPU loop is
-    # single-threaded and drains cancellations before every step, so the
-    # barrier's completion proves the cancelled request is fully settled.
+    # barrier: after an abandon, a 1-token request goes first. The proof rests
+    # on the child running ONE sequence at a time (`MLX_VLM_MAX_NUM_SEQS=1`,
+    # set by `_mlx_vlm_server_runner._apply_child_runtime_env`): mlx-vlm admits
+    # new requests before it drains cancellations, so with a wider batch the
+    # barrier could share a step with the cancelled request and finish first.
+    # With one sequence, the barrier is admitted only once the cancelled
+    # request has left the batch -- its completion proves that request settled.
 
     _PREFIX_OWNER_FRESH = "<fresh>"
     _PREFIX_OWNER_DIRTY = "<dirty>"
@@ -610,7 +614,10 @@ class MLX_Engine(BaseChatServerEngine):
     ) -> bool:
         """One 1-token request, the readiness ping's shape; True on success.
 
-        Bounded by the first-chunk ceiling for this child's window: the
+        It proves a cancelled request has settled only because the child runs
+        one sequence at a time (``MLX_VLM_MAX_NUM_SEQS=1``, see the section
+        comment above). Bounded by the first-chunk ceiling for this child's
+        window: the
         barrier may queue behind the last step of a cancelled prefill, and
         that step can legitimately last as long as a long prefill does.
         """

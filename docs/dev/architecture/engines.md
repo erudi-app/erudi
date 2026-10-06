@@ -157,9 +157,15 @@ prefix cache answers `{"enabled": false}`, which counts as success. When the han
 flagged `abandoned`, a **barrier** goes first: a one-token chat request, the readiness
 ping's shape, bounded by the first-chunk ceiling. mlx-vlm's `clear()` pushes every block
 back on the free list without guarding against a double push, and a request cancelled
-during its last prefill step still releases its blocks after the cancellation; the GPU
-loop is single-threaded and drains cancellations before each step, so the barrier's
-completion proves the cancelled request is settled. A failed barrier or reset is one
+during its last prefill step still releases its blocks after the cancellation. The
+barrier's completion proves the cancelled request is settled **only because the child runs
+one sequence at a time**: the runner sets `MLX_VLM_MAX_NUM_SEQS=1` in the child's
+environment (`_mlx_vlm_server_runner._apply_child_runtime_env`). mlx-vlm's GPU loop admits
+new requests before it drains cancellations, and its batch is unbounded by default, so a
+wider batch would let the barrier share a step with the cancelled request and finish
+first; with one sequence the barrier is admitted only once that request has left the
+batch. Nothing is lost by the cap: every request to the child is already serialized behind
+the generation guard. A failed barrier or reset is one
 WARNING and leaves the owner `<dirty>`, so the next claim retries; it never fails a turn.
 Each performed reset logs `Prefix cache reset: reason=<conversation_change|arena|compaction>`.
 

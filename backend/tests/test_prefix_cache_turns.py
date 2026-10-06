@@ -203,6 +203,60 @@ async def test_the_arena_claims_the_arena(monkeypatch):
     assert _names("claim-start") == [("claim-start", "arena")]
 
 
+class _HangingOneShot:
+    """A one-shot client whose stream hangs after one chunk, carrying an
+    ``abandon_hook`` like the real client."""
+
+    def __init__(self, hook):
+        self.abandon_hook = hook
+
+    async def astream(self, messages):
+        from types import SimpleNamespace
+
+        yield SimpleNamespace(text="A ")
+        await asyncio.sleep(30)
+        yield SimpleNamespace(text="never")
+
+
+async def test_an_abandoned_title_flags_the_child_it_ran_against(monkeypatch):
+    """``BaseChatModel.astream`` does not close the client's own stream
+    deterministically, so the runner flags the child itself: the next prefix
+    reset then sends a barrier, which waits for that request."""
+    flag = _Flag()
+    monkeypatch.setattr(runner_module, "build_chat_model", lambda llm, **kw: _HangingOneShot(flag))
+    gen = AgentRunner(checkpointer=None).astream_oneshot(
+        llm=_Llm(), prompt_text="p", temperature=0.5, top_p=0.9, max_tokens=12
+    )
+
+    assert await gen.__anext__() == "A "
+    await asyncio.wait_for(gen.aclose(), timeout=5)
+
+    assert flag.calls == 1
+
+
+async def test_a_completed_title_flags_nothing(monkeypatch):
+    from types import SimpleNamespace
+
+    flag = _Flag()
+
+    class _OneShot:
+        abandon_hook = flag
+
+        async def astream(self, messages):
+            yield SimpleNamespace(text="A Title")
+
+    monkeypatch.setattr(runner_module, "build_chat_model", lambda llm, **kw: _OneShot())
+
+    _ = [
+        t
+        async for t in AgentRunner(checkpointer=None).astream_oneshot(
+            llm=_Llm(), prompt_text="p", temperature=0.5, top_p=0.9, max_tokens=12
+        )
+    ]
+
+    assert flag.calls == 0
+
+
 async def test_a_title_claims_nothing(monkeypatch):
     from types import SimpleNamespace
 
@@ -222,6 +276,64 @@ async def test_a_title_claims_nothing(monkeypatch):
 
     assert "".join(out) == "A Title"
     assert _names("claim-start") == []
+
+
+# ===================== llama.cpp engines: a strict no-op =====================
+
+
+class _PlainEngine(BaseEngine):
+    """No prefix hook overridden: what CPU_Engine and CUDA_Engine are."""
+
+    window: ClassVar[Any] = None
+
+    @classmethod
+    def effective_context_tokens(cls):
+        return cls.window
+
+
+def test_only_mlx_overrides_the_prefix_hooks():
+    from src.engines.cpu_engine import CPU_Engine
+    from src.engines.cuda_engine import CUDA_Engine
+    from src.engines.mlx_engine import MLX_Engine
+
+    for name in ("claim_prefix", "on_history_rewritten"):
+        assert runner_module._engine_overrides(MLX_Engine, name)
+        assert not runner_module._engine_overrides(CPU_Engine, name)
+        assert not runner_module._engine_overrides(CUDA_Engine, name)
+        assert not runner_module._engine_overrides(BaseEngine, name)
+
+
+async def test_an_engine_without_prefix_hooks_never_starts_a_reset(monkeypatch):
+    """CPU/CUDA turns -- a claim AND a compaction -- create no reset thread
+    and never touch ``_pending_reset``."""
+    calls = []
+
+    async def _spy(fn):
+        calls.append(fn)
+
+    monkeypatch.setattr(config, "LLM_Engine", _PlainEngine)
+    monkeypatch.setattr(runner_module, "run_reset_shielded", _spy)
+    monkeypatch.setattr(_PlainEngine, "window", 50)
+    summary = ToolableFakeChatModel(messages=iter([AIMessage(content="A summary.")]))
+    _patch_model(
+        monkeypatch,
+        ToolableFakeChatModel(messages=iter([AIMessage(content="one"), AIMessage(content="two")])),
+        summary_model=summary,
+    )
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    _ = [e async for e in _stream(runner, question="x" * 400)]
+    _ = [e async for e in _stream(runner, question="y" * 400)]
+
+    assert calls == []
+    assert BaseEngine._pending_reset is None
+    # The second turn did compact (the window is tiny): the hook was skipped,
+    # not the compaction.
+    probe = create_agent(
+        ToolableFakeChatModel(messages=iter([])), tools=[], checkpointer=runner.checkpointer
+    )
+    state = await probe.aget_state({"configurable": {"thread_id": "1"}})
+    assert "A summary." in state.values["messages"][0].content
 
 
 # ===================== the generator chain =====================

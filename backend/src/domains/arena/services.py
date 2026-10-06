@@ -195,9 +195,11 @@ class ArenaService:
         if attachment_notice:
             response += attachment_notice
             yield attachment_notice
-        # ``aclosing``: a client that goes away closes the runner (and the
-        # generation guard it holds) now, not whenever the garbage collector
-        # finalizes the generator.
+        # ``aclosing``: whenever THIS generator is closed, the runner is closed
+        # with it, inside the guard. Starlette never closes a body iterator
+        # itself: a disconnect noticed while ``send()`` is in progress leaves
+        # this generator suspended at its yield, and closing it then still
+        # depends on its finalization.
         async with contextlib.aclosing(
             self.runner.astream_text(
                 llm=llm,

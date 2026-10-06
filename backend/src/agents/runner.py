@@ -83,7 +83,7 @@ from src.agents.think_splitter import ThinkSplitter
 from src.core import config
 from src.core.exceptions import EngineException, GenerationTimeoutException
 from src.core.logging import logger
-from src.engines.base_engine import run_reset_shielded
+from src.engines.base_engine import BaseEngine, run_reset_shielded
 from src.engines.memory_budget import MemoryBudget
 from src.engines.working_window import canonical_working_window
 
@@ -229,6 +229,21 @@ def summarization_triggers(working_window: Optional[int]) -> list:
         triggers.append(("tokens", max(1, int(COMPACTION_WINDOW_FRACTION * working_window))))
     triggers.append(("messages", SUMMARY_TRIGGER_MESSAGES))
     return triggers
+
+
+def _engine_overrides(engine: Any, hook_name: str) -> bool:
+    """Whether ``engine`` implements the prefix-cache hook ``hook_name``
+    itself, rather than inheriting ``BaseEngine``'s no-op.
+
+    Only MLX does. The llama.cpp engines (CPU, CUDA) must stay a strict
+    no-op: no reset thread, no ``BaseEngine._pending_reset`` -- so the runner
+    calls ``run_reset_shielded`` only for an engine that overrides the hook.
+    """
+    hook = getattr(engine, hook_name, None)
+    if not callable(hook):
+        return False
+    base = getattr(BaseEngine, hook_name)
+    return getattr(hook, "__func__", hook) is not getattr(base, "__func__", base)
 
 
 def approx_token_count(messages: Any) -> int:
@@ -526,9 +541,8 @@ def _summarization_middleware_class():
             # Non-None exactly when the history was rewritten.
             result = await super().abefore_model(state, runtime)
             if result is not None:
-                hook = getattr(self.engine, "on_history_rewritten", None)
-                if callable(hook):
-                    await run_reset_shielded(hook)
+                if _engine_overrides(self.engine, "on_history_rewritten"):
+                    await run_reset_shielded(self.engine.on_history_rewritten)
             return result
 
         async def _acreate_summary(self, messages_to_summarize):
@@ -1117,10 +1131,9 @@ class AgentRunner:
                 # now that the child is resolved and before the agent sends
                 # anything. A reset it needs runs shielded: the guard is never
                 # left while it still talks to the child.
-                claim = getattr(engine, "claim_prefix", None)
-                if callable(claim):
+                if _engine_overrides(engine, "claim_prefix"):
                     owner = f"conv:{thread_id}" if stateful else "arena"
-                    await run_reset_shielded(functools.partial(claim, owner))
+                    await run_reset_shielded(functools.partial(engine.claim_prefix, owner))
 
                 # Aggregate-only stream accounting (never log per token): start,
                 # first-token latency, then one completion line with totals.
@@ -1542,27 +1555,39 @@ class AgentRunner:
                 )
                 return
             splitter = ThinkSplitter()
+            # Same rule as a conversation turn: a title that does not end
+            # normally (its caller went away) flags the child it ran against,
+            # through the hook bound to the build-time handle. ``aclosing``
+            # closes ``BaseChatModel.astream`` here, but that generator does
+            # not close the client's own stream deterministically, so the
+            # HTTP response may close -- and the client-level flag may land --
+            # only after the guard is released. This flag makes the next
+            # prefix reset send a barrier first, which waits for that request.
+            abandon_hook = getattr(model, "abandon_hook", None)
             try:
-                # ``aclosing``: a caller that stops early closes the model
-                # stream (and its HTTP response) inside the guard.
-                async with contextlib.aclosing(
-                    model.astream([HumanMessage(prompt_text)])
-                ) as chunks:
-                    async for chunk in chunks:
-                        text = getattr(chunk, "text", "")
-                        if not text:
-                            continue
-                        for event in splitter.feed(text):
-                            if event["t"] == "answer":
-                                yield event["text"]
-            except Exception:
-                logger.warning(
-                    f"One-shot streaming failed: llm={getattr(llm, 'id', '?')} "
-                    f"({getattr(llm, 'name', '?')}); using the default"
-                    f"{_child_crash_suffix(engine)}",
-                    exc_info=True,
-                )
-                return
+                try:
+                    async with contextlib.aclosing(
+                        model.astream([HumanMessage(prompt_text)])
+                    ) as chunks:
+                        async for chunk in chunks:
+                            text = getattr(chunk, "text", "")
+                            if not text:
+                                continue
+                            for event in splitter.feed(text):
+                                if event["t"] == "answer":
+                                    yield event["text"]
+                except Exception:
+                    logger.warning(
+                        f"One-shot streaming failed: llm={getattr(llm, 'id', '?')} "
+                        f"({getattr(llm, 'name', '?')}); using the default"
+                        f"{_child_crash_suffix(engine)}",
+                        exc_info=True,
+                    )
+                    return
+            except BaseException:
+                if abandon_hook is not None:
+                    abandon_hook()
+                raise
             # Stream completed normally: drain the splitter. An unclosed
             # <think> flushes as thinking and is dropped on purpose -- the
             # caller then falls back to its default title.

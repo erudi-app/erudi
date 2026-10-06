@@ -439,10 +439,14 @@ class ConversationService:
                 assistant_response += attachment_notice
                 yield _ndjson({"t": "answer", "text": attachment_notice})
 
-            # ``aclosing``: Starlette never closes a body iterator, so a client
-            # that goes away would otherwise leave the runner (and LangGraph,
-            # and the generation guard it holds) to the garbage collector.
-            # Closing this generator now closes the whole chain at once.
+            # ``aclosing``: whenever THIS generator is closed, the runner is
+            # closed with it, inside the guard. Starlette never closes a body
+            # iterator itself: a disconnect that cancels the stream unwinds
+            # the chain through the cancellation (the runner then closes
+            # LangGraph inside the guard, see ``src.agents.isolated_stream``),
+            # but a disconnect noticed while ``send()`` is in progress leaves
+            # this generator suspended at its yield, and closing it then still
+            # depends on its finalization.
             async with contextlib.aclosing(
                 self.runner.astream_text(
                     llm=llm,

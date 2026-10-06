@@ -158,6 +158,48 @@ async def test_a_native_cancellation_of_the_consumer_is_re_raised_after_the_sour
     assert events == ["source-closed"]
 
 
+async def test_a_failure_while_the_source_unwinds_after_the_consumer_left_is_logged_once(caplog):
+    """The consumer is leaving for its own reason, which is the one that
+    propagates; an error raised during the source's teardown (a checkpointer
+    write failing while LangGraph unwinds) is still one WARNING record with
+    its traceback, never discarded in silence."""
+    import logging
+
+    teardown_error = RuntimeError("checkpoint write failed during unwind")
+
+    async def source():
+        try:
+            yield "a"
+            await asyncio.sleep(30)
+        finally:
+            raise teardown_error
+
+    stream = isolated_stream(source)
+    assert await stream.__anext__() == "a"
+    with caplog.at_level(logging.WARNING):
+        await asyncio.wait_for(stream.aclose(), timeout=5)
+
+    records = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(records) == 1
+    assert records[0].exc_info is not None
+    assert records[0].exc_info[1] is teardown_error
+    assert records[0].getMessage().isascii()
+
+
+async def test_a_failure_already_raised_to_the_consumer_is_not_logged_again(caplog):
+    import logging
+
+    async def source():
+        yield "a"
+        raise ValueError("delivered to the consumer")
+
+    with caplog.at_level(logging.WARNING), pytest.raises(ValueError):
+        async for _ in isolated_stream(source):
+            pass
+
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
 async def test_the_source_runs_in_a_copy_of_the_callers_context():
     """``create_task`` copies the context: the request id the HTTP middleware
     set is what the logging filter reads inside the node."""

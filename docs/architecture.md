@@ -206,8 +206,12 @@ LangGraph itself from a child task (`agents/isolated_stream.py`). Starlette deli
 client disconnect as an anyio cancellation re-delivered at every await, which would
 abort LangGraph's own teardown and leave the model call streaming; the child task gets a
 single native cancellation instead, and the runner waits for it, shielded. Whether the
-consumer closes the stream or the client goes away, the in-flight model call is closed
-before the generation guard is released.
+consumer closes the stream or a disconnect cancels it, the in-flight model call is closed
+before the generation guard is released. Starlette never closes a body iterator itself:
+a disconnect noticed while a chunk is being sent leaves the service generator suspended,
+still holding the guard, until its finalization closes it the same way. Titles have no
+LangGraph: a title cut short flags the inference child, so the next prefix-cache reset
+sends a barrier first.
 
 A turn is captured as structured events — `answer`, `thinking`, `tool_call`,
 `tool_result` — which the conversation service frames as NDJSON. Arena projects the same
