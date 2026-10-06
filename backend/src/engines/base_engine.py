@@ -76,6 +76,118 @@ def _log_monitor_death(task: "asyncio.Task") -> None:
         logger.error(f"Idle cleanup monitor died: {exc}", exc_info=exc)
 
 
+# ---------------------------------------------------------------------------
+# Prefix-cache resets: one shielded wait, one drain
+# ---------------------------------------------------------------------------
+#
+# A prefix-cache reset (``MLX_Engine._reset_prefix_cache``: an optional
+# barrier request, then ``POST /v1/cache/reset``) is blocking HTTP, so it runs
+# in a worker thread. The child's ``clear()`` must never overlap a prefill, so
+# the generation lock must not let anyone proceed while that thread runs --
+# whatever tears down the task that started it:
+#
+# * Awaiting the thread directly is not enough: cancelling the awaiting task
+#   cancels the executor future and returns while the thread still runs.
+#   ``_wait_shielded`` therefore loops on ``asyncio.shield`` until the task
+#   is really done, and reports whether a cancellation arrived meanwhile.
+# * anyio (Starlette's client-disconnect path) re-delivers a cancelled scope's
+#   cancellation at EVERY await, so a bare shield loop would spin for the
+#   whole wait. An ``anyio.CancelScope(shield=True)`` around the loop stops
+#   the re-delivery; the inner ``asyncio.shield`` still absorbs a native
+#   ``task.cancel()`` (LangGraph cancels its node tasks that way), which the
+#   anyio scope alone does not stop.
+# * The reset can run inside a LangGraph node task (compaction) while the
+#   task holding the generation guard is torn down by anyio's repeated
+#   cancellation: the holder then leaves ``async with generation_guard()``
+#   while the node still waits. So the reset task is registered as
+#   ``BaseEngine._pending_reset``, and whoever acquires the lock next (a
+#   turn, a title, an llms endpoint, the idle tick) drains it before doing
+#   anything (``BaseEngine._acquire_generation_lock``).
+#
+# The reset's outcome is logged once, by a done callback, and never re-raised
+# into a caller: a reset never fails a turn.
+
+
+def _log_reset_outcome(task: "asyncio.Task") -> None:
+    """Done callback of a reset task: a reset that raised is logged once."""
+    if task.cancelled():
+        return
+    exc = task.exception()
+    if exc is not None:
+        logger.error(f"Prefix cache reset task failed: {exc}", exc_info=exc)
+
+
+async def _wait_shielded(task: "asyncio.Task") -> bool:
+    """Wait until ``task`` is done, whatever cancellation arrives meanwhile.
+
+    Returns whether a native cancellation of the CURRENT task was absorbed,
+    so the caller can re-raise it once the wait is over. The task's own
+    outcome is not retrieved here (``_log_reset_outcome`` owns it).
+    """
+    import anyio
+
+    cancelled = False
+    with anyio.CancelScope(shield=True):
+        while not task.done():
+            try:
+                await asyncio.shield(task)
+            except asyncio.CancelledError:
+                # Ours (the outer wait was cancelled) unless the task itself
+                # ended cancelled; either way, keep waiting until it is done.
+                if not (task.done() and task.cancelled()):
+                    cancelled = True
+            except Exception:
+                # The task's own failure: logged by its done callback.
+                break
+    return cancelled
+
+
+async def run_reset_shielded(fn: Any) -> Any:
+    """Run the blocking reset ``fn`` in a worker thread, shielded.
+
+    Registers the thread's task as ``BaseEngine._pending_reset`` for the next
+    lock acquirer to drain, waits for it through ``_wait_shielded`` (a
+    cancellation never returns early), then re-raises a cancellation that
+    arrived meanwhile. Returns ``fn``'s result, or ``None`` when it raised
+    (logged once by the done callback). Every prefix-cache reset path -- the
+    claim of a conversation and the compaction reset -- goes through here.
+    """
+    task = asyncio.get_running_loop().create_task(asyncio.to_thread(fn))
+    task.add_done_callback(_log_reset_outcome)
+    BaseEngine._pending_reset = task
+    cancelled = await _wait_shielded(task)
+    if BaseEngine._pending_reset is task:
+        BaseEngine._pending_reset = None
+    if cancelled:
+        raise asyncio.CancelledError()
+    if task.cancelled() or task.exception() is not None:
+        return None
+    return task.result()
+
+
+async def _drain_pending_reset() -> None:
+    """Wait for an in-flight reset an earlier lock holder left behind.
+
+    Called right after acquiring the generation lock, before the new holder
+    does anything. The reset task's outcome is never re-raised into this
+    unrelated holder; a cancellation of the holder during the wait is
+    re-raised once the reset thread has finished.
+    """
+    task = BaseEngine._pending_reset
+    if task is None:
+        return
+    if task.get_loop() is not asyncio.get_running_loop():
+        # Left behind by another (closed) event loop: nothing can still run
+        # against this loop's child, and it cannot be awaited from here.
+        BaseEngine._pending_reset = None
+        return
+    cancelled = await _wait_shielded(task)
+    if BaseEngine._pending_reset is task:
+        BaseEngine._pending_reset = None
+    if cancelled:
+        raise asyncio.CancelledError()
+
+
 class BaseEngine(ABC, metaclass=EngineMeta):
     """Abstract base class for all LLM inference engines.
 
@@ -126,6 +238,12 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     # test (own loop) stays isolated; production has one loop -> one lock.
     _generation_lock = None
     _generation_lock_loop = None
+
+    # The in-flight prefix-cache reset (an ``asyncio.Task`` around its worker
+    # thread), or None. Class-level on ``BaseEngine`` like the lock it
+    # completes: the next lock acquirer drains it before proceeding (see
+    # ``run_reset_shielded`` / ``_acquire_generation_lock``).
+    _pending_reset: ClassVar[Optional["asyncio.Task"]] = None
 
     # --- Lifecycle management ---
     _cleanup_task = None
@@ -193,6 +311,32 @@ class BaseEngine(ABC, metaclass=EngineMeta):
             if isinstance(caps, dict):
                 return caps
         return {}
+
+    # --- Prefix-cache ownership (no-ops; only MLX_Engine implements them) ---
+    #
+    # The MLX child keeps a prefix cache that must hold ONLY the current
+    # conversation; the llama.cpp engines manage theirs elsewhere and write
+    # nothing here. All three hooks are synchronous (they may do blocking
+    # HTTP): the agent layer runs the first two through ``run_reset_shielded``.
+
+    @classmethod
+    def claim_prefix(cls, owner: str) -> None:
+        """Make the loaded child's prefix cache belong to ``owner``
+        (``conv:<thread id>`` or ``arena``), resetting it when it held
+        something else. No-op here."""
+        return None
+
+    @classmethod
+    def on_history_rewritten(cls) -> None:
+        """The conversation history was rewritten (compaction): the cached
+        prefix is garbage. No-op here."""
+        return None
+
+    @classmethod
+    def note_stream_abandoned(cls, handle: Any) -> None:
+        """A model stream against ``handle`` (the child it was built for) did
+        not end normally. No-op here."""
+        return None
 
     # Stored model links that download fine but FAIL TO RUN on this engine
     # (e.g. a quantized checkpoint the loader can't read). Overridden per engine.
@@ -722,6 +866,21 @@ class BaseEngine(ABC, metaclass=EngineMeta):
 
     @classmethod
     @asynccontextmanager
+    async def _acquire_generation_lock(cls):
+        """THE way to take the generation lock: acquire, then drain.
+
+        Used by ``generation_guard`` and by the idle tick alike. Right after
+        acquiring, an in-flight prefix-cache reset left by an earlier holder
+        is drained (``_drain_pending_reset``) before the new holder gets
+        control -- so no prefill, title, model swap or reap can start while
+        an orphan reset thread still talks to the child.
+        """
+        async with cls._generation_lock_for_running_loop():
+            await _drain_pending_reset()
+            yield
+
+    @classmethod
+    @asynccontextmanager
     async def generation_guard(cls):
         """Serialize a full generation and suppress idle cleanup for its duration.
 
@@ -737,13 +896,16 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         This is the engine-level home of the invariant that ``generate_stream``
         used to carry; it lives here (not in the agent layer) to keep subprocess
         lifecycle and concurrency inside the engine encapsulation.
+
+        The lock is taken through ``_acquire_generation_lock``, which first
+        drains a prefix-cache reset an earlier holder left running.
         """
         lock = cls._generation_lock_for_running_loop()
         # Contention diagnostic: another generation (or the cleanup tick)
         # holds the lock right now — measure how long this request waits.
         wait_start_s = time.perf_counter()
         contended = lock.locked()
-        async with lock:
+        async with cls._acquire_generation_lock():
             if contended:
                 wait_ms = (time.perf_counter() - wait_start_s) * 1000
                 logger.debug(
@@ -787,11 +949,13 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     async def _cleanup_tick(cls):
         """One idle-check pass: reap the model iff it has been idle too long.
 
-        Acquires the SAME asyncio lock as ``generation_guard`` (so it can never
-        run during a generation) and runs the blocking ``cleanup()`` — which
-        kills the child subprocess — off the event loop via ``asyncio.to_thread``.
+        Acquires the SAME asyncio lock as ``generation_guard``, through the
+        same draining helper (so it can never run during a generation, nor
+        reap a child an orphan prefix-cache reset still talks to) and runs the
+        blocking ``cleanup()`` — which kills the child subprocess — off the
+        event loop via ``asyncio.to_thread``.
         """
-        async with cls._generation_lock_for_running_loop():
+        async with cls._acquire_generation_lock():
             if cls._should_cleanup():
                 await asyncio.to_thread(cls.cleanup)
 
