@@ -240,15 +240,46 @@ def test_with_a_window_the_cutoff_is_the_later_of_the_token_and_message_cutoffs(
     short = _conversation(15, 50)
     assert _count(short[-10:]) < budget
     assert compaction_cutoff(short, window, approx_token_count) == 21
-    # Long messages and a short question: the token cutoff lands on a user
-    # message (index 26), so it moves back to the answer before it -- the
-    # kept tail may exceed the budget by that one answer.
+    # Long messages and a short question: the token cutoff lands on an OLDER
+    # user message (index 26), so it moves FORWARD to the answer after it --
+    # the kept tail stays inside the budget.
     long = _alternating(30, 900) + [HumanMessage("short question")]
     cut = compaction_cutoff(long, window, approx_token_count)
-    assert cut == 25
+    assert cut == 27
     assert isinstance(long[cut], AIMessage)
-    assert _count(long[cut + 1 :]) <= budget
-    assert _count(long[cut:]) <= budget + _count([long[cut]])
+    assert _count(long[cut:]) <= budget
+
+
+async def test_a_long_answer_at_the_boundary_stays_out_and_the_state_stays_under_the_trigger():
+    """The token cutoff lands on an older user message whose preceding answer
+    is long. Moving back would keep that answer, which did not fit, and push
+    the post-compaction state over the trigger again; the cutoff moves
+    forward instead, and with ordinary messages the state stays under
+    ``0.8 W - 256``."""
+    window = 4096
+    cap = summary_cap(window)
+    messages = [
+        HumanMessage(_text(900), id="h0"),
+        AIMessage(_text(900), id="a1"),
+        HumanMessage(_text(200), id="h2"),
+        AIMessage(_text(1500), id="a3-long"),
+        HumanMessage(_text(100), id="h4"),
+        AIMessage(_text(600), id="a5"),
+        HumanMessage(_text(100), id="h6"),
+        AIMessage(_text(600), id="a7"),
+        HumanMessage(_text(50), id="q8"),
+    ]
+    token_cut = runner_module._token_cutoff(messages, keep_token_budget(window), approx_token_count)
+    assert messages[token_cut].id == "h4"  # an older user message, not the last
+
+    assert compaction_cutoff(messages, window, approx_token_count) == 5
+
+    summary = _ScriptedSummaryModel(messages=iter([]), script=[_text(cap, "s")])
+    mw = _middleware(summary, window=window)
+    assert _count(messages) >= int(0.8 * window)
+    after = _after(await mw.abefore_model({"messages": messages}, None))
+    assert [m.id for m in after[1:]] == ["a5", "h6", "a7", "q8"]
+    assert approx_token_count(after) <= int(0.8 * window) - 256
 
 
 def test_an_oversized_last_message_is_kept_whole_with_the_answer_before_it():
@@ -929,6 +960,54 @@ async def test_the_memory_warning_projects_the_kept_suffix_plus_the_summary_cap(
     state = await _state(cp, "w1")
     cut = compaction_cutoff(state, 10_000, approx_token_count)
     assert calls[0] == _count(state[cut:]) + summary_cap(10_000)
+
+
+class _RecordingBudget:
+    weights_bytes = 10
+
+    def __init__(self):
+        self.calls = []
+
+    def memory_margin_fraction(self, tokens):
+        self.calls.append(tokens)
+        return 0.5
+
+    def conversation_bytes(self, tokens):
+        return 1
+
+
+def _agent_with_state(messages):
+    async def aget_state(config):
+        return SimpleNamespace(values={"messages": messages})
+
+    return SimpleNamespace(aget_state=aget_state)
+
+
+async def test_the_warning_never_counts_the_summary_twice():
+    """Only the previous summary would go: nothing is compacted, and the
+    state already holds its summary -- no second ``summary_cap`` on top."""
+    state = [_previous_summary_message(), AIMessage(_text(300)), HumanMessage("q"), AIMessage("a")]
+    assert compaction_cutoff(state, 10_000, approx_token_count) == 0
+    budget = _RecordingBudget()
+
+    await AgentRunner()._memory_warning_event(_agent_with_state(state), {}, budget, 10_000)
+
+    assert budget.calls[0] == approx_token_count(state)
+
+
+async def test_without_a_window_the_warning_projects_what_the_middleware_keeps():
+    # 30 messages ending with an answer: the last-10 slice would start on a
+    # user message; the middleware's cutoff moves forward to the answer.
+    state = _alternating(30, 50)
+    cut = compaction_cutoff(state, None, approx_token_count)
+    assert cut == 21
+    budget = _RecordingBudget()
+
+    await AgentRunner()._memory_warning_event(_agent_with_state(state), {}, budget, None)
+
+    assert budget.calls[0] == approx_token_count(state[cut:]) + (
+        runner_module.SUMMARY_TOKEN_ALLOWANCE
+    )
 
 
 # ===================== the private LangChain surface this rests on =====================

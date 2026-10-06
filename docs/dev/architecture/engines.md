@@ -164,8 +164,10 @@ environment (`_mlx_vlm_server_runner._apply_child_runtime_env`). mlx-vlm's GPU l
 new requests before it drains cancellations, and its batch is unbounded by default, so a
 wider batch would let the barrier share a step with the cancelled request and finish
 first; with one sequence the barrier is admitted only once that request has left the
-batch. Nothing is lost by the cap: every request to the child is already serialized behind
-the generation guard. A failed barrier or reset is one
+batch. The cap costs no concurrency — every request to the child is already serialized
+behind the generation guard — but it does cost a wait right after an abandon: ANY request
+sent then (not only the barrier: the next turn, a title, a summary call) waits for the
+cancelled request to leave the batch, typically one prefill step. A failed barrier or reset is one
 WARNING and leaves the owner `<dirty>`, so the next claim retries; it never fails a turn.
 Each performed reset logs `Prefix cache reset: reason=<conversation_change|arena|compaction>`.
 

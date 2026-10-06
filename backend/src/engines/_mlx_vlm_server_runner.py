@@ -295,8 +295,11 @@ def _apply_child_runtime_env(
       cancellation is not registered yet, finish, and let the reset clear
       blocks that request still holds. With a capacity of
       ``max(0, 1 - len(active))`` the barrier is only admitted once the
-      cancelled request has left the batch. Nothing is lost: Erudi already
-      serializes every request to the child behind the generation guard.
+      cancelled request has left the batch. No concurrency is lost: Erudi
+      already serializes every request to the child behind the generation
+      guard. The cost is a wait right after an abandon: any request sent then
+      (not only the barrier) waits for the cancelled request to leave the
+      batch, typically one prefill step.
 
     Uses ``os.environ.update`` (not ``os.environ[name] = ...``) on purpose: these
     are knobs the parent WRITES for the mlx-vlm child, not configuration the

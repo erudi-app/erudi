@@ -234,6 +234,47 @@ async def test_an_abandoned_title_flags_the_child_it_ran_against(monkeypatch):
     assert flag.calls == 1
 
 
+def _failing_hook():
+    raise RuntimeError("flagging failed")
+
+
+async def test_a_failing_abandon_hook_never_replaces_a_titles_own_exit(monkeypatch, caplog):
+    import logging
+
+    monkeypatch.setattr(
+        runner_module, "build_chat_model", lambda llm, **kw: _HangingOneShot(_failing_hook)
+    )
+    gen = AgentRunner(checkpointer=None).astream_oneshot(
+        llm=_Llm(), prompt_text="p", temperature=0.5, top_p=0.9, max_tokens=12
+    )
+    assert await gen.__anext__() == "A "
+
+    with caplog.at_level(logging.WARNING):
+        await asyncio.wait_for(gen.aclose(), timeout=5)  # GeneratorExit, not RuntimeError
+
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].exc_info is not None
+
+
+async def test_a_failing_abandon_hook_never_replaces_a_turns_own_exit(monkeypatch, caplog):
+    import logging
+
+    _patch_model(monkeypatch, _SlowModel(messages=iter([]), abandon_hook=_failing_hook))
+    gen = _stream(AgentRunner(checkpointer=InMemorySaver()), summarize=False)
+    assert (await gen.__anext__())["t"] == "answer"
+
+    with caplog.at_level(logging.WARNING):
+        await asyncio.wait_for(gen.aclose(), timeout=5)
+
+    warnings = [
+        r
+        for r in caplog.records
+        if r.levelno == logging.WARNING and "abandon" in r.getMessage().lower()
+    ]
+    assert len(warnings) == 1
+
+
 async def test_a_completed_title_flags_nothing(monkeypatch):
     from types import SimpleNamespace
 

@@ -231,6 +231,24 @@ def summarization_triggers(working_window: Optional[int]) -> list:
     return triggers
 
 
+def _flag_abandoned(abandon_hook: Any) -> None:
+    """Flag the child a turn or title ran against, from an ``except
+    BaseException`` that re-raises.
+
+    A failure of the hook must never replace the exit in flight (the
+    consumer's GeneratorExit or cancellation): it is one WARNING with its
+    traceback instead, like ``Erudi_Chat_OpenAI._notify_abandoned``.
+    """
+    if abandon_hook is None:
+        return
+    try:
+        abandon_hook()
+    except Exception:
+        # The exit in flight is what propagates; this record says the
+        # runner-level flag was lost (the next reset then skips its barrier).
+        logger.warning("Flagging an abandoned turn failed", exc_info=True)
+
+
 def _engine_overrides(engine: Any, hook_name: str) -> bool:
     """Whether ``engine`` implements the prefix-cache hook ``hook_name``
     itself, rather than inheriting ``BaseEngine``'s no-op.
@@ -320,9 +338,13 @@ def compaction_cutoff(messages: list, working_window: Optional[int], counter: An
        be large on its own).
     3. Never ON a user message: LangChain inserts the summary as a user
        message, and two user messages in a row make the strict chat
-       templates (Gemma, Mistral) reject every later turn. The cutoff moves
-       back until the kept tail starts with an assistant message, so the
-       state alternates ``[summary, answer, question, ...]``.
+       templates (Gemma, Mistral) reject every later turn, so the kept tail
+       always starts with an assistant message and the state alternates
+       ``[summary, answer, question, ...]``. On an OLDER user message the
+       cutoff moves FORWARD to the next assistant message (keeping less, so
+       the budget holds); only on the current question -- or when no
+       assistant message lies between the cutoff and it -- does it move BACK
+       to the answer before it.
     4. Tool-pair safe (LangChain's ``_find_safe_cutoff_point``): an AI
        message is never separated from its tool results -- moving back can
        land in a tool round, and the cutoff then moves back to its call.
@@ -330,11 +352,12 @@ def compaction_cutoff(messages: list, working_window: Optional[int], counter: An
        summary), nothing is: re-summarizing a summary alone adds nothing and
        would reset the prefix cache for nothing.
 
-    The kept tail is therefore not strictly bounded: it can exceed the token
-    budget by the answer before the current question (steps 2-3), by a last
-    message larger than the budget on its own (kept whole, summarized on a
-    later turn, never truncated), and by a tool round kept with its call
-    (step 4) -- accepted, the alternatives break the conversation.
+    With ordinary messages the kept tail stays inside the token budget. It
+    exceeds it only by the answer before the current question when the cut
+    falls ON that question (steps 2-3), by a last message larger than the
+    budget on its own (kept whole, summarized on a later turn, never
+    truncated), and by a tool round kept with its call (step 4) -- accepted,
+    the alternatives break the conversation.
     """
     from langchain.agents.middleware import SummarizationMiddleware
     from langchain_core.messages import HumanMessage, ToolMessage
@@ -355,7 +378,21 @@ def compaction_cutoff(messages: list, working_window: Optional[int], counter: An
     )
     if last_human is not None:
         cutoff = min(cutoff, last_human)
-    # Every step moves strictly back, so the loop ends.
+    if (
+        last_human is not None
+        and cutoff < last_human
+        and isinstance(messages[cutoff], HumanMessage)
+    ):
+        # An OLDER user message: move FORWARD to the next assistant message
+        # (tool results after a call are fine, they follow it). Moving back
+        # would keep the answer before it -- one that did not fit the budget.
+        forward = cutoff
+        while forward <= last_human and isinstance(messages[forward], (HumanMessage, ToolMessage)):
+            forward += 1
+        if forward <= last_human:
+            cutoff = forward
+    # Only on the current question (or with no assistant message between the
+    # cutoff and it): every step moves strictly back, so the loop ends.
     while cutoff > 0:
         message = messages[cutoff]
         if isinstance(message, HumanMessage):
@@ -1496,8 +1533,7 @@ class AgentRunner:
                             hop_text_buffer.clear()
                             yield {"t": "answer", "text": ERROR_MESSAGE}
             except BaseException:
-                if abandon_hook is not None:
-                    abandon_hook()
+                _flag_abandoned(abandon_hook)
                 raise
 
     async def astream_oneshot(
@@ -1585,8 +1621,7 @@ class AgentRunner:
                     )
                     return
             except BaseException:
-                if abandon_hook is not None:
-                    abandon_hook()
+                _flag_abandoned(abandon_hook)
                 raise
             # Stream completed normally: drain the splitter. An unclosed
             # <think> flushes as thinking and is dropped on purpose -- the
@@ -1685,11 +1720,13 @@ class AgentRunner:
         THIS turn is compacted on the NEXT turn -- judging the warning on the
         current size would flag every conversation for exactly one turn and
         then flicker off once compaction ran. Instead the post-turn thread
-        state is projected past an ideal compaction: with a known working
-        window, the suffix ``compaction_cutoff`` would keep plus a
-        ``summary_cap(W)``-token summary (the summary client's own cap);
-        without one, the last ``SUMMARY_KEEP_MESSAGES`` messages plus a
-        ``SUMMARY_TOKEN_ALLOWANCE``-token summary. Both are counted with the
+        state is projected past an ideal compaction: the suffix
+        ``compaction_cutoff`` would keep (with or without a known window,
+        exactly what the middleware keeps) plus the summary it would write --
+        ``summary_cap(W)`` tokens (the summary client's own cap), or the
+        ``SUMMARY_TOKEN_ALLOWANCE`` without a window, and nothing when no
+        compaction would happen on a state that already holds its summary.
+        Both are counted with the
         SAME ``approx_token_count`` the compaction trigger uses. Only when
         even THAT projected size leaves the margin strictly under the floor
         does the warning go out -- the honest meaning of "compaction had its
@@ -1702,15 +1739,19 @@ class AgentRunner:
             messages = (state.values or {}).get("messages", []) if state else []
             if not messages:
                 return None
-            if _known_window(working_window):
-                cutoff = compaction_cutoff(messages, working_window, approx_token_count)
-                projected_tokens = approx_token_count(messages[cutoff:]) + summary_cap(
-                    working_window
-                )
-            else:
-                projected_tokens = (
-                    approx_token_count(messages[-SUMMARY_KEEP_MESSAGES:]) + SUMMARY_TOKEN_ALLOWANCE
-                )
+            # What the middleware would actually keep, plus the summary it
+            # would write -- unless nothing would be compacted on a state that
+            # already holds its summary (counting that summary twice would
+            # warn for nothing).
+            cutoff = compaction_cutoff(messages, working_window, approx_token_count)
+            summary_tokens = (
+                summary_cap(working_window)
+                if _known_window(working_window)
+                else SUMMARY_TOKEN_ALLOWANCE
+            )
+            if cutoff == 0 and _is_previous_summary(messages[0]):
+                summary_tokens = 0
+            projected_tokens = approx_token_count(messages[cutoff:]) + summary_tokens
             projected_margin = budget.memory_margin_fraction(projected_tokens)
             if projected_margin is None or projected_margin >= MEMORY_MARGIN_FLOOR:
                 return None

@@ -455,24 +455,29 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    `max(1, min(0.4 × W, 0.8 × W − summary_cap(W) − 256))` tokens, `W` being the working window —
    whichever keeps less. One bound alone would loop: ten long messages can by themselves exceed
    the 80 % trigger, and a token budget made of many short messages can leave 20 messages, which
-   re-fires the message floor. Three rules then adjust the cut, and each can only keep **more**:
+   re-fires the message floor. Three rules then adjust the cut:
 
    - the **current question** — the last user message — is never summarized away, even mid-turn
      when a large tool result follows it;
    - the kept part always **starts with an assistant message**. The summary is inserted as a user
      message, and two user messages in a row make strict chat templates (Gemma, Mistral) reject
-     every later turn, so a cut that would start on a user message moves back to the answer before
-     it — the state reads `[summary, answer, question, …]`;
+     every later turn, so the state always reads `[summary, answer, question, …]`. A cut that lands
+     on an older user message moves **forward** to the answer after it (keeping less, so the budget
+     holds); only a cut that lands on the current question itself moves **back** to the answer
+     before it;
    - an assistant message is never separated from its **tool results**.
 
    When only the previous summary would be summarized, nothing is compacted. What is guaranteed:
    with ordinary messages, the state left behind sits under `0.8 × W − 256` and the next model call
-   does not compact again. The documented exceptions keep more than the budget: a current message
-   or a previous answer larger than the budget on its own (kept whole, summarized on a later turn,
-   never truncated), and a tool round kept whole with its call — the next call can then compact
-   again. In the corner where the loaded model alone already exceeds the memory floor (`W = 1`),
-   every model call compacts down to the current turn and the answer before it. Without a known
-   window the keep is the last 10 messages, adjusted the same way. The trigger and the keep count
+   does not compact again. The documented exceptions keep more than the budget: the answer before
+   the current question when the cut falls on that question, a current message or a previous
+   answer larger than the budget on its own (kept whole, summarized on a later turn, never
+   truncated), and a tool round kept whole with its call — the next call can then compact again.
+   In the corner where the loaded model alone already exceeds the memory floor (`W = 1`), a model
+   call compacts down to the current turn and the answer before it; once the state is
+   `[summary, answer, current question, …]` only the summary would remain to summarize, so later
+   calls of the same turn do not compact again. Without a known window the keep is the last 10
+   messages, adjusted the same way. The trigger and the keep count
    tokens with **one** unscaled `chars / 4` counter (`approx_token_count`); the usage a model call
    reports is never used to trigger a compaction (a kept answer's report counts messages that are
    gone).
