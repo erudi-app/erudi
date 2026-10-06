@@ -35,6 +35,7 @@ from src.agents.runner import (
     GenParams,
     ERROR_SENTINEL,
     KEEP_FRACTION,
+    approx_token_count,
     compaction_cutoff,
     keep_token_budget,
     summarize_trim_budget,
@@ -72,6 +73,14 @@ def _alternating(n: int, tokens_each: int) -> list:
         cls = HumanMessage if i % 2 == 0 else AIMessage
         out.append(cls(content=_text(tokens_each, chr(ord("a") + i % 26)), id=f"m{i}"))
     return out
+
+
+def _conversation(pairs: int, tokens_each: int) -> list:
+    """``pairs`` user/assistant exchanges, then the current user question --
+    the shape the middleware sees before a model call."""
+    return _alternating(2 * pairs, tokens_each) + [
+        HumanMessage(_text(tokens_each, "q"), id="current-question")
+    ]
 
 
 class _Llm:
@@ -218,33 +227,60 @@ def test_the_trim_budget_grows_with_a_big_window():
 
 
 def test_without_a_window_the_cutoff_keeps_the_last_ten_messages():
-    messages = _alternating(30, 10)
-    assert compaction_cutoff(messages, None, count_tokens_approximately) == 20
+    # 31 alternating messages ending with the current question: the
+    # 10-message cutoff lands on an answer.
+    messages = _conversation(15, 10)
+    assert compaction_cutoff(messages, None, approx_token_count) == 21
 
 
 def test_with_a_window_the_cutoff_is_the_later_of_the_token_and_message_cutoffs():
     window = 10_000
     budget = keep_token_budget(window)
     # Short messages: the token budget alone would keep far more than 10.
-    short = _alternating(30, 50)
+    short = _conversation(15, 50)
     assert _count(short[-10:]) < budget
-    assert compaction_cutoff(short, window, count_tokens_approximately) == 20
-    # Long messages: the token budget keeps fewer than 10.
-    long = _alternating(30, 900)
-    cut = compaction_cutoff(long, window, count_tokens_approximately)
-    assert cut > 20
-    assert _count(long[cut:]) <= budget
-    assert _count(long[cut - 1 :]) > budget
+    assert compaction_cutoff(short, window, approx_token_count) == 21
+    # Long messages and a short question: the token cutoff lands on a user
+    # message (index 26), so it moves back to the answer before it -- the
+    # kept tail may exceed the budget by that one answer.
+    long = _alternating(30, 900) + [HumanMessage("short question")]
+    cut = compaction_cutoff(long, window, approx_token_count)
+    assert cut == 25
+    assert isinstance(long[cut], AIMessage)
+    assert _count(long[cut + 1 :]) <= budget
+    assert _count(long[cut:]) <= budget + _count([long[cut]])
 
 
-def test_an_oversized_last_message_is_kept_whole():
+def test_an_oversized_last_message_is_kept_whole_with_the_answer_before_it():
     messages = [HumanMessage("hi", id="a"), AIMessage("yo", id="b"), HumanMessage(_text(9000))]
-    assert compaction_cutoff(messages, 10_000, count_tokens_approximately) == 2
+    assert compaction_cutoff(messages, 10_000, approx_token_count) == 1
 
 
-def test_the_degenerate_window_of_one_keeps_only_the_last_message():
-    messages = _alternating(5, 10)
-    assert compaction_cutoff(messages, 1, count_tokens_approximately) == 4
+def test_the_degenerate_window_of_one_keeps_the_current_turn_and_the_answer_before_it():
+    messages = _conversation(2, 10)
+    assert compaction_cutoff(messages, 1, approx_token_count) == 3
+
+
+def test_nothing_is_compacted_when_only_the_previous_summary_would_go():
+    # [summary, answer, question]: summarizing the summary alone is pointless
+    # (and would reset the prefix cache for nothing).
+    messages = [_previous_summary_message(), AIMessage(_text(900), id="a"), HumanMessage("q")]
+    assert compaction_cutoff(messages, 1, approx_token_count) == 0
+
+
+def test_a_mid_turn_tool_round_never_summarizes_the_current_question_away():
+    # The model called a tool whose result is huge: the token cutoff alone
+    # would keep only the tool round. The question that started this turn
+    # must stay, with the answer before it.
+    messages = _conversation(6, 50) + [
+        AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": "c1"}], id="tc"),
+        ToolMessage(_text(5000), tool_call_id="c1", id="tool"),
+    ]
+    question = messages[12]
+    assert question.id == "current-question"
+    cut = compaction_cutoff(messages, 10_000, approx_token_count)
+    assert cut == 11
+    assert isinstance(messages[cut], AIMessage)
 
 
 def test_many_parallel_tool_calls_are_kept_with_their_call_documented_over_keep():
@@ -257,11 +293,109 @@ def test_many_parallel_tool_calls_are_kept_with_their_call_documented_over_keep(
         *[ToolMessage(_text(70), tool_call_id=f"c{i}", id=f"t{i}") for i in range(12)],
         AIMessage("done", id="a2"),
     ]
-    cut = compaction_cutoff(messages, 2000, count_tokens_approximately)
-    # Never split the AI message from its tool results: the cutoff moves BACK
-    # to the AI message, keeping more than 10 messages and more than the budget.
-    assert messages[cut].id == "a1"
+    cut = compaction_cutoff(messages, 2000, approx_token_count)
+    # Never split the AI message from its tool results, never drop the
+    # turn's question: the tail starts with the answer before it and keeps
+    # more than 10 messages and more than the budget.
+    assert messages[cut].id == "a0"
     assert len(messages) - cut > runner_module.SUMMARY_KEEP_MESSAGES
+
+
+def _after_cut(messages, cut):
+    """The state a compaction at ``cut`` leaves (summary + kept tail)."""
+    if cut <= 0:
+        return list(messages)
+    return [_previous_summary_message("new")] + list(messages[cut:])
+
+
+def _assert_alternates(messages, cut):
+    after = _after_cut(messages, cut)
+    for first, second in zip(after, after[1:]):
+        assert not (
+            isinstance(first, HumanMessage) and isinstance(second, HumanMessage)
+        ), f"two user messages in a row at cut={cut}"
+    if cut > 0:
+        assert isinstance(messages[cut], AIMessage)
+        assert not isinstance(after[1], ToolMessage)
+    humans = [m for m in messages if isinstance(m, HumanMessage)]
+    if humans:
+        assert any(m is humans[-1] for m in after), "the current question was summarized away"
+
+
+def _random_conversation(rng):
+    out = []
+    if rng.random() < 0.5:
+        out.append(_previous_summary_message())
+        out.append(AIMessage(_text(rng.randint(1, 600))))
+    call = 0
+    for _ in range(rng.randint(1, 18)):
+        out.append(HumanMessage(_text(rng.randint(1, 900))))
+        for _ in range(rng.choice([0, 0, 0, 1, 2])):
+            ids = [f"c{call + k}" for k in range(rng.randint(1, 4))]
+            call += len(ids)
+            out.append(
+                AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": i} for i in ids])
+            )
+            out.extend(ToolMessage(_text(rng.randint(1, 1500)), tool_call_id=i) for i in ids)
+        out.append(AIMessage(_text(rng.randint(1, 900))))
+    out.append(HumanMessage(_text(rng.randint(1, 3000))))
+    if rng.random() < 0.3:
+        out.append(AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": "last"}]))
+        out.append(ToolMessage(_text(rng.randint(1, 6000)), tool_call_id="last"))
+    return out
+
+
+def _named_cases():
+    calls = [{"name": "t", "args": {}, "id": f"p{i}"} for i in range(12)]
+    return {
+        "611": (_alternating(14, 950) + [HumanMessage("next question")], 10_000),
+        "oversized": (
+            [HumanMessage("hi"), AIMessage("yo"), HumanMessage(_text(9000))],
+            10_000,
+        ),
+        "w1": (_conversation(2, 10), 1),
+        "w1-with-summary": (
+            [_previous_summary_message(), AIMessage("a"), HumanMessage("b"), AIMessage("c")]
+            + [HumanMessage("d")],
+            1,
+        ),
+        "mid-turn-tool-round": (
+            _conversation(6, 50)
+            + [
+                AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": "m1"}]),
+                ToolMessage(_text(5000), tool_call_id="m1"),
+            ],
+            10_000,
+        ),
+        "parallel-tool-calls": (
+            [
+                HumanMessage(_text(500)),
+                AIMessage(_text(500)),
+                HumanMessage("use the tools"),
+                AIMessage(content="", tool_calls=calls),
+                *[ToolMessage(_text(70), tool_call_id=f"p{i}") for i in range(12)],
+                AIMessage("done"),
+                HumanMessage("next"),
+            ],
+            2000,
+        ),
+    }
+
+
+@pytest.mark.parametrize("case", list(_named_cases()))
+def test_a_compaction_always_leaves_alternating_roles(case):
+    messages, window = _named_cases()[case]
+    _assert_alternates(messages, compaction_cutoff(messages, window, approx_token_count))
+
+
+def test_a_compaction_leaves_alternating_roles_on_random_conversations():
+    import random
+
+    rng = random.Random(611)
+    for _ in range(400):
+        messages = _random_conversation(rng)
+        window = rng.choice([None, 1, 300, 2000, 4000, 10_000, 32_768])
+        _assert_alternates(messages, compaction_cutoff(messages, window, approx_token_count))
 
 
 # ===================== the middleware wiring =====================
@@ -276,10 +410,39 @@ def test_the_middleware_keeps_tokens_with_a_window_and_messages_without():
 
 def test_the_middleware_cutoff_is_the_pure_rule():
     mw = _middleware(_ScriptedSummaryModel(messages=iter([])), window=10_000)
-    messages = _alternating(30, 900)
+    messages = _alternating(30, 900) + [HumanMessage("q")]
     assert mw._determine_cutoff_index(messages) == compaction_cutoff(
-        messages, 10_000, count_tokens_approximately
+        messages, 10_000, approx_token_count
     )
+
+
+def test_one_unscaled_counter_drives_trigger_cutoff_trim_and_truncation():
+    """LangChain swaps ``count_tokens_approximately`` for a usage-scaled
+    variant; a distinct wrapper keeps every count on plain chars/4."""
+    mw = _middleware(_ScriptedSummaryModel(messages=iter([])), window=10_000)
+    assert mw.token_counter is approx_token_count
+    assert mw._partial_token_counter is approx_token_count
+    messages = _alternating(4, 100)
+    assert approx_token_count(messages) == count_tokens_approximately(messages)
+
+
+def test_reported_usage_never_triggers_a_compaction():
+    """A preserved AI message keeps the stale usage total of the call that
+    produced it; that number counts what is no longer in the messages."""
+    from langchain.agents.middleware import SummarizationMiddleware
+
+    mw = _middleware(_ScriptedSummaryModel(messages=iter([])), window=10_000)
+    provider = mw.model._get_ls_params().get("ls_provider")
+    stale = AIMessage(
+        "short",
+        usage_metadata={"input_tokens": 9000, "output_tokens": 10, "total_tokens": 9010},
+        response_metadata={"model_provider": provider},
+    )
+    # The stock middleware WOULD fire on it (the provider matches)...
+    stock = SummarizationMiddleware(model=mw.model)
+    assert stock._should_summarize_based_on_reported_tokens([stale], 100.0) is True
+    # ...ours never does.
+    assert mw._should_summarize_based_on_reported_tokens([stale], 100.0) is False
 
 
 def test_the_middleware_trims_the_summarizer_input_to_the_window():
@@ -304,6 +467,8 @@ async def test_the_611_loop_compacts_once_and_not_on_the_next_turn():
     assert _count(state[-10:]) > int(0.8 * window)
 
     after = _after(await mw.abefore_model({"messages": state}, None))
+    # [summary, answer, ..., question]: the roles still alternate.
+    assert isinstance(after[1], AIMessage)
     next_call = after + [AIMessage("answer", id="r1"), HumanMessage("again", id="q2")]
 
     assert await mw.abefore_model({"messages": next_call}, None) is None
@@ -316,12 +481,15 @@ async def test_thirty_short_messages_compact_once_and_not_on_the_next_turn():
     window = 10_000
     summary = _ScriptedSummaryModel(messages=iter([]))
     mw = _middleware(summary, window=window)
-    state = _alternating(29, 200) + [HumanMessage(_text(200), id="q1")]
+    state = _alternating(28, 200) + [HumanMessage(_text(200), id="q1")]
     total = _count(state)
     assert int(0.4 * window) < total < int(0.8 * window)
 
     after = _after(await mw.abefore_model({"messages": state}, None))
-    assert len(after) <= runner_module.SUMMARY_KEEP_MESSAGES + 1
+    # At most 10 kept messages, plus the answer before them when the cutoff
+    # would otherwise start the tail on a user message.
+    assert len(after) <= runner_module.SUMMARY_KEEP_MESSAGES + 2
+    assert isinstance(after[1], AIMessage)
     next_call = after + [AIMessage("answer", id="r1"), HumanMessage("again", id="q2")]
 
     assert await mw.abefore_model({"messages": next_call}, None) is None
@@ -334,7 +502,7 @@ async def test_small_windows_do_not_retrigger_on_the_next_call(window):
     # The longest summary the capped client can write.
     summary = _ScriptedSummaryModel(messages=iter([]), script=[_text(cap, "s")])
     mw = _middleware(summary, window=window)
-    state = _alternating(9, window // 10) + [HumanMessage(_text(window // 10), id="q1")]
+    state = _alternating(10, window // 10) + [HumanMessage(_text(window // 10), id="q1")]
     assert _count(state) >= int(0.8 * window)
 
     after = _after(await mw.abefore_model({"messages": state}, None))
@@ -343,14 +511,23 @@ async def test_small_windows_do_not_retrigger_on_the_next_call(window):
     assert await mw.abefore_model({"messages": next_call}, None) is None
 
 
-async def test_the_degenerate_window_compacts_every_call_down_to_the_last_message():
+async def test_the_degenerate_window_compacts_down_to_the_current_turn_and_the_answer_before():
     summary = _ScriptedSummaryModel(messages=iter([]))
     mw = _middleware(summary, window=None, budget=SimpleNamespace(tokens_at_margin=lambda m: -5))
     state = [HumanMessage("a", id="1"), AIMessage("b", id="2"), HumanMessage("c", id="3")]
 
     after = _after(await mw.abefore_model({"messages": state}, None))
 
-    assert [m.content for m in after[1:]] == ["c"]
+    assert [m.content for m in after[1:]] == ["b", "c"]
+
+
+async def test_the_degenerate_window_does_not_re_summarize_the_summary_alone():
+    summary = _ScriptedSummaryModel(messages=iter([]))
+    mw = _middleware(summary, window=None, budget=SimpleNamespace(tokens_at_margin=lambda m: -5))
+    state = [_previous_summary_message(), AIMessage("b", id="2"), HumanMessage("c", id="3")]
+
+    assert await mw.abefore_model({"messages": state}, None) is None
+    assert summary.prompts == []
 
 
 async def test_an_oversized_last_message_survives_compaction_whole():
@@ -361,7 +538,7 @@ async def test_an_oversized_last_message_survives_compaction_whole():
 
     after = _after(await mw.abefore_model({"messages": state}, None))
 
-    assert after[-1].content == huge.content
+    assert [m.content for m in after[1:]] == ["yo", huge.content]
 
 
 # ===================== the summarizer input and failures =====================
@@ -491,17 +668,97 @@ async def test_a_transient_summary_error_is_raised(exc):
         )
 
 
-async def test_engine_and_watchdog_failures_are_transient():
+async def test_a_dead_child_and_a_decode_timeout_are_transient():
     from src.core.exceptions import EngineException, GenerationTimeoutException
 
     for exc in (
         EngineException(message="child died"),
-        GenerationTimeoutException("silent", phase="first-chunk", budget_s=1.0),
+        GenerationTimeoutException("silent", phase="inter-chunk", budget_s=1.0),
     ):
         summary = _ScriptedSummaryModel(messages=iter([]), script=[exc])
         mw = _middleware(summary, window=10_000)
         with pytest.raises(type(exc)):
             await mw._acreate_summary([HumanMessage("q", id="h"), AIMessage("a", id="a")])
+
+
+def _child_prefill_timeout():
+    return RuntimeError(
+        "Timed out waiting for 600s for the next generated token. "
+        "Increase MLX_VLM_TOKEN_QUEUE_TIMEOUT for long prefills, or reduce the prompt size."
+    )
+
+
+@pytest.mark.parametrize("which", ["watchdog-first-chunk", "child-token-queue"])
+async def test_a_prefill_timeout_takes_the_size_path_with_a_halved_budget(which, caplog):
+    """Too slow to READ this input is deterministic for its size: a smaller
+    input is the cure, never a retry of the same one on the next turn."""
+    from src.core.exceptions import GenerationTimeoutException
+
+    exc = (
+        GenerationTimeoutException("no first chunk", phase="first-chunk", budget_s=300.0)
+        if which == "watchdog-first-chunk"
+        else _child_prefill_timeout()
+    )
+    summary = _ScriptedSummaryModel(messages=iter([]), script=[exc, "Smaller summary."])
+    mw = _middleware(summary, window=10_000)
+    to_summarize = [_previous_summary_message()] + _alternating(30, 300)
+
+    with caplog.at_level(logging.WARNING):
+        result = await mw._acreate_summary(to_summarize)
+
+    assert result == "Smaller summary."
+    first, second = summary.prompts
+    assert len(second) < len(first)
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+    assert not [r for r in caplog.records if r.levelno == logging.ERROR]
+
+
+async def test_an_empty_summary_is_a_failure_never_an_erased_memory(caplog):
+    summary = _ScriptedSummaryModel(messages=iter([]), script=["", "   \n"])
+    mw = _middleware(summary, window=10_000)
+
+    with caplog.at_level(logging.WARNING):
+        result = await mw._acreate_summary(
+            [_previous_summary_message(), HumanMessage("q", id="h"), AIMessage("a", id="a")]
+        )
+
+    assert result == f"{_PREVIOUS}\n\nLater messages of this conversation could not be summarized."
+    assert len(summary.prompts) == 2
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 2
+
+
+async def test_an_empty_first_summary_is_retried():
+    summary = _ScriptedSummaryModel(messages=iter([]), script=["", "Second try."])
+    mw = _middleware(summary, window=10_000)
+
+    result = await mw._acreate_summary(
+        [_previous_summary_message(), HumanMessage("q", id="h"), AIMessage("a", id="a")]
+    )
+
+    assert result == "Second try."
+
+
+async def test_the_placeholder_caps_the_carried_summary_to_the_current_window():
+    """A summary written under a large window must not keep the state above
+    a smaller window's trigger forever: the placeholder carries at most
+    ``summary_cap(W)`` tokens of it (its head)."""
+    window = 2000
+    cap = summary_cap(window)
+    big_previous = "F" * 40 + _text(5000, "x")
+    summary = _ScriptedSummaryModel(messages=iter([]), script=[_overflow_400(), _overflow_400()])
+    mw = _middleware(summary, window=window)
+
+    result = await mw._acreate_summary(
+        [
+            _previous_summary_message(big_previous),
+            HumanMessage("q", id="h"),
+            AIMessage("a", id="a"),
+        ]
+    )
+
+    assert result.startswith("F" * 40)
+    assert result.endswith("Later messages of this conversation could not be summarized.")
+    assert approx_token_count([HumanMessage(result)]) <= cap + 32
 
 
 # ===================== through the runner and the real graph =====================
@@ -555,7 +812,9 @@ async def _turn(runner, thread_id, question="next question"):
 
 
 def _seed_messages():
-    return [_previous_summary_message()] + _alternating(14, 900)
+    # [summary, answer, question, answer, ...]: alternating, ending with an
+    # answer (the turn appends the next question).
+    return [_previous_summary_message()] + _alternating(30, 300)[1:]
 
 
 async def test_the_summary_client_is_capped_and_never_auto_budgeted(monkeypatch):
@@ -668,7 +927,7 @@ async def test_the_memory_warning_projects_the_kept_suffix_plus_the_summary_cap(
     await _turn(runner, "w1")
 
     state = await _state(cp, "w1")
-    cut = compaction_cutoff(state, 10_000, count_tokens_approximately)
+    cut = compaction_cutoff(state, 10_000, approx_token_count)
     assert calls[0] == _count(state[cut:]) + summary_cap(10_000)
 
 
@@ -704,3 +963,16 @@ def test_the_langchain_surface_the_compaction_overrides_is_pinned():
     mw = SummarizationMiddleware(model=ToolableFakeChatModel(messages=iter([])))
     assert hasattr(mw, "_partial_token_counter")
     assert hasattr(mw, "trim_tokens_to_summarize")
+    assert list(
+        inspect.signature(
+            SummarizationMiddleware._should_summarize_based_on_reported_tokens
+        ).parameters
+    ) == ["self", "messages", "threshold"]
+    # The counter swap the wrapper avoids: passing the stock function makes
+    # LangChain substitute a usage-scaled variant of it.
+    assert mw.token_counter is not count_tokens_approximately
+    wrapped = SummarizationMiddleware(
+        model=ToolableFakeChatModel(messages=iter([])), token_counter=approx_token_count
+    )
+    assert wrapped.token_counter is approx_token_count
+    assert wrapped._partial_token_counter is approx_token_count

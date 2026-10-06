@@ -149,8 +149,9 @@ SUMMARY_TOKEN_ALLOWANCE = 512
 # message keep would re-fire compaction on every turn), and a token keep of
 # many short messages can leave >= 20 messages, which re-fires the message
 # floor (OR'd into the trigger). The token bound also leaves room for the
-# summary and a margin under the trigger, so the post-compaction state stays
-# under ``0.8 W - 256`` for every window: ``max(1, min(0.4 W, 0.8 W -
+# summary and a margin under the trigger, so with ordinary messages the
+# post-compaction state stays under ``0.8 W - 256`` for every window (the
+# exceptions ``compaction_cutoff`` documents keep more): ``max(1, min(0.4 W, 0.8 W -
 # summary_cap(W) - 256))`` (non-positive below ~480 tokens, hence the floor of
 # one token). 0.4 is a design value, not a measurement: it trades kept detail
 # for room to grow before the next compaction.
@@ -213,13 +214,11 @@ def summarization_triggers(working_window: Optional[int]) -> list:
 
     Deliberately never ``("fraction", ...)``: that form needs a
     ``model.profile`` our local chat clients do not carry (the middleware's
-    ``__init__`` would raise). The token counter passed stays
-    ``count_tokens_approximately`` -- the same base counter the output budget
-    uses. One nuance: langchain 1.3.9 recognizes that exact reference and
-    swaps it internally for a usage-metadata-scaling variant of the same
-    counter, so the middleware's counts can differ slightly from a raw
-    ``count_tokens_approximately`` call; both remain the same estimator
-    family, never a second tokenizer.
+    ``__init__`` would raise). The token counter passed is
+    ``approx_token_count``: plain ``count_tokens_approximately`` (chars / 4,
+    the same base counter the output budget uses) behind a distinct name, so
+    langchain 1.3.9 does not swap in its usage-scaled variant -- the trigger
+    and the keep count with one unscaled estimator.
     """
     triggers: list = []
     if (
@@ -230,6 +229,22 @@ def summarization_triggers(working_window: Optional[int]) -> list:
         triggers.append(("tokens", max(1, int(COMPACTION_WINDOW_FRACTION * working_window))))
     triggers.append(("messages", SUMMARY_TRIGGER_MESSAGES))
     return triggers
+
+
+def approx_token_count(messages: Any) -> int:
+    """THE token counter of compaction: ``count_tokens_approximately``
+    (chars / 4), unscaled.
+
+    A distinct function on purpose: handed ``count_tokens_approximately``
+    itself, LangChain's ``SummarizationMiddleware`` swaps in a variant that
+    rescales the count with the last AI message's reported usage -- a stale
+    total that counts messages compaction already removed. Through this
+    wrapper the trigger, the cutoff, the summarizer trim, the truncation and
+    the amber-warning projection all count with one plain estimator.
+    """
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    return count_tokens_approximately(messages)
 
 
 def _known_window(window: Any) -> bool:
@@ -279,31 +294,68 @@ def compaction_cutoff(messages: list, working_window: Optional[int], counter: An
     """Index of the first message a compaction keeps (0: nothing to compact).
 
     THE cutoff rule, pure: the summarization middleware uses it, and so does
-    the amber-warning projection (which has no middleware instance). With a
-    known window, the later of two cutoffs -- the earliest suffix that fits
-    ``keep_token_budget(W)`` tokens and the one keeping
-    ``SUMMARY_KEEP_MESSAGES`` messages -- so the kept tail respects BOTH
-    bounds. Without a window, the message cutoff alone (LangChain's own
-    ``("messages", 10)``).
+    the amber-warning projection (which has no middleware instance).
 
-    Both cutoffs are moved by LangChain's ``_find_safe_cutoff_point``, which
-    never separates an AI message from its tool results: when the cutoff
-    lands inside a tool round it moves BACK to the AI message, so a turn with
-    many parallel tool calls can keep more than either bound (accepted -- the
-    alternative is an orphaned tool result the chat template rejects). A last
-    message larger than the budget on its own is kept whole and summarized on
-    a later turn, never truncated.
+    1. With a known window, the later of two cutoffs -- the earliest suffix
+       that fits ``keep_token_budget(W)`` tokens and the one keeping
+       ``SUMMARY_KEEP_MESSAGES`` messages -- so the kept tail respects BOTH
+       bounds. Without a window, the message cutoff alone.
+    2. Never past the LAST user message: the question the current turn
+       answers is never summarized away mid-turn (a tool round after it can
+       be large on its own).
+    3. Never ON a user message: LangChain inserts the summary as a user
+       message, and two user messages in a row make the strict chat
+       templates (Gemma, Mistral) reject every later turn. The cutoff moves
+       back until the kept tail starts with an assistant message, so the
+       state alternates ``[summary, answer, question, ...]``.
+    4. Tool-pair safe (LangChain's ``_find_safe_cutoff_point``): an AI
+       message is never separated from its tool results -- moving back can
+       land in a tool round, and the cutoff then moves back to its call.
+    5. If only the previous summary would be summarized (cutoff <= 1 after a
+       summary), nothing is: re-summarizing a summary alone adds nothing and
+       would reset the prefix cache for nothing.
+
+    The kept tail is therefore not strictly bounded: it can exceed the token
+    budget by the answer before the current question (steps 2-3), by a last
+    message larger than the budget on its own (kept whole, summarized on a
+    later turn, never truncated), and by a tool round kept with its call
+    (step 4) -- accepted, the alternatives break the conversation.
     """
     from langchain.agents.middleware import SummarizationMiddleware
+    from langchain_core.messages import HumanMessage, ToolMessage
 
     safe_point = SummarizationMiddleware._find_safe_cutoff_point
     if len(messages) <= SUMMARY_KEEP_MESSAGES:
-        message_cut = 0
+        cutoff = 0
     else:
-        message_cut = safe_point(messages, len(messages) - SUMMARY_KEEP_MESSAGES)
-    if not _known_window(working_window):
-        return message_cut
-    return max(_token_cutoff(messages, keep_token_budget(working_window), counter), message_cut)
+        cutoff = safe_point(messages, len(messages) - SUMMARY_KEEP_MESSAGES)
+    if _known_window(working_window):
+        token_cut = _token_cutoff(messages, keep_token_budget(working_window), counter)
+        cutoff = max(token_cut, cutoff)
+    if cutoff <= 0:
+        return 0
+    last_human = next(
+        (i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)),
+        None,
+    )
+    if last_human is not None:
+        cutoff = min(cutoff, last_human)
+    # Every step moves strictly back, so the loop ends.
+    while cutoff > 0:
+        message = messages[cutoff]
+        if isinstance(message, HumanMessage):
+            cutoff -= 1
+        elif isinstance(message, ToolMessage):
+            paired = safe_point(messages, cutoff)
+            # LangChain answers an orphaned tool result (no matching call)
+            # by moving FORWARD, which could land back on a user message:
+            # step back past it instead.
+            cutoff = paired if paired < cutoff else cutoff - 1
+        else:
+            break
+    if cutoff <= 1 and messages and _is_previous_summary(messages[0]):
+        return 0
+    return cutoff
 
 
 def _token_cutoff(messages: list, budget: int, counter: Any) -> int:
@@ -351,11 +403,18 @@ def _previous_summary_text(previous: Any) -> str:
     return text
 
 
-def _summary_placeholder(previous: Any) -> str:
+def _summary_placeholder(previous: Any, max_tokens: Optional[int] = None) -> str:
     """What a compaction writes when no summary could be produced: the
-    previous summary, carried over whole, plus one honest sentence. Bounded
-    loss -- the earlier memory survives -- and no compaction dead-lock."""
+    previous summary, carried over, plus one honest sentence. Bounded loss --
+    the earlier memory survives -- and no compaction dead-lock.
+
+    ``max_tokens`` (``summary_cap(W)`` when the window is known) caps the
+    carried text, head kept: a summary written under a larger window would
+    otherwise keep the state above a smaller window's trigger forever.
+    """
     text = _previous_summary_text(previous)
+    if text and max_tokens is not None:
+        text = text[: max_tokens * _APPROX_CHARS_PER_TOKEN].rstrip()
     if text:
         return f"{text}\n\n{SUMMARY_LATER_LOST}"
     return SUMMARY_EARLIER_LOST
@@ -380,19 +439,30 @@ def _truncate_for_summary(messages: list, budget: int, counter: Any) -> list:
 _TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 429})
 
 
+def _is_prefill_timeout(exc: BaseException) -> bool:
+    """The summary call timed out READING its input: the parent watchdog's
+    first-chunk budget, or mlx_vlm.server's raw token-queue timeout."""
+    if isinstance(exc, GenerationTimeoutException):
+        return exc.phase == PHASE_FIRST_CHUNK
+    return is_child_prefill_timeout(exc)
+
+
 def _is_transient_summary_error(exc: BaseException) -> bool:
     """A failure of the summary call that the next turn can expect not to
-    meet again: connection refused/reset, a timeout (the client's or the
-    watchdog's), 408/409/429/5xx, a dead child. The turn then fails with the
+    meet again: connection refused/reset, a client timeout, a timeout while
+    DECODING, 408/409/429/5xx, a dead child. The turn then fails with the
     history intact, and the next turn retries the compaction.
 
-    Everything else -- a context overflow, any other 4xx, a bug -- would fail
-    every later turn identically while the main model is fine, so it degrades
-    instead (``_acreate_summary``).
+    Everything else would fail every later turn identically while the main
+    model is fine, so it degrades instead (``_acreate_summary``): a context
+    overflow, any other 4xx, a timeout while reading the input (deterministic
+    for that input size -- a smaller input is the cure), a bug.
     """
     import httpx
     import openai
 
+    if _is_prefill_timeout(exc):
+        return False
     if isinstance(exc, (EngineException, GenerationTimeoutException)):
         return True
     if parse_context_overflow(exc) is not None:
@@ -407,11 +477,15 @@ def _is_transient_summary_error(exc: BaseException) -> bool:
 
 
 def _is_rejection(exc: BaseException) -> bool:
-    """A deterministic refusal by the server (overflow or another 4xx), as
-    opposed to an unexpected failure."""
+    """A deterministic failure the app expects (an overflow, another 4xx, a
+    prefill timeout), as opposed to an unexpected one."""
     import openai
 
-    return parse_context_overflow(exc) is not None or isinstance(exc, openai.APIStatusError)
+    return (
+        parse_context_overflow(exc) is not None
+        or isinstance(exc, openai.APIStatusError)
+        or _is_prefill_timeout(exc)
+    )
 
 
 @lru_cache(maxsize=1)
@@ -441,6 +515,12 @@ def _summarization_middleware_class():
 
         def _determine_cutoff_index(self, messages):
             return compaction_cutoff(messages, self.working_window, self._partial_token_counter)
+
+        def _should_summarize_based_on_reported_tokens(self, messages, threshold):
+            # Never: the usage a preserved AI message reports is the stale
+            # total of the call that produced it, counting messages that are
+            # no longer there. The trigger counts what IS there.
+            return False
 
         async def abefore_model(self, state, runtime):
             # Non-None exactly when the history was rewritten.
@@ -487,7 +567,10 @@ def _summarization_middleware_class():
             trimmed = self._trim_for_summary(truncated, retry_budget, start_on=None)
             summary = await self._summarize(previous, trimmed, attempt="retry")
             if summary is None:
-                summary = _summary_placeholder(previous)
+                cap = (
+                    summary_cap(self.working_window) if _known_window(self.working_window) else None
+                )
+                summary = _summary_placeholder(previous, cap)
             return self._compacted(messages_to_summarize, summary)
 
         def _trim_for_summary(self, messages, budget, *, start_on):
@@ -536,7 +619,13 @@ def _summarization_middleware_class():
                         exc_info=True,
                     )
                 return None
-            return response.text.strip()
+            summary = response.text.strip()
+            if not summary:
+                # An empty summary would replace the whole history with
+                # nothing: a failure, never a success.
+                logger.warning(f"Compaction summary call returned no text ({attempt} attempt)")
+                return None
+            return summary
 
         @staticmethod
         def _compacted(messages_to_summarize, summary):
@@ -1500,9 +1589,9 @@ class AgentRunner:
         (``compaction_cutoff``) and reads up to ``summarize_trim_budget``
         tokens of history; without one it keeps the last
         ``SUMMARY_KEEP_MESSAGES`` messages and LangChain's 4000-token trim.
+        Every count -- trigger, cutoff, trim, truncation -- goes through ONE
+        unscaled counter, ``approx_token_count``.
         """
-        from langchain_core.messages.utils import count_tokens_approximately
-
         from src.agents.middleware import (
             _StripStaleImagesMiddleware,
             _StripStaleToolResults,
@@ -1521,7 +1610,7 @@ class AgentRunner:
                 model=model,
                 trigger=summarization_triggers(working_window),
                 keep=keep,
-                token_counter=count_tokens_approximately,
+                token_counter=approx_token_count,
                 summary_prompt=SUMMARY_PROMPT,
                 trim_tokens_to_summarize=summarize_trim_budget(working_window, allocated_window),
                 working_window=working_window,
@@ -1576,34 +1665,31 @@ class AgentRunner:
         ``summary_cap(W)``-token summary (the summary client's own cap);
         without one, the last ``SUMMARY_KEEP_MESSAGES`` messages plus a
         ``SUMMARY_TOKEN_ALLOWANCE``-token summary. Both are counted with the
-        SAME ``count_tokens_approximately`` the compaction trigger uses. Only when
+        SAME ``approx_token_count`` the compaction trigger uses. Only when
         even THAT projected size leaves the margin strictly under the floor
         does the warning go out -- the honest meaning of "compaction had its
         chance": it cannot restore the margin. The event still reports the
         CURRENT numbers (what the user's machine holds right now). Advisory
         only: a failure here is logged and never sinks the turn.
         """
-        from langchain_core.messages.utils import count_tokens_approximately
-
         try:
             state = await agent.aget_state(run_config)
             messages = (state.values or {}).get("messages", []) if state else []
             if not messages:
                 return None
             if _known_window(working_window):
-                cutoff = compaction_cutoff(messages, working_window, count_tokens_approximately)
-                projected_tokens = count_tokens_approximately(messages[cutoff:]) + summary_cap(
+                cutoff = compaction_cutoff(messages, working_window, approx_token_count)
+                projected_tokens = approx_token_count(messages[cutoff:]) + summary_cap(
                     working_window
                 )
             else:
                 projected_tokens = (
-                    count_tokens_approximately(messages[-SUMMARY_KEEP_MESSAGES:])
-                    + SUMMARY_TOKEN_ALLOWANCE
+                    approx_token_count(messages[-SUMMARY_KEEP_MESSAGES:]) + SUMMARY_TOKEN_ALLOWANCE
                 )
             projected_margin = budget.memory_margin_fraction(projected_tokens)
             if projected_margin is None or projected_margin >= MEMORY_MARGIN_FLOOR:
                 return None
-            conversation_tokens = count_tokens_approximately(messages)
+            conversation_tokens = approx_token_count(messages)
             current_margin = budget.memory_margin_fraction(conversation_tokens)
             margin = current_margin if current_margin is not None else projected_margin
             logger.warning(

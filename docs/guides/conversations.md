@@ -450,18 +450,32 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    by a summary, so the agent's context stays bounded. The `messages` table is untouched — the UI
    still shows the whole conversation.
 
-   **What a compaction keeps** is bounded twice (`compaction_cutoff` in `runner.py`): at most the
-   last **10 messages** *and* at most a **token budget** of
+   **What a compaction keeps** (`compaction_cutoff` in `runner.py`) starts from two bounds: at most
+   the last **10 messages** *and* at most a **token budget** of
    `max(1, min(0.4 × W, 0.8 × W − summary_cap(W) − 256))` tokens, `W` being the working window —
    whichever keeps less. One bound alone would loop: ten long messages can by themselves exceed
    the 80 % trigger, and a token budget made of many short messages can leave 20 messages, which
-   re-fires the message floor. With both, the state left behind sits under `0.8 × W − 256`, so the
-   next model call does not compact again. A last message larger than the budget on its own is kept
-   whole (it is summarized on a later turn), and an assistant message is never separated from its
-   tool results — a turn with many parallel tool calls can therefore keep more than either bound.
-   In the corner where the loaded model alone already exceeds the memory floor (`W = 1`), every
-   model call compacts down to the last message. Without a known window the keep is the last 10
-   messages. Both the trigger and the keep count tokens with the same `chars / 4` estimator.
+   re-fires the message floor. Three rules then adjust the cut, and each can only keep **more**:
+
+   - the **current question** — the last user message — is never summarized away, even mid-turn
+     when a large tool result follows it;
+   - the kept part always **starts with an assistant message**. The summary is inserted as a user
+     message, and two user messages in a row make strict chat templates (Gemma, Mistral) reject
+     every later turn, so a cut that would start on a user message moves back to the answer before
+     it — the state reads `[summary, answer, question, …]`;
+   - an assistant message is never separated from its **tool results**.
+
+   When only the previous summary would be summarized, nothing is compacted. What is guaranteed:
+   with ordinary messages, the state left behind sits under `0.8 × W − 256` and the next model call
+   does not compact again. The documented exceptions keep more than the budget: a current message
+   or a previous answer larger than the budget on its own (kept whole, summarized on a later turn,
+   never truncated), and a tool round kept whole with its call — the next call can then compact
+   again. In the corner where the loaded model alone already exceeds the memory floor (`W = 1`),
+   every model call compacts down to the current turn and the answer before it. Without a known
+   window the keep is the last 10 messages, adjusted the same way. The trigger and the keep count
+   tokens with **one** unscaled `chars / 4` counter (`approx_token_count`); the usage a model call
+   reports is never used to trigger a compaction (a kept answer's report counts messages that are
+   gone).
 
    **The summary itself is bounded**: the summary client is capped at
    `summary_cap(W) = clamp(W / 8, 128, 1024)` tokens, with no automatic output budget. It reads up
@@ -472,13 +486,17 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    facts it carries survive every compaction.
 
    **A failed summary never erases memory.** A transient failure of the summary call (the child
-   unreachable or dead, a timeout, HTTP 408/409/429/5xx) fails the turn with the history intact: no
-   summary is written and the next turn retries. A deterministic failure (a context overflow or
-   another 4xx) — or a history where no user turn fits the summarizer's budget because one answer
-   alone exceeds it — is retried once with oversized messages truncated (and the budget halved after
-   a rejection); if that fails too, the compaction writes a placeholder that **carries the previous
-   summary** followed by "Later messages of this conversation could not be summarized." The
-   conversation keeps working, and `backend.log` carries one warning per failed attempt.
+   unreachable or dead, a client timeout, a timeout while the summary was being written, HTTP
+   408/409/429/5xx) fails the turn with the history intact: no summary is written and the next turn
+   retries. A deterministic failure — a context overflow, another 4xx, a timeout while the model was
+   still reading the input (deterministic for that input size), or an **empty summary** — and a
+   history where no user turn fits the summarizer's budget because one answer alone exceeds it are
+   retried once with oversized messages truncated (and the budget halved after a failed call); if
+   that fails too, the compaction writes a placeholder that **carries the previous summary** —
+   capped at `summary_cap(W)` tokens, so a summary written under a larger window cannot keep the
+   conversation above a smaller window's trigger — followed by "Later messages of this
+   conversation could not be summarized." The conversation keeps working, and `backend.log`
+   carries one warning per failed attempt.
 
    **Warn only when compaction cannot save you**: the middleware compacts in `before_model`, so
    this turn's growth is compacted on the *next* turn. At the end of each turn the runner therefore
