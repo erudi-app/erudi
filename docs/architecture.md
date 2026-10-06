@@ -146,7 +146,7 @@ How the child is launched differs:
   `set_start_method("spawn", force=True)`), which re-executes the launcher in child mode.
 
 Shared lifecycle (port pick, two-stage `/health` + chat-ping probe, SSE byte-buffer
-parser, atexit storage, idle-cleanup active marker, kwarg translation) lives in
+parser, atexit storage, last-used stamp for the idle cleanup, kwarg translation) lives in
 `BaseChatServerEngine`; `BaseLlamaCppEngine` factors what is specific to `llama-server`.
 See [Engines Architecture](dev/architecture/engines.md).
 
@@ -192,8 +192,26 @@ Conversations and Arena share one streaming primitive, `AgentRunner`
 
 - **Conversations** run with a `thread_id`, summarization enabled, and the LangGraph
   checkpointer, so history is restored from the checkpointer (only the new message is
-  sent) and older turns are summarized in the agent state.
+  sent) and older turns are summarized in the agent state. A compaction keeps at most
+  10 messages and at most a token budget of the working window, and its summary is
+  capped (see the [Conversations guide](guides/conversations.md)).
 - **Arena** runs stateless: no `thread_id`, no summarization, no checkpointer.
+
+Each conversation or Arena turn claims the engine's prefix cache for itself
+(`claim_prefix`); on Apple Silicon the cache holds one conversation at a time and is
+reset on a conversation change and after a compaction (see
+[Engines](dev/architecture/engines.md#prefix-cache-mlx)). The generators between the
+service and LangGraph are consumed under `contextlib.aclosing`, and the runner iterates
+LangGraph itself from a child task (`agents/isolated_stream.py`). Starlette delivers a
+client disconnect as an anyio cancellation re-delivered at every await, which would
+abort LangGraph's own teardown and leave the model call streaming; the child task gets a
+single native cancellation instead, and the runner waits for it, shielded. Whether the
+consumer closes the stream or a disconnect cancels it, the in-flight model call is closed
+before the generation guard is released. Starlette never closes a body iterator itself:
+a disconnect noticed while a chunk is being sent leaves the service generator suspended,
+still holding the guard, until its finalization closes it the same way. Titles have no
+LangGraph: a title cut short flags the inference child, so the next prefix-cache reset
+sends a barrier first.
 
 A turn is captured as structured events — `answer`, `thinking`, `tool_call`,
 `tool_result` — which the conversation service frames as NDJSON. Arena projects the same
@@ -211,6 +229,7 @@ Other modules in the layer:
 | `middleware.py` | Summarization and related agent middleware |
 | `model_factory.py` | Builds the chat client pointed at the engine's child server |
 | `chat_model.py` | `Erudi_Chat_OpenAI`: the `ChatOpenAI` subclass carrying the streaming budgets and the servers' dedicated reasoning field |
+| `isolated_stream.py` | Iterates an async stream (the agent's LangGraph stream) from a child task, so a client disconnect reaches it as one cancellation and it is closed before the guard is released |
 | `reasoning_stream.py` | Pure extraction of `delta.reasoning_content` / `delta.reasoning` from raw chunks |
 | `think_splitter.py` | Fallback splitter: inline `<think>` the server parser missed stays out of the answer |
 
@@ -488,8 +507,10 @@ the budget to consume.
 
 `BaseEngine` keeps a single model in memory as class state. The cleanup monitor started
 in the lifespan ticks every 300 seconds and unloads the model once it has been idle
-longer than `_max_idle_time` (300 seconds). A generation in flight sets the active marker
-`_last_used = None`, which blocks the monitor from reaping the model mid-stream.
+longer than `_max_idle_time` (300 seconds). The monitor's tick takes the same lock as
+`generation_guard`, so it waits for a generation in flight to release it — and the guard
+refreshes `_last_used` on release — which is what keeps a model from being reaped
+mid-stream.
 
 ### Streaming
 

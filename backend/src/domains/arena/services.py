@@ -16,6 +16,7 @@ this endpoint); the runner's engine guard serializes them on the single-model
 engine, so model swaps don't thrash the subprocess.
 """
 
+import contextlib
 import time
 from typing import AsyncGenerator, Dict, Any
 
@@ -194,24 +195,32 @@ class ArenaService:
         if attachment_notice:
             response += attachment_notice
             yield attachment_notice
-        async for token in self.runner.astream_text(
-            llm=llm,
-            user_message=self._build_user_message(
-                prepend_attachment_block(attachments.block, payload.question), payload.images
-            ),
-            system_prompt=plan.system_prompt,
-            params=params,
-            thread_id=None,
-            summarize=False,
-            kb_context_block=plan.kb_context_block,
-            kb_language_line=plan.kb_language_line,
-            tools=plan.tools,
-            context=plan.context,
-            supports_vision=supports_vision,
-            effort_plan=effort_plan,
-        ):
-            response += token
-            yield token
+        # ``aclosing``: whenever THIS generator is closed, the runner is closed
+        # with it, inside the guard. Starlette never closes a body iterator
+        # itself: a disconnect noticed while ``send()`` is in progress leaves
+        # this generator suspended at its yield, and closing it then still
+        # depends on its finalization.
+        async with contextlib.aclosing(
+            self.runner.astream_text(
+                llm=llm,
+                user_message=self._build_user_message(
+                    prepend_attachment_block(attachments.block, payload.question), payload.images
+                ),
+                system_prompt=plan.system_prompt,
+                params=params,
+                thread_id=None,
+                summarize=False,
+                kb_context_block=plan.kb_context_block,
+                kb_language_line=plan.kb_language_line,
+                tools=plan.tools,
+                context=plan.context,
+                supports_vision=supports_vision,
+                effort_plan=effort_plan,
+            )
+        ) as tokens:
+            async for token in tokens:
+                response += token
+                yield token
 
         duration_ms = (time.perf_counter() - start_s) * 1000
         logger.info(

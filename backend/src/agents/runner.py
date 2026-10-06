@@ -58,9 +58,12 @@ itself LangChain-free at import time (``ChatOpenAI`` is deferred inside it).
 
 from __future__ import annotations
 
+import contextlib
+import functools
 import json
 import time
 from dataclasses import dataclass
+from functools import lru_cache
 from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
 
 from fastapi.concurrency import run_in_threadpool
@@ -71,6 +74,7 @@ from src.agents.chat_model import (
     first_chunk_ceiling_s,
     is_child_prefill_timeout,
 )
+from src.agents.isolated_stream import isolated_stream
 from src.agents.model_factory import build_chat_model
 from src.agents.overflow import ContextOverflow, parse_context_overflow
 from src.agents.reasoning_effort import NO_REASONING_PLAN, EffortPlan
@@ -79,6 +83,7 @@ from src.agents.think_splitter import ThinkSplitter
 from src.core import config
 from src.core.exceptions import EngineException, GenerationTimeoutException
 from src.core.logging import logger
+from src.engines.base_engine import BaseEngine, run_reset_shielded
 from src.engines.memory_budget import MemoryBudget
 from src.engines.working_window import canonical_working_window
 
@@ -132,8 +137,68 @@ COMPACTION_WINDOW_FRACTION = 0.8
 # the saturation scenario, raise the floor then.
 MEMORY_MARGIN_FLOOR = 0.15
 # Token allowance for the summary a compaction would insert, used when
-# projecting the post-compaction size the warning is judged on.
+# projecting the post-compaction size the warning is judged on -- ONLY when no
+# working window is known. With a window, the projection uses the summary's
+# real cap, ``summary_cap(W)``.
 SUMMARY_TOKEN_ALLOWANCE = 512
+
+# What a compaction keeps (#611). The kept tail is bounded TWICE: at most
+# ``SUMMARY_KEEP_MESSAGES`` messages AND at most ``KEEP_FRACTION`` of the
+# working window, in tokens -- whichever keeps less. One bound alone loops:
+# the last 10 messages can by themselves exceed the 80 % token trigger (a
+# message keep would re-fire compaction on every turn), and a token keep of
+# many short messages can leave >= 20 messages, which re-fires the message
+# floor (OR'd into the trigger). The token bound also leaves room for the
+# summary and a margin under the trigger, so with ordinary messages the
+# post-compaction state stays under ``0.8 W - 256`` for every window (the
+# exceptions ``compaction_cutoff`` documents keep more): ``max(1, min(0.4 W, 0.8 W -
+# summary_cap(W) - 256))`` (non-positive below ~480 tokens, hence the floor of
+# one token). 0.4 is a design value, not a measurement: it trades kept detail
+# for room to grow before the next compaction.
+KEEP_FRACTION = 0.4
+POST_COMPACTION_MARGIN_TOKENS = 256
+
+# The summary's own length is BOUNDED: the summary client is built with
+# ``max_tokens = summary_cap(W)`` and no automatic output budget (which would
+# otherwise hand it the whole window minus the prompt). An eighth of the
+# window, clamped to [128, 1024].
+SUMMARY_CAP_FLOOR_TOKENS = 128
+SUMMARY_CAP_CEILING_TOKENS = 1024
+
+# How much history the summarizer reads. LangChain trims what it summarizes to
+# 4000 tokens by default (strategy "last"), so with a big window the previous
+# summary would fall out of the summarizer's input and its facts would be lost
+# at every compaction. With a known window the budget is
+#   max(256, min(max(4000, 0.8 W - cap),
+#                W - 2 cap - 256,
+#                (W_alloc - 2 cap - 512) // 3))
+# -- the second term keeps the summarizer prompt (input + the prepended
+# previous summary + the summary it writes, each up to ``cap``) inside the
+# MEMORY window, the third inside the ALLOCATED window even when chars/4
+# under-counts threefold (CJK). The previous summary is always prepended on
+# top of this budget, never trimmed away.
+SUMMARY_TRIM_DEFAULT_TOKENS = 4000
+SUMMARY_TRIM_FLOOR_TOKENS = 256
+SUMMARY_TRIM_MEMORY_MARGIN_TOKENS = 256
+SUMMARY_TRIM_ALLOCATED_MARGIN_TOKENS = 512
+SUMMARY_TRIM_UNDERCOUNT_FACTOR = 3
+
+# chars per token of ``count_tokens_approximately`` (its default), used to
+# truncate an oversized message to a token budget.
+_APPROX_CHARS_PER_TOKEN = 4
+# Room left for the role and per-message overhead when truncating a message.
+_TRUNCATION_OVERHEAD_TOKENS = 16
+# LangChain's fallback when ``trim_messages`` itself fails.
+_TRIM_FALLBACK_MESSAGE_COUNT = 15
+
+# The summary message LangChain inserts (``_build_new_messages``, pinned in
+# tests/test_compaction_keep.py) and the marker it carries.
+SUMMARY_MESSAGE_PREFIX = "Here is a summary of the conversation to date:\n\n"
+SUMMARY_SOURCE_MARKER = "summarization"
+# The placeholder a compaction writes when the summary could not be produced
+# (see ``_summary_placeholder``). ASCII, addressed to the model.
+SUMMARY_LATER_LOST = "Later messages of this conversation could not be summarized."
+SUMMARY_EARLIER_LOST = "Earlier messages of this conversation could not be summarized."
 
 
 def summarization_triggers(working_window: Optional[int]) -> list:
@@ -149,13 +214,11 @@ def summarization_triggers(working_window: Optional[int]) -> list:
 
     Deliberately never ``("fraction", ...)``: that form needs a
     ``model.profile`` our local chat clients do not carry (the middleware's
-    ``__init__`` would raise). The token counter passed stays
-    ``count_tokens_approximately`` -- the same base counter the output budget
-    uses. One nuance: langchain 1.3.9 recognizes that exact reference and
-    swaps it internally for a usage-metadata-scaling variant of the same
-    counter, so the middleware's counts can differ slightly from a raw
-    ``count_tokens_approximately`` call; both remain the same estimator
-    family, never a second tokenizer.
+    ``__init__`` would raise). The token counter passed is
+    ``approx_token_count``: plain ``count_tokens_approximately`` (chars / 4,
+    the same base counter the output budget uses) behind a distinct name, so
+    langchain 1.3.9 does not swap in its usage-scaled variant -- the trigger
+    and the keep count with one unscaled estimator.
     """
     triggers: list = []
     if (
@@ -166,6 +229,464 @@ def summarization_triggers(working_window: Optional[int]) -> list:
         triggers.append(("tokens", max(1, int(COMPACTION_WINDOW_FRACTION * working_window))))
     triggers.append(("messages", SUMMARY_TRIGGER_MESSAGES))
     return triggers
+
+
+def _flag_abandoned(abandon_hook: Any) -> None:
+    """Flag the child a turn or title ran against, from an ``except
+    BaseException`` that re-raises.
+
+    A failure of the hook must never replace the exit in flight (the
+    consumer's GeneratorExit or cancellation): it is one WARNING with its
+    traceback instead, like ``Erudi_Chat_OpenAI._notify_abandoned``.
+    """
+    if abandon_hook is None:
+        return
+    try:
+        abandon_hook()
+    except Exception:
+        # The exit in flight is what propagates; this record says the
+        # runner-level flag was lost (the next reset then skips its barrier).
+        logger.warning("Flagging an abandoned turn failed", exc_info=True)
+
+
+def _engine_overrides(engine: Any, hook_name: str) -> bool:
+    """Whether ``engine`` implements the prefix-cache hook ``hook_name``
+    itself, rather than inheriting ``BaseEngine``'s no-op.
+
+    Only MLX does. The llama.cpp engines (CPU, CUDA) must stay a strict
+    no-op: no reset thread, no ``BaseEngine._pending_reset`` -- so the runner
+    calls ``run_reset_shielded`` only for an engine that overrides the hook.
+    """
+    hook = getattr(engine, hook_name, None)
+    if not callable(hook):
+        return False
+    base = getattr(BaseEngine, hook_name)
+    return getattr(hook, "__func__", hook) is not getattr(base, "__func__", base)
+
+
+def approx_token_count(messages: Any) -> int:
+    """THE token counter of compaction: ``count_tokens_approximately``
+    (chars / 4), unscaled.
+
+    A distinct function on purpose: handed ``count_tokens_approximately``
+    itself, LangChain's ``SummarizationMiddleware`` swaps in a variant that
+    rescales the count with the last AI message's reported usage -- a stale
+    total that counts messages compaction already removed. Through this
+    wrapper the trigger, the cutoff, the summarizer trim, the truncation and
+    the amber-warning projection all count with one plain estimator.
+    """
+    from langchain_core.messages.utils import count_tokens_approximately
+
+    return count_tokens_approximately(messages)
+
+
+def _known_window(window: Any) -> bool:
+    """A real positive int (``bool`` rejected), like the trigger's own test."""
+    return isinstance(window, int) and not isinstance(window, bool) and window > 0
+
+
+def summary_cap(working_window: int) -> int:
+    """The summary's token cap for this working window: ``W // 8`` clamped
+    to [128, 1024]. Also the summary size the keep budget and the amber
+    warning projection reserve."""
+    return max(SUMMARY_CAP_FLOOR_TOKENS, min(SUMMARY_CAP_CEILING_TOKENS, working_window // 8))
+
+
+def keep_token_budget(working_window: int) -> int:
+    """Tokens a compaction may keep: ``max(1, min(0.4 W, 0.8 W - cap - 256))``."""
+    room_under_trigger = (
+        int(COMPACTION_WINDOW_FRACTION * working_window)
+        - summary_cap(working_window)
+        - POST_COMPACTION_MARGIN_TOKENS
+    )
+    return max(1, min(int(KEEP_FRACTION * working_window), room_under_trigger))
+
+
+def summarize_trim_budget(working_window: Optional[int], allocated_window: Optional[int]) -> int:
+    """Tokens of history the summarizer reads (see the constants above).
+
+    No known working window: LangChain's own 4000. The allocated-window term
+    is dropped when the allocation is unknown.
+    """
+    if not _known_window(working_window):
+        return SUMMARY_TRIM_DEFAULT_TOKENS
+    cap = summary_cap(working_window)
+    terms = [
+        max(SUMMARY_TRIM_DEFAULT_TOKENS, int(COMPACTION_WINDOW_FRACTION * working_window) - cap),
+        working_window - 2 * cap - SUMMARY_TRIM_MEMORY_MARGIN_TOKENS,
+    ]
+    if _known_window(allocated_window):
+        terms.append(
+            (allocated_window - 2 * cap - SUMMARY_TRIM_ALLOCATED_MARGIN_TOKENS)
+            // SUMMARY_TRIM_UNDERCOUNT_FACTOR
+        )
+    return max(SUMMARY_TRIM_FLOOR_TOKENS, min(terms))
+
+
+def compaction_cutoff(messages: list, working_window: Optional[int], counter: Any) -> int:
+    """Index of the first message a compaction keeps (0: nothing to compact).
+
+    THE cutoff rule, pure: the summarization middleware uses it, and so does
+    the amber-warning projection (which has no middleware instance).
+
+    1. With a known window, the later of two cutoffs -- the earliest suffix
+       that fits ``keep_token_budget(W)`` tokens and the one keeping
+       ``SUMMARY_KEEP_MESSAGES`` messages -- so the kept tail respects BOTH
+       bounds. Without a window, the message cutoff alone.
+    2. Never past the LAST user message: the question the current turn
+       answers is never summarized away mid-turn (a tool round after it can
+       be large on its own).
+    3. Never ON a user message: LangChain inserts the summary as a user
+       message, and two user messages in a row make the strict chat
+       templates (Gemma, Mistral) reject every later turn, so the kept tail
+       always starts with an assistant message and the state alternates
+       ``[summary, answer, question, ...]``. On an OLDER user message the
+       cutoff moves FORWARD to the next assistant message (keeping less, so
+       the budget holds); only on the current question -- or when no
+       assistant message lies between the cutoff and it -- does it move BACK
+       to the answer before it.
+    4. Tool-pair safe (LangChain's ``_find_safe_cutoff_point``): an AI
+       message is never separated from its tool results -- moving back can
+       land in a tool round, and the cutoff then moves back to its call.
+    5. If only the previous summary would be summarized (cutoff <= 1 after a
+       summary), nothing is: re-summarizing a summary alone adds nothing and
+       would reset the prefix cache for nothing.
+
+    With ordinary messages the kept tail stays inside the token budget. It
+    exceeds it only by the answer before the current question when the cut
+    falls ON that question (steps 2-3), by a last message larger than the
+    budget on its own (kept whole, summarized on a later turn, never
+    truncated), and by a tool round kept with its call (step 4) -- accepted,
+    the alternatives break the conversation.
+    """
+    from langchain.agents.middleware import SummarizationMiddleware
+    from langchain_core.messages import HumanMessage, ToolMessage
+
+    safe_point = SummarizationMiddleware._find_safe_cutoff_point
+    if len(messages) <= SUMMARY_KEEP_MESSAGES:
+        cutoff = 0
+    else:
+        cutoff = safe_point(messages, len(messages) - SUMMARY_KEEP_MESSAGES)
+    if _known_window(working_window):
+        token_cut = _token_cutoff(messages, keep_token_budget(working_window), counter)
+        cutoff = max(token_cut, cutoff)
+    if cutoff <= 0:
+        return 0
+    last_human = next(
+        (i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)),
+        None,
+    )
+    if last_human is not None:
+        cutoff = min(cutoff, last_human)
+    if (
+        last_human is not None
+        and cutoff < last_human
+        and isinstance(messages[cutoff], HumanMessage)
+    ):
+        # An OLDER user message: move FORWARD to the next assistant message
+        # (tool results after a call are fine, they follow it). Moving back
+        # would keep the answer before it -- one that did not fit the budget.
+        forward = cutoff
+        while forward <= last_human and isinstance(messages[forward], (HumanMessage, ToolMessage)):
+            forward += 1
+        if forward <= last_human:
+            cutoff = forward
+    # Only on the current question (or with no assistant message between the
+    # cutoff and it): every step moves strictly back, so the loop ends.
+    while cutoff > 0:
+        message = messages[cutoff]
+        if isinstance(message, HumanMessage):
+            cutoff -= 1
+        elif isinstance(message, ToolMessage):
+            paired = safe_point(messages, cutoff)
+            # LangChain answers an orphaned tool result (no matching call)
+            # by moving FORWARD, which could land back on a user message:
+            # step back past it instead.
+            cutoff = paired if paired < cutoff else cutoff - 1
+        else:
+            break
+    if cutoff <= 1 and messages and _is_previous_summary(messages[0]):
+        return 0
+    return cutoff
+
+
+def _token_cutoff(messages: list, budget: int, counter: Any) -> int:
+    """LangChain's ``_find_token_based_cutoff``, for a given budget: the
+    earliest index whose suffix fits, the last message kept whole when it
+    alone exceeds the budget, then tool-pair safe."""
+    from langchain.agents.middleware import SummarizationMiddleware
+
+    if not messages or counter(messages) <= budget:
+        return 0
+    low, high = 0, len(messages)
+    while low < high:
+        mid = (low + high) // 2
+        if counter(messages[mid:]) <= budget:
+            high = mid
+        else:
+            low = mid + 1
+    cutoff = low
+    if cutoff >= len(messages):
+        if len(messages) == 1:
+            return 0
+        cutoff = len(messages) - 1
+    return SummarizationMiddleware._find_safe_cutoff_point(messages, cutoff)
+
+
+def _is_previous_summary(message: Any) -> bool:
+    kwargs = getattr(message, "additional_kwargs", None) or {}
+    return kwargs.get("lc_source") == SUMMARY_SOURCE_MARKER
+
+
+def _previous_summary_text(previous: Any) -> str:
+    """The previous summary's own text: LangChain's prefix and a closing
+    placeholder sentence stripped, so neither is ever repeated."""
+    if previous is None:
+        return ""
+    text = getattr(previous, "text", None)
+    if not isinstance(text, str):
+        text = str(getattr(previous, "content", "") or "")
+    if text.startswith(SUMMARY_MESSAGE_PREFIX):
+        text = text[len(SUMMARY_MESSAGE_PREFIX) :]
+    text = text.strip()
+    for tail in (SUMMARY_LATER_LOST, SUMMARY_EARLIER_LOST):
+        if text.endswith(tail):
+            text = text[: -len(tail)].rstrip()
+    return text
+
+
+def _summary_placeholder(previous: Any, max_tokens: Optional[int] = None) -> str:
+    """What a compaction writes when no summary could be produced: the
+    previous summary, carried over, plus one honest sentence. Bounded loss --
+    the earlier memory survives -- and no compaction dead-lock.
+
+    ``max_tokens`` (``summary_cap(W)`` when the window is known) caps the
+    carried text, head kept: a summary written under a larger window would
+    otherwise keep the state above a smaller window's trigger forever.
+    """
+    text = _previous_summary_text(previous)
+    if text and max_tokens is not None:
+        text = text[: max_tokens * _APPROX_CHARS_PER_TOKEN].rstrip()
+    if text:
+        return f"{text}\n\n{SUMMARY_LATER_LOST}"
+    return SUMMARY_EARLIER_LOST
+
+
+def _truncate_for_summary(messages: list, budget: int, counter: Any) -> list:
+    """Copies of ``messages`` whose content alone exceeds ``budget`` tokens,
+    cut to fit it (the head is kept). Halving the input cannot fix a single
+    oversized answer; cutting it can."""
+    keep_chars = max(0, (budget - _TRUNCATION_OVERHEAD_TOKENS) * _APPROX_CHARS_PER_TOKEN)
+    out = []
+    for message in messages:
+        if counter([message]) <= budget:
+            out.append(message)
+            continue
+        text = message.text if isinstance(getattr(message, "text", None), str) else ""
+        out.append(message.model_copy(update={"content": text[:keep_chars]}))
+    return out
+
+
+# HTTP statuses of the summary call that are worth retrying on the NEXT turn.
+_TRANSIENT_HTTP_STATUSES = frozenset({408, 409, 429})
+
+
+def _is_prefill_timeout(exc: BaseException) -> bool:
+    """The summary call timed out READING its input: the parent watchdog's
+    first-chunk budget, or mlx_vlm.server's raw token-queue timeout."""
+    if isinstance(exc, GenerationTimeoutException):
+        return exc.phase == PHASE_FIRST_CHUNK
+    return is_child_prefill_timeout(exc)
+
+
+def _is_transient_summary_error(exc: BaseException) -> bool:
+    """A failure of the summary call that the next turn can expect not to
+    meet again: connection refused/reset, a client timeout, a timeout while
+    DECODING, 408/409/429/5xx, a dead child. The turn then fails with the
+    history intact, and the next turn retries the compaction.
+
+    Everything else would fail every later turn identically while the main
+    model is fine, so it degrades instead (``_acreate_summary``): a context
+    overflow, any other 4xx, a timeout while reading the input (deterministic
+    for that input size -- a smaller input is the cure), a bug.
+    """
+    import httpx
+    import openai
+
+    if _is_prefill_timeout(exc):
+        return False
+    if isinstance(exc, (EngineException, GenerationTimeoutException)):
+        return True
+    if parse_context_overflow(exc) is not None:
+        return False
+    if isinstance(exc, openai.APIConnectionError):  # includes APITimeoutError
+        return True
+    if isinstance(exc, openai.APIStatusError):
+        return exc.status_code in _TRANSIENT_HTTP_STATUSES or exc.status_code >= 500
+    # A connection that breaks mid-stream (the child died while answering)
+    # surfaces from the SSE iterator as a raw httpx transport error.
+    return isinstance(exc, httpx.TransportError)
+
+
+def _is_rejection(exc: BaseException) -> bool:
+    """A deterministic failure the app expects (an overflow, another 4xx, a
+    prefill timeout), as opposed to an unexpected one."""
+    import openai
+
+    return (
+        parse_context_overflow(exc) is not None
+        or isinstance(exc, openai.APIStatusError)
+        or _is_prefill_timeout(exc)
+    )
+
+
+@lru_cache(maxsize=1)
+def _summarization_middleware_class():
+    """The per-turn compaction middleware class, built lazily (LangChain is
+    not imported at boot, #160) and cached."""
+    from langchain.agents.middleware import SummarizationMiddleware
+    from langchain_core.messages.utils import get_buffer_string, trim_messages
+
+    class _Logged_Summarization_Middleware(SummarizationMiddleware):
+        """The stock middleware, with what Erudi changes about compaction:
+
+        * the cutoff is ``compaction_cutoff`` (token AND message bound);
+        * a performed compaction resets the engine's prefix cache, shielded
+          (``run_reset_shielded``): the old prefix is garbage once the
+          history is rewritten;
+        * the summarizer input always carries the previous summary, and a
+          failed summary call never erases memory (``_acreate_summary``);
+        * the ONE aggregate log line the QA spec promises ("backend.log
+          records the summarization"). ASCII, INFO: the app did its job.
+        """
+
+        def __init__(self, *, working_window: Optional[int], engine: Any, **kwargs: Any):
+            super().__init__(**kwargs)
+            self.working_window = working_window
+            self.engine = engine
+
+        def _determine_cutoff_index(self, messages):
+            return compaction_cutoff(messages, self.working_window, self._partial_token_counter)
+
+        def _should_summarize_based_on_reported_tokens(self, messages, threshold):
+            # Never: the usage a preserved AI message reports is the stale
+            # total of the call that produced it, counting messages that are
+            # no longer there. The trigger counts what IS there.
+            return False
+
+        async def abefore_model(self, state, runtime):
+            # Non-None exactly when the history was rewritten.
+            result = await super().abefore_model(state, runtime)
+            if result is not None:
+                if _engine_overrides(self.engine, "on_history_rewritten"):
+                    await run_reset_shielded(self.engine.on_history_rewritten)
+            return result
+
+        async def _acreate_summary(self, messages_to_summarize):
+            """Summarize, never losing what the previous summary knew.
+
+            The previous summary is set aside from the pool, the pool is
+            trimmed to the budget, and the previous summary is prepended
+            back. A transient failure of the summary call is RAISED: the
+            turn fails with the history intact and the next turn retries. A
+            deterministic one -- or a pool where no user turn fits the budget
+            because one answer alone exceeds it -- takes the size path: one
+            retry with oversized messages truncated (the budget halved after
+            a rejection), then a placeholder carrying the previous summary.
+            One WARNING per failed attempt; an unexpected error is one ERROR
+            with its traceback.
+            """
+            if not messages_to_summarize:
+                return "No previous conversation history."
+            previous = next((m for m in messages_to_summarize if _is_previous_summary(m)), None)
+            pool = [m for m in messages_to_summarize if m is not previous]
+            budget = self.trim_tokens_to_summarize or SUMMARY_TRIM_DEFAULT_TOKENS
+            retry_budget = budget
+            trimmed = self._trim_for_summary(pool, budget, start_on="human")
+            if pool and not trimmed:
+                logger.warning(
+                    f"Compaction summary skipped its first attempt: no user turn fits "
+                    f"the {budget}-token summarizer budget; retrying with oversized "
+                    f"messages truncated"
+                )
+            else:
+                summary = await self._summarize(previous, trimmed, attempt="first")
+                if summary is not None:
+                    return self._compacted(messages_to_summarize, summary)
+                retry_budget = max(1, budget // 2)
+            truncated = _truncate_for_summary(pool, retry_budget, self._partial_token_counter)
+            trimmed = self._trim_for_summary(truncated, retry_budget, start_on=None)
+            summary = await self._summarize(previous, trimmed, attempt="retry")
+            if summary is None:
+                cap = (
+                    summary_cap(self.working_window) if _known_window(self.working_window) else None
+                )
+                summary = _summary_placeholder(previous, cap)
+            return self._compacted(messages_to_summarize, summary)
+
+        def _trim_for_summary(self, messages, budget, *, start_on):
+            if not messages:
+                return []
+            try:
+                return trim_messages(
+                    messages,
+                    max_tokens=budget,
+                    token_counter=self.token_counter,
+                    start_on=start_on,
+                    strategy="last",
+                    allow_partial=True,
+                    include_system=True,
+                )
+            except Exception:
+                # LangChain's own fallback when trimming fails; the summary
+                # still runs, on the most recent messages.
+                logger.warning(
+                    "Trimming the summarizer input failed; using the last messages",
+                    exc_info=True,
+                )
+                return messages[-_TRIM_FALLBACK_MESSAGE_COUNT:]
+
+        async def _summarize(self, previous, trimmed, *, attempt):
+            """One summary call; the text, or None after a deterministic
+            failure (logged). A transient failure propagates."""
+            messages = ([previous] if previous is not None else []) + list(trimmed)
+            prompt = self.summary_prompt.format(messages=get_buffer_string(messages)).rstrip()
+            try:
+                response = await self.model.ainvoke(
+                    prompt, config={"metadata": {"lc_source": SUMMARY_SOURCE_MARKER}}
+                )
+            except Exception as exc:
+                if _is_transient_summary_error(exc):
+                    raise
+                if _is_rejection(exc):
+                    logger.warning(
+                        f"Compaction summary call rejected ({attempt} attempt): "
+                        f"{type(exc).__name__}, status={getattr(exc, 'status_code', None)}"
+                    )
+                else:
+                    logger.error(
+                        f"Compaction summary call failed ({attempt} attempt): "
+                        f"{type(exc).__name__}",
+                        exc_info=True,
+                    )
+                return None
+            summary = response.text.strip()
+            if not summary:
+                # An empty summary would replace the whole history with
+                # nothing: a failure, never a success.
+                logger.warning(f"Compaction summary call returned no text ({attempt} attempt)")
+                return None
+            return summary
+
+        @staticmethod
+        def _compacted(messages_to_summarize, summary):
+            logger.info(
+                f"Conversation compacted: {len(messages_to_summarize)} message(s) "
+                f"summarized into {len(summary or '')} chars"
+            )
+            return summary
+
+    return _Logged_Summarization_Middleware
 
 
 # Hard cap on LangGraph super-steps per turn (#277). Without it the graph
@@ -454,24 +975,29 @@ class AgentRunner:
         service maps it to an ``error`` event on the wire; DB persistence
         unchanged).
         """
-        async for event in self._astream_events(
-            llm=llm,
-            user_message=user_message,
-            system_prompt=system_prompt,
-            params=params,
-            thread_id=thread_id,
-            summarize=summarize,
-            kb_context_block=kb_context_block,
-            kb_language_line=kb_language_line,
-            tools=tools,
-            context=context,
-            supports_vision=supports_vision,
-            effort_plan=effort_plan,
-        ):
-            if emit_events:
-                yield event
-            elif event["t"] == "answer":
-                yield event["text"]
+        # ``aclosing``: closing THIS generator closes the capture loop (and,
+        # through it, LangGraph) right away, inside the generation guard.
+        async with contextlib.aclosing(
+            self._astream_events(
+                llm=llm,
+                user_message=user_message,
+                system_prompt=system_prompt,
+                params=params,
+                thread_id=thread_id,
+                summarize=summarize,
+                kb_context_block=kb_context_block,
+                kb_language_line=kb_language_line,
+                tools=tools,
+                context=context,
+                supports_vision=supports_vision,
+                effort_plan=effort_plan,
+            )
+        ) as events:
+            async for event in events:
+                if emit_events:
+                    yield event
+                elif event["t"] == "answer":
+                    yield event["text"]
 
     async def _astream_events(
         self,
@@ -541,24 +1067,6 @@ class AgentRunner:
                     # the artifact has a native lever for it.
                     effort_plan=effort_plan,
                 )
-                # The compaction summary ALWAYS runs at effort "none" (1.1.2):
-                # summarizing is machine work, and a reasoning model would spend
-                # the call deliberating about it instead of writing it. Same
-                # child, same everything else -- only the reasoning field
-                # differs, so the second client costs a cached handle lookup.
-                summary_model = (
-                    await run_in_threadpool(
-                        build_chat_model,
-                        llm,
-                        temperature=params.temperature,
-                        top_p=params.top_p,
-                        max_tokens=params.max_tokens,
-                        sampling=sampling,
-                        effort_plan=NO_REASONING_PLAN,
-                    )
-                    if summarize
-                    else None
-                )
                 # Memory accounting for the compaction signal and the amber
                 # warning (1.1.2). Derived AFTER build_chat_model so the child
                 # is up and the handle carries the loaded artifact; file I/O
@@ -566,6 +1074,34 @@ class AgentRunner:
                 # raises; an unaccountable model just carries None facts.
                 budget = (
                     await run_in_threadpool(MemoryBudget.from_engine, engine) if summarize else None
+                )
+                working_window = self._compaction_windows(budget)[1] if summarize else None
+                # The compaction summary ALWAYS runs at effort "none" (1.1.2):
+                # summarizing is machine work, and a reasoning model would spend
+                # the call deliberating about it instead of writing it. Same
+                # child, same everything else -- only the reasoning field and
+                # the length differ, so the second client costs a cached
+                # handle lookup. Its length is BOUNDED to ``summary_cap(W)``,
+                # with no automatic output budget (which would hand it the
+                # whole window): the keep arithmetic reserves exactly that much
+                # for it. No known window: today's budget.
+                summary_model = (
+                    await run_in_threadpool(
+                        build_chat_model,
+                        llm,
+                        temperature=params.temperature,
+                        top_p=params.top_p,
+                        max_tokens=(
+                            summary_cap(working_window)
+                            if _known_window(working_window)
+                            else params.max_tokens
+                        ),
+                        sampling=sampling,
+                        effort_plan=NO_REASONING_PLAN,
+                        auto_output_budget=not _known_window(working_window),
+                    )
+                    if summarize
+                    else None
                 )
                 middleware = self._build_middleware(summary_model, budget) if summarize else []
                 if kb_context_block:
@@ -618,351 +1154,387 @@ class AgentRunner:
                 yield _construction_error_event(exc)
                 return
 
-            # Aggregate-only stream accounting (never log per token): start,
-            # first-token latency, then one completion line with totals.
-            # ``char_count`` counts ANSWER text only -- reasoning is counted
-            # apart (``reasoning_chars``) and must not inflate the answer
-            # accounting nor the empty-final signal below. ``finish_reason``
-            # keeps the LAST finish_reason a model hop reported (#554): it
-            # picks the curated empty-answer wording and lands in the
-            # completion log for field-report attribution.
-            stream_start_s = time.perf_counter()
-            first_token_s: Optional[float] = None
-            chunk_count = 0
-            char_count = 0
-            reasoning_chars = 0
-            finish_reason: Optional[str] = None
-            # Empty-final fallback bookkeeping (#90): some agentic models call a
-            # tool successfully, then emit an EMPTY final ANSWER (observed with
-            # Gemma: calculator("1240 + 1378 + 1456") -> ToolMessage "4074" ->
-            # empty AIMessage, finish_reason=stop). ``emitted_model_text`` tracks
-            # non-blank ANSWER text ONLY (post-splitter), so a model that only
-            # thinks then calls a tool and returns nothing still triggers the
-            # fallback -- thinking must never mask an empty answer.
-            emitted_model_text = False
-            last_tool_result: Optional[str] = None
-            splitter = ThinkSplitter()
-            pending_tool_calls: dict = {}
-            # Pre-tool narration reclassification (#297), tool-carrying turns
-            # only: each model hop's post-splitter ANSWER text is buffered here.
-            # The hop's first tool_call_chunk re-emits the buffer as thinking
-            # (the text was narration, not the answer) and flips
-            # ``hop_has_tool_call`` so the rest of the hop streams as thinking;
-            # a ToolMessage resets the flag for the next hop; stream end flushes
-            # whatever is buffered as the real answer. ``emitted_model_text``
-            # and ``char_count`` are only touched on that final ANSWER flush --
-            # reclassified narration must not defeat the #90 fallback.
-            agentic = bool(effective_tools)
-            hop_text_buffer: list[str] = []
-            hop_has_tool_call = False
-            logger.info(
-                f"Agent stream started: llm={getattr(llm, 'id', '?')}, " f"thread_id={thread_id}"
-            )
+            # A turn that does not end normally -- the client went away
+            # (GeneratorExit at a yield, or a cancellation), or an exception
+            # escaped -- flags the child it ran against, through the hook the
+            # factory bound to the handle captured at BUILD time (never
+            # ``cls._model`` read now): the MLX engine then sends a barrier
+            # before its next prefix-cache reset. Deterministic, at guard
+            # release, in addition to the client-level flag.
+            abandon_hook = getattr(model, "abandon_hook", None)
             try:
-                async for token, meta in agent.astream(
-                    {"messages": [HumanMessage(user_message)]},
-                    config=run_config,
-                    context=context,
-                    stream_mode="messages",
-                ):
-                    if getattr(token, "type", None) == "tool":
-                        # ToolMessage from the tools node: the model node has
-                        # finished streaming this step's tool_call_chunks, so emit
-                        # the complete tool_call event(s) first, then the result.
-                        # Keep the latest non-blank result for the #90 fallback.
-                        tool_text = getattr(token, "text", "") or ""
-                        if tool_text.strip():
-                            last_tool_result = tool_text
-                        # Defensive (#297): narration not yet reclassified (tool
-                        # calls that arrived without streamed chunks) goes out
-                        # as thinking BEFORE the tool_call events.
-                        for buffered in hop_text_buffer:
-                            yield {"t": "thinking", "text": buffered}
+                # The prefix cache belongs to ONE conversation (MLX; a no-op
+                # on llama.cpp): claim it for this thread -- or for the arena --
+                # now that the child is resolved and before the agent sends
+                # anything. A reset it needs runs shielded: the guard is never
+                # left while it still talks to the child.
+                if _engine_overrides(engine, "claim_prefix"):
+                    owner = f"conv:{thread_id}" if stateful else "arena"
+                    await run_reset_shielded(functools.partial(engine.claim_prefix, owner))
+
+                # Aggregate-only stream accounting (never log per token): start,
+                # first-token latency, then one completion line with totals.
+                # ``char_count`` counts ANSWER text only -- reasoning is counted
+                # apart (``reasoning_chars``) and must not inflate the answer
+                # accounting nor the empty-final signal below. ``finish_reason``
+                # keeps the LAST finish_reason a model hop reported (#554): it
+                # picks the curated empty-answer wording and lands in the
+                # completion log for field-report attribution.
+                stream_start_s = time.perf_counter()
+                first_token_s: Optional[float] = None
+                chunk_count = 0
+                char_count = 0
+                reasoning_chars = 0
+                finish_reason: Optional[str] = None
+                # Empty-final fallback bookkeeping (#90): some agentic models call a
+                # tool successfully, then emit an EMPTY final ANSWER (observed with
+                # Gemma: calculator("1240 + 1378 + 1456") -> ToolMessage "4074" ->
+                # empty AIMessage, finish_reason=stop). ``emitted_model_text`` tracks
+                # non-blank ANSWER text ONLY (post-splitter), so a model that only
+                # thinks then calls a tool and returns nothing still triggers the
+                # fallback -- thinking must never mask an empty answer.
+                emitted_model_text = False
+                last_tool_result: Optional[str] = None
+                splitter = ThinkSplitter()
+                pending_tool_calls: dict = {}
+                # Pre-tool narration reclassification (#297), tool-carrying turns
+                # only: each model hop's post-splitter ANSWER text is buffered here.
+                # The hop's first tool_call_chunk re-emits the buffer as thinking
+                # (the text was narration, not the answer) and flips
+                # ``hop_has_tool_call`` so the rest of the hop streams as thinking;
+                # a ToolMessage resets the flag for the next hop; stream end flushes
+                # whatever is buffered as the real answer. ``emitted_model_text``
+                # and ``char_count`` are only touched on that final ANSWER flush --
+                # reclassified narration must not defeat the #90 fallback.
+                agentic = bool(effective_tools)
+                hop_text_buffer: list[str] = []
+                hop_has_tool_call = False
+                logger.info(
+                    f"Agent stream started: llm={getattr(llm, 'id', '?')}, "
+                    f"thread_id={thread_id}"
+                )
+                # LangGraph is iterated in a child task (``isolated_stream``)
+                # under ``aclosing``: whether this generator is closed by its
+                # consumer or cancelled by a client disconnect (anyio
+                # re-delivers that cancellation at every await), LangGraph
+                # receives ONE cancellation, its exit cancels and awaits the
+                # in-flight node, and all of it completes before the guard is
+                # released -- never later from a finalizer or a stray task.
+                async with contextlib.aclosing(
+                    isolated_stream(
+                        lambda: agent.astream(
+                            {"messages": [HumanMessage(user_message)]},
+                            config=run_config,
+                            context=context,
+                            stream_mode="messages",
+                        )
+                    )
+                ) as agent_stream:
+                    try:
+                        async for token, meta in agent_stream:
+                            if getattr(token, "type", None) == "tool":
+                                # ToolMessage from the tools node: the model node has
+                                # finished streaming this step's tool_call_chunks, so emit
+                                # the complete tool_call event(s) first, then the result.
+                                # Keep the latest non-blank result for the #90 fallback.
+                                tool_text = getattr(token, "text", "") or ""
+                                if tool_text.strip():
+                                    last_tool_result = tool_text
+                                # Defensive (#297): narration not yet reclassified (tool
+                                # calls that arrived without streamed chunks) goes out
+                                # as thinking BEFORE the tool_call events.
+                                for buffered in hop_text_buffer:
+                                    yield {"t": "thinking", "text": buffered}
+                                hop_text_buffer.clear()
+                                for tc_event in _drain_tool_calls(pending_tool_calls):
+                                    yield tc_event
+                                yield {
+                                    "t": "tool_result",
+                                    "name": getattr(token, "name", "") or "",
+                                    "text": tool_text,
+                                }
+                                # The hop ended with tools: the next model hop buffers
+                                # fresh (#297).
+                                hop_has_tool_call = False
+                                continue
+                            if meta.get("langgraph_node") == "model":
+                                tc_chunks = getattr(token, "tool_call_chunks", None) or []
+                                for tc_chunk in tc_chunks:
+                                    _accumulate_tool_call(pending_tool_calls, tc_chunk)
+                                if agentic and tc_chunks and not hop_has_tool_call:
+                                    # First tool_call_chunk of this hop (#297): the text
+                                    # streamed so far was pre-tool narration -- re-emit
+                                    # it as thinking NOW (before the tool_call event),
+                                    # preserving stream liveness.
+                                    hop_has_tool_call = True
+                                    for buffered in hop_text_buffer:
+                                        yield {"t": "thinking", "text": buffered}
+                                    hop_text_buffer.clear()
+                                # Dedicated reasoning channel (#554): both servers
+                                # extract chain-of-thought server-side and the chat
+                                # client re-attaches it to the chunk. A reasoning-only
+                                # chunk has EMPTY ``.text`` but is stream activity all
+                                # the same: it must start the first-token clock and
+                                # count in the chunk total, or an all-reasoning turn
+                                # would look like a silent hang in the logs.
+                                reasoning_delta = (
+                                    getattr(token, "additional_kwargs", None) or {}
+                                ).get("reasoning_content") or ""
+                                text = getattr(token, "text", "")
+                                hop_finish = (getattr(token, "response_metadata", None) or {}).get(
+                                    "finish_reason"
+                                )
+                                if hop_finish:
+                                    finish_reason = hop_finish
+                                if text or reasoning_delta:
+                                    if first_token_s is None:
+                                        first_token_s = time.perf_counter()
+                                        logger.info(
+                                            f"Agent first token: llm={getattr(llm, 'id', '?')}, "
+                                            f"latency_ms={(first_token_s - stream_start_s) * 1000:.0f}"
+                                        )
+                                    chunk_count += 1
+                                if reasoning_delta:
+                                    # Never buffered by the #297 narration logic:
+                                    # reasoning is thinking by definition, on every hop.
+                                    reasoning_chars += len(reasoning_delta)
+                                    yield {"t": "thinking", "text": reasoning_delta}
+                                if text:
+                                    for event in splitter.feed(text):
+                                        if event["t"] != "answer":
+                                            # Real <think> content (fallback splitter
+                                            # families): flows immediately.
+                                            reasoning_chars += len(event["text"])
+                                            yield event
+                                        elif agentic and hop_has_tool_call:
+                                            # Post-tool-call text in a narrating hop
+                                            # (#297): also narration -> thinking.
+                                            yield {"t": "thinking", "text": event["text"]}
+                                        elif agentic:
+                                            # Tool-carrying turn, no tool call yet this
+                                            # hop: hold the text (#297) -- it is either
+                                            # narration (a tool call follows) or the
+                                            # final answer (flushed at stream end).
+                                            hop_text_buffer.append(event["text"])
+                                        else:
+                                            if event["text"].strip():
+                                                emitted_model_text = True
+                                            char_count += len(event["text"])
+                                            yield event
+                        # The final hop ended without a tool call: its buffered text IS
+                        # the final answer (#297) -- flush it as ANSWER events (this is
+                        # the only place buffered text counts as emitted answer).
+                        for text in hop_text_buffer:
+                            if text.strip():
+                                emitted_model_text = True
+                            char_count += len(text)
+                            yield {"t": "answer", "text": text}
                         hop_text_buffer.clear()
+                        # Flush any buffered splitter text (a trailing partial tag, or an
+                        # unclosed <think> -> thinking) BEFORE the empty-final decision.
+                        for event in splitter.flush():
+                            if event["t"] == "answer":
+                                if event["text"].strip():
+                                    emitted_model_text = True
+                                char_count += len(event["text"])
+                            else:
+                                reasoning_chars += len(event["text"])
+                            yield event
+                        # Empty/blank final answer, but a tool produced a result this
+                        # turn: deliver that last tool result AS THE ANSWER (#90) so a
+                        # correct value is streamed and persisted instead of crashing the
+                        # empty-content guard. No tool ran -> the curated empty-answer
+                        # turn below (#554).
+                        if not emitted_model_text and last_tool_result is not None:
+                            logger.info(
+                                f"Empty final answer with a tool result; falling back to "
+                                f"the last tool result: llm={getattr(llm, 'id', '?')}, "
+                                f"tool_result_chars={len(last_tool_result)}"
+                            )
+                            char_count += len(last_tool_result)
+                            yield {"t": "answer", "text": last_tool_result}
+                        # A tool call that never produced a ToolMessage this turn (rare):
+                        # emit it now so the trace still records the attempt.
                         for tc_event in _drain_tool_calls(pending_tool_calls):
                             yield tc_event
-                        yield {
-                            "t": "tool_result",
-                            "name": getattr(token, "name", "") or "",
-                            "text": tool_text,
-                        }
-                        # The hop ended with tools: the next model hop buffers
-                        # fresh (#297).
-                        hop_has_tool_call = False
-                        continue
-                    if meta.get("langgraph_node") == "model":
-                        tc_chunks = getattr(token, "tool_call_chunks", None) or []
-                        for tc_chunk in tc_chunks:
-                            _accumulate_tool_call(pending_tool_calls, tc_chunk)
-                        if agentic and tc_chunks and not hop_has_tool_call:
-                            # First tool_call_chunk of this hop (#297): the text
-                            # streamed so far was pre-tool narration -- re-emit
-                            # it as thinking NOW (before the tool_call event),
-                            # preserving stream liveness.
-                            hop_has_tool_call = True
-                            for buffered in hop_text_buffer:
-                                yield {"t": "thinking", "text": buffered}
-                            hop_text_buffer.clear()
-                        # Dedicated reasoning channel (#554): both servers
-                        # extract chain-of-thought server-side and the chat
-                        # client re-attaches it to the chunk. A reasoning-only
-                        # chunk has EMPTY ``.text`` but is stream activity all
-                        # the same: it must start the first-token clock and
-                        # count in the chunk total, or an all-reasoning turn
-                        # would look like a silent hang in the logs.
-                        reasoning_delta = (getattr(token, "additional_kwargs", None) or {}).get(
-                            "reasoning_content"
-                        ) or ""
-                        text = getattr(token, "text", "")
-                        hop_finish = (getattr(token, "response_metadata", None) or {}).get(
-                            "finish_reason"
+                        # No answer text and nothing to fall back to (#554): deliver
+                        # the curated empty-answer turn as a NORMAL answer instead of
+                        # yielding nothing (which crashed the downstream empty-content
+                        # guard into a generic error that also dropped the trace). The
+                        # wording follows finish_reason: ``length`` = cut mid-reasoning,
+                        # anything else = the model closed its turn without an answer.
+                        if not emitted_model_text and last_tool_result is None:
+                            curated = (
+                                EMPTY_ANSWER_LENGTH_MESSAGE
+                                if finish_reason == "length"
+                                else EMPTY_ANSWER_STOP_MESSAGE
+                            )
+                            logger.info(
+                                f"Turn ended with no answer text: llm={getattr(llm, 'id', '?')}, "
+                                f"finish_reason={finish_reason or 'unknown'}, "
+                                f"reasoning_chars={reasoning_chars}; yielding the curated turn"
+                            )
+                            char_count += len(curated)
+                            if stateful:
+                                # State BEFORE the yield: a client that disconnects
+                                # right after receiving the curated event closes this
+                                # generator at the yield, and code after it never runs
+                                # -- while the conversation service's finally still
+                                # persists the curated line to SQL. Writing first keeps
+                                # the checkpointer consistent with what a reload shows;
+                                # the reverse window (state written, client already
+                                # gone) is covered by the service's interrupted-turn
+                                # handling. Without the write at all, the checkpointer
+                                # keeps the EMPTY AIMessage the model node committed
+                                # and the next turn replays an empty assistant turn.
+                                await self._write_curated_empty_turn(agent, run_config, curated)
+                            yield {"t": "answer", "text": curated}
+                        # Amber warning check (1.1.2), at end of turn on the
+                        # POST-turn thread state: one ``memory_warning`` event goes
+                        # out ONLY when even a compaction down to the keep-tail could
+                        # not restore the memory margin (see ``_memory_warning_event``
+                        # for the projection). The conversation service forwards it to
+                        # the wire and never persists it (it is a statement about NOW,
+                        # on THIS machine).
+                        if stateful and budget is not None:
+                            warning = await self._memory_warning_event(
+                                agent, run_config, budget, working_window
+                            )
+                            if warning is not None:
+                                yield warning
+                        duration_ms = (time.perf_counter() - stream_start_s) * 1000
+                        logger.info(
+                            f"Agent stream completed: llm={getattr(llm, 'id', '?')}, "
+                            f"duration_ms={duration_ms:.0f}, chunks={chunk_count} (~tokens), "
+                            f"reasoning_chars={reasoning_chars}, answer_chars={char_count}, "
+                            f"finish_reason={finish_reason or 'unknown'}"
                         )
-                        if hop_finish:
-                            finish_reason = hop_finish
-                        if text or reasoning_delta:
-                            if first_token_s is None:
-                                first_token_s = time.perf_counter()
-                                logger.info(
-                                    f"Agent first token: llm={getattr(llm, 'id', '?')}, "
-                                    f"latency_ms={(first_token_s - stream_start_s) * 1000:.0f}"
-                                )
-                            chunk_count += 1
-                        if reasoning_delta:
-                            # Never buffered by the #297 narration logic:
-                            # reasoning is thinking by definition, on every hop.
-                            reasoning_chars += len(reasoning_delta)
-                            yield {"t": "thinking", "text": reasoning_delta}
-                        if text:
-                            for event in splitter.feed(text):
-                                if event["t"] != "answer":
-                                    # Real <think> content (fallback splitter
-                                    # families): flows immediately.
-                                    reasoning_chars += len(event["text"])
-                                    yield event
-                                elif agentic and hop_has_tool_call:
-                                    # Post-tool-call text in a narrating hop
-                                    # (#297): also narration -> thinking.
-                                    yield {"t": "thinking", "text": event["text"]}
-                                elif agentic:
-                                    # Tool-carrying turn, no tool call yet this
-                                    # hop: hold the text (#297) -- it is either
-                                    # narration (a tool call follows) or the
-                                    # final answer (flushed at stream end).
-                                    hop_text_buffer.append(event["text"])
-                                else:
-                                    if event["text"].strip():
-                                        emitted_model_text = True
-                                    char_count += len(event["text"])
-                                    yield event
-                # The final hop ended without a tool call: its buffered text IS
-                # the final answer (#297) -- flush it as ANSWER events (this is
-                # the only place buffered text counts as emitted answer).
-                for text in hop_text_buffer:
-                    if text.strip():
-                        emitted_model_text = True
-                    char_count += len(text)
-                    yield {"t": "answer", "text": text}
-                hop_text_buffer.clear()
-                # Flush any buffered splitter text (a trailing partial tag, or an
-                # unclosed <think> -> thinking) BEFORE the empty-final decision.
-                for event in splitter.flush():
-                    if event["t"] == "answer":
-                        if event["text"].strip():
-                            emitted_model_text = True
-                        char_count += len(event["text"])
-                    else:
-                        reasoning_chars += len(event["text"])
-                    yield event
-                # Empty/blank final answer, but a tool produced a result this
-                # turn: deliver that last tool result AS THE ANSWER (#90) so a
-                # correct value is streamed and persisted instead of crashing the
-                # empty-content guard. No tool ran -> the curated empty-answer
-                # turn below (#554).
-                if not emitted_model_text and last_tool_result is not None:
-                    logger.info(
-                        f"Empty final answer with a tool result; falling back to "
-                        f"the last tool result: llm={getattr(llm, 'id', '?')}, "
-                        f"tool_result_chars={len(last_tool_result)}"
-                    )
-                    char_count += len(last_tool_result)
-                    yield {"t": "answer", "text": last_tool_result}
-                # A tool call that never produced a ToolMessage this turn (rare):
-                # emit it now so the trace still records the attempt.
-                for tc_event in _drain_tool_calls(pending_tool_calls):
-                    yield tc_event
-                # No answer text and nothing to fall back to (#554): deliver
-                # the curated empty-answer turn as a NORMAL answer instead of
-                # yielding nothing (which crashed the downstream empty-content
-                # guard into a generic error that also dropped the trace). The
-                # wording follows finish_reason: ``length`` = cut mid-reasoning,
-                # anything else = the model closed its turn without an answer.
-                if not emitted_model_text and last_tool_result is None:
-                    curated = (
-                        EMPTY_ANSWER_LENGTH_MESSAGE
-                        if finish_reason == "length"
-                        else EMPTY_ANSWER_STOP_MESSAGE
-                    )
-                    logger.info(
-                        f"Turn ended with no answer text: llm={getattr(llm, 'id', '?')}, "
-                        f"finish_reason={finish_reason or 'unknown'}, "
-                        f"reasoning_chars={reasoning_chars}; yielding the curated turn"
-                    )
-                    char_count += len(curated)
-                    if stateful:
-                        # State BEFORE the yield: a client that disconnects
-                        # right after receiving the curated event closes this
-                        # generator at the yield, and code after it never runs
-                        # -- while the conversation service's finally still
-                        # persists the curated line to SQL. Writing first keeps
-                        # the checkpointer consistent with what a reload shows;
-                        # the reverse window (state written, client already
-                        # gone) is covered by the service's interrupted-turn
-                        # handling. Without the write at all, the checkpointer
-                        # keeps the EMPTY AIMessage the model node committed
-                        # and the next turn replays an empty assistant turn.
-                        await self._write_curated_empty_turn(agent, run_config, curated)
-                    yield {"t": "answer", "text": curated}
-                # Amber warning check (1.1.2), at end of turn on the
-                # POST-turn thread state: one ``memory_warning`` event goes
-                # out ONLY when even a compaction down to the keep-tail could
-                # not restore the memory margin (see ``_memory_warning_event``
-                # for the projection). The conversation service forwards it to
-                # the wire and never persists it (it is a statement about NOW,
-                # on THIS machine).
-                if stateful and budget is not None:
-                    warning = await self._memory_warning_event(agent, run_config, budget)
-                    if warning is not None:
-                        yield warning
-                duration_ms = (time.perf_counter() - stream_start_s) * 1000
-                logger.info(
-                    f"Agent stream completed: llm={getattr(llm, 'id', '?')}, "
-                    f"duration_ms={duration_ms:.0f}, chunks={chunk_count} (~tokens), "
-                    f"reasoning_chars={reasoning_chars}, answer_chars={char_count}, "
-                    f"finish_reason={finish_reason or 'unknown'}"
-                )
-            except GraphRecursionError:
-                # #277: the agent hit AGENT_RECURSION_LIMIT (a small model looping
-                # on the same tool call). Degrade gracefully instead of surfacing a
-                # generic error after a long hang: flush any buffered answer text,
-                # then, if the model never produced usable text, fall back to the
-                # last tool result (like the #90 empty-final path) or a curated
-                # loop-limit turn.
-                logger.warning(
-                    "Agent hit recursion limit (%s) -- likely a tool-call loop: "
-                    "llm=%s, thread_id=%s",
-                    AGENT_RECURSION_LIMIT,
-                    getattr(llm, "id", "?"),
-                    thread_id,
-                )
-                # Deliver what was gathered: an interrupted hop's buffered text
-                # (#297) had no tool call yet, so it flushes as answer.
-                for text in hop_text_buffer:
-                    if text.strip():
-                        emitted_model_text = True
-                    char_count += len(text)
-                    yield {"t": "answer", "text": text}
-                hop_text_buffer.clear()
-                for event in splitter.flush():
-                    if event["t"] == "answer":
-                        if event["text"].strip():
-                            emitted_model_text = True
-                        char_count += len(event["text"])
-                    yield event
-                if not emitted_model_text:
-                    if last_tool_result is not None:
-                        char_count += len(last_tool_result)
-                        yield {"t": "answer", "text": last_tool_result}
-                    else:
-                        yield {"t": "answer", "text": LOOP_LIMIT_MESSAGE}
-                if stateful:
-                    await self._repair_alternation(agent, run_config)
-            except GenerationTimeoutException as exc:
-                # #573: the stream stayed silent past its budget. Nothing
-                # crashed -- the watchdog ended the turn on a budget WE chose --
-                # so this is a degradation, logged at WARNING with the numbers
-                # behind the decision and no traceback (docs/logging.md), and
-                # the user gets a turn that names the actual cause.
-                logger.warning(
-                    f"Agent stream timed out: llm={getattr(llm, 'id', '?')} "
-                    f"({getattr(llm, 'name', '?')}), thread_id={thread_id}, "
-                    f"phase={exc.phase}, budget_s={exc.budget_s:.0f}, "
-                    f"est_prompt_tokens={exc.estimated_prompt_tokens}"
-                )
-                if stateful:
-                    await self._repair_alternation(agent, run_config)
-                # Same parity as the generic failure below: text buffered before
-                # the timeout is delivered ahead of the curated turn.
-                for text in hop_text_buffer:
-                    yield {"t": "answer", "text": text}
-                hop_text_buffer.clear()
-                yield {"t": "answer", "text": _stream_timeout_message(exc)}
-            except Exception as exc:
-                overflow = parse_context_overflow(exc)
-                if overflow is not None:
-                    # PR-G: the engine's own 400 already named the real
-                    # numbers -- nothing crashed, the app degraded on its
-                    # own, so WARNING (not exception) with the numbers and no
-                    # traceback (docs/logging.md).
-                    logger.warning(
-                        f"Agent stream hit a context-window overflow: llm={getattr(llm, 'id', '?')} "
-                        f"({getattr(llm, 'name', '?')}), thread_id={thread_id}, "
-                        f"prompt_tokens={overflow.prompt_tokens}, "
-                        f"context_tokens={overflow.context_tokens}"
-                    )
-                    if stateful:
-                        await self._repair_alternation(agent, run_config)
-                    for text in hop_text_buffer:
-                        yield {"t": "answer", "text": text}
-                    hop_text_buffer.clear()
-                    yield {"t": "answer", "text": _context_overflow_message(overflow)}
-                elif is_child_prefill_timeout(exc):
-                    # Defense in depth (#573 alignment): the MLX child's
-                    # token-queue timeout is sized ABOVE the parent's first-chunk
-                    # ceiling (src.engines.mlx_engine), so this branch should
-                    # never fire -- but if mlx_vlm.server's raw "Increase
-                    # MLX_VLM_TOKEN_QUEUE_TIMEOUT ..." error ever surfaces, the
-                    # child out-waited the parent (worth a WARNING) and the user
-                    # must get the SAME curated prefill turn, never the internal
-                    # env var name. Reported at WARNING with no traceback: the
-                    # app degraded on its own (docs/logging.md).
-                    window_probe = getattr(engine, "effective_context_tokens", None)
-                    window = window_probe() if callable(window_probe) else None
-                    ceiling = first_chunk_ceiling_s(window)
-                    logger.warning(
-                        f"Child token-queue timeout surfaced past the aligned budget: "
-                        f"llm={getattr(llm, 'id', '?')} ({getattr(llm, 'name', '?')}), "
-                        f"thread_id={thread_id}, ceiling_s={ceiling:.0f}"
-                    )
-                    if stateful:
-                        await self._repair_alternation(agent, run_config)
-                    for text in hop_text_buffer:
-                        yield {"t": "answer", "text": text}
-                    hop_text_buffer.clear()
-                    # Reuse the parent watchdog's curated first-chunk turn.
-                    yield {
-                        "t": "answer",
-                        "text": PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
-                            sentinel=ERROR_SENTINEL, minutes=max(1, round(ceiling / 60))
-                        ),
-                    }
-                else:
-                    # A stream that breaks because the inference child died shows
-                    # up here as a connection error; the engine knows the exit
-                    # code and the child's last lines, so ask it.
-                    logger.exception(
-                        f"Agent streaming failed: llm={getattr(llm, 'id', '?')} "
-                        f"({getattr(llm, 'name', '?')}), thread_id={thread_id}"
-                        f"{_child_crash_suffix(engine)}"
-                    )
-                    if stateful:
-                        await self._repair_alternation(agent, run_config)
-                    # Parity with the pre-#297 live stream: text buffered before the
-                    # failure would already have been yielded, so flush it ahead of
-                    # the sentinel instead of dropping it.
-                    for text in hop_text_buffer:
-                        yield {"t": "answer", "text": text}
-                    hop_text_buffer.clear()
-                    yield {"t": "answer", "text": ERROR_MESSAGE}
+                    except GraphRecursionError:
+                        # #277: the agent hit AGENT_RECURSION_LIMIT (a small model looping
+                        # on the same tool call). Degrade gracefully instead of surfacing a
+                        # generic error after a long hang: flush any buffered answer text,
+                        # then, if the model never produced usable text, fall back to the
+                        # last tool result (like the #90 empty-final path) or a curated
+                        # loop-limit turn.
+                        logger.warning(
+                            "Agent hit recursion limit (%s) -- likely a tool-call loop: "
+                            "llm=%s, thread_id=%s",
+                            AGENT_RECURSION_LIMIT,
+                            getattr(llm, "id", "?"),
+                            thread_id,
+                        )
+                        # Deliver what was gathered: an interrupted hop's buffered text
+                        # (#297) had no tool call yet, so it flushes as answer.
+                        for text in hop_text_buffer:
+                            if text.strip():
+                                emitted_model_text = True
+                            char_count += len(text)
+                            yield {"t": "answer", "text": text}
+                        hop_text_buffer.clear()
+                        for event in splitter.flush():
+                            if event["t"] == "answer":
+                                if event["text"].strip():
+                                    emitted_model_text = True
+                                char_count += len(event["text"])
+                            yield event
+                        if not emitted_model_text:
+                            if last_tool_result is not None:
+                                char_count += len(last_tool_result)
+                                yield {"t": "answer", "text": last_tool_result}
+                            else:
+                                yield {"t": "answer", "text": LOOP_LIMIT_MESSAGE}
+                        if stateful:
+                            await self._repair_alternation(agent, run_config)
+                    except GenerationTimeoutException as exc:
+                        # #573: the stream stayed silent past its budget. Nothing
+                        # crashed -- the watchdog ended the turn on a budget WE chose --
+                        # so this is a degradation, logged at WARNING with the numbers
+                        # behind the decision and no traceback (docs/logging.md), and
+                        # the user gets a turn that names the actual cause.
+                        logger.warning(
+                            f"Agent stream timed out: llm={getattr(llm, 'id', '?')} "
+                            f"({getattr(llm, 'name', '?')}), thread_id={thread_id}, "
+                            f"phase={exc.phase}, budget_s={exc.budget_s:.0f}, "
+                            f"est_prompt_tokens={exc.estimated_prompt_tokens}"
+                        )
+                        if stateful:
+                            await self._repair_alternation(agent, run_config)
+                        # Same parity as the generic failure below: text buffered before
+                        # the timeout is delivered ahead of the curated turn.
+                        for text in hop_text_buffer:
+                            yield {"t": "answer", "text": text}
+                        hop_text_buffer.clear()
+                        yield {"t": "answer", "text": _stream_timeout_message(exc)}
+                    except Exception as exc:
+                        overflow = parse_context_overflow(exc)
+                        if overflow is not None:
+                            # PR-G: the engine's own 400 already named the real
+                            # numbers -- nothing crashed, the app degraded on its
+                            # own, so WARNING (not exception) with the numbers and no
+                            # traceback (docs/logging.md).
+                            logger.warning(
+                                f"Agent stream hit a context-window overflow: llm={getattr(llm, 'id', '?')} "
+                                f"({getattr(llm, 'name', '?')}), thread_id={thread_id}, "
+                                f"prompt_tokens={overflow.prompt_tokens}, "
+                                f"context_tokens={overflow.context_tokens}"
+                            )
+                            if stateful:
+                                await self._repair_alternation(agent, run_config)
+                            for text in hop_text_buffer:
+                                yield {"t": "answer", "text": text}
+                            hop_text_buffer.clear()
+                            yield {"t": "answer", "text": _context_overflow_message(overflow)}
+                        elif is_child_prefill_timeout(exc):
+                            # Defense in depth (#573 alignment): the MLX child's
+                            # token-queue timeout is sized ABOVE the parent's first-chunk
+                            # ceiling (src.engines.mlx_engine), so this branch should
+                            # never fire -- but if mlx_vlm.server's raw "Increase
+                            # MLX_VLM_TOKEN_QUEUE_TIMEOUT ..." error ever surfaces, the
+                            # child out-waited the parent (worth a WARNING) and the user
+                            # must get the SAME curated prefill turn, never the internal
+                            # env var name. Reported at WARNING with no traceback: the
+                            # app degraded on its own (docs/logging.md).
+                            window_probe = getattr(engine, "effective_context_tokens", None)
+                            window = window_probe() if callable(window_probe) else None
+                            ceiling = first_chunk_ceiling_s(window)
+                            logger.warning(
+                                f"Child token-queue timeout surfaced past the aligned budget: "
+                                f"llm={getattr(llm, 'id', '?')} ({getattr(llm, 'name', '?')}), "
+                                f"thread_id={thread_id}, ceiling_s={ceiling:.0f}"
+                            )
+                            if stateful:
+                                await self._repair_alternation(agent, run_config)
+                            for text in hop_text_buffer:
+                                yield {"t": "answer", "text": text}
+                            hop_text_buffer.clear()
+                            # Reuse the parent watchdog's curated first-chunk turn.
+                            yield {
+                                "t": "answer",
+                                "text": PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
+                                    sentinel=ERROR_SENTINEL, minutes=max(1, round(ceiling / 60))
+                                ),
+                            }
+                        else:
+                            # A stream that breaks because the inference child died shows
+                            # up here as a connection error; the engine knows the exit
+                            # code and the child's last lines, so ask it.
+                            logger.exception(
+                                f"Agent streaming failed: llm={getattr(llm, 'id', '?')} "
+                                f"({getattr(llm, 'name', '?')}), thread_id={thread_id}"
+                                f"{_child_crash_suffix(engine)}"
+                            )
+                            if stateful:
+                                await self._repair_alternation(agent, run_config)
+                            # Parity with the pre-#297 live stream: text buffered before the
+                            # failure would already have been yielded, so flush it ahead of
+                            # the sentinel instead of dropping it.
+                            for text in hop_text_buffer:
+                                yield {"t": "answer", "text": text}
+                            hop_text_buffer.clear()
+                            yield {"t": "answer", "text": ERROR_MESSAGE}
+            except BaseException:
+                _flag_abandoned(abandon_hook)
+                raise
 
     async def astream_oneshot(
         self,
@@ -1019,22 +1591,38 @@ class AgentRunner:
                 )
                 return
             splitter = ThinkSplitter()
+            # Same rule as a conversation turn: a title that does not end
+            # normally (its caller went away) flags the child it ran against,
+            # through the hook bound to the build-time handle. ``aclosing``
+            # closes ``BaseChatModel.astream`` here, but that generator does
+            # not close the client's own stream deterministically, so the
+            # HTTP response may close -- and the client-level flag may land --
+            # only after the guard is released. This flag makes the next
+            # prefix reset send a barrier first, which waits for that request.
+            abandon_hook = getattr(model, "abandon_hook", None)
             try:
-                async for chunk in model.astream([HumanMessage(prompt_text)]):
-                    text = getattr(chunk, "text", "")
-                    if not text:
-                        continue
-                    for event in splitter.feed(text):
-                        if event["t"] == "answer":
-                            yield event["text"]
-            except Exception:
-                logger.warning(
-                    f"One-shot streaming failed: llm={getattr(llm, 'id', '?')} "
-                    f"({getattr(llm, 'name', '?')}); using the default"
-                    f"{_child_crash_suffix(engine)}",
-                    exc_info=True,
-                )
-                return
+                try:
+                    async with contextlib.aclosing(
+                        model.astream([HumanMessage(prompt_text)])
+                    ) as chunks:
+                        async for chunk in chunks:
+                            text = getattr(chunk, "text", "")
+                            if not text:
+                                continue
+                            for event in splitter.feed(text):
+                                if event["t"] == "answer":
+                                    yield event["text"]
+                except Exception:
+                    logger.warning(
+                        f"One-shot streaming failed: llm={getattr(llm, 'id', '?')} "
+                        f"({getattr(llm, 'name', '?')}); using the default"
+                        f"{_child_crash_suffix(engine)}",
+                        exc_info=True,
+                    )
+                    return
+            except BaseException:
+                _flag_abandoned(abandon_hook)
+                raise
             # Stream completed normally: drain the splitter. An unclosed
             # <think> flushes as thinking and is dropped on purpose -- the
             # caller then falls back to its default title.
@@ -1054,32 +1642,50 @@ class AgentRunner:
 
         ``model`` here is the summary client -- the same child served by a
         second ``ChatOpenAI`` pinned to ``reasoning_effort="none"`` (1.1.2), so
-        the summary is written rather than deliberated about.
+        the summary is written rather than deliberated about, and capped at
+        ``summary_cap(W)`` tokens.
+
+        With a known working window the middleware keeps a TOKEN budget
+        (``compaction_cutoff``) and reads up to ``summarize_trim_budget``
+        tokens of history; without one it keeps the last
+        ``SUMMARY_KEEP_MESSAGES`` messages and LangChain's 4000-token trim.
+        Every count -- trigger, cutoff, trim, truncation -- goes through ONE
+        unscaled counter, ``approx_token_count``.
         """
-        from langchain.agents.middleware import SummarizationMiddleware
-
-        class _Logged_Summarization_Middleware(SummarizationMiddleware):
-            """The stock middleware plus the ONE aggregate log line the QA
-            spec promises ("backend.log records the summarization"). Without it
-            a fired compaction is invisible -- the only field evidence during
-            the release recette was turn latency collapsing after the trigger.
-            ASCII, INFO: the app did its job, nothing degraded."""
-
-            async def _acreate_summary(self, messages_to_summarize):
-                summary = await super()._acreate_summary(messages_to_summarize)
-                logger.info(
-                    f"Conversation compacted: {len(messages_to_summarize)} message(s) "
-                    f"summarized into {len(summary or '')} chars"
-                )
-                return summary
-
-        from langchain_core.messages.utils import count_tokens_approximately
-
         from src.agents.middleware import (
             _StripStaleImagesMiddleware,
             _StripStaleToolResults,
         )
 
+        allocated_window, working_window = self._compaction_windows(memory_budget)
+        keep = (
+            ("tokens", keep_token_budget(working_window))
+            if _known_window(working_window)
+            else ("messages", SUMMARY_KEEP_MESSAGES)
+        )
+        return [
+            _StripStaleImagesMiddleware(),
+            _StripStaleToolResults(),
+            _summarization_middleware_class()(
+                model=model,
+                trigger=summarization_triggers(working_window),
+                keep=keep,
+                token_counter=approx_token_count,
+                summary_prompt=SUMMARY_PROMPT,
+                trim_tokens_to_summarize=summarize_trim_budget(working_window, allocated_window),
+                working_window=working_window,
+                engine=config.LLM_Engine,
+            ),
+        ]
+
+    @staticmethod
+    def _compaction_windows(memory_budget=None) -> tuple[Optional[int], Optional[int]]:
+        """``(allocated window, working window)`` for this turn's compaction.
+
+        The allocated window is the loaded child's (``effective_context_tokens``);
+        the working window folds it with the memory ceiling into the ONE
+        canonical value the memory consumers share.
+        """
         engine = config.LLM_Engine
         window_probe = getattr(engine, "effective_context_tokens", None)
         effective_window = window_probe() if callable(window_probe) else None
@@ -1102,20 +1708,11 @@ class AgentRunner:
         # Fold the allocated window and the memory ceiling into the ONE
         # canonical working window (the memory consumer's value); the raw
         # allocated window stays with the time/bound consumers elsewhere.
-        working_window = canonical_working_window(effective_window, memory_token_ceiling)
-        return [
-            _StripStaleImagesMiddleware(),
-            _StripStaleToolResults(),
-            _Logged_Summarization_Middleware(
-                model=model,
-                trigger=summarization_triggers(working_window),
-                keep=("messages", SUMMARY_KEEP_MESSAGES),
-                token_counter=count_tokens_approximately,
-                summary_prompt=SUMMARY_PROMPT,
-            ),
-        ]
+        return effective_window, canonical_working_window(effective_window, memory_token_ceiling)
 
-    async def _memory_warning_event(self, agent, run_config, budget) -> Optional[dict]:
+    async def _memory_warning_event(
+        self, agent, run_config, budget, working_window: Optional[int] = None
+    ) -> Optional[dict]:
         """The ``memory_warning`` event for this turn, or ``None``.
 
         Warn ONLY IF compaction cannot save this conversation. The
@@ -1123,31 +1720,42 @@ class AgentRunner:
         THIS turn is compacted on the NEXT turn -- judging the warning on the
         current size would flag every conversation for exactly one turn and
         then flicker off once compaction ran. Instead the post-turn thread
-        state is projected past an ideal compaction: the last
-        ``SUMMARY_KEEP_MESSAGES`` messages plus a
-        ``SUMMARY_TOKEN_ALLOWANCE``-token summary, counted with the SAME
-        ``count_tokens_approximately`` the compaction trigger uses. Only when
+        state is projected past an ideal compaction: the suffix
+        ``compaction_cutoff`` would keep (with or without a known window,
+        exactly what the middleware keeps) plus the summary it would write --
+        ``summary_cap(W)`` tokens (the summary client's own cap), or the
+        ``SUMMARY_TOKEN_ALLOWANCE`` without a window, and nothing when no
+        compaction would happen on a state that already holds its summary.
+        Both are counted with the
+        SAME ``approx_token_count`` the compaction trigger uses. Only when
         even THAT projected size leaves the margin strictly under the floor
         does the warning go out -- the honest meaning of "compaction had its
         chance": it cannot restore the margin. The event still reports the
         CURRENT numbers (what the user's machine holds right now). Advisory
         only: a failure here is logged and never sinks the turn.
         """
-        from langchain_core.messages.utils import count_tokens_approximately
-
         try:
             state = await agent.aget_state(run_config)
             messages = (state.values or {}).get("messages", []) if state else []
             if not messages:
                 return None
-            projected_tokens = (
-                count_tokens_approximately(messages[-SUMMARY_KEEP_MESSAGES:])
-                + SUMMARY_TOKEN_ALLOWANCE
+            # What the middleware would actually keep, plus the summary it
+            # would write -- unless nothing would be compacted on a state that
+            # already holds its summary (counting that summary twice would
+            # warn for nothing).
+            cutoff = compaction_cutoff(messages, working_window, approx_token_count)
+            summary_tokens = (
+                summary_cap(working_window)
+                if _known_window(working_window)
+                else SUMMARY_TOKEN_ALLOWANCE
             )
+            if cutoff == 0 and _is_previous_summary(messages[0]):
+                summary_tokens = 0
+            projected_tokens = approx_token_count(messages[cutoff:]) + summary_tokens
             projected_margin = budget.memory_margin_fraction(projected_tokens)
             if projected_margin is None or projected_margin >= MEMORY_MARGIN_FLOOR:
                 return None
-            conversation_tokens = count_tokens_approximately(messages)
+            conversation_tokens = approx_token_count(messages)
             current_margin = budget.memory_margin_fraction(conversation_tokens)
             margin = current_margin if current_margin is not None else projected_margin
             logger.warning(

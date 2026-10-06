@@ -9,7 +9,7 @@ OpenAI-compatible HTTP server in a child process and stream from it over SSE.
 BaseEngine
 └── BaseChatServerEngine        ← shared: port pick, /health + chat-ping probe,
     │                             SSE byte-buffer parser, atexit storage,
-    │                             idle-cleanup active marker, kwarg translation
+    │                             last-used stamp, kwarg translation
     ├── MLX_Engine               (mp.Process + mlx_vlm.server, ports 27300-27399)
     └── BaseLlamaCppEngine      ← shared CPU/CUDA: Popen, llama-server resolution,
         │                         GGUF picker, `repetition_penalty → repeat_penalty`
@@ -136,7 +136,53 @@ async with config.LLM_Engine.generation_guard():
 The guard serializes concurrent requests on one asyncio lock so they cannot thrash the
 single-model subprocess, and the idle-cleanup tick shares that same lock, so a model can
 never be reaped mid-stream. On exit the idle clock restarts from the end of the
-generation.
+generation. Both take the lock through one helper, `_acquire_generation_lock`, which
+first drains a prefix-cache reset an earlier holder left running (next section).
+
+## Prefix cache (MLX)
+
+The `mlx_vlm.server` child keeps an Automatic Prefix Cache pool, sized from the window at
+spawn. It holds **one conversation at a time**; the ownership lives on the engine handle
+(`prefix_owner`) and is driven by three `BaseEngine` hooks that are no-ops everywhere but
+`MLX_Engine` (the llama.cpp engines write nothing):
+
+| Hook | Called by | MLX behaviour |
+|---|---|---|
+| `claim_prefix(owner)` | the runner, every conversation (`conv:<id>`) or Arena (`arena`) turn, after the model is resolved | Same owner: nothing. A freshly spawned child (`<fresh>`, empty pool): records the owner without a reset. Anything else: reset, then record the owner. |
+| `on_history_rewritten()` | the compaction middleware, when it rewrote the history | Reset; the owner is kept. |
+| `note_stream_abandoned(handle)` | the chat client (`abandon_hook`, bound at build time) and the runner, when a stream did not end normally | Sets `abandoned` on the handle the stream was built against. |
+
+A reset is `POST /v1/cache/reset` with the child's Bearer key (5 s). A child without a
+prefix cache answers `{"enabled": false}`, which counts as success. When the handle is
+flagged `abandoned`, a **barrier** goes first: a one-token chat request, the readiness
+ping's shape, bounded by the first-chunk ceiling. mlx-vlm's `clear()` pushes every block
+back on the free list without guarding against a double push, and a request cancelled
+during its last prefill step still releases its blocks after the cancellation. The
+barrier's completion proves the cancelled request is settled **only because the child runs
+one sequence at a time**: the runner sets `MLX_VLM_MAX_NUM_SEQS=1` in the child's
+environment (`_mlx_vlm_server_runner._apply_child_runtime_env`). mlx-vlm's GPU loop admits
+new requests before it drains cancellations, and its batch is unbounded by default, so a
+wider batch would let the barrier share a step with the cancelled request and finish
+first; with one sequence the barrier is admitted only once that request has left the
+batch. The cap costs no concurrency — every request to the child is already serialized
+behind the generation guard — but it does cost a wait right after an abandon: ANY request
+sent then (not only the barrier: the next turn, a title, a summary call) waits for the
+cancelled request to leave the batch, typically one prefill step. A failed barrier or reset is one
+WARNING and leaves the owner `<dirty>`, so the next claim retries; it never fails a turn.
+Each performed reset logs `Prefix cache reset: reason=<conversation_change|arena|compaction>`.
+
+The reset is blocking HTTP, so it runs in a worker thread through `run_reset_shielded`
+(`base_engine.py`), which waits for the thread whatever cancellation arrives: an
+`asyncio.shield` loop absorbs a native `task.cancel()`, and an
+`anyio.CancelScope(shield=True)` around it stops anyio from re-delivering a client
+disconnect at every iteration. A compaction reset runs inside a LangGraph node task; the
+runner consumes LangGraph from a child task (`src/agents/isolated_stream.py`) that a client
+disconnect reaches as ONE native cancellation and that the runner awaits, shielded, before
+leaving the guard — so the node, and the reset it waits on, finish inside the guard. As
+defense in depth, the reset's task is also registered as `BaseEngine._pending_reset`, and
+the next lock acquirer drains it before doing anything should a holder ever leave the
+guard while a reset still runs. A reset that raised is logged once by the task's done
+callback and never reaches the next holder.
 
 ## Memory lifecycle
 
@@ -144,8 +190,10 @@ generation.
 attributes shared across requests. A cleanup monitor started in the FastAPI lifespan
 (`core/api.py`, `start_cleanup_task()`) ticks every 300 seconds and unloads the model once
 it has been idle for longer than `_max_idle_time` (300 seconds, `base_engine.py`).
-While a generation is in flight the active marker `_last_used = None` makes
-`_should_cleanup()` return `False`.
+A generation in flight cannot be reaped because the idle tick (`_cleanup_tick`) takes the
+same lock as `generation_guard`, through the same `_acquire_generation_lock`: it waits until
+the generation releases the lock, by which point `_last_used` has been refreshed to the end
+of that generation.
 
 ## Embeddings
 

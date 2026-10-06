@@ -100,6 +100,8 @@ import time  # used by hardware warm-up loop
 from pathlib import Path
 from typing import Any, Dict, Optional, Union
 
+import requests
+
 from src.engines.base_chat_server_engine import BaseChatServerEngine
 from src.engines._mlx_vlm_server_runner import run_mlx_vlm_server
 from src.engines import mlx_child_log as child_log
@@ -491,7 +493,162 @@ class MLX_Engine(BaseChatServerEngine):
             # here (nothing to read back, unlike llama-server whose fit
             # resolves the window at load). None = unbounded child.
             "context_tokens": context_tokens,
+            # Who the child's prefix cache belongs to (see `claim_prefix`). A
+            # new child starts with an EMPTY pool, so the first claim takes it
+            # without a reset. No `abandoned` flag either: nothing ran yet.
+            "prefix_owner": cls._PREFIX_OWNER_FRESH,
         }
+
+    # ======================= PREFIX CACHE OWNERSHIP =======================
+    #
+    # The child's Automatic Prefix Cache pool holds ONLY the current
+    # conversation: it is reset when another conversation (or the arena)
+    # claims the child and when compaction rewrites the history, so a reused
+    # prefix can only ever be this conversation's own and the pool never fills
+    # with dead prefixes. The owner lives on the handle: a respawn, a swap or
+    # an idle reap hands out a fresh handle, hence a fresh owner. One-shot
+    # titles claim nothing: their few blocks go with the next reset.
+    #
+    # The reset is `POST /v1/cache/reset` (mlx_vlm `APCManager.clear()`, behind
+    # the same Bearer key as inference). `clear()` re-pushes every block on the
+    # free list with no guard against a double push, so it must never overlap a
+    # request still holding blocks. An abandoned stream is cancelled
+    # server-side before the next GPU step, but one cancelled during its LAST
+    # prefill step finishes that step and releases its blocks AFTER the
+    # cancellation -- possibly after a reset issued meanwhile. Hence the
+    # barrier: after an abandon, a 1-token request goes first. The proof rests
+    # on the child running ONE sequence at a time (`MLX_VLM_MAX_NUM_SEQS=1`,
+    # set by `_mlx_vlm_server_runner._apply_child_runtime_env`): mlx-vlm admits
+    # new requests before it drains cancellations, so with a wider batch the
+    # barrier could share a step with the cancelled request and finish first.
+    # With one sequence, the barrier is admitted only once the cancelled
+    # request has left the batch -- its completion proves that request settled.
+
+    _PREFIX_OWNER_FRESH = "<fresh>"
+    _PREFIX_OWNER_DIRTY = "<dirty>"
+    _CACHE_RESET_TIMEOUT_S = 5.0
+
+    @classmethod
+    def claim_prefix(cls, owner: str) -> None:
+        """Make the prefix cache belong to ``owner``, resetting it if needed.
+
+        Same owner: nothing to do. A fresh child: its pool is empty, so the
+        owner is recorded without a reset. Anything else (another owner, a
+        previous reset that failed -- ``<dirty>`` -- or no owner at all): reset,
+        then record the owner. A failed reset leaves the owner ``<dirty>`` so
+        the next claim retries; it never fails the turn.
+        """
+        handle = cls._model
+        if not isinstance(handle, dict):
+            return
+        current = handle.get("prefix_owner")
+        if current == owner:
+            return
+        if current == cls._PREFIX_OWNER_FRESH:
+            handle["prefix_owner"] = owner
+            return
+        reason = "arena" if owner == "arena" else "conversation_change"
+        if cls._reset_prefix_cache(handle, reason=reason):
+            handle["prefix_owner"] = owner
+
+    @classmethod
+    def on_history_rewritten(cls) -> None:
+        """Compaction rewrote the history: the cached prefix is garbage."""
+        handle = cls._model
+        if not isinstance(handle, dict):
+            return
+        cls._reset_prefix_cache(handle, reason="compaction")
+
+    @classmethod
+    def note_stream_abandoned(cls, handle: Any) -> None:
+        """Flag ``handle`` -- the child the stream was BUILT against, never the
+        one loaded now -- so its next reset sends a barrier first."""
+        if isinstance(handle, dict):
+            handle["abandoned"] = True
+
+    @classmethod
+    def _reset_prefix_cache(cls, handle: Dict[str, Any], *, reason: str) -> bool:
+        """Reset the child's prefix cache; True on success. Never raises.
+
+        Acts on ``handle`` only (the caller read ``cls._model`` once). After
+        an abandoned stream, a barrier request goes first; a failed barrier
+        skips the reset (deferring only costs memory) and keeps the flag. Any
+        failure is ONE warning and the owner ``<dirty>``, so the next claim
+        retries. A child without a prefix cache answers 200
+        ``{"enabled": false}``: a success with nothing to clear.
+        """
+        api_key = handle.get("api_key")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+        if handle.get("abandoned"):
+            if not cls._send_barrier(handle, headers, reason=reason):
+                handle["prefix_owner"] = cls._PREFIX_OWNER_DIRTY
+                return False
+            handle["abandoned"] = False
+        try:
+            resp = requests.post(
+                f"{handle.get('base_url')}/v1/cache/reset",
+                headers=headers,
+                timeout=cls._CACHE_RESET_TIMEOUT_S,
+            )
+        except requests.RequestException as exc:
+            # The class name only: the exception text can quote the request.
+            logger.warning(
+                f"[MLX_Engine] Prefix cache reset failed ({type(exc).__name__}); "
+                f"deferred to the next claim: reason={reason}"
+            )
+            handle["prefix_owner"] = cls._PREFIX_OWNER_DIRTY
+            return False
+        if resp.status_code != 200:
+            logger.warning(
+                f"[MLX_Engine] Prefix cache reset failed (HTTP {resp.status_code}); "
+                f"deferred to the next claim: reason={reason}"
+            )
+            handle["prefix_owner"] = cls._PREFIX_OWNER_DIRTY
+            return False
+        logger.info(f"Prefix cache reset: reason={reason}")
+        return True
+
+    @classmethod
+    def _send_barrier(
+        cls, handle: Dict[str, Any], headers: Optional[Dict[str, str]], *, reason: str
+    ) -> bool:
+        """One 1-token request, the readiness ping's shape; True on success.
+
+        It proves a cancelled request has settled only because the child runs
+        one sequence at a time (``MLX_VLM_MAX_NUM_SEQS=1``, see the section
+        comment above). Bounded by the first-chunk ceiling for this child's
+        window: the barrier may queue behind the last step of a cancelled
+        prefill, and that step can legitimately last as long as a long
+        prefill does.
+        """
+        from src.agents.chat_model import first_chunk_ceiling_s
+
+        try:
+            resp = requests.post(
+                f"{handle.get('base_url')}/v1/chat/completions",
+                json={
+                    "model": cls._payload_model_value(handle),
+                    "messages": [{"role": "user", "content": "ping"}],
+                    "max_tokens": 1,
+                    "temperature": 0.0,
+                    "stream": False,
+                },
+                headers=headers,
+                timeout=first_chunk_ceiling_s(handle.get("context_tokens")),
+            )
+        except requests.RequestException as exc:
+            logger.warning(
+                f"[MLX_Engine] Prefix cache barrier failed ({type(exc).__name__}); "
+                f"reset deferred to the next claim: reason={reason}"
+            )
+            return False
+        if resp.status_code >= 400:
+            logger.warning(
+                f"[MLX_Engine] Prefix cache barrier failed (HTTP {resp.status_code}); "
+                f"reset deferred to the next claim: reason={reason}"
+            )
+            return False
+        return True
 
     @classmethod
     def _trained_window_of(cls, model_path: Path) -> Optional[int]:
