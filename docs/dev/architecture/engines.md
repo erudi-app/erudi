@@ -9,7 +9,7 @@ OpenAI-compatible HTTP server in a child process and stream from it over SSE.
 BaseEngine
 └── BaseChatServerEngine        ← shared: port pick, /health + chat-ping probe,
     │                             SSE byte-buffer parser, atexit storage,
-    │                             idle-cleanup active marker, kwarg translation
+    │                             last-used stamp, kwarg translation
     ├── MLX_Engine               (mp.Process + mlx_vlm.server, ports 27300-27399)
     └── BaseLlamaCppEngine      ← shared CPU/CUDA: Popen, llama-server resolution,
         │                         GGUF picker, `repetition_penalty → repeat_penalty`

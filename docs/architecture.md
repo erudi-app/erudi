@@ -146,7 +146,7 @@ How the child is launched differs:
   `set_start_method("spawn", force=True)`), which re-executes the launcher in child mode.
 
 Shared lifecycle (port pick, two-stage `/health` + chat-ping probe, SSE byte-buffer
-parser, atexit storage, idle-cleanup active marker, kwarg translation) lives in
+parser, atexit storage, last-used stamp for the idle cleanup, kwarg translation) lives in
 `BaseChatServerEngine`; `BaseLlamaCppEngine` factors what is specific to `llama-server`.
 See [Engines Architecture](dev/architecture/engines.md).
 
