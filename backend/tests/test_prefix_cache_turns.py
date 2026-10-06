@@ -320,20 +320,67 @@ async def test_an_anyio_cancelled_consumer_releases_the_guard_and_flags_the_chil
     assert flag.calls >= 1
 
 
-@pytest.mark.xfail(
-    strict=True,
-    reason=(
-        "langgraph 1.2.11: AsyncPregelLoop.__aexit__ unwinds its exit stack in a "
-        "separate task and awaits it; anyio re-delivers the cancellation, which "
-        "cancels that task before it runs, so AsyncBackgroundExecutor.__aexit__ "
-        "never cancels the in-flight model node. aclosing cannot reach it: the "
-        "LangGraph generator is already finished by the exception."
-    ),
-)
-async def test_an_anyio_cancelled_consumer_closes_the_in_flight_node(monkeypatch):
+async def test_an_anyio_cancelled_consumer_closes_the_in_flight_node_inside_the_guard(monkeypatch):
+    """langgraph 1.2.11 unwinds ``AsyncPregelLoop.__aexit__`` in a separate
+    task it awaits; a cancellation anyio re-delivers would cancel that task
+    before it runs and leave the model node streaming after the guard is
+    released. The runner consumes LangGraph from a child task, which gets ONE
+    native cancellation, and waits for it shielded inside the guard."""
     await _anyio_cancelled_turn(monkeypatch, _Flag())
 
     assert ("node-closed", None) in _RecEngine.events
+    assert _index(("node-closed", None)) < _index(("guard-released", None))
+
+
+async def test_an_anyio_cancelled_arena_turn_closes_the_in_flight_node_inside_the_guard(
+    monkeypatch,
+):
+    _patch_model(monkeypatch, _SlowModel(messages=iter([])))
+    runner = AgentRunner(checkpointer=None)
+    got_first = asyncio.Event()
+    holder: dict = {}
+
+    async def _consume():
+        with anyio.CancelScope() as scope:
+            holder["scope"] = scope
+            async for _ in runner.astream_text(
+                llm=_Llm(),
+                user_message="hi",
+                system_prompt="s",
+                params=_PARAMS,
+                thread_id=None,
+                summarize=False,
+            ):
+                got_first.set()
+
+    task = asyncio.create_task(_consume())
+    await asyncio.wait_for(got_first.wait(), timeout=5)
+    holder["scope"].cancel()
+    await asyncio.wait_for(task, timeout=5)
+
+    assert _index(("node-closed", None)) < _index(("guard-released", None))
+
+
+async def test_the_request_id_reaches_the_model_call_inside_the_node(monkeypatch):
+    """The node runs in a copy of the turn's context: the request id the HTTP
+    middleware set is what the logging filter reads there."""
+    from src.core.request_context import request_id_var
+
+    seen = []
+
+    class _ContextModel(ToolableFakeChatModel):
+        async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+            seen.append(request_id_var.get())
+            yield ChatGenerationChunk(message=AIMessageChunk(content="ok", chunk_position="last"))
+
+    _patch_model(monkeypatch, _ContextModel(messages=iter([])))
+    token = request_id_var.set("req-node-42")
+    try:
+        _ = [e async for e in _stream(AgentRunner(checkpointer=InMemorySaver()), summarize=False)]
+    finally:
+        request_id_var.reset(token)
+
+    assert seen == ["req-node-42"]
 
 
 # ===================== cancellation while a reset thread runs =====================
@@ -381,9 +428,6 @@ class _NextModel:
 
     def __call__(self, llm, **kw):
         _RecEngine.events.append(("model-built", None))
-        if not self.used:
-            self.used = True
-            return self.first
         if kw.get("disable_thinking"):
             from types import SimpleNamespace
 
@@ -392,6 +436,9 @@ class _NextModel:
                     yield SimpleNamespace(text="Title")
 
             return _OneShot()
+        if not self.used:
+            self.used = True
+            return self.first
         return ToolableFakeChatModel(messages=iter([AIMessage(content="next answer")]))
 
 
@@ -466,7 +513,8 @@ async def test_a_disconnect_during_the_compaction_reset_holds_every_next_acquire
     builder = _NextModel(first)
 
     def _build(llm, **kw):
-        if kw.get("effort_plan") is NO_REASONING_PLAN:
+        # Titles also run at effort "none": tell them apart by disable_thinking.
+        if kw.get("effort_plan") is NO_REASONING_PLAN and not kw.get("disable_thinking"):
             return summary
         return builder(llm, **kw)
 
@@ -490,9 +538,11 @@ async def test_a_disconnect_during_the_compaction_reset_holds_every_next_acquire
     await asyncio.wait_for(task, timeout=10)
     await asyncio.wait_for(nxt, timeout=10)
 
-    # The guard holder was torn down while the reset thread still ran: only
-    # the drain held the next acquirer.
-    assert _index(("guard-released", None)) < _index(("rewrite-end", None))
+    # The torn-down holder kept the guard until the node -- blocked in the
+    # reset -- was closed: LangGraph runs in a child task that is cancelled
+    # once and awaited inside the guard. (The drain stays the defense in
+    # depth for a holder that leaves anyway; see tests/test_prefix_cache.py.)
+    assert _index(("rewrite-end", None)) < _index(("guard-released", None))
     assert _index(("rewrite-end", None)) < _index(("next-proceeded", acquirer))
     if acquirer == "turn":
         assert _index(("rewrite-end", None)) < _index(("claim-start", "conv:next"))

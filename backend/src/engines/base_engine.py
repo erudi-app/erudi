@@ -88,7 +88,7 @@ def _log_monitor_death(task: "asyncio.Task") -> None:
 #
 # * Awaiting the thread directly is not enough: cancelling the awaiting task
 #   cancels the executor future and returns while the thread still runs.
-#   ``_wait_shielded`` therefore loops on ``asyncio.shield`` until the task
+#   ``wait_shielded`` therefore loops on ``asyncio.shield`` until the task
 #   is really done, and reports whether a cancellation arrived meanwhile.
 # * anyio (Starlette's client-disconnect path) re-delivers a cancelled scope's
 #   cancellation at EVERY await, so a bare shield loop would spin for the
@@ -96,13 +96,13 @@ def _log_monitor_death(task: "asyncio.Task") -> None:
 #   the re-delivery; the inner ``asyncio.shield`` still absorbs a native
 #   ``task.cancel()`` (LangGraph cancels its node tasks that way), which the
 #   anyio scope alone does not stop.
-# * The reset can run inside a LangGraph node task (compaction) while the
-#   task holding the generation guard is torn down by anyio's repeated
-#   cancellation: the holder then leaves ``async with generation_guard()``
-#   while the node still waits. So the reset task is registered as
-#   ``BaseEngine._pending_reset``, and whoever acquires the lock next (a
-#   turn, a title, an llms endpoint, the idle tick) drains it before doing
-#   anything (``BaseEngine._acquire_generation_lock``).
+# * The reset can run inside a LangGraph node task (compaction). The runner
+#   consumes LangGraph from a child task it awaits before leaving the guard
+#   (``src.agents.isolated_stream``), so the node finishes inside the guard.
+#   As defense in depth for any holder that leaves the guard anyway, the
+#   reset task is registered as ``BaseEngine._pending_reset``, and whoever
+#   acquires the lock next (a turn, a title, an llms endpoint, the idle tick)
+#   drains it before doing anything (``BaseEngine._acquire_generation_lock``).
 #
 # The reset's outcome is logged once, by a done callback, and never re-raised
 # into a caller: a reset never fails a turn.
@@ -117,12 +117,14 @@ def _log_reset_outcome(task: "asyncio.Task") -> None:
         logger.error(f"Prefix cache reset task failed: {exc}", exc_info=exc)
 
 
-async def _wait_shielded(task: "asyncio.Task") -> bool:
+async def wait_shielded(task: "asyncio.Task") -> bool:
     """Wait until ``task`` is done, whatever cancellation arrives meanwhile.
 
     Returns whether a native cancellation of the CURRENT task was absorbed,
     so the caller can re-raise it once the wait is over. The task's own
-    outcome is not retrieved here (``_log_reset_outcome`` owns it).
+    outcome is left to the caller (for a reset, ``_log_reset_outcome`` owns
+    it). Also used by ``src.agents.isolated_stream`` to wait for the task
+    that consumes the agent's LangGraph stream.
     """
     import anyio
 
@@ -137,7 +139,8 @@ async def _wait_shielded(task: "asyncio.Task") -> bool:
                 if not (task.done() and task.cancelled()):
                     cancelled = True
             except Exception:
-                # The task's own failure: logged by its done callback.
+                # The task's own failure: the task is done, and the caller
+                # reads (or logs) its outcome from it.
                 break
     return cancelled
 
@@ -146,7 +149,7 @@ async def run_reset_shielded(fn: Any) -> Any:
     """Run the blocking reset ``fn`` in a worker thread, shielded.
 
     Registers the thread's task as ``BaseEngine._pending_reset`` for the next
-    lock acquirer to drain, waits for it through ``_wait_shielded`` (a
+    lock acquirer to drain, waits for it through ``wait_shielded`` (a
     cancellation never returns early), then re-raises a cancellation that
     arrived meanwhile. Returns ``fn``'s result, or ``None`` when it raised
     (logged once by the done callback). Every prefix-cache reset path -- the
@@ -155,7 +158,7 @@ async def run_reset_shielded(fn: Any) -> Any:
     task = asyncio.get_running_loop().create_task(asyncio.to_thread(fn))
     task.add_done_callback(_log_reset_outcome)
     BaseEngine._pending_reset = task
-    cancelled = await _wait_shielded(task)
+    cancelled = await wait_shielded(task)
     if BaseEngine._pending_reset is task:
         BaseEngine._pending_reset = None
     if cancelled:
@@ -181,7 +184,7 @@ async def _drain_pending_reset() -> None:
         # against this loop's child, and it cannot be awaited from here.
         BaseEngine._pending_reset = None
         return
-    cancelled = await _wait_shielded(task)
+    cancelled = await wait_shielded(task)
     if BaseEngine._pending_reset is task:
         BaseEngine._pending_reset = None
     if cancelled:

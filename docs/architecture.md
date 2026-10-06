@@ -201,8 +201,13 @@ Each conversation or Arena turn claims the engine's prefix cache for itself
 (`claim_prefix`); on Apple Silicon the cache holds one conversation at a time and is
 reset on a conversation change and after a compaction (see
 [Engines](dev/architecture/engines.md#prefix-cache-mlx)). The generators between the
-service and LangGraph are consumed under `contextlib.aclosing`, so a stream its consumer
-closes is torn down inside the generation guard.
+service and LangGraph are consumed under `contextlib.aclosing`, and the runner iterates
+LangGraph itself from a child task (`agents/isolated_stream.py`). Starlette delivers a
+client disconnect as an anyio cancellation re-delivered at every await, which would
+abort LangGraph's own teardown and leave the model call streaming; the child task gets a
+single native cancellation instead, and the runner waits for it, shielded. Whether the
+consumer closes the stream or the client goes away, the in-flight model call is closed
+before the generation guard is released.
 
 A turn is captured as structured events — `answer`, `thinking`, `tool_call`,
 `tool_result` — which the conversation service frames as NDJSON. Arena projects the same
@@ -220,6 +225,7 @@ Other modules in the layer:
 | `middleware.py` | Summarization and related agent middleware |
 | `model_factory.py` | Builds the chat client pointed at the engine's child server |
 | `chat_model.py` | `Erudi_Chat_OpenAI`: the `ChatOpenAI` subclass carrying the streaming budgets and the servers' dedicated reasoning field |
+| `isolated_stream.py` | Iterates an async stream (the agent's LangGraph stream) from a child task, so a client disconnect reaches it as one cancellation and it is closed before the guard is released |
 | `reasoning_stream.py` | Pure extraction of `delta.reasoning_content` / `delta.reasoning` from raw chunks |
 | `think_splitter.py` | Fallback splitter: inline `<think>` the server parser missed stays out of the answer |
 
@@ -497,8 +503,10 @@ the budget to consume.
 
 `BaseEngine` keeps a single model in memory as class state. The cleanup monitor started
 in the lifespan ticks every 300 seconds and unloads the model once it has been idle
-longer than `_max_idle_time` (300 seconds). A generation in flight sets the active marker
-`_last_used = None`, which blocks the monitor from reaping the model mid-stream.
+longer than `_max_idle_time` (300 seconds). The monitor's tick takes the same lock as
+`generation_guard`, so it waits for a generation in flight to release it — and the guard
+refreshes `_last_used` on release — which is what keeps a model from being reaped
+mid-stream.
 
 ### Streaming
 

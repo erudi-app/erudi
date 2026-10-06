@@ -74,6 +74,7 @@ from src.agents.chat_model import (
     first_chunk_ceiling_s,
     is_child_prefill_timeout,
 )
+from src.agents.isolated_stream import isolated_stream
 from src.agents.model_factory import build_chat_model
 from src.agents.overflow import ContextOverflow, parse_context_overflow
 from src.agents.reasoning_effort import NO_REASONING_PLAN, EffortPlan
@@ -1073,15 +1074,21 @@ class AgentRunner:
                     f"Agent stream started: llm={getattr(llm, 'id', '?')}, "
                     f"thread_id={thread_id}"
                 )
-                # ``aclosing``: a consumer that closes this generator closes
-                # LangGraph too (its executor cancels and awaits the in-flight
-                # node), inside the guard -- never later from a finalizer.
+                # LangGraph is iterated in a child task (``isolated_stream``)
+                # under ``aclosing``: whether this generator is closed by its
+                # consumer or cancelled by a client disconnect (anyio
+                # re-delivers that cancellation at every await), LangGraph
+                # receives ONE cancellation, its exit cancels and awaits the
+                # in-flight node, and all of it completes before the guard is
+                # released -- never later from a finalizer or a stray task.
                 async with contextlib.aclosing(
-                    agent.astream(
-                        {"messages": [HumanMessage(user_message)]},
-                        config=run_config,
-                        context=context,
-                        stream_mode="messages",
+                    isolated_stream(
+                        lambda: agent.astream(
+                            {"messages": [HumanMessage(user_message)]},
+                            config=run_config,
+                            context=context,
+                            stream_mode="messages",
+                        )
                     )
                 ) as agent_stream:
                     try:

@@ -511,8 +511,9 @@ conversations pays that on every switch. Staying in one conversation keeps the c
 
 A reset never fails a turn: when the child cannot be reached it is deferred (one warning) and
 retried on the next turn. When a turn was stopped mid-generation, the next reset first sends a
-one-token request so the stopped request is fully settled before the cache is cleared, and a reset
-in progress is always finished before the next turn, title or idle unload starts. The llama.cpp
+one-token request so the stopped request is fully settled before the cache is cleared. When the
+client goes away mid-turn, the model call and any reset in progress are finished before the next
+turn, title or idle unload starts. The llama.cpp
 engines (CPU, CUDA) manage their own cache and are untouched by this.
 
 ## The system prompt and the KB budget

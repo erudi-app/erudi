@@ -167,11 +167,14 @@ The reset is blocking HTTP, so it runs in a worker thread through `run_reset_shi
 (`base_engine.py`), which waits for the thread whatever cancellation arrives: an
 `asyncio.shield` loop absorbs a native `task.cancel()`, and an
 `anyio.CancelScope(shield=True)` around it stops anyio from re-delivering a client
-disconnect at every iteration. The thread's task is registered as
-`BaseEngine._pending_reset`; because a compaction reset runs inside a LangGraph node task,
-the guard holder can be torn down while it still runs, so the next lock acquirer drains it
-before doing anything. A reset that raised is logged once by the task's done callback and
-never reaches the next holder.
+disconnect at every iteration. A compaction reset runs inside a LangGraph node task; the
+runner consumes LangGraph from a child task (`src/agents/isolated_stream.py`) that a client
+disconnect reaches as ONE native cancellation and that the runner awaits, shielded, before
+leaving the guard — so the node, and the reset it waits on, finish inside the guard. As
+defense in depth, the reset's task is also registered as `BaseEngine._pending_reset`, and
+the next lock acquirer drains it before doing anything should a holder ever leave the
+guard while a reset still runs. A reset that raised is logged once by the task's done
+callback and never reaches the next holder.
 
 ## Memory lifecycle
 
@@ -179,8 +182,10 @@ never reaches the next holder.
 attributes shared across requests. A cleanup monitor started in the FastAPI lifespan
 (`core/api.py`, `start_cleanup_task()`) ticks every 300 seconds and unloads the model once
 it has been idle for longer than `_max_idle_time` (300 seconds, `base_engine.py`).
-While a generation is in flight the active marker `_last_used = None` makes
-`_should_cleanup()` return `False`.
+A generation in flight cannot be reaped because the idle tick (`_cleanup_tick`) takes the
+same lock as `generation_guard`, through the same `_acquire_generation_lock`: it waits until
+the generation releases the lock, by which point `_last_used` has been refreshed to the end
+of that generation.
 
 ## Embeddings
 
