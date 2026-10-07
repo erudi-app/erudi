@@ -10,9 +10,13 @@ WARNING in ``backend.log``.
 File: ``<data folder>/memory_calibration.json`` (local only, never sent
 anywhere; deleting it loses only the recorded observations). One entry per
 (model, machine, runtime) key, whose components are kept in clear -- none is a
-path: the model, the artifact's size, the GPU working set, the macOS, mlx and
-mlx_vlm versions, the child's runtime configuration. Not the app version. An
-entry holds the last measured base footprint and a ring of the last
+path: the model's architecture (its config ``model_type``; never the
+conversation's model name, renameable free text), the artifact's size, the
+GPU working set, the macOS, mlx and mlx_vlm versions, the child's runtime
+configuration. Not the app version. Only measured bases are recorded (never
+the weights-on-disk fallback); a child that died during a turn is recorded
+with ``child_died`` and no peak. An entry holds the last measured base
+footprint and a ring of the last
 ``RING_PER_KEY`` observations. Entries of an older runtime are kept, labelled
 by their version components, within ``MAX_OBSERVATIONS`` overall (oldest
 dropped first).
@@ -106,7 +110,23 @@ def _read(path: Path) -> Dict[str, Any]:
     except ValueError:
         logger.warning("Memory observations file is corrupt; ignoring it and rewriting it")
         return empty
-    return data
+    return _well_formed(data)
+
+
+def _well_formed(data: Dict[str, Any]) -> Dict[str, Any]:
+    """``data`` without its malformed entries and observations: a partly
+    corrupt file is rewritten clean, and never blocks a recording."""
+    entries = {}
+    for key, entry in data.get("entries", {}).items():
+        if not isinstance(entry, dict) or not isinstance(entry.get("observations"), list):
+            continue
+        observations = [
+            o
+            for o in entry["observations"]
+            if isinstance(o, dict) and isinstance(o.get("id"), str) and o.get("id")
+        ]
+        entries[key] = {**entry, "observations": observations}
+    return {"version": SCHEMA_VERSION, "entries": entries}
 
 
 def load() -> Dict[str, Any]:

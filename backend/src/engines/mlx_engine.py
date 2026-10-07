@@ -492,9 +492,10 @@ class MLX_Engine(BaseChatServerEngine):
             "api_key": api_key,
             # The ALLOCATED window (`BaseEngine.effective_context_tokens`):
             # for MLX it equals the preflight bound passed above, known at
-            # spawn -- hence `_read_server_properties` stays the base no-op
-            # here (nothing to read back, unlike llama-server whose fit
-            # resolves the window at load). None = unbounded child.
+            # spawn -- nothing to read back, unlike llama-server whose fit
+            # resolves the window at load (MLX's `_read_server_properties`
+            # measures the child's base footprint instead). None = unbounded
+            # child.
             "context_tokens": context_tokens,
             # Who the child's prefix cache belongs to (see `claim_prefix`). A
             # new child starts with an EMPTY pool, so the first claim takes it
@@ -689,9 +690,11 @@ class MLX_Engine(BaseChatServerEngine):
             handle["base_footprint_bytes"] = None
 
     @classmethod
-    def begin_memory_window(cls, model_ref: Optional[str]) -> Any:
+    def begin_memory_window(cls) -> Any:
         """Open the turn's measurement window on the loaded child; returns the
-        ``(handle, pid)`` token ``end_memory_window`` closes it with."""
+        ``(handle, pid, window)`` token ``end_memory_window`` closes it with
+        (``window`` numbers the turn's window on this child: a token of an
+        earlier window never closes a later one)."""
         from src.engines import process_footprint
 
         handle = cls._model
@@ -701,10 +704,11 @@ class MLX_Engine(BaseChatServerEngine):
         previous = handle.get("memory_window") or {}
         base = handle.get("base_footprint_bytes")
         current = process_footprint.footprint(pid)
+        window_id = int(previous.get("window", 0)) + 1
         handle["memory_window"] = {
+            "window": window_id,
             "seq": int(previous.get("seq", 0)) + 1,
             "open": True,
-            "model_ref": model_ref,
             # What the previous request left behind (MLX's buffer cache):
             # it can raise this turn's peak.
             "residue_at_start_bytes": (
@@ -715,7 +719,7 @@ class MLX_Engine(BaseChatServerEngine):
             "spi_started": process_footprint.begin_peak_window(pid),
             "calls": [],
         }
-        return (handle, pid)
+        return (handle, pid, window_id)
 
     @classmethod
     def _restart_memory_window(cls, handle: Dict[str, Any]) -> None:
@@ -754,7 +758,12 @@ class MLX_Engine(BaseChatServerEngine):
     @classmethod
     def end_memory_window(cls, token: Any, *, abandoned: bool = False) -> Optional[Dict[str, Any]]:
         """Close the window and record the turn's observation; returns it, or
-        ``None`` when nothing could be recorded."""
+        ``None`` when nothing could be recorded.
+
+        Recorded only on a MEASURED base (never the weights-on-disk fallback)
+        and a window that really started. A child that died during the window
+        is recorded too, ``child_died`` and no peak: it is the ground truth of
+        an under-prediction."""
         import time
         import uuid
 
@@ -764,23 +773,36 @@ class MLX_Engine(BaseChatServerEngine):
 
         if not token:
             return None
-        handle, pid = token
+        handle, pid, window_id = token
         window = handle.get("memory_window") if isinstance(handle, dict) else None
-        if not isinstance(window, dict) or not window.get("open") or handle.get("pid") != pid:
+        if (
+            not isinstance(window, dict)
+            or not window.get("open")
+            or handle.get("pid") != pid
+            or window.get("window") != window_id
+        ):
             return None
         window["open"] = False
         calls = [call for call in window["calls"] if call["seq"] == window["seq"]]
-        if not window.get("spi_started") or not calls:
+        base = handle.get("base_footprint_bytes")
+        if not window.get("spi_started") or base is None:
             return None
         peak = process_footprint.peak_since(pid, True)
-        budget = MemoryBudget.from_handle(cls, handle)
-        base = handle.get("base_footprint_bytes") or budget.base_bytes
-        if peak is None or base is None:
+        child_died = peak is None and not cls._proc_is_alive(handle.get("proc"))
+        if (peak is None and not child_died) or (not calls and not child_died):
             return None
-        largest = max(calls, key=lambda call: call["n_in"] + call["n_out"])
-        n = largest["n_in"] + largest["n_out"]
+        budget = MemoryBudget.from_handle(cls, handle)
+        if calls:
+            largest = max(calls, key=lambda call: call["n_in"] + call["n_out"])
+        else:
+            largest = {"n_in": None, "n_out": None, "cached": None}
+        n = (
+            largest["n_in"] + largest["n_out"]
+            if largest["n_in"] is not None and largest["n_out"] is not None
+            else None
+        )
         scale = prior_scale()
-        predicted = budget.predict(n)
+        predicted = budget.predict(n) if n is not None else None
         if predicted is not None and scale != 1.0:
             predicted = int(predicted * scale)
         swap_start, swap_end = window.get("swapouts_start"), process_footprint.swapouts()
@@ -796,7 +818,7 @@ class MLX_Engine(BaseChatServerEngine):
             "n": n,
             "n_in": largest["n_in"],
             "n_out": largest["n_out"],
-            "y_bytes": peak - base,
+            "y_bytes": peak - base if peak is not None else None,
             "predicted_bytes": predicted,
             "cache_read": largest["cached"],
             "has_images": has_images,
@@ -807,12 +829,13 @@ class MLX_Engine(BaseChatServerEngine):
                 swap_end - swap_start if swap_start is not None and swap_end is not None else None
             ),
             "spi_started": True,
+            "child_died": child_died,
         }
         if scale != 1.0:
             observation["prior_scale"] = scale
         facts = handle.get("memory_facts") or {}
         components = memory_observations.key_components(
-            model=window.get("model_ref"),
+            model=facts.get("model_type"),
             artifact_bytes=facts.get("weights_bytes"),
             working_set_bytes=facts.get("working_set_bytes"),
             runtime={
@@ -826,12 +849,17 @@ class MLX_Engine(BaseChatServerEngine):
         except Exception:
             # The observation is lost, nothing else: the turn already ended.
             logger.warning("[MLX_Engine] Recording a memory observation failed", exc_info=True)
-        if predicted is not None and not has_images and observation["y_bytes"] > predicted:
+        if (
+            predicted is not None
+            and observation["y_bytes"] is not None
+            and not has_images
+            and observation["y_bytes"] > predicted
+        ):
             warned = handle.setdefault("memory_exceeded_warned", set())
             key = memory_observations.entry_key(components)
             if key not in warned:
                 warned.add(key)
-                model = str(window.get("model_ref")).encode("ascii", "backslashreplace").decode()
+                model = str(facts.get("model_type")).encode("ascii", "backslashreplace").decode()
                 logger.warning(
                     f"Memory prediction exceeded on this machine (the app's memory estimate "
                     f"was wrong here; nothing is corrected automatically): model={model}, "

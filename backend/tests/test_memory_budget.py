@@ -1,10 +1,11 @@
-"""Deterministic memory accounting for the compaction memory signal (1.1.2).
+"""Memory accounting on a measured prior (Apple Silicon only).
 
-Pure math over facts read from disk and the engine's hardware totals — never
-``psutil available`` (macOS compression/swap makes it lie). Every test here is
-hand-computed: the KV formula is 2 (K and V) x layers x kv_heads x head_dim x
-2 bytes (f16) per token. Missing facts always answer ``None`` (signal off),
-never a guessed number.
+Pure math over facts read from disk, the child's measured base footprint and
+the engine's GPU working set -- never ``psutil available`` (macOS
+compression/swap makes it lie). Every test here is hand-computed: the KV
+formula is 2 (K and V) x layers x kv_heads x head_dim x 2 bytes (f16) per
+token, and ``predict(N) = m (t0 + step x vocab x 2 B + c0 x kv x N)``. Missing
+facts always answer ``None`` (accounting off), never a guessed number.
 """
 
 import json
@@ -321,6 +322,24 @@ def _hand_predict(n):
     return PRIOR_MARGIN * (
         PRIOR_FIXED_BYTES + STEP * VOCAB * LOGITS_BYTES_PER_VALUE + PRIOR_KV_MULTIPLIER * KV * n
     )
+
+
+def test_the_ceiling_reserves_the_output_budgets_own_floor():
+    from src.agents.output_budget import OUTPUT_BUDGET_FLOOR_TOKENS
+    from src.engines import memory_budget
+
+    assert memory_budget._OUTPUT_FLOOR_TOKENS == OUTPUT_BUDGET_FLOOR_TOKENS
+
+
+def test_an_invalid_prior_scale_warns_once_per_process(monkeypatch, caplog):
+    from src.engines import memory_budget
+
+    monkeypatch.setattr(memory_budget, "_PRIOR_SCALE_WARNED", False)
+    monkeypatch.setenv(memory_budget.PRIOR_SCALE_ENV_VAR, "not-a-number")
+    with caplog.at_level(logging.WARNING):
+        assert memory_budget.prior_scale() == 1.0
+        assert memory_budget.prior_scale() == 1.0
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
 
 def test_the_priors_are_the_named_provisional_values():

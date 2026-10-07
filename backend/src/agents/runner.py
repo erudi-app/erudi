@@ -1411,9 +1411,7 @@ class AgentRunner:
                 # this turn's memory) and closes at the end of the turn,
                 # inside the guard.
                 if _engine_overrides(engine, "begin_memory_window"):
-                    memory_token = await run_in_threadpool(
-                        engine.begin_memory_window, getattr(llm, "name", None)
-                    )
+                    memory_token = await run_in_threadpool(engine.begin_memory_window)
 
                 # Aggregate-only stream accounting (never log per token): start,
                 # first-token latency, then one completion line with totals.

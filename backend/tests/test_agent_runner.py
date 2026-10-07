@@ -2635,8 +2635,8 @@ def test_summarization_triggers_clamps_a_tiny_window_to_at_least_one():
 def _compaction_tokens(allocated, memory):
     # Mirror ``_build_middleware`` exactly: a KNOWN memory ceiling is clamped up
     # to >= 1 before folding (the compact-ASAP safety net for the corner where
-    # the weights alone already blow the 15 % floor), then canonical_working
-    # takes the min.
+    # the model's fixed part alone already fills the memory budget), then
+    # canonical_working takes the min.
     from src.engines.working_window import canonical_working_window
 
     if memory is not None:
@@ -2679,9 +2679,9 @@ def test_compaction_with_neither_signal_has_no_token_trigger():
     ]
 
 
-def test_compaction_fires_asap_when_the_weights_blow_the_floor():
-    # A non-positive ceiling means the weights alone already exceed the 15 %
-    # floor. The call site clamps it up to 1, so the working window is 1 and
+def test_compaction_fires_asap_when_the_fixed_part_fills_the_budget():
+    # A non-positive ceiling means the model's fixed part alone already fills
+    # the memory budget. The call site clamps it up to 1, so the working window is 1 and
     # compaction fires as early as it can -- the historical safety net, kept
     # until the reactive memory brake replaces it (PR3.4).
     assert _compaction_tokens(10000, -3) == 1

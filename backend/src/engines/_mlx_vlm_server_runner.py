@@ -286,6 +286,10 @@ def _apply_child_runtime_env(
       parent's first-chunk watchdog ceiling so a long cold prefill trips the
       parent's curated timeout, not the child's raw error; ``None`` leaves
       mlx-vlm's own default (600 s).
+    - ``PREFILL_STEP_SIZE``: the prefill step the memory prior was measured at
+      (``memory_budget.MLX_PREFILL_STEP_TOKENS``; its logits term and t0 depend
+      on it). mlx-vlm's CLI also rewrites it from its own ``--prefill-step-size``
+      default, which ``tests/test_mlx_engine_server.py`` pins equal.
     - ``MLX_VLM_MAX_NUM_SEQS=1``: one sequence in the running batch at a time.
       The prefix-cache barrier (``MLX_Engine._send_barrier``) relies on it.
       mlx-vlm's GPU loop admits new requests BEFORE it drains cancellations
@@ -305,10 +309,13 @@ def _apply_child_runtime_env(
     are knobs the parent WRITES for the mlx-vlm child, not configuration the
     backend itself reads, so they do not belong in ``backend/.env.example``.
     """
+    from src.engines.memory_budget import MLX_PREFILL_STEP_TOKENS
+
     env = {
         "APC_ENABLED": "1",
         "APC_BLOCK_SIZE": str(APC_BLOCK_SIZE_TOKENS),
         "MLX_VLM_MAX_NUM_SEQS": "1",
+        "PREFILL_STEP_SIZE": str(MLX_PREFILL_STEP_TOKENS),
     }
     if apc_num_blocks is not None:
         env["APC_NUM_BLOCKS"] = str(int(apc_num_blocks))

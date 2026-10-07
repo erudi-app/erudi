@@ -638,6 +638,26 @@ class TestChildRuntimeEnv:
         runner._apply_child_runtime_env(apc_num_blocks=num_blocks, token_queue_timeout_s=timeout)
         assert env["MLX_VLM_MAX_NUM_SEQS"] == "1"
 
+    @pytest.mark.parametrize("num_blocks,timeout", [(2048, 1401.0), (None, None)])
+    def test_pins_the_prefill_step_the_memory_prior_was_measured_at(
+        self, monkeypatch, num_blocks, timeout
+    ):
+        from src.engines import _mlx_vlm_server_runner as runner
+        from src.engines.memory_budget import MLX_PREFILL_STEP_TOKENS
+
+        env = self._fresh_env(monkeypatch)
+        runner._apply_child_runtime_env(apc_num_blocks=num_blocks, token_queue_timeout_s=timeout)
+        assert env["PREFILL_STEP_SIZE"] == str(MLX_PREFILL_STEP_TOKENS) == "2048"
+
+    def test_the_pinned_step_is_mlx_vlms_own_default(self):
+        """mlx_vlm's CLI rewrites ``PREFILL_STEP_SIZE`` from its own
+        ``--prefill-step-size`` default: the pin only holds while the two
+        agree, which this test watches on a host where mlx_vlm imports."""
+        common = pytest.importorskip("mlx_vlm.generate.common")
+        from src.engines.memory_budget import MLX_PREFILL_STEP_TOKENS
+
+        assert common.DEFAULT_PREFILL_STEP_SIZE == MLX_PREFILL_STEP_TOKENS
+
     def test_falls_back_to_upstream_defaults_when_unknown(self, monkeypatch):
         from src.engines import _mlx_vlm_server_runner as runner
 

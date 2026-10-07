@@ -133,21 +133,35 @@ def test_a_missing_spi_is_false_with_one_warning_per_process(monkeypatch, caplog
 
 
 def test_importing_the_module_loads_no_native_library():
-    import importlib
+    """No ``ctypes.CDLL`` at import time: the Ubuntu and Windows legs import
+    this module, and a native load there would fail."""
     import subprocess as sp
+    from pathlib import Path
 
     probe = (
-        "import sys, ctypes\n"
-        "before = set(sys.modules)\n"
-        "import src.engines.process_footprint as m\n"
-        "assert m._LIBPROC is None\n"
+        "import ctypes\n"
+        "def _refuse(*args, **kwargs):\n"
+        "    raise AssertionError('ctypes.CDLL called at import time')\n"
+        "ctypes.CDLL = _refuse\n"
+        "import src.engines.process_footprint\n"
         "print('ok')\n"
     )
     out = sp.run(
         [sys.executable, "-c", probe],
         capture_output=True,
         text=True,
-        cwd=str(importlib.import_module("pathlib").Path(__file__).resolve().parents[1]),
+        cwd=str(Path(__file__).resolve().parents[1]),
         timeout=60,
     )
     assert out.returncode == 0, out.stderr
+    assert out.stdout.strip() == "ok"
+
+
+@pytest.mark.skipif(sys.platform != "darwin", reason="macOS system counters")
+def test_the_host_port_is_taken_once(monkeypatch):
+    """``mach_host_self()`` returns a send right each call; it is taken once
+    and reused, never leaked per turn."""
+    first = process_footprint._host_port()
+    assert first is not None
+    assert process_footprint._host_port() == first
+    assert process_footprint.swapouts() >= 0

@@ -348,7 +348,7 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     # writes a small file).
 
     @classmethod
-    def begin_memory_window(cls, model_ref: Optional[str]) -> Any:
+    def begin_memory_window(cls) -> Any:
         """Open a measurement window on the loaded child for one turn; the
         returned token closes it (``end_memory_window``). No-op here."""
         return None

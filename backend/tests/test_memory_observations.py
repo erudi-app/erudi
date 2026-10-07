@@ -70,6 +70,7 @@ def child(monkeypatch):
             "vocab_size": VOCAB,
             "prefill_step": 2048,
             "working_set_bytes": 12 * GIB,
+            "model_type": "qwen3",
         },
     }
     monkeypatch.setattr(MLX_Engine, "_model", handle)
@@ -89,7 +90,7 @@ def _recorded(path):
 
 def test_n_is_the_largest_single_call_not_a_mix_of_calls(child, _memory_observations_in_tmp):
     scripted, handle = child
-    token = MLX_Engine.begin_memory_window("Qwen3-0.6B")
+    token = MLX_Engine.begin_memory_window()
     MLX_Engine.note_call_usage(handle, 300, 6000)
     MLX_Engine.note_call_usage(handle, 6500, 50)
     scripted.peak = scripted.base + 3 * GIB
@@ -104,7 +105,7 @@ def test_n_is_the_largest_single_call_not_a_mix_of_calls(child, _memory_observat
 
 def test_a_short_prompt_with_a_long_answer_is_recorded_at_prompt_plus_answer(child):
     scripted, handle = child
-    token = MLX_Engine.begin_memory_window("m")
+    token = MLX_Engine.begin_memory_window()
     MLX_Engine.note_call_usage(handle, 256, 8000)
 
     observation = MLX_Engine.end_memory_window(token)
@@ -114,7 +115,7 @@ def test_a_short_prompt_with_a_long_answer_is_recorded_at_prompt_plus_answer(chi
 
 def test_calls_before_a_compaction_restart_are_excluded(child):
     scripted, handle = child
-    token = MLX_Engine.begin_memory_window("m")
+    token = MLX_Engine.begin_memory_window()
     MLX_Engine.note_call_usage(handle, 9000, 10)  # a pre-compaction hop
     scripted.peak = scripted.base + 6 * GIB  # ...and the summary call's peak
     MLX_Engine.on_history_rewritten()
@@ -131,7 +132,7 @@ def test_calls_before_a_compaction_restart_are_excluded(child):
 def test_nothing_is_recorded_without_the_spi(child, _memory_observations_in_tmp):
     scripted, handle = child
     scripted.spi = False
-    token = MLX_Engine.begin_memory_window("m")
+    token = MLX_Engine.begin_memory_window()
     MLX_Engine.note_call_usage(handle, 1000, 10)
 
     assert MLX_Engine.end_memory_window(token) is None
@@ -139,7 +140,7 @@ def test_nothing_is_recorded_without_the_spi(child, _memory_observations_in_tmp)
 
 
 def test_nothing_is_recorded_without_usage(child, _memory_observations_in_tmp):
-    token = MLX_Engine.begin_memory_window("m")
+    token = MLX_Engine.begin_memory_window()
 
     assert MLX_Engine.end_memory_window(token) is None
     assert not _memory_observations_in_tmp.exists()
@@ -148,7 +149,7 @@ def test_nothing_is_recorded_without_usage(child, _memory_observations_in_tmp):
 def test_usage_pushed_with_no_open_window_is_ignored(child):
     _scripted, handle = child
     MLX_Engine.note_call_usage(handle, 1000, 10)  # a title, before any turn
-    token = MLX_Engine.begin_memory_window("m")
+    token = MLX_Engine.begin_memory_window()
     MLX_Engine.note_call_usage(handle, 500, 5)
 
     assert MLX_Engine.end_memory_window(token)["n"] == 505
@@ -157,7 +158,7 @@ def test_usage_pushed_with_no_open_window_is_ignored(child):
 def test_the_observation_carries_what_qa_needs(child):
     scripted, handle = child
     scripted.current = scripted.base + GIB // 4  # residue left by the previous turn
-    token = MLX_Engine.begin_memory_window("m")
+    token = MLX_Engine.begin_memory_window()
     MLX_Engine.note_call_usage(handle, 1000, 10, cached_tokens=600, has_images=False)
     scripted.peak = scripted.base + 2 * GIB
 
@@ -168,6 +169,7 @@ def test_the_observation_carries_what_qa_needs(child):
     assert observation["abandoned"] is True
     assert observation["residue_at_start_bytes"] == GIB // 4
     assert observation["spi_started"] is True
+    assert observation["child_died"] is False
     assert observation["pressure_level"] == 1
     assert observation["swapouts"] == 0
     assert isinstance(observation["id"], str) and observation["id"]
@@ -178,7 +180,7 @@ def test_an_exceeded_prediction_warns_once_per_child_and_changes_nothing(child, 
     before = _predict(handle, 1010)
     with caplog.at_level(logging.WARNING):
         for _ in range(3):
-            token = MLX_Engine.begin_memory_window("Qwen3-0.6B")
+            token = MLX_Engine.begin_memory_window()
             MLX_Engine.note_call_usage(handle, 1000, 10)
             scripted.peak = scripted.base + 20 * GIB
             MLX_Engine.end_memory_window(token)
@@ -187,7 +189,7 @@ def test_an_exceeded_prediction_warns_once_per_child_and_changes_nothing(child, 
     assert len(warnings) == 1
     message = warnings[0].getMessage()
     assert message.isascii()
-    for fragment in ("Qwen3-0.6B", "n_in=1000", "n_out=10", "residue"):
+    for fragment in ("model=qwen3", "n_in=1000", "n_out=10", "residue"):
         assert fragment in message
     assert _predict(handle, 1010) == before
 
@@ -195,7 +197,7 @@ def test_an_exceeded_prediction_warns_once_per_child_and_changes_nothing(child, 
 def test_an_image_turn_never_warns(child, caplog):
     scripted, handle = child
     with caplog.at_level(logging.WARNING):
-        token = MLX_Engine.begin_memory_window("m")
+        token = MLX_Engine.begin_memory_window()
         MLX_Engine.note_call_usage(handle, 1000, 10, has_images=True)
         scripted.peak = scripted.base + 20 * GIB
         observation = MLX_Engine.end_memory_window(token)
@@ -210,7 +212,7 @@ def test_the_prior_scale_seam_forces_the_warning(child, caplog, monkeypatch):
     monkeypatch.setenv("ERUDI_MEMORY_PRIOR_SCALE", "0.01")
     with caplog.at_level(logging.WARNING):
         for _ in range(2):
-            token = MLX_Engine.begin_memory_window("m")
+            token = MLX_Engine.begin_memory_window()
             MLX_Engine.note_call_usage(handle, 1000, 10)
             scripted.peak = scripted.base + GIB
             MLX_Engine.end_memory_window(token)
@@ -220,12 +222,62 @@ def test_the_prior_scale_seam_forces_the_warning(child, caplog, monkeypatch):
 
 def test_a_window_token_from_another_child_is_ignored(child):
     _scripted, handle = child
-    token = MLX_Engine.begin_memory_window("m")
+    token = MLX_Engine.begin_memory_window()
     MLX_Engine.note_call_usage(handle, 1000, 10)
-    stale = ({"pid": 1}, 1)
+    stale = ({"pid": 1}, 1, 1)
 
     assert MLX_Engine.end_memory_window(stale) is None
     assert MLX_Engine.end_memory_window(token) is not None
+
+
+def test_a_token_from_an_earlier_window_on_the_same_child_is_ignored(child):
+    _scripted, handle = child
+    earlier = MLX_Engine.begin_memory_window()
+    current = MLX_Engine.begin_memory_window()
+    MLX_Engine.note_call_usage(handle, 1000, 10)
+
+    assert MLX_Engine.end_memory_window(earlier) is None
+    assert MLX_Engine.end_memory_window(current) is not None
+
+
+def test_a_compaction_restart_keeps_the_turns_token_valid(child):
+    _scripted, handle = child
+    token = MLX_Engine.begin_memory_window()
+    MLX_Engine.on_history_rewritten()
+    MLX_Engine.note_call_usage(handle, 1000, 10)
+
+    assert MLX_Engine.end_memory_window(token) is not None
+
+
+def test_nothing_is_recorded_on_a_fallback_base(child, _memory_observations_in_tmp):
+    """The data must hold measured bases only: the weights-on-disk fallback
+    would make every observation of that child wrong by its error."""
+    _scripted, handle = child
+    handle["base_footprint_bytes"] = None
+    token = MLX_Engine.begin_memory_window()
+    MLX_Engine.note_call_usage(handle, 1000, 10)
+
+    assert MLX_Engine.end_memory_window(token) is None
+    assert not _memory_observations_in_tmp.exists()
+
+
+def test_a_child_that_dies_during_the_window_is_recorded_without_a_peak(
+    child, _memory_observations_in_tmp, monkeypatch
+):
+    """The ground truth of an under-prediction: the child is gone, its peak
+    unreadable; the observation says so (``child_died``, ``y = None``)."""
+    scripted, handle = child
+    token = MLX_Engine.begin_memory_window()
+    MLX_Engine.note_call_usage(handle, 9000, 10)
+    monkeypatch.setattr(process_footprint, "peak_since", lambda pid, started: None)
+    monkeypatch.setattr(MLX_Engine, "_proc_is_alive", classmethod(lambda cls, proc: False))
+
+    observation = MLX_Engine.end_memory_window(token)
+
+    assert observation["child_died"] is True
+    assert observation["y_bytes"] is None
+    assert observation["n"] == 9010
+    assert _recorded(_memory_observations_in_tmp)["observations"][-1]["child_died"] is True
 
 
 def test_the_base_footprint_is_measured_right_after_the_readiness_probe(monkeypatch):
@@ -240,7 +292,7 @@ def test_the_base_footprint_is_measured_right_after_the_readiness_probe(monkeypa
 def test_the_base_engine_hooks_are_no_ops():
     from src.engines.base_engine import BaseEngine
 
-    assert BaseEngine.begin_memory_window("m") is None
+    assert BaseEngine.begin_memory_window() is None
     assert BaseEngine.end_memory_window(None) is None
     assert BaseEngine.note_call_usage({}, 1, 1) is None
 
@@ -347,6 +399,19 @@ def test_a_round_trip_keeps_the_base_and_the_observations(_memory_observations_i
     assert [o["id"] for o in entry["observations"]] == ["obs-1"]
 
 
+def test_the_model_component_is_the_artifacts_model_type(child, _memory_observations_in_tmp):
+    """Not the conversation's model name (renameable, free user text): the
+    artifact's ``model_type``, with its size already in the key."""
+    _scripted, handle = child
+    token = MLX_Engine.begin_memory_window()
+    MLX_Engine.note_call_usage(handle, 1000, 10)
+    MLX_Engine.end_memory_window(token)
+
+    components = _recorded(_memory_observations_in_tmp)["components"]
+    assert components["model"] == "qwen3"
+    assert components["artifact_bytes"] == GIB
+
+
 def test_the_key_components_are_in_clear_and_carry_no_app_version():
     components = _components()
     assert components["model"] == "Qwen3-0.6B"
@@ -405,6 +470,32 @@ def test_concurrent_writers_merge_without_duplicates(_memory_observations_in_tmp
     assert sorted(ids) == sorted({f"obs-{i}" for i in range(50)})
 
 
+def test_malformed_entries_and_observations_are_dropped_never_blocking(
+    _memory_observations_in_tmp, caplog
+):
+    _memory_observations_in_tmp.write_text(
+        json.dumps(
+            {
+                "version": 1,
+                "entries": {
+                    "broken-entry": "not a dict",
+                    "no-ring": {"components": {}, "observations": "nope"},
+                    "mixed": {
+                        "components": {"model": "x"},
+                        "observations": [{"id": "ok-1", "at": 1}, "junk", {"no": "id"}],
+                    },
+                },
+            }
+        )
+    )
+
+    memory_observations.record(_components(), GIB, _observation(1))
+
+    data = json.loads(_memory_observations_in_tmp.read_text())
+    assert set(data["entries"]) == {"mixed", memory_observations.entry_key(_components())}
+    assert [o["id"] for o in data["entries"]["mixed"]["observations"]] == ["ok-1"]
+
+
 def test_a_corrupt_file_is_ignored_once_and_rewritten(_memory_observations_in_tmp, caplog):
     _memory_observations_in_tmp.write_text("{not json")
 
@@ -439,9 +530,9 @@ def _windowed_engine(events):
             return None
 
         @classmethod
-        def begin_memory_window(cls, model_ref):
-            events.append(("begin", model_ref))
-            return ("token", model_ref)
+        def begin_memory_window(cls):
+            events.append(("begin",))
+            return "token"
 
         @classmethod
         def end_memory_window(cls, token, *, abandoned=False):
@@ -501,7 +592,7 @@ async def test_every_conversation_and_arena_turn_is_measured(monkeypatch, statef
     ]
 
     assert "answer" in "".join(texts)
-    assert events == [("begin", "Qwen3-0.6B"), ("end", ("token", "Qwen3-0.6B"), False)]
+    assert events == [("begin",), ("end", "token", False)]
     assert len([kw for kw in built if kw.get("record_usage")]) == 1
 
 
@@ -521,7 +612,7 @@ async def test_an_abandoned_turn_closes_its_window_as_abandoned(monkeypatch):
         async for _ in texts:
             break
 
-    assert events[-1] == ("end", ("token", "Qwen3-0.6B"), True)
+    assert events[-1] == ("end", "token", True)
 
 
 async def test_a_title_opens_no_window(monkeypatch):

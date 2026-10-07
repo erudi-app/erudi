@@ -215,6 +215,18 @@ def kv_bytes_per_token(config: Any) -> Optional[int]:
     return _KV_TENSORS_PER_TOKEN * layers * kv_heads * head_dim * _KV_BYTES_PER_VALUE
 
 
+def model_type_of(config: Any) -> Optional[str]:
+    """The architecture a ``config.json`` declares (``model_type``, top level
+    first, then the VLM text container), or ``None``."""
+    if not isinstance(config, dict):
+        return None
+    for scope in _scopes(config):
+        value = scope.get("model_type")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
 def vocab_size_of(config: Any) -> Optional[int]:
     """The vocabulary size a ``config.json`` declares (top level or the VLM
     text container), or ``None``."""
@@ -312,8 +324,13 @@ def total_memory_bytes(engine: Any) -> Optional[int]:
     return total
 
 
+_PRIOR_SCALE_WARNED = False
+
+
 def prior_scale() -> float:
-    """``ERUDI_MEMORY_PRIOR_SCALE`` as a positive float, else 1.0."""
+    """``ERUDI_MEMORY_PRIOR_SCALE`` as a positive float, else 1.0 (an invalid
+    value is one WARNING per process, not one per turn)."""
+    global _PRIOR_SCALE_WARNED
     raw = os.getenv(PRIOR_SCALE_ENV_VAR)
     if raw is None or not raw.strip():
         return 1.0
@@ -322,7 +339,9 @@ def prior_scale() -> float:
     except ValueError:
         value = 0.0
     if value <= 0:
-        logger.warning(f"{PRIOR_SCALE_ENV_VAR}={raw!r} is not a positive number; ignoring it")
+        if not _PRIOR_SCALE_WARNED:
+            _PRIOR_SCALE_WARNED = True
+            logger.warning(f"{PRIOR_SCALE_ENV_VAR}={raw!r} is not a positive number; ignoring it")
         return 1.0
     return value
 
@@ -337,6 +356,7 @@ def _static_facts(engine: Any, handle: Dict[str, Any]) -> Dict[str, Any]:
     weights: Optional[int] = None
     kv: Optional[int] = None
     vocab: Optional[int] = None
+    model_type: Optional[str] = None
     raw_path = handle.get("model_path")
     if raw_path:
         path = Path(raw_path)
@@ -347,6 +367,7 @@ def _static_facts(engine: Any, handle: Dict[str, Any]) -> Dict[str, Any]:
                 config = json.loads(config_path.read_text(encoding="utf-8"))
                 kv = kv_bytes_per_token(config)
                 vocab = vocab_size_of(config)
+                model_type = model_type_of(config)
         except (OSError, ValueError) as exc:
             # A corrupt config disables the accounting for this model; the
             # model itself keeps running, so one INFO record is enough.
@@ -368,6 +389,7 @@ def _static_facts(engine: Any, handle: Dict[str, Any]) -> Dict[str, Any]:
         "vocab_size": vocab,
         "prefill_step": MLX_PREFILL_STEP_TOKENS,
         "working_set_bytes": working_set,
+        "model_type": model_type,
     }
     handle["memory_facts"] = facts
     return facts

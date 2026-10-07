@@ -40,6 +40,9 @@ _HOST_VM_INFO64 = 4
 # Opened on first use (see ``_libproc``); ``None`` until then.
 _LIBPROC: Any = None
 _SPI_WARNED = False
+# ``mach_host_self()`` hands out a send right on every call: taken once and
+# reused for the life of the process (``_host_port``).
+_HOST_PORT: Optional[int] = None
 
 _V4_FIELDS = (
     "ri_user_time",
@@ -198,6 +201,22 @@ def pressure_level() -> Optional[int]:
     return int(value.value) if rc == 0 else None
 
 
+def _host_port() -> Optional[int]:
+    """This host's Mach port, taken once (macOS), or ``None``."""
+    global _HOST_PORT
+    if _HOST_PORT is None and _on_macos():
+        import ctypes
+        import ctypes.util
+
+        try:
+            libc = ctypes.CDLL(ctypes.util.find_library("c"))
+            libc.mach_host_self.restype = ctypes.c_uint32
+            _HOST_PORT = int(libc.mach_host_self())
+        except (OSError, AttributeError, TypeError):
+            return None
+    return _HOST_PORT
+
+
 def swapouts() -> Optional[int]:
     """System-wide pages swapped out since boot, or ``None``."""
     if not _on_macos():
@@ -233,13 +252,15 @@ def swapouts() -> Optional[int]:
             ("total_uncompressed_pages_in_compressor", ctypes.c_uint64),
         ]
 
+    host = _host_port()
+    if host is None:
+        return None
     try:
         libc = ctypes.CDLL(ctypes.util.find_library("c"))
-        libc.mach_host_self.restype = ctypes.c_uint32
         stats = _VmStatistics64()
         count = ctypes.c_uint32(ctypes.sizeof(stats) // 4)
         rc = libc.host_statistics64(
-            libc.mach_host_self(), _HOST_VM_INFO64, ctypes.byref(stats), ctypes.byref(count)
+            ctypes.c_uint32(host), _HOST_VM_INFO64, ctypes.byref(stats), ctypes.byref(count)
         )
     except (OSError, AttributeError, TypeError):
         return None
