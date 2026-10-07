@@ -587,6 +587,15 @@ If a turn fails mid-super-step and leaves a dangling user message in the checkpo
 appends an error assistant message so the thread keeps alternating roles — otherwise the next turn
 would send two consecutive user messages and the chat template would reject it.
 
+A turn the client **interrupts** — Stop, a closed tab, the app's own client timeout — is closed the
+same way. The disconnect cancels the model before it writes its answer into the checkpointer, so
+the runner writes one assistant message itself, before the turn releases the model: the answer
+text already streamed to the client (the same text the conversation stores and shows), or, when
+nothing was streamed yet, the line `[The answer was interrupted.]`. It is marked
+`additional_kwargs["erudi_interrupted"]`, carries no token usage (it is counted from its text like
+any new message), and is not written when the checkpointer already ends with an answer. The next
+question therefore never follows another question, and strict templates keep working.
+
 ### The prefix cache holds one conversation (Apple Silicon)
 
 On Apple Silicon the inference child keeps a **prefix cache**: a turn re-reads only the part of the

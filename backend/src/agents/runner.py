@@ -58,6 +58,7 @@ itself LangChain-free at import time (``ChatOpenAI`` is deferred inside it).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import functools
 import json
@@ -98,7 +99,7 @@ from src.agents.think_splitter import ThinkSplitter
 from src.core import config
 from src.core.exceptions import EngineException, GenerationTimeoutException
 from src.core.logging import logger
-from src.engines.base_engine import BaseEngine, run_reset_shielded
+from src.engines.base_engine import BaseEngine, run_reset_shielded, wait_shielded
 from src.engines.memory_budget import MemoryBudget
 from src.engines.working_window import canonical_working_window
 
@@ -939,6 +940,26 @@ EMPTY_ANSWER_STOP_MESSAGE = (
     "Send a follow-up asking it to continue."
 )
 
+# What closes a stateful turn the client interrupted before anything was
+# streamed (a disconnect, Stop, a closed tab): the model node was cancelled
+# before it wrote an answer, and the history must still alternate -- strict
+# chat templates (Gemma, Mistral) reject two user messages in a row. When
+# answer text was streamed, that text closes the turn instead (it is what the
+# conversation service persists). ASCII, addressed to the model.
+INTERRUPTED_ANSWER_MESSAGE = "[The answer was interrupted.]"
+INTERRUPTED_KWARG = "erudi_interrupted"
+
+
+def _interrupted_answer(text: str) -> Any:
+    """The AIMessage that closes an interrupted turn in the thread state."""
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content=text if text.strip() else INTERRUPTED_ANSWER_MESSAGE,
+        additional_kwargs={INTERRUPTED_KWARG: True},
+    )
+
+
 # Curated turns for a stream that ran out of wall-clock budget (#573). The two
 # silences are not the same failure and must not read the same: one says the
 # model never started on a prompt this size (retrying makes it WORSE -- the
@@ -1388,6 +1409,16 @@ class AgentRunner:
             # release, in addition to the client-level flag.
             abandon_hook = getattr(model, "abandon_hook", None)
             memory_token = None
+            # The answer text this turn has handed to its consumer -- what the
+            # conversation service persists. An interrupted stateful turn is
+            # closed in the thread state with it (``_close_interrupted_turn``).
+            streamed_answer: list = []
+
+            def _record(event: dict) -> dict:
+                if event.get("t") == "answer":
+                    streamed_answer.append(event.get("text") or "")
+                return event
+
             try:
                 # The prefix cache belongs to ONE conversation (MLX; a no-op
                 # on llama.cpp): claim it for this thread -- or for the arena --
@@ -1537,7 +1568,7 @@ class AgentRunner:
                                             # Real <think> content (fallback splitter
                                             # families): flows immediately.
                                             reasoning_chars += len(event["text"])
-                                            yield event
+                                            yield _record(event)
                                         elif agentic and hop_has_tool_call:
                                             # Post-tool-call text in a narrating hop
                                             # (#297): also narration -> thinking.
@@ -1552,7 +1583,7 @@ class AgentRunner:
                                             if event["text"].strip():
                                                 emitted_model_text = True
                                             char_count += len(event["text"])
-                                            yield event
+                                            yield _record(event)
                         # The final hop ended without a tool call: its buffered text IS
                         # the final answer (#297) -- flush it as ANSWER events (this is
                         # the only place buffered text counts as emitted answer).
@@ -1560,7 +1591,7 @@ class AgentRunner:
                             if text.strip():
                                 emitted_model_text = True
                             char_count += len(text)
-                            yield {"t": "answer", "text": text}
+                            yield _record({"t": "answer", "text": text})
                         hop_text_buffer.clear()
                         # Flush any buffered splitter text (a trailing partial tag, or an
                         # unclosed <think> -> thinking) BEFORE the empty-final decision.
@@ -1571,7 +1602,7 @@ class AgentRunner:
                                 char_count += len(event["text"])
                             else:
                                 reasoning_chars += len(event["text"])
-                            yield event
+                            yield _record(event)
                         # Empty/blank final answer, but a tool produced a result this
                         # turn: deliver that last tool result AS THE ANSWER (#90) so a
                         # correct value is streamed and persisted instead of crashing the
@@ -1584,7 +1615,7 @@ class AgentRunner:
                                 f"tool_result_chars={len(last_tool_result)}"
                             )
                             char_count += len(last_tool_result)
-                            yield {"t": "answer", "text": last_tool_result}
+                            yield _record({"t": "answer", "text": last_tool_result})
                         # A tool call that never produced a ToolMessage this turn (rare):
                         # emit it now so the trace still records the attempt.
                         for tc_event in _drain_tool_calls(pending_tool_calls):
@@ -1620,7 +1651,7 @@ class AgentRunner:
                                 # keeps the EMPTY AIMessage the model node committed
                                 # and the next turn replays an empty assistant turn.
                                 await self._write_curated_empty_turn(agent, run_config, curated)
-                            yield {"t": "answer", "text": curated}
+                            yield _record({"t": "answer", "text": curated})
                         # Amber warning check (1.1.2), at end of turn on the
                         # POST-turn thread state: one ``memory_warning`` event goes
                         # out ONLY when even a compaction down to the keep-tail would
@@ -1675,20 +1706,20 @@ class AgentRunner:
                             if text.strip():
                                 emitted_model_text = True
                             char_count += len(text)
-                            yield {"t": "answer", "text": text}
+                            yield _record({"t": "answer", "text": text})
                         hop_text_buffer.clear()
                         for event in splitter.flush():
                             if event["t"] == "answer":
                                 if event["text"].strip():
                                     emitted_model_text = True
                                 char_count += len(event["text"])
-                            yield event
+                            yield _record(event)
                         if not emitted_model_text:
                             if last_tool_result is not None:
                                 char_count += len(last_tool_result)
-                                yield {"t": "answer", "text": last_tool_result}
+                                yield _record({"t": "answer", "text": last_tool_result})
                             else:
-                                yield {"t": "answer", "text": LOOP_LIMIT_MESSAGE}
+                                yield _record({"t": "answer", "text": LOOP_LIMIT_MESSAGE})
                         if stateful:
                             await self._repair_alternation(agent, run_config)
                     except GenerationTimeoutException as exc:
@@ -1708,9 +1739,9 @@ class AgentRunner:
                         # Same parity as the generic failure below: text buffered before
                         # the timeout is delivered ahead of the curated turn.
                         for text in hop_text_buffer:
-                            yield {"t": "answer", "text": text}
+                            yield _record({"t": "answer", "text": text})
                         hop_text_buffer.clear()
-                        yield {"t": "answer", "text": _stream_timeout_message(exc)}
+                        yield _record({"t": "answer", "text": _stream_timeout_message(exc)})
                     except Exception as exc:
                         overflow = parse_context_overflow(exc)
                         if overflow is not None:
@@ -1727,9 +1758,11 @@ class AgentRunner:
                             if stateful:
                                 await self._repair_alternation(agent, run_config)
                             for text in hop_text_buffer:
-                                yield {"t": "answer", "text": text}
+                                yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
-                            yield {"t": "answer", "text": _context_overflow_message(overflow)}
+                            yield _record(
+                                {"t": "answer", "text": _context_overflow_message(overflow)}
+                            )
                         elif is_child_prefill_timeout(exc):
                             # Defense in depth (#573 alignment): the MLX child's
                             # token-queue timeout is sized ABOVE the parent's first-chunk
@@ -1751,15 +1784,18 @@ class AgentRunner:
                             if stateful:
                                 await self._repair_alternation(agent, run_config)
                             for text in hop_text_buffer:
-                                yield {"t": "answer", "text": text}
+                                yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
                             # Reuse the parent watchdog's curated first-chunk turn.
-                            yield {
-                                "t": "answer",
-                                "text": PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
-                                    sentinel=ERROR_SENTINEL, minutes=max(1, round(ceiling / 60))
-                                ),
-                            }
+                            yield _record(
+                                {
+                                    "t": "answer",
+                                    "text": PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
+                                        sentinel=ERROR_SENTINEL,
+                                        minutes=max(1, round(ceiling / 60)),
+                                    ),
+                                }
+                            )
                         else:
                             # A stream that breaks because the inference child died shows
                             # up here as a connection error; the engine knows the exit
@@ -1775,15 +1811,20 @@ class AgentRunner:
                             # failure would already have been yielded, so flush it ahead of
                             # the sentinel instead of dropping it.
                             for text in hop_text_buffer:
-                                yield {"t": "answer", "text": text}
+                                yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
-                            yield {"t": "answer", "text": ERROR_MESSAGE}
+                            yield _record({"t": "answer", "text": ERROR_MESSAGE})
             except BaseException:
                 _flag_abandoned(abandon_hook)
                 # Synchronous on purpose: the exit in flight (a closed
                 # consumer, a cancellation) must not wait on a thread. It
                 # reads two process counters and writes one small file.
                 _close_memory_window(engine, memory_token, abandoned=True)
+                if stateful:
+                    # The cancelled model node never wrote this turn's answer:
+                    # close the turn in the thread state, inside the guard,
+                    # or the next question makes two user messages in a row.
+                    await self._close_interrupted_turn(agent, run_config, "".join(streamed_answer))
                 raise
             if memory_token is not None:
                 await run_in_threadpool(_close_memory_window, engine, memory_token, abandoned=False)
@@ -2065,6 +2106,43 @@ class AgentRunner:
             # Advisory signal: losing it costs one warning, never the answer.
             logger.exception("Memory-margin evaluation failed; skipping the warning")
             return None
+
+    async def _close_interrupted_turn(self, agent, run_config, streamed_text: str) -> None:
+        """Close an interrupted stateful turn in the thread state, shielded.
+
+        Runs while a cancellation or a ``GeneratorExit`` is in flight, inside
+        the generation guard: the write runs in its own task, awaited through
+        ``wait_shielded`` (the pattern of the prefix-cache reset), so the
+        cancellation that triggered it cannot cut it short. The caller
+        re-raises its own exit afterwards; a failed write is one WARNING
+        inside ``_write_interrupted_turn`` and never replaces that exit.
+        """
+        task = asyncio.get_running_loop().create_task(
+            self._write_interrupted_turn(agent, run_config, streamed_text)
+        )
+        await wait_shielded(task)
+
+    async def _write_interrupted_turn(self, agent, run_config, streamed_text: str) -> None:
+        """Write the AIMessage closing an interrupted turn, when the state
+        still ends with the turn's question (or with a tool result whose
+        round never got its answer). A state already ending with an AI
+        message -- the node finished just before the disconnect -- is left
+        alone: checked, never assumed. Written as the ``model`` node, like
+        ``_repair_alternation``."""
+        try:
+            state = await agent.aget_state(run_config)
+            messages = (state.values or {}).get("messages", []) if state else []
+            if not messages or messages[-1].type not in ("human", "tool"):
+                return
+            await agent.aupdate_state(
+                run_config,
+                {"messages": [_interrupted_answer(streamed_text)]},
+                as_node="model",
+            )
+        except Exception:
+            # The exit in flight is what propagates; this record says the
+            # thread may now end with the turn's question unanswered.
+            logger.warning("Closing an interrupted turn in the thread state failed", exc_info=True)
 
     async def _write_curated_empty_turn(self, agent, run_config, text: str) -> None:
         """Write the curated empty-answer line into the thread state (#554).
