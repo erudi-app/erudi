@@ -2495,6 +2495,34 @@ async def test_stop_with_no_answer_yields_the_curated_stop_turn(monkeypatch):
     assert str(msgs[-1].text) == runner_module.EMPTY_ANSWER_STOP_MESSAGE
 
 
+async def test_the_curated_turn_keeps_the_replaced_messages_usage_and_stamp():
+    """The empty answer is replaced in place by a copy: same id, and the usage
+    and request stamp of the call it answered survive (still a measurement)."""
+    empty = AIMessage(
+        content="",
+        id="empty-1",
+        usage_metadata={"input_tokens": 900, "output_tokens": 3, "total_tokens": 903},
+        response_metadata={"erudi_request_est": 1000, "erudi_request_first_hop": True},
+    )
+    updates = []
+
+    async def aget_state(config):
+        return SimpleNamespace(values={"messages": [HumanMessage("q"), empty]})
+
+    async def aupdate_state(config, values, as_node=None):
+        updates.append(values["messages"][0])
+
+    agent = SimpleNamespace(aget_state=aget_state, aupdate_state=aupdate_state)
+
+    await AgentRunner()._write_curated_empty_turn(agent, {}, "curated line")
+
+    (written,) = updates
+    assert written.id == "empty-1"
+    assert written.content == "curated line"
+    assert written.usage_metadata["input_tokens"] == 900
+    assert written.response_metadata["erudi_request_est"] == 1000
+
+
 async def test_curated_turn_state_is_written_before_the_event_is_emitted(monkeypatch):
     """A client that disconnects right after receiving the curated event closes
     the generator at that yield -- nothing after it runs. The thread-state

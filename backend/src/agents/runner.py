@@ -2094,7 +2094,7 @@ class AgentRunner:
         try:
             state = await agent.aget_state(run_config)
             messages = (state.values or {}).get("messages", []) if state else []
-            replace_id = None
+            curated = AIMessage(content=text)
             if messages:
                 last = messages[-1]
                 if (
@@ -2102,12 +2102,11 @@ class AgentRunner:
                     and not getattr(last, "tool_calls", None)
                     and not str(getattr(last, "text", "") or "").strip()
                 ):
-                    replace_id = last.id
-            await agent.aupdate_state(
-                run_config,
-                {"messages": [AIMessage(content=text, id=replace_id)]},
-                as_node="model",
-            )
+                    # A copy of the empty message: same id (replaced in
+                    # place), and its usage and stamp survive -- the request
+                    # it answered is still a measurement.
+                    curated = last.model_copy(update={"content": text})
+            await agent.aupdate_state(run_config, {"messages": [curated]}, as_node="model")
         except Exception:
             # Accepted trade: a failed state write leaves SQL ahead of the
             # thread state (the user still gets the curated line; the next
