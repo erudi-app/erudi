@@ -5,13 +5,13 @@ psutil==7.0.0
 py-cpuinfo==9.0.0
 huggingface_hub==1.10.1
 pydantic==2.11.5
-sentence-transformers==5.4.0
+sentence-transformers==5.6.0
 # transformers: normalized to 5.14.1 for ALL platforms. Now possible because
 # torch-CUDA was dropped — every build runs a CPU/recent torch (>=2.7). The floor
 # is dictated by mlx-vlm on mac (0.6.17, declares transformers>=5.14.0; the 5.12
 # AutoProcessor regression that froze us on 5.10.2 is superseded by 0.6.13's own
 # loading path — re-verified in the #273 hardware pass). sentence-transformers
-# 5.4.0 accepts transformers <6. Needs torch>=2.7 at import (float8_e8m0fnu).
+# 5.6.0 accepts transformers <6. Needs torch>=2.7 at import (float8_e8m0fnu).
 transformers==5.14.1
 python-dotenv==1.2.2
 pypdf==6.16.1
