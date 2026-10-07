@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import json
 import logging
+import sys
 import threading
 
 import pytest
@@ -24,6 +25,12 @@ from src.engines.memory_budget import MemoryBudget
 from src.engines.mlx_engine import MLX_Engine
 
 pytestmark = pytest.mark.unit
+
+# The observations file is written by the MLX engine only (macOS), under a
+# POSIX file lock (``fcntl``): the tests that write it cannot run on Windows.
+writes_the_file = pytest.mark.skipif(
+    sys.platform == "win32", reason="the observations file uses a POSIX lock (MLX runs on macOS)"
+)
 
 GIB = 1024**3
 KV = 114_688
@@ -88,6 +95,7 @@ def _recorded(path):
     return entry
 
 
+@writes_the_file
 def test_n_is_the_largest_single_call_not_a_mix_of_calls(child, _memory_observations_in_tmp):
     scripted, handle = child
     token = MLX_Engine.begin_memory_window()
@@ -261,6 +269,7 @@ def test_nothing_is_recorded_on_a_fallback_base(child, _memory_observations_in_t
     assert not _memory_observations_in_tmp.exists()
 
 
+@writes_the_file
 def test_a_child_that_dies_during_the_window_is_recorded_without_a_peak(
     child, _memory_observations_in_tmp, monkeypatch
 ):
@@ -301,6 +310,7 @@ def test_the_base_engine_hooks_are_no_ops():
 # ===================== an abandoned turn is still measured =====================
 
 
+@writes_the_file
 def test_an_abandoned_turn_is_recorded_with_the_estimate_of_the_call_in_flight(
     child, _memory_observations_in_tmp, caplog
 ):
@@ -513,6 +523,7 @@ def _observation(i, **extra):
     return {"id": f"obs-{i}", "at": 1_000_000 + i, "n": i, **extra}
 
 
+@writes_the_file
 def test_a_round_trip_keeps_the_base_and_the_observations(_memory_observations_in_tmp):
     memory_observations.record(_components(), 2 * GIB, _observation(1))
 
@@ -522,6 +533,7 @@ def test_a_round_trip_keeps_the_base_and_the_observations(_memory_observations_i
     assert [o["id"] for o in entry["observations"]] == ["obs-1"]
 
 
+@writes_the_file
 def test_the_model_component_is_the_artifacts_model_type(child, _memory_observations_in_tmp):
     """Not the conversation's model name (renameable, free user text): the
     artifact's ``model_type``, with its size already in the key."""
@@ -546,6 +558,7 @@ def test_the_key_components_are_in_clear_and_carry_no_app_version():
     )
 
 
+@writes_the_file
 def test_the_ring_holds_the_last_64_observations_per_key(_memory_observations_in_tmp):
     for i in range(70):
         memory_observations.record(_components(), GIB, _observation(i))
@@ -556,6 +569,7 @@ def test_the_ring_holds_the_last_64_observations_per_key(_memory_observations_in
     assert entry["observations"][0]["id"] == "obs-6"
 
 
+@writes_the_file
 def test_an_older_runtime_entry_is_kept_and_labelled(_memory_observations_in_tmp):
     memory_observations.record(_components(mlx="0.31.0"), GIB, _observation(1))
     memory_observations.record(_components(mlx="0.32.2"), GIB, _observation(2))
@@ -566,6 +580,7 @@ def test_an_older_runtime_entry_is_kept_and_labelled(_memory_observations_in_tmp
     assert versions == ["0.31.0", "0.32.2"]
 
 
+@writes_the_file
 def test_the_file_is_bounded_to_512_observations_oldest_first(_memory_observations_in_tmp):
     for i in range(600):
         memory_observations.record(_components(model=f"m{i % 10}"), GIB, _observation(i))
@@ -577,6 +592,7 @@ def test_the_file_is_bounded_to_512_observations_oldest_first(_memory_observatio
     assert min(o["at"] for o in kept) == 1_000_000 + 600 - 512
 
 
+@writes_the_file
 def test_concurrent_writers_merge_without_duplicates(_memory_observations_in_tmp):
     def _writer(start):
         for i in range(start, start + 25):
@@ -593,6 +609,7 @@ def test_concurrent_writers_merge_without_duplicates(_memory_observations_in_tmp
     assert sorted(ids) == sorted({f"obs-{i}" for i in range(50)})
 
 
+@writes_the_file
 def test_malformed_entries_and_observations_are_dropped_never_blocking(
     _memory_observations_in_tmp, caplog
 ):
@@ -619,6 +636,7 @@ def test_malformed_entries_and_observations_are_dropped_never_blocking(
     assert [o["id"] for o in data["entries"]["mixed"]["observations"]] == ["ok-1"]
 
 
+@writes_the_file
 def test_a_corrupt_file_is_ignored_once_and_rewritten(_memory_observations_in_tmp, caplog):
     _memory_observations_in_tmp.write_text("{not json")
 
