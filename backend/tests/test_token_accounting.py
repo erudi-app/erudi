@@ -31,7 +31,6 @@ from src.agents.token_accounting import (
     RequestOverhead,
     estimate,
     exact_tokens,
-    first_hop_ratio,
     has_reasoning,
     hop_ratio,
     last_human_index,
@@ -147,15 +146,15 @@ def test_an_image_or_unstamped_hop_has_no_ratio():
     assert hop_ratio(HumanMessage("q")) is None
 
 
-def test_first_hop_ratio_reads_the_last_stamped_first_hop_only():
+def test_the_anchor_never_falls_back_to_an_earlier_turns_last_hop():
     messages = [
         HumanMessage("q"),
         _hop(1100, 1000),
-        HumanMessage("q2"),
+        ToolMessage("result", tool_call_id="c"),
         _hop(2140, 1000, first=False),
+        HumanMessage("q2"),
     ]
-    assert first_hop_ratio(messages) == pytest.approx(1.1)
-    assert first_hop_ratio([HumanMessage("q"), AIMessage("a")]) is None
+    assert measured_anchor(messages) == (1, pytest.approx(1.1))
 
 
 # ===================== the anchor k =====================
@@ -345,13 +344,16 @@ def test_a_kb_turns_ratio_excludes_the_block_it_carried():
     assert hop_ratio(kb_turn) == pytest.approx(2.5)
 
 
-def test_a_degenerate_kb_stamp_falls_back_to_the_plain_ratio():
+@pytest.mark.parametrize("kb_est, kb_real", [(2500, 3000), (1000, 4000), (2600, 100)])
+def test_a_hop_with_nothing_left_beside_its_kb_block_is_unmeasurable(kb_est, kb_real):
+    """The KB-corrected remainder is empty or negative: the hop measured the
+    block, not the history -- no ratio, never the uncorrected one."""
     from src.agents.token_accounting import REQUEST_KB_EST_KEY, REQUEST_KB_REAL_KEY
 
     hop = _hop(4000, 2500)
-    hop.response_metadata[REQUEST_KB_EST_KEY] = 2500  # nothing left of the request
-    hop.response_metadata[REQUEST_KB_REAL_KEY] = 3000
-    assert hop_ratio(hop) == pytest.approx(1.6)
+    hop.response_metadata[REQUEST_KB_EST_KEY] = kb_est
+    hop.response_metadata[REQUEST_KB_REAL_KEY] = kb_real
+    assert hop_ratio(hop) is None
 
 
 # ===================== inline reasoning =====================

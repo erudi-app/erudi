@@ -301,15 +301,6 @@ def _engine_overrides(engine: Any, hook_name: str) -> bool:
     return getattr(hook, "__func__", hook) is not getattr(base, "__func__", base)
 
 
-def approx_token_count(messages: Any) -> int:
-    """The UNSCALED base of the compaction counter: ``count_tokens_approximately``
-    (chars / 4) with its defaults -- the same estimator as the request stamp
-    and the output budget (``src.agents.token_accounting.request_tokens_est``)."""
-    from langchain_core.messages.utils import count_tokens_approximately
-
-    return count_tokens_approximately(messages)
-
-
 def _is_marker(message: Any) -> bool:
     """A tool result already sent as its stale-result marker."""
     return getattr(message, "type", None) == "tool" and getattr(
@@ -2102,8 +2093,16 @@ class AgentRunner:
                 ):
                     # A copy of the empty message: same id (replaced in
                     # place), and its usage and stamp survive -- the request
-                    # it answered is still a measurement.
-                    curated = last.model_copy(update={"content": text})
+                    # it answered is still a measurement. Its output count is
+                    # the replaced generation's (a whitespace loop can be 20k
+                    # tokens), not the curated line's: none is kept.
+                    usage = dict(last.usage_metadata or {})
+                    if usage:
+                        usage["output_tokens"] = 0
+                        usage["total_tokens"] = usage.get("input_tokens", 0)
+                    curated = last.model_copy(
+                        update={"content": text, "usage_metadata": usage or None}
+                    )
             await agent.aupdate_state(run_config, {"messages": [curated]}, as_node="model")
         except Exception:
             # Accepted trade: a failed state write leaves SQL ahead of the

@@ -28,6 +28,7 @@ from langchain_core.outputs import ChatGeneration, ChatGenerationChunk, ChatResu
 from langgraph.checkpoint.memory import InMemorySaver
 from pydantic import Field
 
+from langchain_core.messages.utils import count_tokens_approximately as approx_token_count
 from src.agents import runner as runner_module
 from src.agents.reasoning_effort import NO_REASONING_PLAN
 from src.agents.runner import (
@@ -35,7 +36,6 @@ from src.agents.runner import (
     GenParams,
     ERROR_SENTINEL,
     KEEP_FRACTION,
-    approx_token_count,
     compaction_cutoff,
     keep_token_budget,
     real_token_count,
@@ -1126,8 +1126,12 @@ def test_the_langchain_surface_the_compaction_overrides_is_pinned():
     # The counter swap the wrapper avoids: passing the stock function makes
     # LangChain substitute a usage-scaled variant of it.
     assert mw.token_counter is not count_tokens_approximately
+
+    def distinct_counter(messages):
+        return count_tokens_approximately(messages)
+
     wrapped = SummarizationMiddleware(
-        model=ToolableFakeChatModel(messages=iter([])), token_counter=approx_token_count
+        model=ToolableFakeChatModel(messages=iter([])), token_counter=distinct_counter
     )
-    assert wrapped.token_counter is approx_token_count
-    assert wrapped._partial_token_counter is approx_token_count
+    assert wrapped.token_counter is distinct_counter
+    assert wrapped._partial_token_counter is distinct_counter

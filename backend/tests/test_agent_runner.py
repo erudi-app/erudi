@@ -2520,6 +2520,10 @@ async def test_the_curated_turn_keeps_the_replaced_messages_usage_and_stamp():
     assert written.id == "empty-1"
     assert written.content == "curated line"
     assert written.usage_metadata["input_tokens"] == 900
+    # Its output count would be the replaced generation's (a 20k-token
+    # whitespace loop): the curated line is not that, so none is exact.
+    assert written.usage_metadata["output_tokens"] == 0
+    assert written.usage_metadata["total_tokens"] == 900
     assert written.response_metadata["erudi_request_est"] == 1000
 
 

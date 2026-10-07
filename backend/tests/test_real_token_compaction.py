@@ -21,11 +21,11 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage, ToolMessage
 from langgraph.checkpoint.memory import InMemorySaver
 
+from langchain_core.messages.utils import count_tokens_approximately as approx_token_count
 from src.agents import runner as runner_module
 from src.agents.middleware import STALE_TOOL_RESULT_MARKERS, strip_stale_tool_results
 from src.agents.runner import (
     AgentRunner,
-    approx_token_count,
     compaction_cutoff,
     counter_weight,
     frozen_weights,
@@ -536,7 +536,6 @@ async def test_a_compaction_writes_the_stock_summary_message():
     after = _after(await mw.abefore_model({"messages": state}, None))
 
     assert after[0].additional_kwargs == {"lc_source": "summarization"}
-    assert "_build_new_messages" not in type(mw).__dict__
 
 
 async def test_after_a_kb_turn_the_next_trigger_weighs_the_history_at_the_first_hop_ratio():
@@ -586,8 +585,6 @@ async def test_the_runner_hands_the_kb_text_to_the_client_and_reads_no_checkpoin
     assert any(e["t"] == "answer" for e in events)
     main_kwargs = next(kw for kw in captured if kw.get("record_usage"))
     assert main_kwargs["kb_additions"] == "EXCERPTS\n\n\n\nAnswer in English."
-    assert "prompt_ratio" not in main_kwargs
-    assert not hasattr(AgentRunner, "_starting_first_hop_ratio")
 
 
 # ===================== the warning projection =====================

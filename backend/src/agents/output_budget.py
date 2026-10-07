@@ -40,11 +40,13 @@ must behave exactly as it did before this module existed.
 ``ERUDI_MAX_TOKENS`` wins over all of it, window or no window: a QA/dev escape
 hatch for pinning a small budget while reproducing a truncation report.
 
-One estimator for sizing, one bound for the watchdog
-----------------------------------------------------
-The budget, the request stamp (``Erudi_Chat_OpenAI._astream``) and the
-compaction counter (``src.agents.runner``) all read ONE estimator,
-``request_tokens_est``, so they can never disagree about the unscaled size.
+One estimate for sizing, one bound for the watchdog
+---------------------------------------------------
+The budget and the compaction counter (``src.agents.runner``) cost a request
+through ONE function, ``real_tokens_est`` (``src.agents.token_accounting``),
+with their two settings; only the request stamp
+(``Erudi_Chat_OpenAI._astream``) uses the plain chars/4 estimator
+``request_tokens_est`` -- the denominator of the ratio it measures.
 ``src.agents.chat_model.estimate_prompt_tokens`` stays a separate function on
 purpose: it bounds the messages with one token per UTF-8 byte, a PROVABLE
 UPPER bound the first-chunk watchdog needs (under-counting there ends a

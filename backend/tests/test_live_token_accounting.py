@@ -73,17 +73,30 @@ def _hop(chars, input_tokens, est, output_tokens, filler="a", msg_id=None):
     )
 
 
-def _passes(messages, real_prompt):
-    budget = compute_output_budget(messages, WINDOW, digit_tokens=QWEN_DIGIT_TOKENS)
-    return budget, real_prompt + budget <= WINDOW
+LOGGED = LIVE["logged"]
 
 
-def _one_ratio_budget(messages, ratio):
-    """What the v15 rule handed out: one measured ratio over chars/4."""
-    import math
+def _passes(real_prompt, budget):
+    """The server's preflight check: ``prompt + max_tokens <= MAX_KV_SIZE``."""
+    return real_prompt + budget <= WINDOW
 
-    prompt = math.ceil(ratio * request_tokens_est(messages))
-    return max(512, WINDOW - prompt - max(256, int(0.10 * prompt)))
+
+def _budget(messages):
+    return compute_output_budget(messages, WINDOW, digit_tokens=QWEN_DIGIT_TOKENS)
+
+
+def test_the_v15_budgets_were_rejected_by_the_server():
+    """What the server logged: ``Request needs 34101 context tokens (7926
+    prompt + 26175 max generation)``, and 7101 + 26131 for the prose."""
+    for case in ("v15_eng", "v15_prose"):
+        logged = LOGGED[case]
+        assert not _passes(logged["prompt_tokens"], logged["budget"]), case
+
+
+def test_the_v17_budgets_passed_the_server_on_the_live_re_run():
+    for case in ("v17_eng", "v17_prose", "v17_cjk"):
+        logged = LOGGED[case]
+        assert _passes(logged["prompt_tokens"], logged["budget"]), case
 
 
 def test_english_7926_after_two_short_turns():
@@ -96,10 +109,11 @@ def test_english_7926_after_two_short_turns():
         _hop(207, 144, 161, 48),
         HumanMessage(LIVE["eng_paste"]),
     ]
-    budget, ok = _passes(request, real_prompt=7926)
-    assert ok, budget
-    # The live budget was 26175 for the same request: rejected by the server.
-    assert 7926 + _one_ratio_budget(request, 144 / 161) > WINDOW
+    budget = _budget(request)
+    assert _passes(LOGGED["v15_eng"]["prompt_tokens"], budget), budget
+    assert _passes(LOGGED["v17_eng"]["prompt_tokens"], budget), budget
+    # The same request on the live re-run (its answers differed by a token).
+    assert abs(budget - LOGGED["v17_eng"]["budget"]) <= 50
 
 
 def test_english_prose_7101_after_two_short_turns():
@@ -112,11 +126,10 @@ def test_english_prose_7101_after_two_short_turns():
         _hop(384, 183, 218, 70),
         HumanMessage(LIVE["prose_paste"]),
     ]
-    budget, ok = _passes(request, real_prompt=7101)
-    assert ok, budget
-    # 32768 - ceil(0.839 x 7187) - 603 = 26131, the logged budget: rejected.
-    assert _one_ratio_budget(request, 183 / 218) == 26131
-    assert 7101 + 26131 > WINDOW
+    budget = _budget(request)
+    assert _passes(LOGGED["v15_prose"]["prompt_tokens"], budget), budget
+    # The re-run's prose request measured 7115 (other short answers before it).
+    assert _passes(LOGGED["v17_prose"]["prompt_tokens"], budget), budget
 
 
 def test_the_cjk_c2_paste_1921_after_one_short_turn():
@@ -127,9 +140,10 @@ def test_the_cjk_c2_paste_1921_after_one_short_turn():
         _hop(125, 111, 118, 87, filler="长城是中国古代的防御工程"),
         HumanMessage(LIVE["cjk_c2_paste"]),
     ]
-    budget, ok = _passes(request, real_prompt=1921)
-    assert ok, budget
-    assert 1921 + _one_ratio_budget(request, 111 / 118) > WINDOW
+    # The server measured this request at 1921 tokens (the next answer's
+    # stamp, ``input_tokens``).
+    budget = _budget(request)
+    assert _passes(1921, budget), budget
 
 
 def test_the_cjk_24772_token_paste_after_four_turns():
@@ -150,8 +164,8 @@ def test_the_cjk_24772_token_paste_after_four_turns():
     # The paste alone is 24772 tokens for this tokenizer; the request before
     # it measured 2168, plus that answer's 282.
     real_prompt = 2168 + 282 + LIVE["cjk_big_paste_tokens"] + 15
-    budget, ok = _passes(request, real_prompt=real_prompt)
-    assert ok, budget
+    budget = _budget(request)
+    assert _passes(real_prompt, budget), budget
     assert budget > 512
 
 
@@ -175,7 +189,9 @@ def test_after_a_24_8k_token_looping_answer_the_budget_is_not_the_floor():
     # The margin applies to the estimated part only.
     assert budget == WINDOW - prompt.total - max(256, int(0.10 * (prompt.total - prompt.exact)))
     assert budget > 5000
-    assert _one_ratio_budget(request, 7926 / 6701) == 512
+    # At the previous ratio over chars/4 the same request left the floor.
+    one_ratio = -(-(7926 / 6701) * request_tokens_est(request) // 1)
+    assert WINDOW - one_ratio < 512
 
 
 def test_a_turn_right_after_a_compaction_that_kept_only_a_last_hop_uses_rule_3():

@@ -228,24 +228,16 @@ def hop_ratio(message: Any) -> Optional[float]:
     kb_real = _positive_int(metadata.get(REQUEST_KB_REAL_KEY))
     if kb_est is not None and kb_real is not None:
         rest_est, rest_real = estimated - kb_est, input_tokens - kb_real
-        if rest_est >= 1 and rest_real > 0:
-            ratio = rest_real / rest_est
+        if rest_est < 1 or rest_real <= 0:
+            # The hop measured its KB block, not the history: unmeasurable.
+            return None
+        ratio = rest_real / rest_est
     return min(RATIO_CEILING, max(RATIO_FLOOR, ratio))
 
 
 def _is_first_hop(message: Any) -> bool:
     metadata = getattr(message, "response_metadata", None) or {}
     return metadata.get(REQUEST_FIRST_HOP_KEY) is True
-
-
-def first_hop_ratio(messages: Iterable[Any]) -> Optional[float]:
-    """The r of the last stamped FIRST hop, or ``None``."""
-    for message in reversed(list(messages or ())):
-        if _is_first_hop(message):
-            ratio = hop_ratio(message)
-            if ratio is not None:
-                return ratio
-    return None
 
 
 def measured_anchor(messages: Sequence[Any]) -> Tuple[Optional[int], Optional[float]]:

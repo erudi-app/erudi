@@ -135,13 +135,9 @@ def test_working_context_tokens_on_none_engine_is_none():
     assert working_context_tokens(None) is None
 
 
-def test_the_stacked_15_percent_floor_is_gone():
-    """The ceiling is the honest one (``MemoryBudget.tokens_at_ceiling``):
-    no 15 % margin is stacked on top of it. 15 % remains the amber warning's
-    threshold only."""
+def test_15_percent_is_the_amber_warnings_threshold():
+    """The ceiling is the honest one (``MemoryBudget.tokens_at_ceiling``);
+    15 % is the amber warning's threshold only."""
     from src.agents import runner
-    from src.engines import working_window
 
-    assert not hasattr(working_window, "MEMORY_MARGIN_FLOOR")
-    assert not hasattr(runner, "MEMORY_MARGIN_FLOOR")
     assert runner.MEMORY_WARNING_MARGIN == 0.15

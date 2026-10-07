@@ -459,16 +459,13 @@ def test_one_estimator_for_the_stamp_the_counter_and_the_budget():
     from langchain_core.messages import AIMessage
     from langchain_core.messages.utils import count_tokens_approximately
 
-    from src.agents import output_budget, runner
-    from src.agents import chat_model
+    from src.agents import chat_model, output_budget
 
     messages = [_Msg("hello world"), AIMessage("and a second turn")]
 
     assert estimate_prompt_tokens(messages) == count_tokens_approximately(messages)
-    assert not hasattr(output_budget, "estimate_prompt_tokens"), "the duplicate is gone"
     assert "real_tokens_est" in inspect.getsource(output_budget.compute_output_budget)
     assert "request_tokens_est" in inspect.getsource(chat_model)
-    assert runner.approx_token_count(messages) == estimate_prompt_tokens(messages)
 
 
 # ===================== where the budget lands in the request =====================
@@ -898,7 +895,6 @@ async def test_the_stream_budgets_the_request_as_sent_with_its_tools(monkeypatch
     assert [c async for c in client._astream(messages, tools=tools)] == ["chunk"]
     assert captured["max_tokens"] == compute_output_budget(messages, 32768, tools=tools)
     assert captured["max_tokens"] < compute_output_budget(messages, 32768)
-    assert not hasattr(client, "prompt_ratio")
 
 
 async def test_the_tools_reach_the_budget_through_create_agents_tool_binding(monkeypatch):
