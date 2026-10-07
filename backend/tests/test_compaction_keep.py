@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import inspect
 import logging
+import math
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
@@ -38,9 +39,11 @@ from src.agents.runner import (
     approx_token_count,
     compaction_cutoff,
     keep_token_budget,
+    real_token_count,
     summarize_trim_budget,
     summary_cap,
 )
+from src.agents.token_accounting import request_overhead_est
 from src.core import config
 from src.engines.base_engine import BaseEngine
 from tests._helpers import ToolableFakeChatModel
@@ -64,6 +67,21 @@ def _previous_summary_message(text: str = _PREVIOUS) -> HumanMessage:
     return HumanMessage(
         content=f"Here is a summary of the conversation to date:\n\n{text}",
         additional_kwargs={"lc_source": "summarization"},
+    )
+
+
+def _measured(content: str, msg_id: str) -> AIMessage:
+    """An answer carrying a measured first-hop ratio of exactly 1.0, so the
+    real-token counter equals chars/4 on the state it belongs to."""
+    return AIMessage(
+        content=content,
+        id=msg_id,
+        usage_metadata={"input_tokens": 1000, "output_tokens": 1, "total_tokens": 1001},
+        response_metadata={
+            "erudi_request_est": 1000,
+            "erudi_request_has_images": False,
+            "erudi_request_first_hop": True,
+        },
     )
 
 
@@ -197,7 +215,7 @@ def test_the_trim_budget_is_bounded_by_the_allocated_window():
     window = allocated = 10_000
     cap = summary_cap(window)
     trim = summarize_trim_budget(window, allocated)
-    assert trim == (allocated - 2 * cap - 512) // 3
+    assert trim == (allocated - 2 * cap - 512) // 2
 
 
 def test_the_trim_budget_is_bounded_by_a_small_memory_window():
@@ -219,7 +237,7 @@ def test_the_trim_budget_grows_with_a_big_window():
     assert summarize_trim_budget(window, allocated) == min(
         max(4000, int(0.8 * window) - cap),
         window - 2 * cap - 256,
-        (allocated - 2 * cap - 512) // 3,
+        (allocated - 2 * cap - 512) // 2,
     )
 
 
@@ -260,7 +278,7 @@ async def test_a_long_answer_at_the_boundary_stays_out_and_the_state_stays_under
     cap = summary_cap(window)
     messages = [
         HumanMessage(_text(900), id="h0"),
-        AIMessage(_text(900), id="a1"),
+        _measured(_text(900), "a1"),
         HumanMessage(_text(200), id="h2"),
         AIMessage(_text(1500), id="a3-long"),
         HumanMessage(_text(100), id="h4"),
@@ -283,11 +301,26 @@ async def test_a_long_answer_at_the_boundary_stays_out_and_the_state_stays_under
 
 
 def test_an_oversized_last_message_is_kept_whole_with_the_answer_before_it():
-    messages = [HumanMessage("hi", id="a"), AIMessage("yo", id="b"), HumanMessage(_text(9000))]
+    messages = [
+        HumanMessage(_text(3000), id="a"),
+        AIMessage(_text(3000), id="b"),
+        HumanMessage(_text(9000)),
+    ]
     assert compaction_cutoff(messages, 10_000, approx_token_count) == 1
 
 
+def test_a_futile_compaction_of_a_tiny_head_is_skipped_unless_it_overflows():
+    # Summarizing "hi" alone gains nothing (the summary costs more): the
+    # futility guard skips it while the request still fits...
+    messages = [HumanMessage("hi", id="a"), AIMessage("yo", id="b"), HumanMessage(_text(9000))]
+    assert compaction_cutoff(messages, 10_000, approx_token_count) == 0
+    # ...and takes it once the request would overflow the window.
+    assert compaction_cutoff(messages, 10_000, approx_token_count, overhead=1500) == 1
+
+
 def test_the_degenerate_window_of_one_keeps_the_current_turn_and_the_answer_before_it():
+    # Every request overflows a window of one: the futility guard never
+    # stands in the way of the compact-ASAP net.
     messages = _conversation(2, 10)
     assert compaction_cutoff(messages, 1, approx_token_count) == 3
 
@@ -442,17 +475,24 @@ def test_the_middleware_keeps_tokens_with_a_window_and_messages_without():
 def test_the_middleware_cutoff_is_the_pure_rule():
     mw = _middleware(_ScriptedSummaryModel(messages=iter([])), window=10_000)
     messages = _alternating(30, 900) + [HumanMessage("q")]
+    mw._freeze(messages)
     assert mw._determine_cutoff_index(messages) == compaction_cutoff(
-        messages, 10_000, approx_token_count
+        messages,
+        10_000,
+        mw.token_counter,
+        overhead=mw._overhead,
+        allocated_window=10_000,
     )
 
 
-def test_one_unscaled_counter_drives_trigger_cutoff_trim_and_truncation():
+def test_one_real_token_counter_drives_trigger_cutoff_trim_and_truncation():
     """LangChain swaps ``count_tokens_approximately`` for a usage-scaled
-    variant; a distinct wrapper keeps every count on plain chars/4."""
+    variant; the middleware's own counter (real tokens, as sent) is a
+    distinct function, so it is never swapped."""
     mw = _middleware(_ScriptedSummaryModel(messages=iter([])), window=10_000)
-    assert mw.token_counter is approx_token_count
-    assert mw._partial_token_counter is approx_token_count
+    assert mw.token_counter == mw._real_count
+    assert mw._partial_token_counter == mw._real_count
+    assert mw.token_counter is not count_tokens_approximately
     messages = _alternating(4, 100)
     assert approx_token_count(messages) == count_tokens_approximately(messages)
 
@@ -958,8 +998,11 @@ async def test_the_memory_warning_projects_the_kept_suffix_plus_the_summary_cap(
     await _turn(runner, "w1")
 
     state = await _state(cp, "w1")
-    cut = compaction_cutoff(state, 10_000, approx_token_count)
-    assert calls[0] == _count(state[cut:]) + summary_cap(10_000)
+    # A one-turn thread: nothing would be compacted, so the projection is
+    # O + count(all) in real tokens (nothing measured: r = 1.5), no summary.
+    assert compaction_cutoff(state, 10_000, approx_token_count) == 0
+    overhead = math.ceil(1.5 * request_overhead_est("s"))
+    assert calls[0] == overhead + real_token_count(state, 1.5)
 
 
 class _RecordingBudget:
@@ -992,7 +1035,7 @@ async def test_the_warning_never_counts_the_summary_twice():
 
     await AgentRunner()._memory_warning_event(_agent_with_state(state), {}, budget, 10_000)
 
-    assert budget.calls[0] == approx_token_count(state)
+    assert budget.calls[0] == real_token_count(state, 1.5)
 
 
 async def test_without_a_window_the_warning_projects_what_the_middleware_keeps():
@@ -1005,7 +1048,7 @@ async def test_without_a_window_the_warning_projects_what_the_middleware_keeps()
 
     await AgentRunner()._memory_warning_event(_agent_with_state(state), {}, budget, None)
 
-    assert budget.calls[0] == approx_token_count(state[cut:]) + (
+    assert budget.calls[0] == real_token_count(state[cut:], 1.5) + (
         runner_module.SUMMARY_TOKEN_ALLOWANCE
     )
 

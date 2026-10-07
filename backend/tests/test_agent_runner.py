@@ -2750,9 +2750,9 @@ async def test_memory_warning_emitted_once_after_the_answer(monkeypatch):
     assert warnings[0]["footprint_bytes"] == 1234 + 10000
     last_answer = max(i for i, e in enumerate(events) if e["t"] == "answer")
     assert events.index(warnings[0]) > last_answer
-    # The warn decision was taken on the PROJECTED post-compaction size: the
-    # keep-tail plus the summary allowance (>= 512 on this tiny thread).
-    assert any(tokens >= runner_module.SUMMARY_TOKEN_ALLOWANCE for tokens in stub.margin_calls)
+    # Nothing would be compacted on this tiny thread: the projection is the
+    # request as it stands (O + count), with no summary allowance on top.
+    assert 0 < stub.margin_calls[0] < runner_module.SUMMARY_TOKEN_ALLOWANCE
 
 
 async def test_no_memory_warning_when_compaction_could_restore_the_margin(monkeypatch):
@@ -2761,13 +2761,27 @@ async def test_no_memory_warning_when_compaction_could_restore_the_margin(monkey
     keep-tail restore the margin? Here the CURRENT size is under the floor
     but the projected keep-tail is comfortably fine -> no warning (compaction
     will save this conversation; warning now would flicker for one turn)."""
+    from langchain.agents import create_agent
+
     fake = ToolableFakeChatModel(messages=iter([AIMessage(content="hello")]))
     _patch_model(monkeypatch, fake)
-    # Tiny thread: current tokens are far below 100; the projection adds the
-    # 512-token summary allowance, so it lands above 100.
-    stub = _StubBudget(margin=lambda tokens: 0.05 if tokens <= 100 else 0.40)
+    # A long thread: the current size is under the floor, the projected
+    # keep-tail (ten messages and the summary allowance) is comfortably fine.
+    stub = _StubBudget(margin=lambda tokens: 0.05 if tokens > 20_000 else 0.40)
     _patch_budget(monkeypatch, stub)
-    runner = AgentRunner(checkpointer=InMemorySaver())
+    checkpointer = InMemorySaver()
+    # 18 alternating messages ending with an answer (under the 20-message
+    # clause, so this turn compacts nothing; the projection keeps ten).
+    seed = [
+        (HumanMessage if i % 2 == 0 else AIMessage)("x" * 3200, id=f"seed{i}") for i in range(18)
+    ]
+    probe = create_agent(
+        ToolableFakeChatModel(messages=iter([])), tools=[], checkpointer=checkpointer
+    )
+    await probe.aupdate_state(
+        {"configurable": {"thread_id": "mw5"}}, {"messages": seed}, as_node="model"
+    )
+    runner = AgentRunner(checkpointer=checkpointer)
 
     events = await _events(
         runner,
@@ -2778,7 +2792,10 @@ async def test_no_memory_warning_when_compaction_could_restore_the_margin(monkey
         thread_id="mw5",
         summarize=True,
     )
+    assert [e["text"] for e in events if e["t"] == "answer"] == ["hello"]
     assert not any(e["t"] == "memory_warning" for e in events)
+    # Decided on the projected keep-tail, not on the current size.
+    assert 0 < stub.margin_calls[0] <= 20_000
 
 
 async def test_no_memory_warning_when_the_margin_is_fine(monkeypatch):

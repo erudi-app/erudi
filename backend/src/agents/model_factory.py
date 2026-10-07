@@ -55,6 +55,8 @@ def build_chat_model(
     auto_output_budget: bool = True,
     sampling: Optional[SamplingDefaults] = None,
     effort_plan: Optional[EffortPlan] = None,
+    prompt_ratio: Optional[float] = None,
+    preflight_retry: bool = True,
 ) -> ChatOpenAI:
     """Resolve the engine child for ``llm`` and wrap it as a ``ChatOpenAI``.
 
@@ -73,7 +75,19 @@ def build_chat_model(
     ``max_tokens`` is normally only the FALLBACK output budget: the client
     recomputes a real one per model call from the window it is running in
     (``src.agents.output_budget``). ``auto_output_budget=False`` turns that off
-    for the caller whose small budget is deliberate -- the one-shot title path.
+    for the callers whose budget is deliberate -- the one-shot title path and
+    the capped compaction summary.
+
+    ``prompt_ratio`` is the first-hop ratio the runner read from the raw
+    checkpoint state at turn start (``src.agents.token_accounting``); the
+    output budget scales its estimate by it on a first hop. ``None``: nothing
+    measured, the script-aware fallback applies. ``preflight_retry=False``
+    turns off the single retry with a smaller cap after a context-check
+    rejection (the summary client: a smaller cap would truncate the summary).
+
+    Every client asks the server for usage (``stream_usage=True``): the last
+    chunk then carries the real prompt size, which the client stamps with its
+    own estimate of the request (``Erudi_Chat_OpenAI._astream``).
 
     ``effort_plan`` carries the turn's reasoning effort (1.1.2). Its
     ``wire_effort`` rides the NATIVE ``reasoning_effort`` request field, not
@@ -191,7 +205,12 @@ def build_chat_model(
         effective_context_tokens=effective_window,
         working_context_tokens=working_window,
         auto_output_budget=auto_output_budget,
+        prompt_ratio=prompt_ratio,
+        preflight_retry=preflight_retry,
         abandon_hook=abandon_hook,
         streaming=True,
-        stream_usage=False,  # local servers may not emit usage in SSE; summarization triggers on count
+        # ``stream_options.include_usage``: both local servers then end the
+        # stream with a usage chunk (mlx_vlm 0.6.17 and llama-server alike);
+        # a server that sends none leaves every consumer on its estimate.
+        stream_usage=True,
     )

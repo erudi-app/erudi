@@ -368,3 +368,34 @@ class TestWebSearchGate:
             )
         joined = " ".join(r.message for r in caplog.records)
         assert "web_search" in joined and "unavailable" in joined
+
+
+@pytest.mark.parametrize("flag", [None, True, False])
+def test_a_kb_context_block_always_comes_with_a_zero_tool_agent(monkeypatch, flag):
+    """Invariant the first-hop ratio rests on: ``_KbContextMiddleware._merge``
+    rewrites the LAST message as a user message, so a KB block on a request
+    ending with a tool result would turn it into a user turn. A block
+    therefore never rides a tool-carrying turn, and a first hop is exactly a
+    request that ends with a user message."""
+    import itertools
+
+    from src.core import config
+
+    monkeypatch.setattr(config, "KB_AGENTIC_MODE", flag)
+    excerpts = [KbExcerpt(source_file="d.pdf", text="x")]
+    for attached, tools, wire, web, found in itertools.product(
+        (False, True), (None, False, True), (None, False, True), (False, True), (False, True)
+    ):
+        plan = plan_turn(
+            _llm(
+                is_attached_to_kb=attached,
+                kb_id=5 if attached else None,
+                supports_tools=tools,
+                supports_tools_wire=wire,
+            ),
+            question="q",
+            retrieve=(lambda: excerpts) if found else (lambda: []),
+            web_search_enabled=web,
+        )
+        if plan.kb_context_block is not None:
+            assert plan.tools == [], (attached, tools, wire, web, found)

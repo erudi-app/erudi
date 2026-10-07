@@ -87,27 +87,38 @@ So every model call gets its budget computed from the window it is running in:
 max_tokens = max(512, window − prompt − margin)      margin = max(256, 10 % of prompt)
 ```
 
-The window is the one the loaded model actually runs with (see
-[Context window](llms.md)); the prompt is the whole turn as it is about to be sent, so a long
-conversation leaves a smaller budget than a fresh one, and each hop of a tool-calling turn is
-budgeted again against its own longer history. The margin covers what the estimate cannot see —
-the chat template's own tokens, the tool schemas, the system prompt.
+The window is the working window the loaded model runs with (see
+[Context window](llms.md) and the working window below); the prompt is the whole request as it is
+about to be sent — system prompt, knowledge-base block, history, and the tool schemas the call
+carries — so a long conversation leaves a smaller budget than a fresh one, and each hop of a
+tool-calling turn is budgeted again against its own longer history. The margin covers what the
+estimate still cannot see, such as the chat template's own tokens.
 
 There is no fixed ceiling above that: the window is the ceiling.
 
-The prompt in that formula is an estimate — counting the real tokens would cost more than the
-budget it informs, on every hop of every turn. `llama-server` does not mind: it trims its own
-generation against what is actually left of the window. `mlx_vlm.server` does — it checks
-`prompt + budget ≤ window` against the real tokenised prompt before generating and rejects the
-whole call otherwise, and the estimate under-counts scripts like Chinese or Japanese by roughly
-threefold.
+The prompt in that formula is counted in **real tokens** without tokenizing anything in the
+backend: `chars / 4` over the request, scaled by a ratio the model's own server measured on this
+conversation (`backend/src/agents/token_accounting.py`). Every call asks the server for its usage;
+the last streamed chunk then carries the exact prompt size, and the client stamps that chunk with
+its own `chars / 4` estimate of the same request, so `ratio = real prompt tokens / estimate`
+(clamped to 0.8–6; requests that carried images are skipped). A later hop of the current turn uses
+its own measurement; a turn's first hop uses the ratio measured on the last **first hop** (a
+request that ended with a user message: later hops of a knowledge-base or web turn carry that
+turn's search results and read higher). When nothing is measured yet — the first turn, the Arena
+— a script-aware estimate stands in: English and code 1.0, French about 1.02, Russian about 1.5,
+Chinese, Japanese and Korean 3 to 4. This applies on every engine, llama.cpp included.
 
-That rejection carries its own cure: it names the exact prompt count. So the call is retried once,
-with a budget built from that number instead of an estimate. Nothing is lost — the rejection
-arrives before any generation — and the turn then answers normally. A prompt that fills the window
-on its own is not retried: no budget makes it fit, and it is reported as a genuine overflow with
-the real numbers (see [When the prompt no longer fits the context
-window](#when-the-prompt-no-longer-fits-the-context-window)).
+`llama-server` trims its own generation against what is actually left of the window.
+`mlx_vlm.server` checks `prompt + budget ≤ window` against the real tokenised prompt before
+generating and rejects the whole call otherwise. Where the ratio lags — the first turn in another
+script, the first turn after a model swap — that rejection carries its own cure: it names the
+exact prompt count. So the call is retried once, with a budget built from that number instead of
+an estimate. Nothing is lost — the rejection arrives before any generation — and the turn then
+answers normally. The retry checks the **allocated** window only; the memory ceiling has no such
+net. A prompt that fills the window on its own is not retried: no budget makes it fit, and it is
+reported as a genuine overflow with the real numbers (see [When the prompt no longer fits the
+context window](#when-the-prompt-no-longer-fits-the-context-window)). The compaction summary call
+is never retried this way (see below).
 
 Two values still matter at the edges:
 
@@ -420,9 +431,11 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
 
 2. **Summarization middleware (compaction).** `SummarizationMiddleware`
    (`backend/src/agents/runner.py`, `_build_middleware`) runs on the **same local model**. It fires
-   when the conversation reaches **80 % of the working context window**, or on a **20-message
-   floor** — OR semantics, whichever comes first — recomputed on every turn (the middleware is built
-   after the inference child spawned, so the window is fresh for this model on this machine).
+   when the request reaches **80 % of the working context window** — the conversation plus the
+   request overhead *O* (system prompt, knowledge-base block, tool schemas: what every request
+   carries beyond the stored history) — or on a **20-message floor** — OR semantics, whichever
+   comes first — recomputed on every turn (the middleware is built after the inference child
+   spawned, so the window is fresh for this model on this machine).
 
    The **working context window** is the single canonical window the memory-aware parts of a turn
    share (`backend/src/engines/working_window.py`, `working_context_tokens`): the **smaller** of
@@ -452,7 +465,7 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
 
    **What a compaction keeps** (`compaction_cutoff` in `runner.py`) starts from two bounds: at most
    the last **10 messages** *and* at most a **token budget** of
-   `max(1, min(0.4 × W, 0.8 × W − summary_cap(W) − 256))` tokens, `W` being the working window —
+   `max(1, min(0.4 × W, 0.8 × W − summary_cap(W) − 256) − O)` tokens, `W` being the working window —
    whichever keeps less. One bound alone would loop: ten long messages can by themselves exceed
    the 80 % trigger, and a token budget made of many short messages can leave 20 messages, which
    re-fires the message floor. Three rules then adjust the cut:
@@ -467,7 +480,12 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
      before it;
    - an assistant message is never separated from its **tool results**.
 
-   When only the previous summary would be summarized, nothing is compacted. What is guaranteed:
+   When only the previous summary would be summarized, nothing is compacted. When the token
+   trigger fired, a compaction that would gain less than **256 tokens**
+   (`count(all) − count(kept) − summary_cap(W)`) is skipped — a small gain is not worth a summary
+   call and a prefix-cache reset — unless the request would overflow without it (`O + count + 512`
+   above the allocated window, or `O + count` above the working window); the 20-message floor alone
+   compacts as it always did. What is guaranteed:
    with ordinary messages, the state left behind sits under `0.8 × W − 256` and the next model call
    does not compact again. The documented exceptions keep more than the budget: the answer before
    the current question when the cut falls on that question, a current message or a previous
@@ -477,18 +495,31 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    call compacts down to the current turn and the answer before it; once the state is
    `[summary, answer, current question, …]` only the summary would remain to summarize, so later
    calls of the same turn do not compact again. Without a known window the keep is the last 10
-   messages, adjusted the same way. The trigger and the keep count
-   tokens with **one** unscaled `chars / 4` counter (`approx_token_count`); the usage a model call
-   reports is never used to trigger a compaction (a kept answer's report counts messages that are
-   gone).
+   messages, adjusted the same way.
+
+   **Every count is in real tokens, as sent.** The trigger, the keep, the summarizer's trim and the
+   warning projection count `ceil(ratio × chars / 4)` (`real_token_count`) over the history as the
+   model receives it: past turns' knowledge-base and web results count as the short markers that
+   replace them in the request, not as the full results the checkpoint keeps. The ratio is frozen
+   once per model call from the whole state — a later hop of the current turn, else the last
+   measured first hop (see [Output budget](#output-budget)), else the value the summary message
+   carries (a compaction writes the first-hop ratio it knew on the summary), else
+   `max(1.5, script-aware estimate)`: counting high only compacts a little earlier. The usage
+   total a model call reports is never used to trigger a compaction directly (a kept answer's
+   report counts messages that are gone). Images are still counted at the estimator's 85 tokens
+   each.
 
    **The summary itself is bounded**: the summary client is capped at
-   `summary_cap(W) = clamp(W / 8, 128, 1024)` tokens, with no automatic output budget. It reads up
-   to `max(256, min(max(4000, 0.8 × W − cap), W − 2 × cap − 256, (allocated − 2 × cap − 512) / 3))`
+   `summary_cap(W) = clamp(W / 8, 128, 1024)` tokens, with no automatic output budget and no
+   preflight retry (a smaller cap would silently truncate the summary; a rejection takes the size
+   path below). It reads up to
+   `max(256, min(max(4000, 0.8 × W − cap), W − 2 × cap − 256, (allocated − 2 × cap − 512) / 2))`
    tokens of the history being summarized — sized from the working window, and kept inside the
-   allocated window even when `chars / 4` under-counts threefold (Chinese, Japanese). The **previous
-   summary is always part of what the summarizer reads**, prepended on top of that budget, so the
-   facts it carries survive every compaction.
+   allocated window with a factor 2 for the error left in the ratio (it is a whole-request average:
+   an English system prompt around a Chinese history under-counts the history). Past
+   knowledge-base and web results reach the summarizer as their markers, exactly as the model last
+   saw them. The **previous summary is always part of what the summarizer reads**, prepended on top
+   of that budget, so the facts it carries survive every compaction.
 
    **A failed summary never erases memory.** A transient failure of the summary call (the child
    unreachable or dead, a client timeout, a timeout while the summary was being written, HTTP
@@ -498,17 +529,18 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    history where no user turn fits the summarizer's budget because one answer alone exceeds it are
    retried once with oversized messages truncated (and the budget halved after a failed call); if
    that fails too, the compaction writes a placeholder that **carries the previous summary** —
-   capped at `summary_cap(W)` tokens, so a summary written under a larger window cannot keep the
+   capped at `summary_cap(W)` real tokens, so a summary written under a larger window cannot keep the
    conversation above a smaller window's trigger — followed by "Later messages of this
    conversation could not be summarized." The conversation keeps working, and `backend.log`
    carries one warning per failed attempt.
 
    **Warn only when compaction cannot save you**: the middleware compacts in `before_model`, so
    this turn's growth is compacted on the *next* turn. At the end of each turn the runner therefore
-   projects the thread past an ideal compaction — the tail `compaction_cutoff` would keep plus a
-   `summary_cap(W)`-token summary (the last 10 messages plus a 512-token allowance when no window is
-   known) — and emits one `memory_warning` event only if even that projected size still leaves
-   the memory margin under 15 %. The renderer then shows an amber notice above the composer with
+   projects the next request in real tokens — the turn just answered counted as past, the request
+   overhead *O* on top: when a compaction would happen, `O` + the tail `compaction_cutoff` would
+   keep + a `summary_cap(W)`-token summary (a 512-token allowance when no window is known);
+   otherwise `O` + the whole conversation, with no summary added — and emits one `memory_warning`
+   event only if even that projected size still leaves the memory margin under 15 %. The renderer then shows an amber notice above the composer with
    the conversation's approximate memory size. The warning is about the machine *now*, so it is
    never persisted and clears on the next turn that carries none.
 

@@ -5,19 +5,26 @@ model never sees -- it cannot make an answer shorter, only cut it mid-sentence
 -- so asking the user to pick a number only gave them a way to truncate their
 own answers. What replaces it is arithmetic:
 
-    max_tokens = max(512, W_eff - est_prompt - max(256, 10 % of est_prompt))
+    max_tokens = max(512, W_eff - prompt - max(256, 10 % of prompt))
+    prompt     = ceil(r * request_tokens_est(messages, tools))
 
-- ``W_eff`` is the ALLOCATED context window of the loaded child
-  (``BaseEngine.effective_context_tokens``, stamped on the chat client by the
-  factory). **The window is the ceiling**: there is no fixed upper bound on
-  top of it. A model that will not stop is a runtime problem -- cancel the
-  turn -- not something a smaller number fixes, and every fixed cap ever
-  chosen truncated a legitimate long answer somewhere.
-- ``est_prompt`` is what the turn already occupies (see the estimator below).
-- The margin covers what the estimate cannot see: the chat template's own
-  tokens, tool schemas bound by the agent, a system prompt injected further
-  down. Flat 256 tokens for short prompts, 10 % once the conversation is big
-  enough that a percentage is the honest shape of the error.
+- ``W_eff`` is the working window of the loaded child (the allocated window
+  folded with the memory ceiling, ``src.engines.working_window``, stamped on
+  the chat client by the factory). **The window is the ceiling**: there is no
+  fixed upper bound on top of it. A model that will not stop is a runtime
+  problem -- cancel the turn -- not something a smaller number fixes, and
+  every fixed cap ever chosen truncated a legitimate long answer somewhere.
+- ``prompt`` is what the request occupies in REAL tokens: chars/4 over the
+  request as sent -- system prompt, KB block, history after the strippers AND
+  the tool schemas the call carries -- scaled by a ratio the server measured
+  (``src.agents.token_accounting``): a later hop of the current turn, else
+  the first-hop ratio the runner stamped on the client, else the script-aware
+  fallback (``script_ratio``: English 1.0, CJK 3 to 4). Never the compaction
+  counter's 1.5 floor: here an over-estimate silently truncates the answer.
+- The margin covers what the estimate still cannot see: the chat template's
+  own tokens and the error left in the ratio. Flat 256 tokens for short
+  prompts, 10 % once the conversation is big enough that a percentage is the
+  honest shape of the error.
 - The 512-token floor keeps a window-filling turn from being handed a
   zero-token budget. What happens next belongs to the engine, which knows:
   llama-server truncates ``n_predict`` against its own remaining window, MLX's
@@ -31,34 +38,22 @@ must behave exactly as it did before this module existed.
 ``ERUDI_MAX_TOKENS`` wins over all of it, window or no window: a QA/dev escape
 hatch for pinning a small budget while reproducing a truncation report.
 
-Two estimators, two jobs -- and one of them does both
------------------------------------------------------
-``src.agents.chat_model.estimate_prompt_tokens`` bounds the messages with one
-token per UTF-8 byte, and this module counts characters/4 through
-``count_tokens_approximately``. That is not a duplication anyone forgot to
-clean up -- the two estimates have OPPOSITE failure costs:
+One estimator for sizing, one bound for the watchdog
+----------------------------------------------------
+The budget, the request stamp (``Erudi_Chat_OpenAI._astream``) and the
+compaction counter (``src.agents.runner``) all read ONE estimator,
+``request_tokens_est``, so they can never disagree about the unscaled size.
+``src.agents.chat_model.estimate_prompt_tokens`` stays a separate function on
+purpose: it bounds the messages with one token per UTF-8 byte, a PROVABLE
+UPPER bound the first-chunk watchdog needs (under-counting there ends a
+healthy turn mid-prefill, #573). Sizing with it would over-count English
+fourfold.
 
-- The byte bound is a PROVABLE UPPER bound (byte-level tokenizers cannot emit
-  a token per less than a byte). The watchdog needs one: under-counting there
-  ends a healthy turn mid-prefill (#573), so it pays a loose over-count on
-  English to stay honest on CJK.
-- SIZING the budget needs the counter the summarization middleware already
-  uses (``runner._build_middleware``), so the compaction trigger and the budget
-  can never disagree about how full the window is. Using the byte bound to SIZE
-  would over-count English ~4x and shrink real answer budgets by thousands of
-  tokens -- a visible regression.
-
-Under-counting is close to free on the budget side. llama-server truncates
-``n_predict`` server-side. mlx_vlm.server is stricter -- it validates
-``prompt + max_tokens <= window`` against the REAL tokenised prompt and answers
-400 -- and there the margin is nowhere near enough on CJK, where chars/4
-under-counts threefold. That is handled by PRECISION rather than pessimism:
-that 400 names the exact prompt count, so ``chat_model`` retries the call once
-with a budget computed from it. Capping the budget with the byte bound instead
-would be provably safe but would cost English dearly, since the bound
-over-counts it fourfold -- a measured ~24000-token budget would collapse to the
-512 floor on a turn of ~8000 real tokens in a 32k window, silently. The retry
-costs nothing on the text that never trips the check.
+An under-estimate is still recovered: mlx_vlm.server validates
+``prompt + max_tokens <= window`` against the REAL tokenised prompt and its
+400 names the exact prompt count, so ``chat_model`` retries the call once with
+a budget computed from it -- against the ALLOCATED window only; the memory
+ceiling has no such net. llama-server truncates ``n_predict`` server-side.
 
 ``tests/test_output_budget.py`` asserts the two estimators still disagree on a
 CJK string, so neither can silently adopt the other's.
@@ -66,11 +61,11 @@ CJK string, so neither can silently adopt the other's.
 
 from __future__ import annotations
 
+import math
 import os
 from typing import Any, Iterable, Optional
 
-from langchain_core.messages.utils import count_tokens_approximately
-
+from src.agents.token_accounting import request_tokens_est, script_ratio
 from src.core.logging import logger
 
 # Never hand a model a budget below this, however full the window is.
@@ -83,19 +78,6 @@ MARGIN_FRACTION = 0.10
 
 # QA/dev escape hatch. Documented in backend/.env.example.
 MAX_TOKENS_ENV_VAR = "ERUDI_MAX_TOKENS"
-
-
-def estimate_prompt_tokens(messages: Optional[Iterable[Any]]) -> int:
-    """Approximate tokens the outgoing messages occupy (chars/4).
-
-    The summarization middleware's counter, on purpose -- see the module
-    docstring. Unlike the watchdog's byte bound it is STRICT about shapes: it
-    coerces every item and raises on one it cannot read, which is why
-    :func:`compute_output_budget` treats a raised estimate as "no budget".
-    """
-    if not messages:
-        return 0
-    return count_tokens_approximately(messages)
 
 
 def output_budget_override() -> Optional[int]:
@@ -125,18 +107,27 @@ def compute_output_budget(
     messages: Optional[Iterable[Any]],
     effective_window_tokens: Optional[int],
     override: Optional[int] = None,
+    *,
+    tools: Optional[Iterable[Any]] = None,
+    ratio: Optional[float] = None,
 ) -> Optional[int]:
     """Tokens this call may generate, or ``None`` to leave the caller's value.
 
-    Pure: the environment is read by :func:`output_budget_override`, which the
-    caller passes in, so the arithmetic stays testable on its own.
+    ``ratio`` is the measured real-tokens-per-estimate ratio the caller picked
+    (see the module docstring); ``None`` means nothing is measured and the
+    script-aware fallback applies. ``tools`` are the schemas the request
+    carries. Pure: the environment is read by :func:`output_budget_override`,
+    which the caller passes in, so the arithmetic stays testable on its own.
     """
     if override is not None:
         return override
     if not effective_window_tokens or effective_window_tokens <= 0:
         return None
     try:
-        estimated = estimate_prompt_tokens(messages)
+        messages = list(messages or ())
+        if ratio is None:
+            ratio = script_ratio(messages)
+        estimated = math.ceil(ratio * request_tokens_est(messages, tools)) if messages else 0
     except Exception:
         # The budget is an optimisation over a working default; it must never
         # be the reason a turn fails. A message shape the counter cannot read

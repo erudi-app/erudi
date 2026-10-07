@@ -199,11 +199,12 @@ class _FoldSystemIntoUserMiddleware(AgentMiddleware):
         target = messages[first_human]
         text, image_parts = _split_multimodal(target.content)
         folded_text = f"{sys_text}{self._JOIN}{text}" if text else sys_text
-        if image_parts:
-            folded = HumanMessage(content=[{"type": "text", "text": folded_text}, *image_parts])
-        else:
-            folded = HumanMessage(content=folded_text)
-        messages[first_human] = folded
+        content = (
+            [{"type": "text", "text": folded_text}, *image_parts] if image_parts else folded_text
+        )
+        # A copy, not a new message: the target's metadata and id (the
+        # summary's ``lc_source`` and carried first-hop ratio) survive the fold.
+        messages[first_human] = target.model_copy(update={"content": content})
         return request.override(system_message=None, messages=messages)
 
     def wrap_model_call(self, request, handler):
@@ -211,6 +212,75 @@ class _FoldSystemIntoUserMiddleware(AgentMiddleware):
 
     async def awrap_model_call(self, request, handler):
         return await handler(self._fold(request))
+
+
+# Each stripped tool's directive marker (#310). Tools not listed here (e.g. the
+# tiny calculator results) pass through untouched.
+STALE_TOOL_RESULT_MARKERS = {
+    "search_knowledge_base": (
+        "[knowledge base results from an earlier turn omitted - call "
+        "search_knowledge_base again if this turn needs facts from the "
+        "documents]"
+    ),
+    "web_search": (
+        "[web search results from an earlier turn omitted - call "
+        "web_search again if this turn needs fresh web facts]"
+    ),
+}
+
+
+def _last_human_index(messages):
+    return next(
+        (i for i in range(len(messages) - 1, -1, -1) if messages[i].type == "human"),
+        None,
+    )
+
+
+def strip_stale_tool_results(messages, *, all_past: bool = False) -> list:
+    """``messages`` as sent: past turns' KB/web results replaced by their markers.
+
+    Pure (copies, never mutates). A result is past when it lies before the
+    last user message -- the positional rule ``_StripStaleToolResults``
+    applies to every request. ``all_past=True`` replaces every such result:
+    the summarizer's pool holds only past turns, and the amber-warning
+    projection judges the NEXT request, where the turn just answered is past.
+    """
+    messages = list(messages)
+    if all_past:
+        keep = len(messages)
+    else:
+        keep = _last_human_index(messages)
+        if keep is None:
+            return messages
+    for i, message in enumerate(messages[:keep]):
+        marker = STALE_TOOL_RESULT_MARKERS.get(getattr(message, "name", None))
+        if message.type == "tool" and marker is not None:
+            messages[i] = message.model_copy(update={"content": marker})
+    return messages
+
+
+def past_tool_result_ids(messages) -> frozenset:
+    """Message ids of the tool results ``strip_stale_tool_results`` marks.
+
+    Message ids, not tool-call ids: a parser with deterministic call ids
+    (mlx_vlm's kimi_k2 parser emits ``functions.<name>:0``) reuses the same
+    call id every turn, while message ids are unique once
+    ``_ensure_message_ids`` ran. The compaction counter designates past
+    results through this set, so it counts any list LangChain hands it --
+    suffixes, the reversed pool of ``trim_messages``, partial copies -- as
+    sent, without knowing where the list came from.
+    """
+    messages = list(messages)
+    keep = _last_human_index(messages)
+    if keep is None:
+        return frozenset()
+    return frozenset(
+        message.id
+        for message in messages[:keep]
+        if message.type == "tool"
+        and message.id is not None
+        and getattr(message, "name", None) in STALE_TOOL_RESULT_MARKERS
+    )
 
 
 class _StripStaleToolResults(AgentMiddleware):
@@ -226,37 +296,20 @@ class _StripStaleToolResults(AgentMiddleware):
     ``AIMessage(tool_calls) -> ToolMessage`` pairing the chat template requires
     stays valid. The checkpointer keeps the full result, so the UI is
     unaffected — symmetric to ``_StripStaleImagesMiddleware`` for images.
-    Name-keyed (#310): each stripped tool carries its own marker; tools not
-    listed here (e.g. the tiny calculator results) pass through untouched.
+    Name-keyed (#310): each stripped tool carries its own marker
+    (``STALE_TOOL_RESULT_MARKERS``). The substitution is the pure
+    ``strip_stale_tool_results``, which the compaction counter, the
+    summarizer's pool and the amber-warning projection share, so what they
+    count is what this middleware sends.
     """
 
-    _MARKERS = {
-        "search_knowledge_base": (
-            "[knowledge base results from an earlier turn omitted - call "
-            "search_knowledge_base again if this turn needs facts from the "
-            "documents]"
-        ),
-        "web_search": (
-            "[web search results from an earlier turn omitted - call "
-            "web_search again if this turn needs fresh web facts]"
-        ),
-    }
+    _MARKERS = STALE_TOOL_RESULT_MARKERS
 
     def _strip(self, request):
         messages = list(request.messages)
-        human_idxs = [i for i, m in enumerate(messages) if m.type == "human"]
-        if not human_idxs:
-            return request
-        keep = human_idxs[-1]  # last human marks the current turn; earlier = past
-        changed = False
-        for i, m in enumerate(messages):
-            if i >= keep:
-                continue
-            marker = self._MARKERS.get(getattr(m, "name", None))
-            if m.type == "tool" and marker is not None:
-                messages[i] = m.model_copy(update={"content": marker})
-                changed = True
-        return request.override(messages=messages) if changed else request
+        stripped = strip_stale_tool_results(messages)
+        changed = any(new is not old for new, old in zip(stripped, messages))
+        return request.override(messages=stripped) if changed else request
 
     def wrap_model_call(self, request, handler):
         return handler(self._strip(request))
