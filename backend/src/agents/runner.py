@@ -947,17 +947,67 @@ EMPTY_ANSWER_STOP_MESSAGE = (
 # answer text was streamed, that text closes the turn instead (it is what the
 # conversation service persists). ASCII, addressed to the model.
 INTERRUPTED_ANSWER_MESSAGE = "[The answer was interrupted.]"
-INTERRUPTED_KWARG = "erudi_interrupted"
+# The result written for a tool call the interruption left unanswered: a
+# call without its result is as invalid to a chat template as two user
+# messages in a row. ASCII, addressed to the model.
+INTERRUPTED_TOOL_RESULT = "[The tool call was interrupted.]"
+# How long closing an interrupted turn may take (a checkpointer write). The
+# guard waits for it; past this, the turn is released with one WARNING.
+INTERRUPTED_WRITE_TIMEOUT_S = 10.0
 
 
 def _interrupted_answer(text: str) -> Any:
     """The AIMessage that closes an interrupted turn in the thread state."""
     from langchain_core.messages import AIMessage
 
-    return AIMessage(
-        content=text if text.strip() else INTERRUPTED_ANSWER_MESSAGE,
-        additional_kwargs={INTERRUPTED_KWARG: True},
+    return AIMessage(content=text if text.strip() else INTERRUPTED_ANSWER_MESSAGE)
+
+
+def _closing_messages(committed: list, answer_text: str) -> list:
+    """What closes a turn the COMMITTED state leaves open, or ``[]``.
+
+    * ends with the turn's question: the answer;
+    * ends with an AI message whose tool calls are not all answered (or with
+      some of their results): one result per unanswered call, then the answer;
+    * ends with a tool result, every call answered: the answer;
+    * ends with an AI message without tool calls: nothing -- the turn is closed.
+    """
+    from langchain_core.messages import ToolMessage
+
+    if not committed:
+        return []
+    last = committed[-1]
+    if last.type == "human":
+        return [_interrupted_answer(answer_text)]
+    if last.type not in ("ai", "tool"):
+        return []
+    if last.type == "ai" and not getattr(last, "tool_calls", None):
+        return []
+    caller_index = next(
+        (
+            i
+            for i in range(len(committed) - 1, -1, -1)
+            if committed[i].type == "ai" and getattr(committed[i], "tool_calls", None)
+        ),
+        None,
     )
+    closing = []
+    if caller_index is not None:
+        answered = {
+            getattr(m, "tool_call_id", None)
+            for m in committed[caller_index + 1 :]
+            if m.type == "tool"
+        }
+        closing = [
+            ToolMessage(
+                content=INTERRUPTED_TOOL_RESULT,
+                tool_call_id=call.get("id"),
+                name=call.get("name"),
+            )
+            for call in committed[caller_index].tool_calls
+            if call.get("id") not in answered
+        ]
+    return closing + [_interrupted_answer(answer_text)]
 
 
 # Curated turns for a stream that ran out of wall-clock budget (#573). The two
@@ -1814,17 +1864,23 @@ class AgentRunner:
                                 yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
                             yield _record({"t": "answer", "text": ERROR_MESSAGE})
-            except BaseException:
+            except BaseException as exit_in_flight:
                 _flag_abandoned(abandon_hook)
                 # Synchronous on purpose: the exit in flight (a closed
                 # consumer, a cancellation) must not wait on a thread. It
                 # reads two process counters and writes one small file.
                 _close_memory_window(engine, memory_token, abandoned=True)
                 if stateful:
-                    # The cancelled model node never wrote this turn's answer:
-                    # close the turn in the thread state, inside the guard,
-                    # or the next question makes two user messages in a row.
-                    await self._close_interrupted_turn(agent, run_config, "".join(streamed_answer))
+                    # The cancelled model node never committed this turn's
+                    # answer: close the turn in the thread state, inside the
+                    # guard, or the next question makes two user messages in
+                    # a row. A cancellation absorbed while that write ran is
+                    # not lost: re-raised, unless one is already in flight.
+                    absorbed = await self._close_interrupted_turn(
+                        agent, run_config, "".join(streamed_answer)
+                    )
+                    if absorbed and not isinstance(exit_in_flight, asyncio.CancelledError):
+                        raise asyncio.CancelledError()
                 raise
             if memory_token is not None:
                 await run_in_threadpool(_close_memory_window, engine, memory_token, abandoned=False)
@@ -2107,42 +2163,66 @@ class AgentRunner:
             logger.exception("Memory-margin evaluation failed; skipping the warning")
             return None
 
-    async def _close_interrupted_turn(self, agent, run_config, streamed_text: str) -> None:
-        """Close an interrupted stateful turn in the thread state, shielded.
+    async def _close_interrupted_turn(self, agent, run_config, streamed_text: str) -> bool:
+        """Close an interrupted stateful turn in the thread state, shielded;
+        returns whether a native cancellation arrived meanwhile.
 
         Runs while a cancellation or a ``GeneratorExit`` is in flight, inside
         the generation guard: the write runs in its own task, awaited through
         ``wait_shielded`` (the pattern of the prefix-cache reset), so the
         cancellation that triggered it cannot cut it short. The caller
-        re-raises its own exit afterwards; a failed write is one WARNING
-        inside ``_write_interrupted_turn`` and never replaces that exit.
+        re-raises its own exit afterwards (and a cancellation absorbed here);
+        a failed or timed-out write is one WARNING inside
+        ``_write_interrupted_turn`` and never replaces that exit.
         """
         task = asyncio.get_running_loop().create_task(
             self._write_interrupted_turn(agent, run_config, streamed_text)
         )
-        await wait_shielded(task)
+        return await wait_shielded(task)
 
     async def _write_interrupted_turn(self, agent, run_config, streamed_text: str) -> None:
-        """Write the AIMessage closing an interrupted turn, when the state
-        still ends with the turn's question (or with a tool result whose
-        round never got its answer). A state already ending with an AI
-        message -- the node finished just before the disconnect -- is left
-        alone: checked, never assumed. Written as the ``model`` node, like
-        ``_repair_alternation``."""
+        """``_append_closure``, bounded by ``INTERRUPTED_WRITE_TIMEOUT_S``."""
         try:
-            state = await agent.aget_state(run_config)
-            messages = (state.values or {}).get("messages", []) if state else []
-            if not messages or messages[-1].type not in ("human", "tool"):
-                return
-            await agent.aupdate_state(
-                run_config,
-                {"messages": [_interrupted_answer(streamed_text)]},
-                as_node="model",
+            await asyncio.wait_for(
+                self._append_closure(agent, run_config, streamed_text),
+                timeout=INTERRUPTED_WRITE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            # Degraded, one record: the thread may end with the turn's
+            # question unanswered; the turn itself is released.
+            logger.warning(
+                f"Closing an interrupted turn in the thread state timed out after "
+                f"{INTERRUPTED_WRITE_TIMEOUT_S:.0f} s; its question may stay unanswered"
             )
         except Exception:
             # The exit in flight is what propagates; this record says the
             # thread may now end with the turn's question unanswered.
             logger.warning("Closing an interrupted turn in the thread state failed", exc_info=True)
+
+    async def _committed_messages(self, run_config) -> list:
+        """The thread's messages as COMMITTED in its latest checkpoint.
+
+        Not ``agent.aget_state``: it also applies the PENDING writes of the
+        interrupted step (a model node that finished while nobody read its
+        stream leaves its answer there), which the next turn's input discards
+        -- deciding on them would skip a closure the history needs. And not
+        ``aget_state`` at an explicit checkpoint id either: it applies that
+        checkpoint's pending writes the same way. ``aupdate_state`` builds on
+        exactly this committed checkpoint.
+        """
+        checkpoint = await self.checkpointer.aget_tuple(run_config)
+        if checkpoint is None:
+            return []
+        values = (checkpoint.checkpoint or {}).get("channel_values") or {}
+        return list(values.get("messages") or [])
+
+    async def _append_closure(self, agent, run_config, answer_text: str) -> None:
+        """Append what closes the turn the committed state leaves open
+        (``_closing_messages``), as the ``model`` node -- one update, so the
+        tool results and the answer land together."""
+        closing = _closing_messages(await self._committed_messages(run_config), answer_text)
+        if closing:
+            await agent.aupdate_state(run_config, {"messages": closing}, as_node="model")
 
     async def _write_curated_empty_turn(self, agent, run_config, text: str) -> None:
         """Write the curated empty-answer line into the thread state (#554).
@@ -2193,24 +2273,19 @@ class AgentRunner:
     async def _repair_alternation(self, agent, run_config) -> None:
         """Preserve role alternation in the checkpointer after a failed turn.
 
-        If the failed super-step left a dangling ``HumanMessage`` as the last
-        message, the next turn would send two consecutive user messages and the
-        local chat template would 400 ("roles must alternate"). Append an error
-        ``AIMessage`` so the thread stays well-formed. If the super-step never
-        committed (last message is not a human, or state is empty), do nothing.
+        Decided on the COMMITTED checkpoint (``_committed_messages``): when the
+        failed super-step left the turn open -- its question last, or tool
+        calls without their results -- the next turn would send two
+        consecutive user messages (or unanswered calls) and the local chat
+        template would 400 ("roles must alternate"). The closing tool results
+        and an error ``AIMessage`` are appended (``_closing_messages``) so the
+        thread stays well-formed. A turn already closed is left alone.
         """
-        from langchain_core.messages import AIMessage
-
         try:
-            state = await agent.aget_state(run_config)
-            messages = (state.values or {}).get("messages", []) if state else []
-            if messages and messages[-1].type == "human":
+            closing = _closing_messages(await self._committed_messages(run_config), ERROR_MESSAGE)
+            if closing:
                 # as_node="model" is required: updating a non-empty thread is
                 # otherwise "ambiguous". "model" is the create_agent node name.
-                await agent.aupdate_state(
-                    run_config,
-                    {"messages": [AIMessage(content=ERROR_MESSAGE)]},
-                    as_node="model",
-                )
+                await agent.aupdate_state(run_config, {"messages": closing}, as_node="model")
         except Exception:
             logger.exception("Failed to repair conversation alternation after error")

@@ -583,18 +583,23 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
 Two more middlewares run alongside it: stale images and stale tool results are stripped from the
 replayed state before the model is called.
 
-If a turn fails mid-super-step and leaves a dangling user message in the checkpointer, the runner
-appends an error assistant message so the thread keeps alternating roles — otherwise the next turn
-would send two consecutive user messages and the chat template would reject it.
+If a turn fails mid-super-step and leaves it open in the checkpointer — its question last, or
+tool calls without their results — the runner appends a result for each unanswered tool call and
+an error assistant message, so the thread keeps alternating roles: otherwise the next turn would
+send two consecutive user messages (or unanswered calls) and the chat template would reject it.
 
 A turn the client **interrupts** — Stop, a closed tab, the app's own client timeout — is closed the
-same way. The disconnect cancels the model before it writes its answer into the checkpointer, so
-the runner writes one assistant message itself, before the turn releases the model: the answer
-text already streamed to the client (the same text the conversation stores and shows), or, when
-nothing was streamed yet, the line `[The answer was interrupted.]`. It is marked
-`additional_kwargs["erudi_interrupted"]`, carries no token usage (it is counted from its text like
-any new message), and is not written when the checkpointer already ends with an answer. The next
-question therefore never follows another question, and strict templates keep working.
+same way. The disconnect cancels the model before its answer is committed to the checkpointer, so
+the runner closes the turn itself, before it releases the model: a `[The tool call was
+interrupted.]` result for every tool call left unanswered, then one assistant message — the
+answer text already streamed to the client (the same text the conversation stores and shows), or,
+when nothing was streamed yet, the line `[The answer was interrupted.]`. The decision reads the
+**committed** checkpoint: an answer the model produced while the client was no longer reading is
+only a pending write there, and the next question would discard it. Nothing is written when the
+committed state already ends with an answer. The closing message carries no token usage (it is
+counted from its text like any new message). The write is bounded (10 s); past that, one warning
+in `backend.log` and the turn is released. The next question therefore never follows another
+question, and strict templates keep working.
 
 ### The prefix cache holds one conversation (Apple Silicon)
 
