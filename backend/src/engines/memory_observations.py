@@ -15,7 +15,9 @@ conversation's model name, renameable free text), the artifact's size, the
 GPU working set, the macOS, mlx and mlx_vlm versions, the child's runtime
 configuration. Not the app version. Only measured bases are recorded (never
 the weights-on-disk fallback); a child that died during a turn is recorded
-with ``child_died`` and no peak. An entry holds the last measured base
+with ``child_died`` and no peak, and an abandoned turn whose call was cut
+before its usage arrived with ``n_est`` (the client's estimate) instead of a
+measured ``n``. An entry holds the last measured base
 footprint and a ring of the last
 ``RING_PER_KEY`` observations. Entries of an older runtime are kept, labelled
 by their version components, within ``MAX_OBSERVATIONS`` overall (oldest

@@ -179,6 +179,10 @@ def build_chat_model(
     usage_hook = (
         functools.partial(note_usage, handle) if record_usage and callable(note_usage) else None
     )
+    note_start = getattr(engine, "note_call_start", None)
+    call_start_hook = (
+        functools.partial(note_start, handle) if record_usage and callable(note_start) else None
+    )
 
     # Log the extra_body AS SENT (post-translation, so llama.cpp's wire names
     # show up), one key=value per entry on the same line: the optional profile
@@ -226,6 +230,7 @@ def build_chat_model(
         preflight_retry=preflight_retry,
         abandon_hook=abandon_hook,
         usage_hook=usage_hook,
+        call_start_hook=call_start_hook,
         streaming=True,
         # ``stream_options.include_usage``: both local servers then end the
         # stream with a usage chunk (mlx_vlm 0.6.17 and llama-server alike);

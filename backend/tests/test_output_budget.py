@@ -464,7 +464,8 @@ def test_one_estimator_for_the_stamp_the_counter_and_the_budget():
     messages = [_Msg("hello world"), AIMessage("and a second turn")]
 
     assert estimate_prompt_tokens(messages) == count_tokens_approximately(messages)
-    assert "real_tokens_est" in inspect.getsource(output_budget.compute_output_budget)
+    assert "real_tokens_est" in inspect.getsource(output_budget.estimate_prompt)
+    assert "estimate_prompt" in inspect.getsource(output_budget.compute_output_budget)
     assert "request_tokens_est" in inspect.getsource(chat_model)
 
 

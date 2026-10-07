@@ -106,7 +106,11 @@ import contextlib
 from functools import lru_cache
 from typing import Any, AsyncIterator, Callable, Iterable, Optional
 
-from src.agents.output_budget import compute_output_budget, output_budget_override
+from src.agents.output_budget import (
+    compute_output_budget,
+    estimate_prompt,
+    output_budget_override,
+)
 from src.agents.overflow import parse_context_overflow
 from src.agents.reasoning_stream import REASONING_KWARG, extract_reasoning_delta
 from src.agents.token_accounting import (
@@ -528,6 +532,24 @@ def erudi_chat_openai_class():
         # window is open never enters it). ``None``: nothing to tell.
         usage_hook: Optional[Callable[..., None]] = Field(default=None, exclude=True)
 
+        # Called once per model call, BEFORE it is sent, with the client's own
+        # estimate of the request in real tokens. Bound like ``usage_hook``
+        # (conversation and Arena clients only): a turn whose stream is cut
+        # before the usage chunk -- often the heaviest -- is still measured,
+        # at that estimate.
+        call_start_hook: Optional[Callable[[int], None]] = Field(default=None, exclude=True)
+
+        def _announce_call(self, messages, tools) -> None:
+            hook = self.call_start_hook
+            if hook is None:
+                return
+            try:
+                hook(estimate_prompt(messages, tools=tools, digit_tokens=self.digit_tokens).total)
+            except Exception:
+                # A measurement aid: losing it costs the estimate of one
+                # abandoned turn, never the call.
+                logger.warning("Announcing a call's estimated size failed", exc_info=True)
+
         def _push_usage(self, usage: Any, stamp: Optional[dict]) -> None:
             hook = self.usage_hook
             if hook is None:
@@ -642,6 +664,7 @@ def erudi_chat_openai_class():
             )
             if budget is not None:
                 kwargs["max_tokens"] = budget
+            self._announce_call(messages, tools)
 
             # Every attempt is consumed under ``aclosing``: when this
             # generator is closed (GeneratorExit at the yield) or cancelled,

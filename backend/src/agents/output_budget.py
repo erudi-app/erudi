@@ -71,6 +71,7 @@ from typing import Any, Iterable, Optional
 from src.agents.token_accounting import (
     BUDGET_DENSE_TOKENS,
     GROUPED_DIGIT_TOKENS,
+    RealTokens,
     real_tokens_est,
 )
 from src.core.logging import logger
@@ -110,6 +111,23 @@ def output_budget_override() -> Optional[int]:
     return value
 
 
+def estimate_prompt(
+    messages: Optional[Iterable[Any]],
+    *,
+    tools: Optional[Iterable[Any]] = None,
+    digit_tokens: float = GROUPED_DIGIT_TOKENS,
+) -> RealTokens:
+    """The request's size in real tokens, with the budget's settings (what
+    ``compute_output_budget`` sizes against). Raises on a message shape the
+    estimator cannot read."""
+    return real_tokens_est(
+        list(messages or ()),
+        dense=BUDGET_DENSE_TOKENS,
+        tools=tools,
+        digit_tokens=digit_tokens,
+    )
+
+
 def compute_output_budget(
     messages: Optional[Iterable[Any]],
     effective_window_tokens: Optional[int],
@@ -132,12 +150,7 @@ def compute_output_budget(
     if not effective_window_tokens or effective_window_tokens <= 0:
         return None
     try:
-        prompt = real_tokens_est(
-            list(messages or ()),
-            dense=BUDGET_DENSE_TOKENS,
-            tools=tools,
-            digit_tokens=digit_tokens,
-        )
+        prompt = estimate_prompt(messages, tools=tools, digit_tokens=digit_tokens)
     except Exception:
         # The budget is an optimisation over a working default; it must never
         # be the reason a turn fails. A message shape the counter cannot read

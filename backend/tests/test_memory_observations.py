@@ -295,6 +295,129 @@ def test_the_base_engine_hooks_are_no_ops():
     assert BaseEngine.begin_memory_window() is None
     assert BaseEngine.end_memory_window(None) is None
     assert BaseEngine.note_call_usage({}, 1, 1) is None
+    assert BaseEngine.note_call_start({}, 1) is None
+
+
+# ===================== an abandoned turn is still measured =====================
+
+
+def test_an_abandoned_turn_is_recorded_with_the_estimate_of_the_call_in_flight(
+    child, _memory_observations_in_tmp, caplog
+):
+    """The stream was cut before the usage chunk -- often the heaviest turn
+    of all. Its peak is real; its size is the client's estimate of the call
+    in flight (``n_est``), never a measured ``n``."""
+    import logging
+
+    scripted, handle = child
+    token = MLX_Engine.begin_memory_window()
+    MLX_Engine.note_call_start(handle, 7000)
+    scripted.peak = scripted.base + 20 * GIB
+
+    with caplog.at_level(logging.WARNING):
+        observation = MLX_Engine.end_memory_window(token, abandoned=True)
+
+    assert observation["abandoned"] is True
+    assert observation["n"] is None
+    assert observation["n_est"] == 7000
+    assert observation["y_bytes"] == 20 * GIB
+    assert observation["predicted_bytes"] == _predict(handle, 7000)
+    # An estimate is not a measurement: no exceeded-prediction WARNING.
+    assert not [r for r in caplog.records if "exceeded" in r.getMessage()]
+    assert _recorded(_memory_observations_in_tmp)["observations"][-1]["n_est"] == 7000
+
+
+def test_a_completed_call_is_no_longer_in_flight(child):
+    _scripted, handle = child
+    token = MLX_Engine.begin_memory_window()
+    MLX_Engine.note_call_start(handle, 7000)
+    MLX_Engine.note_call_usage(handle, 6900, 40)
+
+    observation = MLX_Engine.end_memory_window(token)
+
+    assert observation["n"] == 6940
+    assert observation["n_est"] is None
+
+
+def test_a_turn_that_ended_normally_without_usage_still_records_nothing(child):
+    _scripted, handle = child
+    token = MLX_Engine.begin_memory_window()
+    MLX_Engine.note_call_start(handle, 7000)
+
+    assert MLX_Engine.end_memory_window(token) is None
+
+
+def test_a_call_started_before_a_compaction_restart_is_not_in_flight(child):
+    _scripted, handle = child
+    token = MLX_Engine.begin_memory_window()
+    MLX_Engine.note_call_start(handle, 9000)  # the hop before the rewrite
+    MLX_Engine.on_history_rewritten()
+
+    assert MLX_Engine.end_memory_window(token, abandoned=True) is None
+
+
+async def test_the_client_pushes_its_estimate_when_a_call_starts(monkeypatch):
+    from langchain_core.messages import AIMessageChunk, HumanMessage
+    from langchain_openai import ChatOpenAI
+
+    from src.agents.chat_model import erudi_chat_openai_class
+    from src.agents.output_budget import estimate_prompt
+
+    started = []
+
+    async def _server(self, messages, *args, **kwargs):
+        assert started, "the start is pushed before the call reaches the server"
+        yield self._convert_chunk_to_generation_chunk(
+            {"choices": [{"index": 0, "delta": {"content": "hi"}}]}, AIMessageChunk, {}
+        )
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    client = erudi_chat_openai_class()(
+        base_url="http://127.0.0.1:1/v1",
+        api_key="k",
+        model="m",
+        call_start_hook=started.append,
+    )
+    messages = [HumanMessage("hello " * 300)]
+
+    _ = [c async for c in client._astream(messages)]
+
+    assert started == [estimate_prompt(messages, digit_tokens=client.digit_tokens).total]
+
+
+def test_only_the_conversation_client_announces_its_calls(monkeypatch):
+    from src.agents.model_factory import build_chat_model
+    from src.core import config
+
+    starts = []
+
+    class _Engine:
+        @staticmethod
+        def get_model_and_tokenizer(llm_id, link):
+            return ({"base_url": "http://127.0.0.1:1", "alias": "a"}, {})
+
+        @staticmethod
+        def _payload_model_value(handle):
+            return "m"
+
+        @staticmethod
+        def note_call_start(handle, estimated):
+            starts.append(estimated)
+
+    class _Llm:
+        id = 1
+        link = "/x"
+        name = "x"
+
+    monkeypatch.setattr(config, "LLM_Engine", _Engine)
+    conversation = build_chat_model(
+        _Llm(), temperature=0.1, top_p=0.9, max_tokens=8, record_usage=True
+    )
+    title = build_chat_model(_Llm(), temperature=0.1, top_p=0.9, max_tokens=8)
+
+    assert title.call_start_hook is None
+    conversation.call_start_hook(42)
+    assert starts == [42]
 
 
 # ===================== the client's usage hook =====================

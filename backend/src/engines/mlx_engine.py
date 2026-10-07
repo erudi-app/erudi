@@ -678,8 +678,11 @@ class MLX_Engine(BaseChatServerEngine):
     # another would over-size n), the peak above base, and ``predict(n)``.
     # A compaction restarts the window (a new sequence number: the hops before
     # it and the summary call never count). Recorded only when the window
-    # really started and usage was reported. A peak above the prediction on a
-    # turn without images is ONE WARNING per child and key; nothing is
+    # really started on a measured base, and usage was reported -- or the
+    # turn was abandoned with a call in flight (recorded at the client's
+    # estimate, ``n_est``, announced before the call: ``note_call_start``), or
+    # the child died. A peak above the prediction on a turn without images,
+    # for a measured ``n``, is ONE WARNING per child and key; nothing is
     # corrected automatically.
 
     @classmethod
@@ -751,6 +754,7 @@ class MLX_Engine(BaseChatServerEngine):
         window = handle.get("memory_window") if isinstance(handle, dict) else None
         if not isinstance(window, dict) or not window.get("open"):
             return
+        window.pop("in_flight", None)
         window["calls"].append(
             {
                 "seq": window["seq"],
@@ -762,6 +766,14 @@ class MLX_Engine(BaseChatServerEngine):
         )
 
     @classmethod
+    def note_call_start(cls, handle: Any, estimated_prompt_tokens: int) -> None:
+        """A call is in flight: its estimated size, until its usage arrives."""
+        window = handle.get("memory_window") if isinstance(handle, dict) else None
+        if not isinstance(window, dict) or not window.get("open"):
+            return
+        window["in_flight"] = {"seq": window["seq"], "n_est": int(estimated_prompt_tokens or 0)}
+
+    @classmethod
     def end_memory_window(cls, token: Any, *, abandoned: bool = False) -> Optional[Dict[str, Any]]:
         """Close the window and record the turn's observation; returns it, or
         ``None`` when nothing could be recorded.
@@ -769,7 +781,10 @@ class MLX_Engine(BaseChatServerEngine):
         Recorded only on a MEASURED base (never the weights-on-disk fallback)
         and a window that really started. A child that died during the window
         is recorded too, ``child_died`` and no peak: it is the ground truth of
-        an under-prediction."""
+        an under-prediction. An ABANDONED turn whose call was cut before its
+        usage arrived is recorded with ``n_est`` (the client's estimate of the
+        call in flight) and no measured ``n``; an estimate never raises the
+        exceeded-prediction WARNING."""
         import time
         import uuid
 
@@ -793,9 +808,16 @@ class MLX_Engine(BaseChatServerEngine):
         base = handle.get("base_footprint_bytes")
         if not window.get("spi_started") or base is None:
             return None
+        in_flight = window.get("in_flight")
+        n_est = (
+            in_flight.get("n_est")
+            if isinstance(in_flight, dict) and in_flight.get("seq") == window["seq"]
+            else None
+        )
         peak = process_footprint.peak_since(pid, True)
         child_died = peak is None and not cls._proc_is_alive(handle.get("proc"))
-        if (peak is None and not child_died) or (not calls and not child_died):
+        measured = bool(calls) or child_died or (abandoned and n_est is not None)
+        if (peak is None and not child_died) or not measured:
             return None
         budget = MemoryBudget.from_handle(cls, handle)
         if calls:
@@ -808,7 +830,8 @@ class MLX_Engine(BaseChatServerEngine):
             else None
         )
         scale = prior_scale()
-        predicted = budget.predict(n) if n is not None else None
+        size = n if n is not None else n_est
+        predicted = budget.predict(size) if size is not None else None
         if predicted is not None and scale != 1.0:
             predicted = int(predicted * scale)
         swap_start, swap_end = window.get("swapouts_start"), process_footprint.swapouts()
@@ -822,6 +845,7 @@ class MLX_Engine(BaseChatServerEngine):
             "id": uuid.uuid4().hex,
             "at": time.time(),
             "n": n,
+            "n_est": n_est,
             "n_in": largest["n_in"],
             "n_out": largest["n_out"],
             "y_bytes": peak - base if peak is not None else None,
@@ -857,6 +881,7 @@ class MLX_Engine(BaseChatServerEngine):
             logger.warning("[MLX_Engine] Recording a memory observation failed", exc_info=True)
         if (
             predicted is not None
+            and n is not None
             and observation["y_bytes"] is not None
             and not has_images
             and observation["y_bytes"] > predicted

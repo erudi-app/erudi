@@ -367,6 +367,12 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         return None
 
     @classmethod
+    def note_call_start(cls, handle: Any, estimated_prompt_tokens: int) -> None:
+        """A model call bound to ``handle`` is about to be sent, with the
+        client's estimate of its size. No-op here."""
+        return None
+
+    @classmethod
     def end_memory_window(cls, token: Any, *, abandoned: bool = False) -> Any:
         """Close the window ``token`` opened and record what the turn used.
         No-op here."""
