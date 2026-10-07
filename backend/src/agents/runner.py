@@ -101,14 +101,14 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
 
-# Auto-summarization (compaction) fires on TWO signals, whichever comes first,
-# recomputed PER TURN (``_build_middleware`` runs after the child spawned, so
-# the allocated window is fresh):
-#   1. the WINDOW signal -- the conversation reaches 80 % of the ALLOCATED
-#      context window (``BaseEngine.effective_context_tokens``);
-#   2. the MEMORY signal -- the machine's deterministic memory margin
-#      (``src.engines.memory_budget``) would drop under 15 %, expressed as the
-#      conversation token count at which that happens.
+# Auto-summarization (compaction) fires at 80 % of the WORKING window, the
+# smaller of two values recomputed PER TURN (``_build_middleware`` runs after
+# the child spawned, so both are fresh):
+#   1. the ALLOCATED context window (``BaseEngine.effective_context_tokens``);
+#   2. the MEMORY ceiling (Apple Silicon) -- the conversation token count at
+#      which the child's predicted footprint reaches the memory budget
+#      (``MemoryBudget.tokens_at_ceiling``, a measured prior; no margin is
+#      stacked on top of it).
 # The 20-message floor stays as the trigger when no window is readable
 # (``W_eff=None``), and always rides along with OR semantics. Once triggered,
 # older turns are summarized by the same local model and replaced in the
@@ -134,18 +134,12 @@ SUMMARY_PROMPT = (
 SUMMARY_TRIGGER_MESSAGES = 20
 SUMMARY_KEEP_MESSAGES = 10
 COMPACTION_WINDOW_FRACTION = 0.8
-# Shared floor of the memory signal AND the amber warning: under 15 % of
-# deterministic margin, compaction fires; the warning is emitted only when
-# even a compaction down to the keep-tail could not restore that margin
-# (see ``_memory_warning_event``). The floor stays 15 % on top of the
-# corrected denominator: the margin is now measured against the GPU's usable
-# working set, not total RAM (see memory_budget.total_memory_bytes), which is
-# already ~2.4x smaller. Issue #601 asked to raise it to 30 %, but that was
-# against the old total-RAM denominator; raising it on top of the smaller,
-# honest one would over-trigger (spurious compactions and amber notices). To
-# be confirmed in the 1.1.3 QA pass -- if auto-compaction fires too late on
-# the saturation scenario, raise the floor then.
-MEMORY_MARGIN_FLOOR = 0.15
+# The amber warning's threshold: it shows when, even after compacting to the
+# kept budget, the model plus the kept conversation would use more than 85 %
+# of the memory budget (see ``_memory_warning_event``). It is the warning's
+# threshold ONLY: the compaction ceiling is the honest one, with no margin
+# stacked on top (the prior carries its own margin, ``memory_budget``).
+MEMORY_WARNING_MARGIN = 0.15
 # Token allowance for the summary a compaction would insert, used when
 # projecting the post-compaction size the warning is judged on -- ONLY when no
 # working window is known. With a window, the projection uses the summary's
@@ -224,7 +218,7 @@ def summarization_triggers(working_window: Optional[int]) -> list:
     known). Its 80 % (``COMPACTION_WINDOW_FRACTION``) becomes the token
     threshold, OR'd with the ``SUMMARY_TRIGGER_MESSAGES`` message floor. The
     memory fold happens at the call site, so this function sees a single value:
-    ``None`` (no window and no memory signal) leaves the message floor alone.
+    ``None`` (no window and no memory ceiling) leaves the message floor alone.
 
     Deliberately never ``("fraction", ...)``: that form needs a
     ``model.profile`` our local chat clients do not carry (the middleware's
@@ -240,6 +234,33 @@ def summarization_triggers(working_window: Optional[int]) -> list:
         triggers.append(("tokens", max(1, int(COMPACTION_WINDOW_FRACTION * working_window))))
     triggers.append(("messages", SUMMARY_TRIGGER_MESSAGES))
     return triggers
+
+
+def _close_memory_window(engine: Any, token: Any, *, abandoned: bool) -> None:
+    """Close the turn's memory measurement window; a failure costs the
+    observation, never the turn (one WARNING)."""
+    if token is None:
+        return
+    try:
+        engine.end_memory_window(token, abandoned=abandoned)
+    except Exception:
+        logger.warning("Closing the memory measurement window failed", exc_info=True)
+
+
+def _track_memory_warning(engine: Any, thread_id: Optional[str], active: bool) -> None:
+    """Per-conversation warning state on the loaded child's handle, with ONE
+    INFO line at each transition (start, end). Lost when the child is reaped
+    or swapped: the next warning simply starts again."""
+    handle = getattr(engine, "_model", None)
+    if not isinstance(handle, dict):
+        return
+    state = handle.setdefault("warning_state", {})
+    if active and thread_id not in state:
+        state[thread_id] = True
+        logger.info(f"Memory warning started: thread_id={thread_id}")
+    elif not active and thread_id in state:
+        state.pop(thread_id, None)
+        logger.info(f"Memory warning ended: thread_id={thread_id}")
 
 
 def _flag_abandoned(abandon_hook: Any) -> None:
@@ -1237,12 +1258,16 @@ class AgentRunner:
                     # the artifact has a native lever for it.
                     effort_plan=effort_plan,
                     prompt_ratio=prompt_ratio,
+                    # Each call's usage feeds the turn's memory measurement
+                    # (MLX); the summary and title clients push nothing.
+                    record_usage=True,
                 )
-                # Memory accounting for the compaction signal and the amber
-                # warning (1.1.2). Derived AFTER build_chat_model so the child
-                # is up and the handle carries the loaded artifact; file I/O
-                # and hardware probes -> threadpool. ``from_engine`` never
-                # raises; an unaccountable model just carries None facts.
+                # Memory accounting for the compaction ceiling and the amber
+                # warning. Derived AFTER build_chat_model so the child is up
+                # and the handle carries the loaded artifact and its measured
+                # base; file I/O and hardware probes -> threadpool.
+                # ``from_engine`` never raises; an unaccountable model just
+                # carries None facts.
                 budget = (
                     await run_in_threadpool(MemoryBudget.from_engine, engine) if summarize else None
                 )
@@ -1349,6 +1374,7 @@ class AgentRunner:
             # before its next prefix-cache reset. Deterministic, at guard
             # release, in addition to the client-level flag.
             abandon_hook = getattr(model, "abandon_hook", None)
+            memory_token = None
             try:
                 # The prefix cache belongs to ONE conversation (MLX; a no-op
                 # on llama.cpp): claim it for this thread -- or for the arena --
@@ -1358,6 +1384,14 @@ class AgentRunner:
                 if _engine_overrides(engine, "claim_prefix"):
                     owner = f"conv:{thread_id}" if stateful else "arena"
                     await run_reset_shielded(functools.partial(engine.claim_prefix, owner))
+                # What this turn really uses is measured on the child (MLX
+                # only): the window opens after the claim (its reset is not
+                # this turn's memory) and closes at the end of the turn,
+                # inside the guard.
+                if _engine_overrides(engine, "begin_memory_window"):
+                    memory_token = await run_in_threadpool(
+                        engine.begin_memory_window, getattr(llm, "name", None)
+                    )
 
                 # Aggregate-only stream accounting (never log per token): start,
                 # first-token latency, then one completion line with totals.
@@ -1578,11 +1612,13 @@ class AgentRunner:
                             yield {"t": "answer", "text": curated}
                         # Amber warning check (1.1.2), at end of turn on the
                         # POST-turn thread state: one ``memory_warning`` event goes
-                        # out ONLY when even a compaction down to the keep-tail could
-                        # not restore the memory margin (see ``_memory_warning_event``
-                        # for the projection). The conversation service forwards it to
-                        # the wire and never persists it (it is a statement about NOW,
-                        # on THIS machine).
+                        # out ONLY when even a compaction down to the keep-tail would
+                        # leave the model and the conversation above 85 % of the
+                        # memory budget (see ``_memory_warning_event`` for the
+                        # projection). The conversation service forwards it to the
+                        # wire and never persists it (it is a statement about NOW,
+                        # on THIS machine). Its start and end per conversation are
+                        # one INFO line each (``_track_memory_warning``).
                         if stateful and budget is not None:
                             warning = await self._memory_warning_event(
                                 agent,
@@ -1592,6 +1628,8 @@ class AgentRunner:
                                 overhead_est=overhead_est,
                                 allocated_window=allocated_window,
                             )
+                            if budget.used_fraction(0) is not None:
+                                _track_memory_warning(engine, thread_id, warning is not None)
                             if warning is not None:
                                 yield warning
                         duration_ms = (time.perf_counter() - stream_start_s) * 1000
@@ -1726,7 +1764,13 @@ class AgentRunner:
                             yield {"t": "answer", "text": ERROR_MESSAGE}
             except BaseException:
                 _flag_abandoned(abandon_hook)
+                # Synchronous on purpose: the exit in flight (a closed
+                # consumer, a cancellation) must not wait on a thread. It
+                # reads two process counters and writes one small file.
+                _close_memory_window(engine, memory_token, abandoned=True)
                 raise
+            if memory_token is not None:
+                await run_in_threadpool(_close_memory_window, engine, memory_token, abandoned=False)
 
     async def astream_oneshot(
         self,
@@ -1893,15 +1937,13 @@ class AgentRunner:
         window_probe = getattr(engine, "effective_context_tokens", None)
         effective_window = window_probe() if callable(window_probe) else None
         memory_token_ceiling = (
-            memory_budget.tokens_at_margin(MEMORY_MARGIN_FLOOR)
-            if memory_budget is not None
-            else None
+            memory_budget.tokens_at_ceiling() if memory_budget is not None else None
         )
-        # Compact-ASAP safety net: a non-positive ceiling means the weights
-        # alone already blow the 15 % floor. Clamp it up to 1 so the working
-        # window is 1 and compaction fires as early as it can -- replacing N
-        # messages with one summary shrinks the live KV, which is exactly what
-        # relieves a weights-dominated machine. This clamp is DELIBERATELY only
+        # Compact-ASAP safety net: a non-positive ceiling means the child's
+        # fixed part alone already fills the memory budget. Clamp it up to 1 so
+        # the working window is 1 and compaction fires as early as it can --
+        # replacing N messages with one summary shrinks the live KV, which is
+        # exactly what relieves such a machine. This clamp is DELIBERATELY only
         # on the compaction path: the output budget (working_context_tokens,
         # which does NOT clamp) keeps sizing from the allocated window in this
         # corner, precisely what it did before PR3.1. Both views get unified
@@ -1939,12 +1981,15 @@ class AgentRunner:
         guard included): ``O + count(kept) + summary_cap(W)`` (or
         ``SUMMARY_TOKEN_ALLOWANCE`` without a window); otherwise
         ``O + count(all)`` -- no summary is added when nothing would be
-        compacted. Only when even THAT projected size leaves the margin
-        strictly under the floor does the warning go out -- the honest
-        meaning of "compaction had its chance". The event reports the CURRENT
-        numbers (``O + count(all)``: what this conversation and its model use
-        now). Advisory only: a failure here is logged and never sinks the
-        turn.
+        compacted. The warning goes out only when even THAT projection leaves
+        the margin strictly under ``MEMORY_WARNING_MARGIN``: the model plus
+        the kept conversation would use more than 85 % of the memory budget
+        (``MemoryBudget.used_fraction``, a measured prior with a fixed part --
+        so it can show for a model whose weights alone are well below 85 %,
+        and from the first turn on a tight machine). The payload quotes the
+        projection: ``footprint_bytes`` (model and conversation, what the copy
+        shows) and ``conversation_bytes`` (what the conversation adds).
+        Advisory only: a failure here is logged and never sinks the turn.
         """
         from src.agents.middleware import strip_stale_tool_results
 
@@ -1980,28 +2025,21 @@ class AgentRunner:
             else:
                 projected_tokens = conversation_tokens
             projected_margin = budget.memory_margin_fraction(projected_tokens)
-            if projected_margin is None or projected_margin >= MEMORY_MARGIN_FLOOR:
+            if projected_margin is None or projected_margin >= MEMORY_WARNING_MARGIN:
                 return None
-            current_margin = budget.memory_margin_fraction(conversation_tokens)
-            margin = current_margin if current_margin is not None else projected_margin
             logger.warning(
-                f"Memory margin under the floor even after a projected compaction: "
-                f"current_margin={margin:.3f}, projected_margin={projected_margin:.3f}, "
+                f"Memory budget over 85 % even after a projected compaction: "
+                f"projected_margin={projected_margin:.3f}, "
+                f"projected_tokens={projected_tokens}, "
                 f"conversation_tokens={conversation_tokens}"
             )
-            conversation_kv = budget.conversation_bytes(conversation_tokens)
-            weights = getattr(budget, "weights_bytes", None)
             return {
                 "t": "memory_warning",
-                "used_fraction": round(1.0 - margin, 4),
-                "conversation_bytes": conversation_kv,
+                "used_fraction": round(1.0 - projected_margin, 4),
+                "conversation_bytes": budget.conversation_bytes(projected_tokens),
                 # What the warning copy quotes: the conversation AND its
                 # loaded model together (the two things the user can act on).
-                "footprint_bytes": (
-                    conversation_kv + weights
-                    if conversation_kv is not None and weights is not None
-                    else None
-                ),
+                "footprint_bytes": budget.footprint_bytes(projected_tokens),
             }
         except Exception:
             # Advisory signal: losing it costs one warning, never the answer.

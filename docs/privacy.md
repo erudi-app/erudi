@@ -69,7 +69,7 @@ The app window runs with Chromium's sandbox, context isolation and no Node integ
 | Windows | `%LOCALAPPDATA%\erudi\backend\prod\data` | `%LOCALAPPDATA%\erudi\logs\backend.log` |
 | Linux | `$XDG_DATA_HOME/erudi/backend/prod/data` (default `~/.local/share/…`) | `$XDG_STATE_HOME/erudi/logs/backend.log` (default `~/.local/state/…`) |
 
-Source: [runtime_paths.py](https://github.com/erudi-app/erudi/blob/main/backend/src/launcher/runtime_paths.py#L173-L191). Inside the data folder: `models/` (the weights you downloaded), `models_cache/` (the embedding model), `postgres/` (conversations, knowledge-base chunks and embeddings, plus `erudi_db_password`, the password the app presents to open them), `db-backups/` (a copy taken before each database migration). *Open data folder* and *Clear all data* in the app act on this folder.
+Source: [runtime_paths.py](https://github.com/erudi-app/erudi/blob/main/backend/src/launcher/runtime_paths.py#L173-L191). Inside the data folder: `models/` (the weights you downloaded), `models_cache/` (the embedding model), `postgres/` (conversations, knowledge-base chunks and embeddings, plus `erudi_db_password`, the password the app presents to open them), `db-backups/` (a copy taken before each database migration), and on Apple Silicon `memory_calibration.json` — the memory the model really used on recent turns next to what the app predicted, keyed by the model's name and size, this Mac's GPU memory budget and the macOS, MLX and mlx-vlm versions (no conversation content; local only, never sent anywhere; deleting it loses only those measurements). *Open data folder* and *Clear all data* in the app act on this folder.
 
 Three things are written outside it:
 

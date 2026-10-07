@@ -176,7 +176,7 @@ their contents through history forever.
 | `thinking` | `text` | A chunk of the model's reasoning (see below) |
 | `tool_call` | `name`, `args` | The agent called a tool (`search_knowledge_base`, `web_search`, `calculator`) |
 | `tool_result` | `name`, `text` | What that tool returned |
-| `memory_warning` | `used_fraction`, `conversation_bytes`, `footprint_bytes` | Even compacting could not restore the machine's 15 % memory margin (see below); `footprint_bytes` = conversation + loaded model |
+| `memory_warning` | `used_fraction`, `conversation_bytes`, `footprint_bytes` | Even after compacting, the model and the kept conversation would use more than 85 % of the memory budget (see below); `footprint_bytes` = the loaded model and the conversation together, `conversation_bytes` = what the conversation adds (the predicted peak above the model's own footprint, not just its KV cache) |
 | `error` | `text` | The turn failed; the text is the curated error message |
 | `done` | — | Terminal event, always sent, including after an `error` |
 
@@ -443,10 +443,21 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    - **the allocated context window** (`BaseEngine.effective_context_tokens()`, the window the
      loaded child actually runs with), and
    - **the memory ceiling** (**Apple Silicon only**) — the conversation token count at which the
-     machine's deterministic memory margin would drop under **15 %**
-     (`backend/src/engines/memory_budget.py`): on-disk weights size plus a per-token KV-cache cost
-     (`2 × layers × kv_heads × head_dim × 2 bytes f16`, read from the local artifact's
-     `config.json`) against the unified-memory total. The ceiling exists only on MLX because only
+     inference child's predicted footprint reaches the memory budget
+     (`backend/src/engines/memory_budget.py`). The budget is 0.9 × the GPU's recommended working
+     set (well below total RAM, and not net of the app's other processes). The prediction is a
+     **measured prior**: the child's own footprint, measured right after it starts (`base`), plus
+     `m × (t0 + step × vocab × 2 bytes + c0 × kv × N)` for a conversation of `N` tokens — `kv` the
+     per-token KV-cache cost (`2 × layers × kv_heads × head_dim × 2 bytes f16`, read from the local
+     artifact's `config.json`), `step × vocab × 2 bytes` the last prefill chunk's logits, and three
+     named priors measured on an M4 16 GB (`c0 = 3.5` KV units per token — the cache, its
+     prefix-cache copy and MLX's buffer cache —, `t0 = 1 GiB`, a margin `m = 1.10`; provisional
+     until the release measurement campaign). The ceiling reserves the output budget's 512-token
+     floor and stacks no further margin. Nothing is learned while the app runs: every turn's real
+     peak is recorded next to its prediction in `memory_calibration.json` in the data folder, and a
+     peak above the prediction writes one warning to `backend.log` (see
+     [Privacy](../privacy.md)). Requests that carry images are outside the prediction (a vision
+     tower's activations do not scale with the conversation). The ceiling exists only on MLX because only
      MLX grows its KV cache lazily with usage; on both llama.cpp engines (CPU and CUDA) the cache is
      allocated **in full at load** and the engine's own fit already guaranteed it fits — memory use
      does not grow with the conversation, so there is nothing per-token to measure (and on a
@@ -456,8 +467,8 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
      ceiling.
 
    over whichever of the two is known. When only the allocated window is known — the common case,
-   and every llama.cpp engine — the working window is the allocated window; when the weights alone
-   already blow the 15 % margin, compaction fires as early as it can. When neither window is
+   and every llama.cpp engine — the working window is the allocated window; when the model's
+   fixed part alone already fills the memory budget, compaction fires as early as it can. When neither window is
    readable, the trigger falls back to the 20-message floor — which always rides along with OR
    semantics anyway. Compaction rewrites the checkpointer state: old turns are dropped and replaced
    by a summary, so the agent's context stays bounded. The `messages` table is untouched — the UI
@@ -540,9 +551,14 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    overhead *O* on top: when a compaction would happen, `O` + the tail `compaction_cutoff` would
    keep + a `summary_cap(W)`-token summary (a 512-token allowance when no window is known);
    otherwise `O` + the whole conversation, with no summary added — and emits one `memory_warning`
-   event only if even that projected size still leaves the memory margin under 15 %. The renderer then shows an amber notice above the composer with
-   the conversation's approximate memory size. The warning is about the machine *now*, so it is
-   never persisted and clears on the next turn that carries none.
+   event only if, even after compacting to the kept budget, the model plus the kept conversation
+   would use more than **85 %** of the memory budget. Because the prediction carries a fixed part,
+   the warning can appear for a model whose weights alone are well below 85 %, and from the first
+   turn on a tight machine. The renderer then shows an amber notice above the composer with the
+   approximate memory size of the model and the conversation. The warning is about the machine
+   *now*, so it is never persisted and clears on the next turn that carries none; `backend.log`
+   records one `Memory warning started` / `Memory warning ended` line per conversation at each
+   transition.
 
 Two more middlewares run alongside it: stale images and stale tool results are stripped from the
 replayed state before the model is called.

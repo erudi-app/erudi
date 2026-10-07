@@ -279,9 +279,9 @@ def _apply_child_runtime_env(
       already memory-bounded by ``--max-kv-size``); a ``None`` count leaves
       mlx-vlm's own default (2048 blocks), for a child spawned without a window.
       The pool fills lazily and mlx-vlm's own ``APC_MAX_POOL_TENSORS`` + Metal
-      memory-pressure guard bound it. NB: this pool counts toward Erudi's
-      resident memory and will be accounted in ``memory_budget`` in a later PR
-      (not touched here).
+      memory-pressure guard bound it. The pool counts toward the child's
+      footprint, which ``memory_budget``'s prior accounts per token and the
+      engine measures every turn (``MLX_Engine.end_memory_window``).
     - ``MLX_VLM_TOKEN_QUEUE_TIMEOUT`` lifts the child's per-token wait above the
       parent's first-chunk watchdog ceiling so a long cold prefill trips the
       parent's curated timeout, not the child's raw error; ``None`` leaves

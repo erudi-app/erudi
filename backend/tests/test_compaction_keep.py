@@ -522,7 +522,7 @@ def test_the_middleware_trims_the_summarizer_input_to_the_window():
 
 
 def test_the_middleware_uses_the_working_window_and_the_allocated_one_for_the_trim():
-    budget = SimpleNamespace(tokens_at_margin=lambda margin: 1500)
+    budget = SimpleNamespace(tokens_at_ceiling=lambda: 1500)
     mw = _middleware(_ScriptedSummaryModel(messages=iter([])), window=32_768, budget=budget)
     assert mw.keep == ("tokens", keep_token_budget(1500))
     assert mw.trim_tokens_to_summarize == summarize_trim_budget(1500, 32_768)
@@ -584,7 +584,7 @@ async def test_small_windows_do_not_retrigger_on_the_next_call(window):
 
 async def test_the_degenerate_window_compacts_down_to_the_current_turn_and_the_answer_before():
     summary = _ScriptedSummaryModel(messages=iter([]))
-    mw = _middleware(summary, window=None, budget=SimpleNamespace(tokens_at_margin=lambda m: -5))
+    mw = _middleware(summary, window=None, budget=SimpleNamespace(tokens_at_ceiling=lambda: -5))
     state = [HumanMessage("a", id="1"), AIMessage("b", id="2"), HumanMessage("c", id="3")]
 
     after = _after(await mw.abefore_model({"messages": state}, None))
@@ -594,7 +594,7 @@ async def test_the_degenerate_window_compacts_down_to_the_current_turn_and_the_a
 
 async def test_the_degenerate_window_does_not_re_summarize_the_summary_alone():
     summary = _ScriptedSummaryModel(messages=iter([]))
-    mw = _middleware(summary, window=None, budget=SimpleNamespace(tokens_at_margin=lambda m: -5))
+    mw = _middleware(summary, window=None, budget=SimpleNamespace(tokens_at_ceiling=lambda: -5))
     state = [_previous_summary_message(), AIMessage("b", id="2"), HumanMessage("c", id="3")]
 
     assert await mw.abefore_model({"messages": state}, None) is None
@@ -979,7 +979,7 @@ async def test_the_memory_warning_projects_the_kept_suffix_plus_the_summary_cap(
     class _Budget:
         weights_bytes = 10
 
-        def tokens_at_margin(self, margin):
+        def tokens_at_ceiling(self):
             return None
 
         def memory_margin_fraction(self, tokens):

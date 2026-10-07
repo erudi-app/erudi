@@ -510,6 +510,32 @@ def erudi_chat_openai_class():
         # cache reset (``src.engines.mlx_engine``). ``None``: nothing to tell.
         abandon_hook: Optional[Callable[[], None]] = Field(default=None, exclude=True)
 
+        # Called once per model call with the server-reported usage
+        # ``(input_tokens, output_tokens, cached_tokens, has_images)``. The
+        # factory binds it to the engine handle (``note_call_usage``) on the
+        # conversation and Arena clients only, so the MLX engine can record
+        # what a turn really used next to its memory prediction; the summary
+        # and title clients carry none (a title generated while a turn's
+        # window is open never enters it). ``None``: nothing to tell.
+        usage_hook: Optional[Callable[..., None]] = Field(default=None, exclude=True)
+
+        def _push_usage(self, usage: Any, stamp: Optional[dict]) -> None:
+            hook = self.usage_hook
+            if hook is None:
+                return
+            try:
+                details = usage.get("input_token_details") or {}
+                hook(
+                    int(usage.get("input_tokens") or 0),
+                    int(usage.get("output_tokens") or 0),
+                    int(details.get("cache_read") or 0),
+                    bool((stamp or {}).get(REQUEST_HAS_IMAGES_KEY)),
+                )
+            except Exception:
+                # A measurement aid: losing it costs one observation, never
+                # the call.
+                logger.warning("Pushing a call's usage failed", exc_info=True)
+
         def _notify_abandoned(self) -> None:
             hook = self.abandon_hook
             if hook is None:
@@ -567,6 +593,7 @@ def erudi_chat_openai_class():
                 return False
             if stamp is not None:
                 message.response_metadata.update(stamp)
+            self._push_usage(message.usage_metadata, stamp)
             return True
 
         async def _astream(self, messages, *args, **kwargs):

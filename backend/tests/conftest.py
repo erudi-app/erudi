@@ -70,6 +70,17 @@ from src.database.core import get_db
 from tests._helpers import is_mlx_platform
 
 
+@pytest.fixture(autouse=True)
+def _memory_observations_in_tmp(tmp_path, monkeypatch):
+    """No test ever writes the user's ``memory_calibration.json``: the
+    recorded memory observations go to a per-test temporary file."""
+    from src.engines import memory_observations
+
+    path = tmp_path / "memory_calibration.json"
+    monkeypatch.setattr(memory_observations, "observations_path", lambda: path)
+    yield path
+
+
 # ============ Database Fixtures ============
 
 

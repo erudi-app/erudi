@@ -30,13 +30,6 @@ from typing import Any, Optional
 
 from src.engines.memory_budget import MemoryBudget
 
-# Mirrors ``src.agents.runner.MEMORY_MARGIN_FLOOR`` (the 15 % deterministic
-# margin the memory signal fires at). Duplicated as a module-level constant on
-# purpose: importing it from ``runner`` would form a cycle (runner imports this
-# module), and the value is a property of the memory accounting, not of the
-# agent runner. ``tests/test_working_window`` pins the two equal.
-MEMORY_MARGIN_FLOOR = 0.15
-
 
 def _positive_int(value: Any) -> Optional[int]:
     """``value`` if it is a real positive int, else ``None`` (rejects bool)."""
@@ -65,9 +58,13 @@ def working_context_tokens(engine: Any) -> Optional[int]:
 
     Folds the engine's allocated window
     (``effective_context_tokens``) with the memory ceiling
-    (``MemoryBudget.from_engine(engine).tokens_at_margin(MEMORY_MARGIN_FLOOR)``
-    -- the conversation token count at which the deterministic memory margin
-    reaches its floor). The window probe is read defensively: an engine (or
+    (``MemoryBudget.from_engine(engine).tokens_at_ceiling()`` -- the
+    conversation token count at which the child's predicted footprint reaches
+    the memory budget, the output floor reserved; no margin stacked on top).
+    The ceiling is not clamped here: a non-positive one (the fixed part alone
+    fills the budget) is no candidate, and the output budget keeps sizing from
+    the allocated window in that corner; the compaction path clamps it to 1
+    (compact as early as it can). The window probe is read defensively: an engine (or
     test stub) that carries no ``effective_context_tokens`` simply has no
     allocated candidate, exactly as ``model_factory`` already treats it.
     ``MemoryBudget.from_engine`` never raises; a window probe that itself
@@ -79,5 +76,5 @@ def working_context_tokens(engine: Any) -> Optional[int]:
         return None
     probe = getattr(engine, "effective_context_tokens", None)
     allocated = probe() if callable(probe) else None
-    memory_ceiling = MemoryBudget.from_engine(engine).tokens_at_margin(MEMORY_MARGIN_FLOOR)
+    memory_ceiling = MemoryBudget.from_engine(engine).tokens_at_ceiling()
     return canonical_working_window(allocated, memory_ceiling)

@@ -57,6 +57,7 @@ def build_chat_model(
     effort_plan: Optional[EffortPlan] = None,
     prompt_ratio: Optional[float] = None,
     preflight_retry: bool = True,
+    record_usage: bool = False,
 ) -> ChatOpenAI:
     """Resolve the engine child for ``llm`` and wrap it as a ``ChatOpenAI``.
 
@@ -88,6 +89,10 @@ def build_chat_model(
     Every client asks the server for usage (``stream_usage=True``): the last
     chunk then carries the real prompt size, which the client stamps with its
     own estimate of the request (``Erudi_Chat_OpenAI._astream``).
+    ``record_usage=True`` (the conversation and Arena clients only) also
+    pushes each call's usage to the engine handle the client was built
+    against (``note_call_usage``), where the MLX engine measures what a turn
+    really used; the summary and title clients push nothing.
 
     ``effort_plan`` carries the turn's reasoning effort (1.1.2). Its
     ``wire_effort`` rides the NATIVE ``reasoning_effort`` request field, not
@@ -120,8 +125,9 @@ def build_chat_model(
     # candidates -- src.engines.working_window). Only the output budget reads
     # it; the first-chunk watchdog and preflight retry keep the raw allocated
     # window above. ``working_context_tokens`` calls ``MemoryBudget.from_engine``
-    # (disk I/O to read the loaded artifact + its config.json), which is safe
-    # here because this factory runs in a threadpool per turn.
+    # (the loaded child's static facts are read from disk once and cached on
+    # its handle), which is safe here because this factory runs in a
+    # threadpool per turn.
     working_window = working_context_tokens(engine)
 
     # Extra sampling params absent from the OpenAI wire schema. mlx_vlm.server reads
@@ -163,6 +169,12 @@ def build_chat_model(
     # must flag its own child, not whichever child is loaded by then.
     note_abandoned = getattr(engine, "note_stream_abandoned", None)
     abandon_hook = functools.partial(note_abandoned, handle) if callable(note_abandoned) else None
+    # Same binding for the usage a call reports: it belongs to the turn's
+    # measurement window on THIS child.
+    note_usage = getattr(engine, "note_call_usage", None)
+    usage_hook = (
+        functools.partial(note_usage, handle) if record_usage and callable(note_usage) else None
+    )
 
     # Log the extra_body AS SENT (post-translation, so llama.cpp's wire names
     # show up), one key=value per entry on the same line: the optional profile
@@ -208,6 +220,7 @@ def build_chat_model(
         prompt_ratio=prompt_ratio,
         preflight_retry=preflight_retry,
         abandon_hook=abandon_hook,
+        usage_hook=usage_hook,
         streaming=True,
         # ``stream_options.include_usage``: both local servers then end the
         # stream with a usage chunk (mlx_vlm 0.6.17 and llama-server alike);

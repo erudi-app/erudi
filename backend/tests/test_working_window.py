@@ -15,7 +15,6 @@ arithmetic; the memory consumers that route onto it are pinned in
 import pytest
 
 from src.engines.working_window import (
-    MEMORY_MARGIN_FLOOR,
     canonical_working_window,
     working_context_tokens,
 )
@@ -80,8 +79,7 @@ class _MargingBudget:
     def __init__(self, ceiling):
         self._ceiling = ceiling
 
-    def tokens_at_margin(self, margin):
-        assert margin == MEMORY_MARGIN_FLOOR
+    def tokens_at_ceiling(self):
         return self._ceiling
 
 
@@ -137,7 +135,13 @@ def test_working_context_tokens_on_none_engine_is_none():
     assert working_context_tokens(None) is None
 
 
-def test_the_memory_margin_floor_mirrors_the_runner_value():
+def test_the_stacked_15_percent_floor_is_gone():
+    """The ceiling is the honest one (``MemoryBudget.tokens_at_ceiling``):
+    no 15 % margin is stacked on top of it. 15 % remains the amber warning's
+    threshold only."""
     from src.agents import runner
+    from src.engines import working_window
 
-    assert MEMORY_MARGIN_FLOOR == runner.MEMORY_MARGIN_FLOOR == 0.15
+    assert not hasattr(working_window, "MEMORY_MARGIN_FLOOR")
+    assert not hasattr(runner, "MEMORY_MARGIN_FLOOR")
+    assert runner.MEMORY_WARNING_MARGIN == 0.15

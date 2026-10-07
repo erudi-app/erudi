@@ -600,6 +600,12 @@ class _RecordingBudget:
     def conversation_bytes(self, tokens):
         return tokens
 
+    def footprint_bytes(self, tokens):
+        return tokens + self.weights_bytes
+
+    def used_fraction(self, tokens):
+        return 1.0 - self.margin
+
 
 def _agent_with_state(messages):
     async def aget_state(config):

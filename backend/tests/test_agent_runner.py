@@ -2668,20 +2668,20 @@ def test_build_middleware_composes_the_two_signal_trigger(monkeypatch):
     # Memory bites (5000 < 10000): the working window is the 5000 ceiling, and
     # compaction fires at 80 % of it -- int(0.8 * 5000) == 4000, earlier than
     # the ceiling itself (the safe direction).
-    budget = SimpleNamespace(tokens_at_margin=lambda margin: 5000)
+    budget = SimpleNamespace(tokens_at_ceiling=lambda: 5000)
     built = AgentRunner()._build_middleware(ToolableFakeChatModel(messages=iter([])), budget)
     mw = next(m for m in built if isinstance(m, SummarizationMiddleware))
     assert mw.trigger == [("tokens", 4000), ("messages", 20)]
 
 
 def test_build_middleware_keeps_the_compact_asap_net_on_weights_overflow(monkeypatch):
-    # The weights alone already blow the 15 % floor: tokens_at_margin comes back
+    # The fixed part alone already exceeds the ceiling: tokens_at_ceiling comes back
     # non-positive. The call site clamps it up to 1 so the trigger is ("tokens",
     # 1) -- compact ASAP, exactly as before PR3.1.
     from langchain.agents.middleware import SummarizationMiddleware
 
     monkeypatch.setattr(_FakeEngine, "effective_context_tokens", classmethod(lambda cls: 10000))
-    budget = SimpleNamespace(tokens_at_margin=lambda margin: -3)
+    budget = SimpleNamespace(tokens_at_ceiling=lambda: -3)
     built = AgentRunner()._build_middleware(ToolableFakeChatModel(messages=iter([])), budget)
     mw = next(m for m in built if isinstance(m, SummarizationMiddleware))
     assert mw.trigger == [("tokens", 1), ("messages", 20)]
@@ -2712,7 +2712,14 @@ class _StubBudget:
     def conversation_bytes(self, conversation_tokens):
         return self._bytes
 
-    def tokens_at_margin(self, margin):
+    def footprint_bytes(self, conversation_tokens):
+        return self._bytes + self.weights_bytes
+
+    def used_fraction(self, conversation_tokens):
+        margin = self.memory_margin_fraction(conversation_tokens)
+        return None if margin is None else 1.0 - margin
+
+    def tokens_at_ceiling(self):
         return 999999
 
 

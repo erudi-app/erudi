@@ -658,7 +658,7 @@ def test_the_factory_stamps_both_the_allocated_and_working_windows(monkeypatch):
     monkeypatch.setattr(
         ww.MemoryBudget,
         "from_engine",
-        staticmethod(lambda engine: SimpleNamespace(tokens_at_margin=lambda margin: 8000)),
+        staticmethod(lambda engine: SimpleNamespace(tokens_at_ceiling=lambda: 8000)),
     )
 
     chat = build_chat_model(_Llm(), temperature=0.3, top_p=0.8, max_tokens=55)
