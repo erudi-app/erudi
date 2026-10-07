@@ -442,6 +442,12 @@ class MLX_Engine(BaseChatServerEngine):
             # stays) on the content channel.
             "--enable-thinking",
         ]
+        # The prefill step the memory prior was measured at (its logits term
+        # and t0 depend on it): on the command line, because mlx_vlm's CLI
+        # rewrites PREFILL_STEP_SIZE from this option (server/cli.py).
+        from src.engines.memory_budget import MLX_PREFILL_STEP_TOKENS
+
+        argv += ["--prefill-step-size", str(MLX_PREFILL_STEP_TOKENS)]
         if context_tokens is not None:
             argv += ["--max-kv-size", str(context_tokens)]
         argv += [
