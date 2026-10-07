@@ -55,7 +55,7 @@ def build_chat_model(
     auto_output_budget: bool = True,
     sampling: Optional[SamplingDefaults] = None,
     effort_plan: Optional[EffortPlan] = None,
-    prompt_ratio: Optional[float] = None,
+    kb_additions: str = "",
     preflight_retry: bool = True,
     record_usage: bool = False,
 ) -> ChatOpenAI:
@@ -79,10 +79,10 @@ def build_chat_model(
     for the callers whose budget is deliberate -- the one-shot title path and
     the capped compaction summary.
 
-    ``prompt_ratio`` is the first-hop ratio the runner read from the raw
-    checkpoint state at turn start (``src.agents.token_accounting``); the
-    output budget scales its estimate by it on a first hop. ``None``: nothing
-    measured, the script-aware fallback applies. ``preflight_retry=False``
+    ``kb_additions`` is the KB text this turn's requests carry (block, joins,
+    language line): a request that carried it stamps its size, so the ratio
+    it measured excludes a block the next request no longer holds.
+    ``preflight_retry=False``
     turns off the single retry with a smaller cap after a context-check
     rejection (the summary client: a smaller cap would truncate the summary).
 
@@ -217,7 +217,7 @@ def build_chat_model(
         effective_context_tokens=effective_window,
         working_context_tokens=working_window,
         auto_output_budget=auto_output_budget,
-        prompt_ratio=prompt_ratio,
+        kb_additions=kb_additions or "",
         preflight_retry=preflight_retry,
         abandon_hook=abandon_hook,
         usage_hook=usage_hook,

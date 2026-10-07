@@ -22,9 +22,11 @@ from src.agents.runner import (
     MEMORY_WARNING_MARGIN,
     AgentRunner,
     compaction_cutoff,
+    frozen_weights,
     real_token_count,
     summary_cap,
 )
+from src.agents.token_accounting import RequestOverhead
 from src.engines.memory_budget import MemoryBudget
 
 pytestmark = pytest.mark.unit
@@ -66,7 +68,12 @@ def _long_thread(pairs=12, tokens_each=900):
 
 async def _warning(state, budget, window):
     return await AgentRunner()._memory_warning_event(
-        _agent_with_state(state), {}, budget, window, overhead_est=200, allocated_window=window
+        _agent_with_state(state),
+        {},
+        budget,
+        window,
+        overhead=RequestOverhead(fixed_est=200, fixed_text="system prompt"),
+        allocated_window=window,
     )
 
 
@@ -102,12 +109,20 @@ async def test_the_payload_quotes_the_projection():
     budget = _budget(base_gib=5.0)
     window = 32_768
     state = _long_thread(pairs=14, tokens_each=1800)
-    ratio = 1.5  # nothing measured
-    counter = lambda m: real_token_count(m, ratio)  # noqa: E731
-    overhead = math.ceil(ratio * 200)
-    cut = compaction_cutoff(state, window, counter, overhead=overhead, allocated_window=window)
+    # Nothing measured: every message at the counter's floored script weight,
+    # the overhead too; an empty next question closes the projection.
+    projected_state = state + [HumanMessage("", id="erudi-next-request")]
+    weights, _ = frozen_weights(projected_state)
+
+    def counter(part):
+        return real_token_count(part, weights)
+
+    overhead = math.ceil(1.2 * 200)
+    cut = compaction_cutoff(
+        projected_state, window, counter, overhead=overhead, allocated_window=window
+    )
     assert cut > 0
-    projected = overhead + counter(state[cut:]) + summary_cap(window)
+    projected = overhead + counter(projected_state[cut:]) + summary_cap(window)
 
     event = await _warning(state, budget, window)
 
@@ -120,13 +135,20 @@ async def test_the_payload_quotes_the_projection():
 async def test_an_oversized_last_message_is_projected_whole():
     budget = _budget(base_gib=5.0)
     window = 32_768
-    huge = HumanMessage(_text(26_000), id="huge")
-    state = [HumanMessage("hi", id="h0"), AIMessage("yo", id="a0"), huge, AIMessage("ok", id="a1")]
+    # The last answer is oversized: the next request's compaction keeps it
+    # whole (the answer before the next question is never summarized away).
+    huge = AIMessage(_text(26_000), id="huge")
+    state = [
+        HumanMessage("hi", id="h0"),
+        AIMessage("yo", id="a0"),
+        HumanMessage("go", id="h1"),
+        huge,
+    ]
 
     event = await _warning(state, budget, window)
 
     assert event is not None
-    assert event["conversation_bytes"] >= budget.conversation_bytes(real_token_count([huge], 1.5))
+    assert event["conversation_bytes"] >= budget.conversation_bytes(real_token_count([huge]))
 
 
 async def test_a_model_whose_prediction_is_off_never_warns():

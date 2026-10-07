@@ -12,6 +12,15 @@ from __future__ import annotations
 from langchain.agents.middleware import AgentMiddleware
 from langchain_core.messages import HumanMessage
 
+# One substitution helper and one marker table, shared with the real-token
+# counters (``src.agents.token_accounting``); re-exported here for the
+# middleware's own users.
+from src.agents.token_accounting import (
+    STALE_TOOL_RESULT_MARKERS,
+    last_human_index,
+    stale_result_copy,
+)
+
 
 def _split_multimodal(content):
     """Split message content into (joined_text, image_parts).
@@ -203,7 +212,7 @@ class _FoldSystemIntoUserMiddleware(AgentMiddleware):
             [{"type": "text", "text": folded_text}, *image_parts] if image_parts else folded_text
         )
         # A copy, not a new message: the target's metadata and id (the
-        # summary's ``lc_source`` and carried first-hop ratio) survive the fold.
+        # summary's ``lc_source``) survive the fold.
         messages[first_human] = target.model_copy(update={"content": content})
         return request.override(system_message=None, messages=messages)
 
@@ -212,28 +221,6 @@ class _FoldSystemIntoUserMiddleware(AgentMiddleware):
 
     async def awrap_model_call(self, request, handler):
         return await handler(self._fold(request))
-
-
-# Each stripped tool's directive marker (#310). Tools not listed here (e.g. the
-# tiny calculator results) pass through untouched.
-STALE_TOOL_RESULT_MARKERS = {
-    "search_knowledge_base": (
-        "[knowledge base results from an earlier turn omitted - call "
-        "search_knowledge_base again if this turn needs facts from the "
-        "documents]"
-    ),
-    "web_search": (
-        "[web search results from an earlier turn omitted - call "
-        "web_search again if this turn needs fresh web facts]"
-    ),
-}
-
-
-def _last_human_index(messages):
-    return next(
-        (i for i in range(len(messages) - 1, -1, -1) if messages[i].type == "human"),
-        None,
-    )
 
 
 def strip_stale_tool_results(messages, *, all_past: bool = False) -> list:
@@ -249,13 +236,11 @@ def strip_stale_tool_results(messages, *, all_past: bool = False) -> list:
     if all_past:
         keep = len(messages)
     else:
-        keep = _last_human_index(messages)
+        keep = last_human_index(messages)
         if keep is None:
             return messages
     for i, message in enumerate(messages[:keep]):
-        marker = STALE_TOOL_RESULT_MARKERS.get(getattr(message, "name", None))
-        if message.type == "tool" and marker is not None:
-            messages[i] = message.model_copy(update={"content": marker})
+        messages[i] = stale_result_copy(message)
     return messages
 
 
@@ -271,7 +256,7 @@ def past_tool_result_ids(messages) -> frozenset:
     sent, without knowing where the list came from.
     """
     messages = list(messages)
-    keep = _last_human_index(messages)
+    keep = last_human_index(messages)
     if keep is None:
         return frozenset()
     return frozenset(

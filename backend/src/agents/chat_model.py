@@ -113,7 +113,8 @@ from src.agents.token_accounting import (
     REQUEST_EST_KEY,
     REQUEST_FIRST_HOP_KEY,
     REQUEST_HAS_IMAGES_KEY,
-    current_turn_ratio,
+    kb_stamp,
+    message_text,
     messages_have_images,
     request_tokens_est,
 )
@@ -324,13 +325,14 @@ def is_child_prefill_timeout(exc: object) -> bool:
 
 # --- Retrying a call the engine's context check rejected --------------------
 #
-# The output budget is sized from an ESTIMATE of the prompt (chars/4 scaled by
-# a measured ratio, see src.agents.output_budget). llama-server clamps its own
-# generation against what is left of the window, so an over-estimate costs
-# nothing there. mlx_vlm.server does not: it validates
-# `prompt + max_tokens <= window` against the REAL tokenised prompt and answers
-# 400. Where the ratio lags -- the first turn, a change of script -- the app
-# would then reject its own turn on a conversation that fits perfectly well.
+# The output budget is sized from an ESTIMATE of the prompt (measured parts at
+# their measured ratio, new text at a script weight, see
+# src.agents.output_budget). llama-server clamps its own generation against
+# what is left of the window, so an over-estimate costs nothing there.
+# mlx_vlm.server does not: it validates `prompt + max_tokens <= window` against
+# the REAL tokenised prompt and answers 400. Where the new text's script weight
+# under-counts this tokenizer, the app would then reject its own turn on a
+# conversation that fits perfectly well.
 #
 # The rejection carries the cure: it names the exact prompt count. So the call
 # is retried once with a budget built from that number instead of an estimate.
@@ -482,14 +484,13 @@ def erudi_chat_openai_class():
         # routes through ``_astream``, so the distinction has to live here.
         auto_output_budget: bool = True
 
-        # The first-hop ratio of the conversation this turn starts from
-        # (``src.agents.token_accounting.first_hop_ratio`` of the raw
-        # checkpoint state), stamped by the runner through the factory. The
-        # output budget scales its estimate by it on a first hop; a later hop
-        # of the same turn uses its own measurement instead. ``None``
-        # (stateless arena turns, titles, a conversation with nothing
-        # measured yet): the script-aware fallback applies.
-        prompt_ratio: Optional[float] = None
+        # The KB additions this turn's requests carry (``_KbContextMiddleware``:
+        # the block, two blank-line joins, the language line), set by the
+        # runner through the factory. A request that carried them stamps their
+        # size next to its own estimate, so its measured ratio is taken on
+        # what the NEXT request still holds (the block is not kept in the
+        # history). Empty: the turn carries no block.
+        kb_additions: str = ""
 
         # Whether a call the engine's context check rejected is retried once
         # with a smaller ``max_tokens`` (see ``preflight_retry_budget``). The
@@ -577,11 +578,16 @@ def erudi_chat_openai_class():
                 logger.debug("Request estimate unavailable; no stamp", exc_info=True)
                 return None
             last = messages[-1] if messages else None
-            return {
+            stamp = {
                 REQUEST_EST_KEY: estimate,
                 REQUEST_HAS_IMAGES_KEY: messages_have_images(messages),
                 REQUEST_FIRST_HOP_KEY: getattr(last, "type", None) == "human",
             }
+            if self.kb_additions and getattr(last, "type", None) == "human":
+                block = self.kb_additions.split("\n\n\n\n", 1)[0]
+                if block and block in message_text(last):
+                    stamp.update(kb_stamp(self.kb_additions))
+            return stamp
 
         def _stamp_usage_chunk(self, chunk, stamp: Optional[dict]) -> bool:
             """Stamp ``chunk`` if it is the one carrying the server's usage;
@@ -615,22 +621,13 @@ def erudi_chat_openai_class():
                 if self.working_context_tokens is not None
                 else self.effective_context_tokens
             )
-            if self.auto_output_budget:
-                # A later hop of this turn measured its own ratio; a first hop
-                # reads the runner's first-hop ratio; nothing measured: the
-                # script-aware fallback (``compute_output_budget``'s None).
-                ratio = current_turn_ratio(messages)
-                if ratio is None:
-                    ratio = self.prompt_ratio
-                budget = compute_output_budget(
-                    messages,
-                    budget_window,
-                    override=output_budget_override(),
-                    tools=tools,
-                    ratio=ratio,
+            budget = (
+                compute_output_budget(
+                    messages, budget_window, override=output_budget_override(), tools=tools
                 )
-            else:
-                budget = None
+                if self.auto_output_budget
+                else None
+            )
             if budget is not None:
                 kwargs["max_tokens"] = budget
 

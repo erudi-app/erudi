@@ -5,8 +5,7 @@ model never sees -- it cannot make an answer shorter, only cut it mid-sentence
 -- so asking the user to pick a number only gave them a way to truncate their
 own answers. What replaces it is arithmetic:
 
-    max_tokens = max(512, W_eff - prompt - max(256, 10 % of prompt))
-    prompt     = ceil(r * request_tokens_est(messages, tools))
+    max_tokens = max(512, W_eff - prompt - max(256, 10 % of (prompt - exact)))
 
 - ``W_eff`` is the working window of the loaded child (the allocated window
   folded with the memory ceiling, ``src.engines.working_window``, stamped on
@@ -14,17 +13,20 @@ own answers. What replaces it is arithmetic:
   fixed upper bound on top of it. A model that will not stop is a runtime
   problem -- cancel the turn -- not something a smaller number fixes, and
   every fixed cap ever chosen truncated a legitimate long answer somewhere.
-- ``prompt`` is what the request occupies in REAL tokens: chars/4 over the
-  request as sent -- system prompt, KB block, history after the strippers AND
-  the tool schemas the call carries -- scaled by a ratio the server measured
-  (``src.agents.token_accounting``): a later hop of the current turn, else
-  the first-hop ratio the runner stamped on the client, else the script-aware
-  fallback (``script_ratio``: English 1.0, CJK 3 to 4). Never the compaction
-  counter's 1.5 floor: here an over-estimate silently truncates the answer.
+- ``prompt`` is what the request occupies in REAL tokens, costed message by
+  message (``src.agents.token_accounting.real_tokens_est``): what the
+  server already measured at its measured ratio, the answers it generated at
+  their exact ``output_tokens``, everything new -- the question, a paste, the
+  KB block, a tool result -- at the script weight of its own text, with the
+  budget's settings (CJK at 0.65 token per character, no floor: here an
+  over-estimate silently truncates the answer). The tool schemas the call
+  carries are counted too. ``exact`` is the part costed from
+  ``output_tokens``.
 - The margin covers what the estimate still cannot see: the chat template's
-  own tokens and the error left in the ratio. Flat 256 tokens for short
-  prompts, 10 % once the conversation is big enough that a percentage is the
-  honest shape of the error.
+  own tokens and the error left in the estimated part (never in the exact
+  one: a 24.8k-token answer counted exactly does not eat 2.5k of margin).
+  Flat 256 tokens for short prompts, 10 % of the estimated part once it is
+  big enough that a percentage is the honest shape of the error.
 - The 512-token floor keeps a window-filling turn from being handed a
   zero-token budget. What happens next belongs to the engine, which knows:
   llama-server truncates ``n_predict`` against its own remaining window, MLX's
@@ -61,11 +63,10 @@ CJK string, so neither can silently adopt the other's.
 
 from __future__ import annotations
 
-import math
 import os
 from typing import Any, Iterable, Optional
 
-from src.agents.token_accounting import request_tokens_est, script_ratio
+from src.agents.token_accounting import BUDGET_DENSE_TOKENS, real_tokens_est
 from src.core.logging import logger
 
 # Never hand a model a budget below this, however full the window is.
@@ -109,13 +110,11 @@ def compute_output_budget(
     override: Optional[int] = None,
     *,
     tools: Optional[Iterable[Any]] = None,
-    ratio: Optional[float] = None,
 ) -> Optional[int]:
     """Tokens this call may generate, or ``None`` to leave the caller's value.
 
-    ``ratio`` is the measured real-tokens-per-estimate ratio the caller picked
-    (see the module docstring); ``None`` means nothing is measured and the
-    script-aware fallback applies. ``tools`` are the schemas the request
+    ``messages`` is the request as sent (the stamped AI messages keep their
+    usage through the strippers and the fold) and ``tools`` the schemas it
     carries. Pure: the environment is read by :func:`output_budget_override`,
     which the caller passes in, so the arithmetic stays testable on its own.
     """
@@ -124,10 +123,7 @@ def compute_output_budget(
     if not effective_window_tokens or effective_window_tokens <= 0:
         return None
     try:
-        messages = list(messages or ())
-        if ratio is None:
-            ratio = script_ratio(messages)
-        estimated = math.ceil(ratio * request_tokens_est(messages, tools)) if messages else 0
+        prompt = real_tokens_est(list(messages or ()), dense=BUDGET_DENSE_TOKENS, tools=tools)
     except Exception:
         # The budget is an optimisation over a working default; it must never
         # be the reason a turn fails. A message shape the counter cannot read
@@ -138,5 +134,5 @@ def compute_output_budget(
             exc_info=True,
         )
         return None
-    margin = max(MARGIN_FLOOR_TOKENS, int(MARGIN_FRACTION * estimated))
-    return max(OUTPUT_BUDGET_FLOOR_TOKENS, effective_window_tokens - estimated - margin)
+    margin = max(MARGIN_FLOOR_TOKENS, int(MARGIN_FRACTION * (prompt.total - prompt.exact)))
+    return max(OUTPUT_BUDGET_FLOOR_TOKENS, effective_window_tokens - prompt.total - margin)

@@ -196,12 +196,13 @@ Conversations and Arena share one streaming primitive, `AgentRunner`
   10 messages and at most a token budget of the working window, and its summary is
   capped (see the [Conversations guide](guides/conversations.md)).
 - **Token counts are real tokens without a tokenizer in the backend**
-  (`agents/token_accounting.py`): one estimator, `chars / 4` over the request as sent
-  (`request_tokens_est`, tool schemas included), scaled by a ratio the server measured on
-  the same conversation — every client streams the server's usage, and the chunk that
-  carries it is stamped with the estimate of the request it answers. The output budget,
-  the compaction counter and the amber-warning projection all read it; the first-chunk
-  watchdog keeps its own one-token-per-byte upper bound (see Streaming budgets).
+  (`agents/token_accounting.py`), costed message by message: every client streams the
+  server's usage, and the chunk that carries it is stamped with the `chars / 4` estimate
+  of the request it answers (`request_tokens_est`, tool schemas included). What was inside
+  the last measured request costs its measured ratio, the answers the server generated
+  their exact output tokens, new text a script weight of its own (`real_tokens_est`). The
+  output budget, the compaction counter and the amber-warning projection all read it; the
+  first-chunk watchdog keeps its own one-token-per-byte upper bound (see Streaming budgets).
 - **Arena** runs stateless: no `thread_id`, no summarization, no checkpointer.
 
 Each conversation or Arena turn claims the engine's prefix cache for itself

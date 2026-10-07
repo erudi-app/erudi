@@ -84,7 +84,7 @@ stops when it is done.
 So every model call gets its budget computed from the window it is running in:
 
 ```
-max_tokens = max(512, window − prompt − margin)      margin = max(256, 10 % of prompt)
+max_tokens = max(512, window − prompt − margin)      margin = max(256, 10 % of the estimated part)
 ```
 
 The window is the working window the loaded model runs with (see
@@ -92,21 +92,35 @@ The window is the working window the loaded model runs with (see
 about to be sent — system prompt, knowledge-base block, history, and the tool schemas the call
 carries — so a long conversation leaves a smaller budget than a fresh one, and each hop of a
 tool-calling turn is budgeted again against its own longer history. The margin covers what the
-estimate still cannot see, such as the chat template's own tokens.
+estimate still cannot see, such as the chat template's own tokens; it applies to the estimated part
+of the prompt only, never to the answers counted exactly (below).
 
 There is no fixed ceiling above that: the window is the ceiling.
 
 The prompt in that formula is counted in **real tokens** without tokenizing anything in the
-backend: `chars / 4` over the request, scaled by a ratio the model's own server measured on this
-conversation (`backend/src/agents/token_accounting.py`). Every call asks the server for its usage;
-the last streamed chunk then carries the exact prompt size, and the client stamps that chunk with
-its own `chars / 4` estimate of the same request, so `ratio = real prompt tokens / estimate`
-(clamped to 0.8–6; requests that carried images are skipped). A later hop of the current turn uses
-its own measurement; a turn's first hop uses the ratio measured on the last **first hop** (a
-request that ended with a user message: later hops of a knowledge-base or web turn carry that
-turn's search results and read higher). When nothing is measured yet — the first turn, the Arena
-— a script-aware estimate stands in: English and code 1.0, French about 1.02, Russian about 1.5,
-Chinese, Japanese and Korean 3 to 4. This applies on every engine, llama.cpp included.
+backend, **message by message** (`backend/src/agents/token_accounting.py`): one ratio measured on
+a request of one composition is wrong on a request of another (short English turns measure about
+0.85, a long paste after them needs 1.0–1.2). Every call asks the server for its usage; the last
+streamed chunk then carries the exact prompt size, and the client stamps that chunk with its own
+`chars / 4` estimate of the same request, so `ratio = real prompt tokens / estimate` (clamped to
+0.8–6; requests that carried images are skipped; the knowledge-base block a request carried is
+taken out of both sides, since the next request no longer carries it). Then, for the request
+about to be sent:
+
+- the messages that were inside the last measured request — the latest request of the current
+  turn, else the last turn's first request — cost `chars / 4 × ratio`;
+- an answer the server generated (without reasoning) costs exactly its `output_tokens`; with
+  reasoning, only the text the history replays is weighed;
+- everything new — the question, a paste, a tool result of this turn, the knowledge-base block, a
+  summary — costs `chars / 4` × the **script weight** of its own text: digits one token each,
+  Chinese, Japanese and Korean characters 0.65 token each, other non-Latin letters 0.4 token each,
+  everything else `chars / 4`;
+- the system prompt and the tool schemas cost the measured ratio, or their own script weight
+  when nothing is measured yet (the first turn, the Arena).
+
+The script weights are constants that depend on the tokenizer: on a model whose tokenizer splits
+more finely (Japanese kana, a small vocabulary, Devanagari or Thai) the new text can be
+under-counted until it has been sent once. This applies on every engine, llama.cpp included.
 
 `llama-server` trims its own generation against what is actually left of the window.
 `mlx_vlm.server` checks `prompt + budget ≤ window` against the real tokenised prompt before
@@ -509,16 +523,17 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    messages, adjusted the same way.
 
    **Every count is in real tokens, as sent.** The trigger, the keep, the summarizer's trim and the
-   warning projection count `ceil(ratio × chars / 4)` (`real_token_count`) over the history as the
-   model receives it: past turns' knowledge-base and web results count as the short markers that
-   replace them in the request, not as the full results the checkpoint keeps. The ratio is frozen
-   once per model call from the whole state — a later hop of the current turn, else the last
-   measured first hop (see [Output budget](#output-budget)), else the value the summary message
-   carries (a compaction writes the first-hop ratio it knew on the summary), else
-   `max(1.5, script-aware estimate)`: counting high only compacts a little earlier. The usage
-   total a model call reports is never used to trigger a compaction directly (a kept answer's
-   report counts messages that are gone). Images are still counted at the estimator's 85 tokens
-   each.
+   warning projection cost each message as the output budget does (see
+   [Output budget](#output-budget)) over the history as the model receives it: past turns'
+   knowledge-base and web results count as the short markers that replace them in the request,
+   not as the full results the checkpoint keeps. The weights are frozen once per model call from
+   the whole state, per message, so a partial copy the summarizer trims costs its share. The
+   counter counts new text a little higher than the budget — Chinese, Japanese and Korean
+   characters one token each, and no script weight below 1.2 — because counting high only
+   compacts a little earlier (a paste of tens of thousands of Chinese characters can trigger one
+   compaction that was not needed). The usage total a model call reports is never used to
+   trigger a compaction directly (a kept answer's report counts messages that are gone). Images
+   are still counted at the estimator's 85 tokens each.
 
    **The summary itself is bounded**: the summary client is capped at
    `summary_cap(W) = clamp(W / 8, 128, 1024)` tokens, with no automatic output budget and no
@@ -547,8 +562,10 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
 
    **Warn only when compaction cannot save you**: the middleware compacts in `before_model`, so
    this turn's growth is compacted on the *next* turn. At the end of each turn the runner therefore
-   projects the next request in real tokens — the turn just answered counted as past, the request
-   overhead *O* on top: when a compaction would happen, `O` + the tail `compaction_cutoff` would
+   projects the next request in real tokens — the turn just answered counted as past, an empty
+   next question appended (so the projection keeps what the next request's compaction keeps), the
+   system prompt and tool schemas on top (not the knowledge-base block of the turn just answered,
+   which the next request does not carry): when a compaction would happen, `O` + the tail `compaction_cutoff` would
    keep + a `summary_cap(W)`-token summary (a 512-token allowance when no window is known);
    otherwise `O` + the whole conversation, with no summary added — and emits one `memory_warning`
    event only if, even after compacting to the kept budget, the model plus the kept conversation

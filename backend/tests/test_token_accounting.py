@@ -1,11 +1,12 @@
-"""Real-token accounting: one estimator, measured ratios, a script-aware fallback.
+"""Real-token accounting, message by message (plan 3.2b v17).
 
-The local servers report the real prompt size of every call (``usage``); the
-app keeps estimating with chars/4 and scales the estimate by the ratio the
-server measured on a comparable request. These tests pin the estimator, the
-two ratio readers (the last stamped FIRST hop, and a later hop of the current
-turn), the summary-carried ratio, and the fallback used before anything is
-measured.
+One ratio measured on a request of one composition is wrong on a request of
+another, so a list of messages is costed per message: the messages before the
+anchor k (the last stamped hop of the current turn, else the last stamped
+first hop) at its measured r; an AI message without reasoning at its exact
+``output_tokens``; everything else at the script weight of its own text. These
+tests pin each rule; ``test_live_token_accounting.py`` pins them on the texts
+and counts of the live run.
 """
 
 from __future__ import annotations
@@ -18,21 +19,32 @@ from langchain_core.messages.utils import count_tokens_approximately
 from langchain_core.tools import tool
 
 from src.agents.token_accounting import (
-    COUNTER_FALLBACK_RATIO_FLOOR,
-    FIRST_HOP_RATIO_KWARG,
+    BUDGET_DENSE_TOKENS,
+    COUNTER_DENSE_TOKENS,
+    COUNTER_WEIGHT_FLOOR,
     RATIO_CEILING,
     RATIO_FLOOR,
     REQUEST_EST_KEY,
     REQUEST_FIRST_HOP_KEY,
     REQUEST_HAS_IMAGES_KEY,
-    counter_ratio,
-    current_turn_ratio,
+    STALE_TOOL_RESULT_MARKERS,
+    RequestOverhead,
+    estimate,
+    exact_tokens,
     first_hop_ratio,
+    has_reasoning,
     hop_ratio,
+    last_human_index,
+    measured_anchor,
+    message_weights,
     messages_have_images,
-    request_overhead_est,
+    overhead_tokens,
+    real_tokens_est,
+    request_overhead,
     request_tokens_est,
-    script_ratio,
+    script_weight,
+    stale_result_copy,
+    weighted_cost,
 )
 
 pytestmark = pytest.mark.unit
@@ -44,14 +56,14 @@ def search_knowledge_base(query: str) -> str:
     return ""
 
 
-def _hop(input_tokens, est, *, first=True, images=False, content="a", **kwargs):
+def _hop(input_tokens, est, *, first=True, images=False, content="a", output_tokens=5, **kwargs):
     """An AI message as ``_astream`` leaves it: server usage + the stamp."""
     return AIMessage(
         content=content,
         usage_metadata={
             "input_tokens": input_tokens,
-            "output_tokens": 10,
-            "total_tokens": input_tokens + 10,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
         },
         response_metadata={
             REQUEST_EST_KEY: est,
@@ -62,14 +74,16 @@ def _hop(input_tokens, est, *, first=True, images=False, content="a", **kwargs):
     )
 
 
-def _summary(ratio=None):
-    kwargs = {"lc_source": "summarization"}
-    if ratio is not None:
-        kwargs[FIRST_HOP_RATIO_KWARG] = ratio
+def _summary(text="facts", msg_id="s0"):
     return HumanMessage(
-        content="Here is a summary of the conversation to date:\n\nfacts",
-        additional_kwargs=kwargs,
+        content=f"Here is a summary of the conversation to date:\n\n{text}",
+        additional_kwargs={"lc_source": "summarization"},
+        id=msg_id,
     )
+
+
+def _budget_est(messages, **kwargs):
+    return real_tokens_est(messages, dense=BUDGET_DENSE_TOKENS, **kwargs)
 
 
 # ===================== the one estimator =====================
@@ -80,35 +94,14 @@ def test_the_request_estimator_is_count_tokens_approximately_with_its_defaults()
     assert request_tokens_est(messages) == count_tokens_approximately(messages)
 
 
-def test_the_request_estimator_counts_the_tool_schemas():
-    messages = [HumanMessage("hello")]
-    assert request_tokens_est(messages, [search_knowledge_base]) > request_tokens_est(messages)
-
-
-def test_tools_are_converted_the_same_way_on_both_sides():
-    """The stamp sees the request's dict schemas, the overhead sees BaseTool
-    objects: both are converted to the OpenAI shape, so they count alike."""
+def test_the_request_estimator_counts_the_tool_schemas_converted_alike():
     from langchain_core.utils.function_calling import convert_to_openai_tool
 
     messages = [HumanMessage("hello")]
-    as_dicts = [convert_to_openai_tool(search_knowledge_base)]
-    assert request_tokens_est(messages, as_dicts) == request_tokens_est(
-        messages, [search_knowledge_base]
+    assert request_tokens_est(messages, [search_knowledge_base]) > request_tokens_est(messages)
+    assert request_tokens_est(messages, [convert_to_openai_tool(search_knowledge_base)]) == (
+        request_tokens_est(messages, [search_knowledge_base])
     )
-
-
-def test_the_overhead_counts_the_system_prompt_the_tools_and_the_kb_additions_unscaled():
-    system = "You are helpful. " * 20
-    bare = request_overhead_est(system, None, "", [])
-    assert bare == request_tokens_est([SystemMessage(system)])
-    with_tools = request_overhead_est(system, None, "", [search_knowledge_base])
-    assert with_tools == request_tokens_est([SystemMessage(system)], [search_knowledge_base])
-    block = "excerpt " * 100
-    line = "Answer in French."
-    with_kb = request_overhead_est(system, block, line, [])
-    # The block, the two blank-line joins and the language line, exactly as
-    # ``_KbContextMiddleware._merge`` adds them; the question is NOT counted.
-    assert with_kb == bare + math.ceil((len(block) + 4 + len(line)) / 4)
 
 
 def test_images_are_detected_in_content_parts():
@@ -125,172 +118,280 @@ def test_images_are_detected_in_content_parts():
     )
 
 
-# ===================== the measured ratio of one hop =====================
+def test_one_last_human_index_and_one_marker_helper():
+    from src.agents import middleware
+
+    messages = [HumanMessage("a"), AIMessage("b"), HumanMessage("c"), AIMessage("d")]
+    assert last_human_index(messages) == 2
+    assert last_human_index([AIMessage("x")]) is None
+    result = ToolMessage("big", name="web_search", tool_call_id="c", id="t")
+    marked = stale_result_copy(result)
+    assert marked.content == STALE_TOOL_RESULT_MARKERS["web_search"] and marked.id == "t"
+    assert stale_result_copy(ToolMessage("4", name="calculator", tool_call_id="c")).content == "4"
+    assert middleware.STALE_TOOL_RESULT_MARKERS is STALE_TOOL_RESULT_MARKERS
 
 
-def test_a_hop_ratio_is_input_tokens_over_the_stamped_estimate():
+# ===================== a hop's measured ratio =====================
+
+
+def test_a_hop_ratio_is_input_tokens_over_the_stamped_estimate_clamped():
     assert hop_ratio(_hop(1100, 1000)) == pytest.approx(1.1)
+    assert hop_ratio(_hop(100, 1000)) == RATIO_FLOOR
+    assert hop_ratio(_hop(10_000, 1000)) == RATIO_CEILING
 
 
-@pytest.mark.parametrize(
-    "input_tokens, est, expected",
-    [(100, 1000, RATIO_FLOOR), (10_000, 1000, RATIO_CEILING)],
-)
-def test_a_hop_ratio_is_clamped(input_tokens, est, expected):
-    assert hop_ratio(_hop(input_tokens, est)) == expected
-
-
-def test_an_image_hop_has_no_ratio():
-    # The estimator counts 85 tokens per image, the server the real ones.
+def test_an_image_or_unstamped_hop_has_no_ratio():
     assert hop_ratio(_hop(5000, 1000, images=True)) is None
-
-
-def test_a_hop_without_usage_or_stamp_has_no_ratio():
     assert hop_ratio(AIMessage("a")) is None
-    assert hop_ratio(AIMessage("a", response_metadata={REQUEST_EST_KEY: 1000})) is None
-    assert (
-        hop_ratio(
-            AIMessage(
-                "a", usage_metadata={"input_tokens": 10, "output_tokens": 1, "total_tokens": 11}
-            )
-        )
-        is None
-    )
     assert hop_ratio(_hop(1000, 0)) is None
     assert hop_ratio(HumanMessage("q")) is None
 
 
-# ===================== first_hop_ratio =====================
-
-
-def _kb_turn(first_r=1.1, last_r=2.14):
-    """A finished KB/web turn: first hop (tool call), the tool result, then
-    the last hop, whose request carried the large results."""
-    return [
-        HumanMessage("question", id="h1"),
-        _hop(
-            int(first_r * 1000),
-            1000,
-            first=True,
-            content="",
-            tool_calls=[{"name": "search_knowledge_base", "args": {}, "id": "c1"}],
-            id="a1",
-        ),
-        ToolMessage("results " * 500, tool_call_id="c1", name="search_knowledge_base", id="t1"),
-        _hop(int(last_r * 1000), 1000, first=False, content="the answer", id="a2"),
-    ]
-
-
-def test_first_hop_ratio_reads_the_last_stamped_first_hop_not_the_last_hop():
-    assert first_hop_ratio(_kb_turn()) == pytest.approx(1.1)
-
-
-def test_the_stamp_wins_over_the_position():
-    """After a compaction the AI message right after the summary is often a
-    turn's LAST hop: its position says nothing, the stamp does."""
+def test_first_hop_ratio_reads_the_last_stamped_first_hop_only():
     messages = [
-        _summary(),
-        _hop(2140, 1000, first=False, content="last hop kept by the compaction"),
-        HumanMessage("next"),
+        HumanMessage("q"),
+        _hop(1100, 1000),
+        HumanMessage("q2"),
+        _hop(2140, 1000, first=False),
     ]
-    assert first_hop_ratio(messages) is None
+    assert first_hop_ratio(messages) == pytest.approx(1.1)
+    assert first_hop_ratio([HumanMessage("q"), AIMessage("a")]) is None
 
 
-def test_first_hop_ratio_falls_back_to_the_summary_carried_value():
-    messages = [_summary(1.3), _hop(2140, 1000, first=False), HumanMessage("next")]
-    assert first_hop_ratio(messages) == pytest.approx(1.3)
+# ===================== the anchor k =====================
 
 
-def test_a_stamped_first_hop_after_the_summary_wins_over_the_carried_value():
-    messages = [_summary(1.3), _hop(2500, 1000, first=True), HumanMessage("next")]
-    assert first_hop_ratio(messages) == pytest.approx(2.5)
+def test_the_anchor_is_the_last_stamped_hop_of_the_current_turn():
+    messages = [
+        HumanMessage("q", id="q"),
+        _hop(
+            1100, 1000, msg_id="h1", content="", tool_calls=[{"name": "t", "args": {}, "id": "c"}]
+        ),
+        ToolMessage("result", tool_call_id="c", id="t"),
+        _hop(2000, 1000, first=False, content=""),
+    ]
+    assert measured_anchor(messages) == (3, pytest.approx(2.0))
 
 
-def test_first_hop_ratio_skips_image_hops():
+def test_without_a_hop_after_the_last_question_the_anchor_is_the_last_first_hop():
     messages = [
         HumanMessage("q1"),
-        _hop(1200, 1000, first=True),
-        HumanMessage("q2 with an image"),
-        _hop(9000, 1000, first=True, images=True),
+        _hop(1100, 1000),
+        ToolMessage("result", tool_call_id="c"),
+        _hop(2140, 1000, first=False),
+        HumanMessage("q2"),
     ]
-    assert first_hop_ratio(messages) == pytest.approx(1.2)
+    assert measured_anchor(messages) == (1, pytest.approx(1.1))
 
 
-def test_first_hop_ratio_is_none_when_nothing_is_measured():
-    assert first_hop_ratio([HumanMessage("q"), AIMessage("a"), HumanMessage("q2")]) is None
-    assert first_hop_ratio([]) is None
+def test_nothing_measured_means_no_anchor():
+    assert measured_anchor([HumanMessage("q"), AIMessage("a"), HumanMessage("q2")]) == (None, None)
 
 
-# ===================== current_turn_ratio =====================
+# ===================== the script weight =====================
 
 
-def test_current_turn_ratio_reads_a_later_hop_of_the_current_turn():
-    messages = _kb_turn()[:3]  # mid-turn: question, first hop, tool result
-    assert current_turn_ratio(messages) == pytest.approx(1.1)
-    assert current_turn_ratio(_kb_turn()) == pytest.approx(2.14)
+def test_english_prose_reads_one_and_digits_read_one_token_each():
+    assert script_weight("The quick brown fox jumps over the lazy dog. " * 10, dense=1.0) == 1.0
+    assert script_weight("2026", dense=1.0) == pytest.approx(4.0)  # four tokens, chars/4 says one
+    assert script_weight("in 1854 near kilometre 42", dense=1.0) > 1.4
 
 
-def test_current_turn_ratio_is_none_at_a_first_hop():
-    messages = _kb_turn() + [HumanMessage("next question")]
-    assert current_turn_ratio(messages) is None
+def test_french_russian_and_cjk():
+    text = ("le cafe est servi dans la petite salle du chateau pres de la riviere " * 3)[:92]
+    assert script_weight(text + "éèàç", dense=1.0) == pytest.approx(1.025, abs=0.01)
+    russian = "Привет, как дела? Сегодня хорошая погода и мы идём гулять в парк. " * 10
+    assert 1.35 <= script_weight(russian, dense=1.0) <= 1.6
+    cjk = "这是一个很长的中文句子，用来测试预算的计算方式。" * 20
+    assert 3.0 <= script_weight(cjk, dense=COUNTER_DENSE_TOKENS) <= 4.0
+    assert 2.0 <= script_weight(cjk, dense=BUDGET_DENSE_TOKENS) <= 2.6
 
 
-# ===================== the script-aware fallback =====================
+def test_an_empty_text_weighs_one():
+    assert script_weight("", dense=1.0) == 1.0
 
 
-def test_english_and_code_read_about_one():
-    assert script_ratio([HumanMessage("The quick brown fox jumps over the lazy dog. " * 20)]) == 1.0
-    assert script_ratio([HumanMessage("def f(x):\n    return x * 2  # double\n" * 20)]) == 1.0
+# ===================== exact AI messages =====================
 
 
-def test_french_with_a_few_accents_reads_about_1_02():
-    text = ("le cafe est servi dans la petite salle du chateau pres de la riviere " * 3)[:96]
-    text = text[:92] + "éèàç"  # 4 % accented letters
-    assert script_ratio([HumanMessage(text)]) == pytest.approx(1.024, abs=0.01)
+def test_an_ai_message_without_reasoning_costs_its_output_tokens_plus_overhead():
+    message = _hop(500, 400, content="x" * 4000, output_tokens=900)
+    overhead = estimate(AIMessage(content=""))
+    assert exact_tokens(message) == 900 + overhead
+    assert weighted_cost(message, 900 / 1) > 0
 
 
-def test_russian_reads_about_1_5():
-    text = "Привет, как дела? Сегодня хорошая погода и мы идём гулять в парк. " * 10
-    assert 1.35 <= script_ratio([HumanMessage(text)]) <= 1.6
+def test_a_thinking_model_answer_is_weighed_by_its_text_not_its_output_tokens():
+    reasoning = _hop(500, 400, content="The answer is four.", output_tokens=6000)
+    reasoning.additional_kwargs["reasoning_content"] = "let me think " * 500
+    inline = _hop(500, 400, content="<think>long</think>The answer.", output_tokens=6000)
+    assert has_reasoning(reasoning) and has_reasoning(inline)
+    assert exact_tokens(reasoning) is None and exact_tokens(inline) is None
+    cost = _budget_est([HumanMessage("q", id="q"), reasoning]).total
+    assert cost < 100
 
 
-def test_hindi_counts_the_combining_marks_too():
-    text = "नमस्ते, आप कैसे हैं? आज मौसम बहुत अच्छा है। " * 10
-    assert script_ratio([HumanMessage(text)]) >= 1.4
+# ===================== per-message weights =====================
 
 
-def test_cjk_reads_three_to_four():
-    text = "这是一个很长的中文句子，用来测试预算的计算方式。" * 20
-    assert 3.0 <= script_ratio([HumanMessage(text)]) <= 4.0
-    assert 3.0 <= script_ratio([HumanMessage("これは日本語の文章です。" * 20)]) <= 4.0
-    assert 3.0 <= script_ratio([HumanMessage("이것은 한국어 문장입니다" * 20)]) <= 4.0
+def test_messages_before_the_anchor_cost_r_and_the_rest_their_own_weight():
+    paste = HumanMessage("北京的秋天很美。" * 200, id="paste")
+    messages = [
+        HumanMessage("hello there, how are you?", id="h1"),
+        _hop(90, 100, msg_id="a1", content="fine, thanks", output_tokens=4),
+        paste,
+    ]
+    weights, ratio = message_weights(messages, dense=BUDGET_DENSE_TOKENS)
+    assert ratio == pytest.approx(0.9)
+    assert weights[0] == pytest.approx(0.9)
+    assert weights[1] == pytest.approx(exact_tokens(messages[1]) / estimate(messages[1]))
+    assert weights[2] == pytest.approx(script_weight(paste.content, dense=BUDGET_DENSE_TOKENS))
 
 
-def test_script_ratio_of_nothing_is_one():
-    assert script_ratio([]) == 1.0
-    assert script_ratio([AIMessage("")]) == 1.0
+def test_a_summary_before_the_anchor_is_weighed_as_new_text():
+    messages = [_summary("这是摘要" * 50), _hop(3000, 1000, msg_id="a"), HumanMessage("next")]
+    weights, ratio = message_weights(messages, dense=COUNTER_DENSE_TOKENS)
+    assert ratio == pytest.approx(3.0)
+    assert weights[0] == pytest.approx(script_weight(messages[0].content, dense=1.0))
 
 
-def test_script_ratio_reads_text_parts_of_multimodal_content():
-    message = HumanMessage(
-        content=[
-            {"type": "text", "text": "中文句子" * 20},
-            {"type": "image_url", "image_url": {"url": "data:image/png;base64," + "A" * 4000}},
-        ]
+def test_the_counter_floors_script_weights_at_1_2():
+    weights, _ = message_weights(
+        [HumanMessage("plain english words", id="h")],
+        dense=COUNTER_DENSE_TOKENS,
+        weight_floor=COUNTER_WEIGHT_FLOOR,
     )
-    assert script_ratio([message]) == 4.0
+    assert weights == [COUNTER_WEIGHT_FLOOR]
 
 
-# ===================== the counter's ratio =====================
+def test_costs_are_additive():
+    messages = [
+        HumanMessage("hello 2026", id="h1"),
+        _hop(90, 100, msg_id="a1", content="fine", output_tokens=4),
+        HumanMessage("长城很长" * 30, id="h2"),
+    ]
+    weights, _ = message_weights(messages, dense=BUDGET_DENSE_TOKENS)
+    total = sum(weighted_cost(m, w) for m, w in zip(messages, weights))
+    assert total == _budget_est(messages).total
 
 
-def test_the_counter_prefers_the_current_turn_then_the_first_hop():
-    assert counter_ratio(_kb_turn()[:3]) == pytest.approx(1.1)
-    assert counter_ratio(_kb_turn() + [HumanMessage("next")]) == pytest.approx(1.1)
+def test_a_partial_copy_costs_its_share():
+    message = HumanMessage("北京" * 1000, id="big")
+    weight = script_weight(message.content, dense=COUNTER_DENSE_TOKENS)
+    half = message.model_copy(update={"content": message.content[:1000]})
+    assert weighted_cost(half, weight) == pytest.approx(
+        weighted_cost(message, weight) / 2, rel=0.02
+    )
 
 
-def test_the_counter_falls_back_to_max_1_5_and_the_script_ratio():
-    english = [HumanMessage("hello there, how are you today?")]
-    assert counter_ratio(english) == COUNTER_FALLBACK_RATIO_FLOOR == 1.5
-    cjk = [HumanMessage("这是一个很长的中文句子" * 20)]
-    assert counter_ratio(cjk) == script_ratio(cjk) > 1.5
+def test_the_exact_part_of_a_request():
+    looping = _hop(7926, 6701, msg_id="loop", content="z" * 100_000, output_tokens=24_778)
+    result = _budget_est([HumanMessage("summary", id="s"), looping, HumanMessage("next")])
+    assert result.exact == 24_778 + estimate(AIMessage(content=""))
+    assert result.total - result.exact < 100
+
+
+# ===================== the request overhead =====================
+
+
+def test_the_overhead_splits_the_fixed_part_from_the_kb_additions():
+    overhead = request_overhead("You are helpful.", "excerpt " * 50, "Answer in French.", [])
+    assert overhead.fixed_est == request_tokens_est([SystemMessage("You are helpful.")])
+    assert overhead.added_text == "excerpt " * 50 + "\n\n\n\nAnswer in French."
+    with_tools = request_overhead("You are helpful.", None, "", [search_knowledge_base])
+    assert with_tools.fixed_est == request_tokens_est(
+        [SystemMessage("You are helpful.")], [search_knowledge_base]
+    )
+    assert "search_knowledge_base" in with_tools.fixed_text
+
+
+def test_the_fixed_overhead_costs_r_when_measured_and_its_own_weight_otherwise():
+    overhead = RequestOverhead(fixed_est=1000, fixed_text="english system prompt")
+    assert overhead_tokens(overhead, 0.9, dense=1.0) == 900
+    assert overhead_tokens(overhead, None, dense=1.0) == 1000
+    assert overhead_tokens(overhead, None, dense=1.0, weight_floor=1.2) == 1200
+
+
+def test_the_kb_additions_are_new_text_every_turn():
+    overhead = RequestOverhead(fixed_est=0, added_text="北京" * 400)
+    expected = math.ceil(script_weight("北京" * 400, dense=1.0) * math.ceil(800 / 4))
+    assert overhead_tokens(overhead, 0.9, dense=1.0) == expected
+
+
+def test_the_request_tools_cost_r_or_their_own_weight():
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+
+    tools = [convert_to_openai_tool(search_knowledge_base)]
+    tools_est = count_tokens_approximately([], tools=tools)
+    measured = [HumanMessage("q", id="q"), _hop(900, 1000, msg_id="a"), HumanMessage("q2")]
+    without = _budget_est(measured).total
+    assert _budget_est(measured, tools=tools).total == without + math.ceil(0.9 * tools_est)
+
+
+# ===================== a KB block is not history =====================
+
+
+def test_a_kb_turns_ratio_excludes_the_block_it_carried():
+    """``_KbContextMiddleware`` adds the block to the request only: the next
+    request no longer has it. CJK history (1000 estimated, real ratio 2.5)
+    plus an English block (1500 estimated, real 1500) measured a plain 1.6;
+    the history alone reads 2.5."""
+    from src.agents.token_accounting import REQUEST_KB_EST_KEY, REQUEST_KB_REAL_KEY
+
+    kb_turn = _hop(4000, 2500, msg_id="kb")
+    assert hop_ratio(kb_turn) == pytest.approx(1.6)
+    kb_turn.response_metadata[REQUEST_KB_EST_KEY] = 1500
+    kb_turn.response_metadata[REQUEST_KB_REAL_KEY] = 1500
+    assert hop_ratio(kb_turn) == pytest.approx(2.5)
+
+
+def test_a_degenerate_kb_stamp_falls_back_to_the_plain_ratio():
+    from src.agents.token_accounting import REQUEST_KB_EST_KEY, REQUEST_KB_REAL_KEY
+
+    hop = _hop(4000, 2500)
+    hop.response_metadata[REQUEST_KB_EST_KEY] = 2500  # nothing left of the request
+    hop.response_metadata[REQUEST_KB_REAL_KEY] = 3000
+    assert hop_ratio(hop) == pytest.approx(1.6)
+
+
+# ===================== inline reasoning =====================
+
+
+def test_inline_reasoning_costs_only_the_text_after_the_last_think_block():
+    answer = "The answer is four, as computed."
+    message = AIMessage(
+        id="t",
+        content="<think>" + "deliberating " * 400 + "</think>" + answer,
+        usage_metadata={"input_tokens": 500, "output_tokens": 3000, "total_tokens": 3500},
+    )
+    tail = AIMessage(content=answer)
+    cost = _budget_est([HumanMessage("q", id="q"), message]).total
+    alone = _budget_est([HumanMessage("q", id="q")]).total
+    assert cost - alone == math.ceil(
+        script_weight(answer, dense=BUDGET_DENSE_TOKENS) * estimate(tail)
+    )
+
+
+def test_an_empty_exact_answer_never_divides_by_zero():
+    from src.agents.token_accounting import fresh_weight
+
+    empty = _hop(10, 10, content="", output_tokens=7)
+    assert fresh_weight(empty, dense=1.0) == pytest.approx(exact_tokens(empty) / estimate(empty))
+
+
+# ===================== the densities are tokenizer-dependent constants =====================
+
+
+def test_the_script_densities_are_pinned():
+    """Non-regression: the constants of the unmeasured tail. They are
+    tokenizer-dependent (Japanese kana, small-vocabulary tokenizers and
+    Devanagari or Thai can be under-estimated -- the budget is caught by the
+    preflight retry, compaction may come late), so a change is a decision."""
+    from src.agents.token_accounting import DIGIT_TOKENS, OTHER_LETTER_TOKENS
+
+    assert (COUNTER_DENSE_TOKENS, COUNTER_WEIGHT_FLOOR, BUDGET_DENSE_TOKENS) == (1.0, 1.2, 0.65)
+    assert (DIGIT_TOKENS, OTHER_LETTER_TOKENS) == (1.0, 0.4)
+    assert script_weight("中文" * 50, dense=BUDGET_DENSE_TOKENS) == pytest.approx(2.6)
+    assert script_weight("ひらがなカタカナ" * 20, dense=BUDGET_DENSE_TOKENS) == pytest.approx(2.6)
+    assert script_weight("नमस्ते" * 30, dense=BUDGET_DENSE_TOKENS) == pytest.approx(1.6)
+    assert script_weight("1234567890", dense=BUDGET_DENSE_TOKENS) == pytest.approx(4.0)

@@ -221,3 +221,69 @@ async def test_the_stamp_and_usage_survive_a_postgres_checkpoint_round_trip(
     assert restored.response_metadata[REQUEST_EST_KEY] == request_tokens_est(messages)
     assert restored.response_metadata[REQUEST_FIRST_HOP_KEY] is True
     assert hop_ratio(restored) == hop_ratio(message)
+
+
+# ===================== the KB block's share of the request =====================
+
+_BLOCK = "Excerpt from the user manual: the device restarts after a long press. " * 30
+_KB_ADDITIONS = f"{_BLOCK}\n\n\n\nAnswer in Chinese."
+
+
+async def test_a_request_carrying_the_kb_block_stamps_its_size(monkeypatch):
+    from src.agents.token_accounting import (
+        REQUEST_KB_EST_KEY,
+        REQUEST_KB_REAL_KEY,
+        kb_stamp,
+    )
+
+    _patch_server(monkeypatch, _ANSWER)
+    merged = HumanMessage(f"{_BLOCK}\n\n设备怎么重启？\n\nAnswer in Chinese.")
+
+    message = await _client(kb_additions=_KB_ADDITIONS).ainvoke([merged])
+
+    expected = kb_stamp(_KB_ADDITIONS)
+    assert message.response_metadata[REQUEST_KB_EST_KEY] == expected[REQUEST_KB_EST_KEY]
+    assert message.response_metadata[REQUEST_KB_REAL_KEY] == expected[REQUEST_KB_REAL_KEY]
+
+
+async def test_a_request_without_the_block_stamps_no_kb_size(monkeypatch):
+    from src.agents.token_accounting import REQUEST_KB_EST_KEY
+
+    _patch_server(monkeypatch, _ANSWER)
+
+    message = await _client(kb_additions=_KB_ADDITIONS).ainvoke([HumanMessage("plain question")])
+
+    assert REQUEST_KB_EST_KEY not in message.response_metadata
+
+
+def test_cjk_history_and_an_english_kb_block_next_turn():
+    """The previous KB turn's request: an English block (1500 estimated, real
+    1500) around a CJK history (1000 estimated, real 2500). Its plain ratio is
+    1.6; the next request carries the history alone, which reads 2.5."""
+    from langchain_core.messages import AIMessage
+
+    from src.agents.token_accounting import (
+        BUDGET_DENSE_TOKENS,
+        REQUEST_HAS_IMAGES_KEY,
+        REQUEST_KB_EST_KEY,
+        REQUEST_KB_REAL_KEY,
+        message_weights,
+    )
+
+    kb_hop = AIMessage(
+        content="答案",
+        usage_metadata={"input_tokens": 4000, "output_tokens": 3, "total_tokens": 4003},
+        response_metadata={
+            REQUEST_EST_KEY: 2500,
+            REQUEST_HAS_IMAGES_KEY: False,
+            REQUEST_FIRST_HOP_KEY: True,
+            REQUEST_KB_EST_KEY: 1500,
+            REQUEST_KB_REAL_KEY: 1500,
+        },
+    )
+    history = HumanMessage("长城的历史很长。" * 100)
+    weights, ratio = message_weights(
+        [history, kb_hop, HumanMessage("下一个问题")], dense=BUDGET_DENSE_TOKENS
+    )
+    assert ratio == pytest.approx(2.5)
+    assert weights[0] == pytest.approx(2.5)

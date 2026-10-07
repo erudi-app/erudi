@@ -466,7 +466,7 @@ def test_one_estimator_for_the_stamp_the_counter_and_the_budget():
 
     assert estimate_prompt_tokens(messages) == count_tokens_approximately(messages)
     assert not hasattr(output_budget, "estimate_prompt_tokens"), "the duplicate is gone"
-    assert "request_tokens_est" in inspect.getsource(output_budget.compute_output_budget)
+    assert "real_tokens_est" in inspect.getsource(output_budget.compute_output_budget)
     assert "request_tokens_est" in inspect.getsource(chat_model)
     assert runner.approx_token_count(messages) == estimate_prompt_tokens(messages)
 
@@ -783,25 +783,25 @@ async def test_the_budget_composes_with_the_first_chunk_watchdog(monkeypatch):
     assert captured["max_tokens"] == compute_output_budget([HumanMessage("hi")], 32768)
 
 
-# ===================== the budget in real tokens (PR3.2b) =====================
+# ===================== the budget in real tokens (plan 3.2b v17) =====================
 #
-# The prompt is ``ceil(r * request_tokens_est(messages, tools))``: chars/4 over
-# the request AS SENT, tool schemas included, scaled by a ratio the server
-# measured -- a later hop of the current turn, else the first-hop ratio the
-# runner stamped on the client (``prompt_ratio``), else the script-aware
-# fallback. Never the compaction's 1.5 floor: for the budget an over-estimate
-# silently truncates the answer.
+# The prompt is costed message by message (``real_tokens_est``): what the
+# server measured at its measured ratio, its answers at their exact output
+# tokens, everything new at the script weight of its own text (CJK 0.65 token
+# per character, no floor), the tool schemas included. The margin applies to
+# the ESTIMATED part only. The live cases are pinned in
+# ``test_live_token_accounting.py``.
 
 
-def _stamped_hop(input_tokens, est, *, first=True, **kwargs):
+def _stamped_hop(input_tokens, est, *, first=True, output_tokens=5, content="", **kwargs):
     from langchain_core.messages import AIMessage
 
     return AIMessage(
-        content="",
+        content=content,
         usage_metadata={
             "input_tokens": input_tokens,
-            "output_tokens": 5,
-            "total_tokens": input_tokens + 5,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
         },
         response_metadata={
             "erudi_request_est": est,
@@ -809,17 +809,6 @@ def _stamped_hop(input_tokens, est, *, first=True, **kwargs):
             "erudi_request_first_hop": first,
         },
         **kwargs,
-    )
-
-
-def test_the_budget_scales_the_estimate_by_the_measured_ratio():
-    import math
-
-    messages = [_Msg(_text(1000))]
-    prompt = math.ceil(2.5 * estimate_prompt_tokens(messages))
-
-    assert compute_output_budget(messages, 32768, ratio=2.5) == 32768 - prompt - max(
-        MARGIN_FLOOR_TOKENS, int(MARGIN_FRACTION * prompt)
     )
 
 
@@ -833,15 +822,15 @@ def test_a_request_with_tool_schemas_gets_a_smaller_budget():
 
     messages = [_Msg(_text(500))]
 
-    assert compute_output_budget(
-        messages, 8192, tools=[search_knowledge_base], ratio=1.0
-    ) < compute_output_budget(messages, 8192, ratio=1.0)
+    assert compute_output_budget(messages, 8192, tools=[search_knowledge_base]) < (
+        compute_output_budget(messages, 8192)
+    )
 
 
 def test_a_first_turn_english_paste_keeps_todays_budget():
-    """Nothing measured yet: English reads 1.0 on the script fallback, so the
-    budget is the chars/4 one -- with the compaction's 1.5 it would collapse
-    to the floor (4800 tokens at W = 8192: ~2900 tokens instead of 512)."""
+    """Nothing measured yet: English prose weighs 1.0, so the budget is the
+    chars/4 one -- with the compaction's floor (1.2) it would be ~1000
+    tokens smaller."""
     messages = [_Msg(_text(4800))]
     est = estimate_prompt_tokens(messages)
 
@@ -849,91 +838,41 @@ def test_a_first_turn_english_paste_keeps_todays_budget():
 
     assert budget == 8192 - est - int(MARGIN_FRACTION * est)
     assert budget > 2800
-    assert compute_output_budget(messages, 8192, ratio=1.5) == OUTPUT_BUDGET_FLOOR_TOKENS
 
 
-def test_a_first_turn_cjk_paste_is_sized_on_the_script_ratio():
-    from src.agents.token_accounting import script_ratio
+def test_a_first_turn_cjk_paste_is_sized_at_the_budgets_density():
+    from src.agents.token_accounting import (
+        BUDGET_DENSE_TOKENS,
+        estimate,
+        script_weight,
+    )
 
     messages = [_Msg(_CJK)]
-    ratio = script_ratio(messages)
-    assert 3.0 <= ratio <= 4.0
+    weight = script_weight(_CJK, dense=BUDGET_DENSE_TOKENS)
+    assert 2.0 <= weight <= 2.6
+    prompt = -(-weight * estimate(messages[0]) // 1)
 
     budget = compute_output_budget(messages, 32768)
 
-    assert budget == compute_output_budget(messages, 32768, ratio=ratio)
-    assert budget < compute_output_budget(messages, 32768, ratio=1.0)
+    assert budget == 32768 - prompt - max(MARGIN_FLOOR_TOKENS, int(MARGIN_FRACTION * prompt))
+    assert budget < compute_output_budget([_Msg(_text(len(_CJK) // 4))], 32768)
 
 
-async def test_a_later_hop_uses_the_current_turns_ratio(monkeypatch):
+def test_the_margin_applies_to_the_estimated_part_only():
+    from src.agents.token_accounting import BUDGET_DENSE_TOKENS, real_tokens_est
+
+    looping = _stamped_hop(7926, 6701, output_tokens=24_778, content="z" * 100_000)
+    messages = [_Msg("summary " * 200), looping, _Msg("next question")]
+    prompt = real_tokens_est(messages, dense=BUDGET_DENSE_TOKENS)
+
+    budget = compute_output_budget(messages, 32768)
+
+    assert prompt.exact > 24_778
+    assert budget == 32768 - prompt.total - max(256, int(0.10 * (prompt.total - prompt.exact)))
+
+
+async def test_the_stream_budgets_the_request_as_sent_with_its_tools(monkeypatch):
     from langchain_core.messages import ToolMessage
-    from langchain_openai import ChatOpenAI
-
-    captured: dict = {}
-
-    async def _capture(self, messages, *args, **kwargs):
-        captured.update(kwargs)
-        yield "chunk"
-
-    monkeypatch.setattr(ChatOpenAI, "_astream", _capture)
-    messages = [
-        HumanMessage(_text(300)),
-        _stamped_hop(2000, 1000, tool_calls=[{"name": "t", "args": {}, "id": "c1"}]),
-        ToolMessage(_text(2000), tool_call_id="c1"),
-    ]
-    client = _client(max_tokens=1234, effective_context_tokens=32768, prompt_ratio=1.2)
-
-    assert [c async for c in client._astream(messages)] == ["chunk"]
-    assert captured["max_tokens"] == compute_output_budget(messages, 32768, ratio=2.0)
-
-
-async def test_a_first_hop_uses_the_clients_prompt_ratio(monkeypatch):
-    from langchain_core.messages import AIMessage
-    from langchain_openai import ChatOpenAI
-
-    captured: dict = {}
-
-    async def _capture(self, messages, *args, **kwargs):
-        captured.update(kwargs)
-        yield "chunk"
-
-    monkeypatch.setattr(ChatOpenAI, "_astream", _capture)
-    # The previous turn's LAST hop measured 2.14: not a first hop, ignored.
-    messages = [
-        HumanMessage(_text(300)),
-        _stamped_hop(2140, 1000, first=False),
-        AIMessage("the answer"),
-        HumanMessage(_text(300)),
-    ]
-    client = _client(max_tokens=1234, effective_context_tokens=32768, prompt_ratio=1.1)
-
-    assert [c async for c in client._astream(messages)] == ["chunk"]
-    assert captured["max_tokens"] == compute_output_budget(messages, 32768, ratio=1.1)
-
-
-async def test_without_a_measurement_the_stream_uses_the_script_ratio(monkeypatch):
-    from langchain_openai import ChatOpenAI
-
-    from src.agents.token_accounting import script_ratio
-
-    captured: dict = {}
-
-    async def _capture(self, messages, *args, **kwargs):
-        captured.update(kwargs)
-        yield "chunk"
-
-    monkeypatch.setattr(ChatOpenAI, "_astream", _capture)
-    messages = [HumanMessage(_CJK)]
-    client = _client(max_tokens=1234, effective_context_tokens=32768)
-
-    assert client.prompt_ratio is None
-    assert [c async for c in client._astream(messages)] == ["chunk"]
-    assert captured["max_tokens"] == compute_output_budget(
-        messages, 32768, ratio=script_ratio(messages)
-    )
-
-
-async def test_the_stream_budget_counts_the_requests_tool_schemas(monkeypatch):
     from langchain_core.utils.function_calling import convert_to_openai_tool
     from langchain_openai import ChatOpenAI
 
@@ -949,18 +888,20 @@ async def test_the_stream_budget_counts_the_requests_tool_schemas(monkeypatch):
 
     monkeypatch.setattr(ChatOpenAI, "_astream", _capture)
     tools = [convert_to_openai_tool(web_search)]
-    messages = [HumanMessage(_text(300))]
-    client = _client(max_tokens=1234, effective_context_tokens=8192, prompt_ratio=1.0)
+    messages = [
+        HumanMessage(_text(300)),
+        _stamped_hop(2000, 1000, tool_calls=[{"name": "web_search", "args": {}, "id": "c1"}]),
+        ToolMessage(_text(2000), tool_call_id="c1"),
+    ]
+    client = _client(max_tokens=1234, effective_context_tokens=32768)
 
     assert [c async for c in client._astream(messages, tools=tools)] == ["chunk"]
-    assert captured["max_tokens"] == compute_output_budget(messages, 8192, tools=tools, ratio=1.0)
-    assert captured["max_tokens"] < compute_output_budget(messages, 8192, ratio=1.0)
+    assert captured["max_tokens"] == compute_output_budget(messages, 32768, tools=tools)
+    assert captured["max_tokens"] < compute_output_budget(messages, 32768)
+    assert not hasattr(client, "prompt_ratio")
 
 
-async def test_prompt_ratio_reaches_the_stream_through_create_agents_tool_binding(monkeypatch):
-    """``create_agent`` wraps a tool-carrying client in a ``bind_tools``
-    binding: the field set by the factory must still be what ``_astream``
-    reads."""
+async def test_the_tools_reach_the_budget_through_create_agents_tool_binding(monkeypatch):
     from langchain.agents import create_agent
     from langchain_core.messages import AIMessageChunk
     from langchain_core.outputs import ChatGenerationChunk
@@ -980,16 +921,14 @@ async def test_prompt_ratio_reaches_the_stream_through_create_agents_tool_bindin
         yield ChatGenerationChunk(message=AIMessageChunk(content="done"))
 
     monkeypatch.setattr(ChatOpenAI, "_astream", _server)
-    client = _client(
-        max_tokens=1234, effective_context_tokens=8192, prompt_ratio=1.7, streaming=True
-    )
+    client = _client(max_tokens=1234, effective_context_tokens=8192, streaming=True)
     agent = create_agent(client, tools=[search_knowledge_base], system_prompt="be brief")
 
     await agent.ainvoke({"messages": [HumanMessage(_text(200))]})
 
     assert seen["kwargs"]["tools"], "the request carried the tool schemas"
     assert seen["kwargs"]["max_tokens"] == compute_output_budget(
-        seen["messages"], 8192, tools=seen["kwargs"]["tools"], ratio=1.7
+        seen["messages"], 8192, tools=seen["kwargs"]["tools"]
     )
 
 
@@ -1045,7 +984,7 @@ async def test_a_giant_first_message_still_gets_a_title_through_the_retry(monkey
     assert len(attempts) == 2
 
 
-def test_the_factory_streams_usage_and_carries_the_ratio_and_the_retry_flag(monkeypatch):
+def test_the_factory_streams_usage_and_carries_the_kb_text_and_the_retry_flag(monkeypatch):
     from src.agents.model_factory import build_chat_model
     from src.core import config
 
@@ -1054,11 +993,16 @@ def test_the_factory_streams_usage_and_carries_the_ratio_and_the_retry_flag(monk
     default = build_chat_model(_Llm(), temperature=0.3, top_p=0.8, max_tokens=55)
     assert default.stream_usage is True
     assert default._should_stream_usage() is True
-    assert default.prompt_ratio is None
+    assert default.kb_additions == ""
     assert default.preflight_retry is True
 
     summary = build_chat_model(
-        _Llm(), temperature=0.3, top_p=0.8, max_tokens=55, prompt_ratio=1.4, preflight_retry=False
+        _Llm(),
+        temperature=0.3,
+        top_p=0.8,
+        max_tokens=55,
+        kb_additions="BLOCK\n\n\n\nAnswer in English.",
+        preflight_retry=False,
     )
-    assert summary.prompt_ratio == 1.4
+    assert summary.kb_additions == "BLOCK\n\n\n\nAnswer in English."
     assert summary.preflight_retry is False

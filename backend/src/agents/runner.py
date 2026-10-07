@@ -61,7 +61,6 @@ from __future__ import annotations
 import contextlib
 import functools
 import json
-import math
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -81,12 +80,18 @@ from src.agents.output_budget import OUTPUT_BUDGET_FLOOR_TOKENS
 from src.agents.overflow import ContextOverflow, parse_context_overflow
 from src.agents.reasoning_effort import NO_REASONING_PLAN, EffortPlan
 from src.agents.token_accounting import (
-    COUNTER_FALLBACK_RATIO_FLOOR,
-    FIRST_HOP_RATIO_KWARG,
+    COUNTER_DENSE_TOKENS,
+    COUNTER_WEIGHT_FLOOR,
+    STALE_TOOL_RESULT_MARKERS,
     SUMMARY_SOURCE_MARKER,
-    first_hop_ratio,
-    request_overhead_est,
-    script_ratio,
+    RequestOverhead,
+    fresh_weight,
+    last_human_index,
+    message_weights,
+    overhead_tokens,
+    request_overhead,
+    stale_result_copy,
+    weighted_cost,
 )
 from src.database.generation_hints import resolve_sampling_defaults
 from src.agents.think_splitter import ThinkSplitter
@@ -305,39 +310,69 @@ def approx_token_count(messages: Any) -> int:
     return count_tokens_approximately(messages)
 
 
-def real_token_count(messages: Any, ratio: float, past_ids: frozenset = frozenset()) -> int:
-    """THE token counter of compaction, in real tokens:
-    ``ceil(r * chars/4)`` over the messages AS SENT.
+def _is_marker(message: Any) -> bool:
+    """A tool result already sent as its stale-result marker."""
+    return getattr(message, "type", None) == "tool" and getattr(
+        message, "content", None
+    ) == STALE_TOOL_RESULT_MARKERS.get(getattr(message, "name", None))
 
-    ``ratio`` is the measured ratio frozen for this count
-    (``token_accounting.counter_ratio``). A ToolMessage whose id is in
-    ``past_ids`` counts as its marker, exactly as ``_StripStaleToolResults``
-    sends it: the set is computed once from the full state, so this works on
-    any list LangChain hands it -- suffixes, the reversed pool of
-    ``trim_messages``, partial copies (they keep their id).
+
+def counter_weight(message: Any) -> float:
+    """The counter's weight for a message nothing was frozen for (rule 2 with
+    the counter's settings: CJK one token per character, floor 1.2)."""
+    return fresh_weight(message, dense=COUNTER_DENSE_TOKENS, weight_floor=COUNTER_WEIGHT_FLOOR)
+
+
+def frozen_weights(messages: Any) -> tuple[dict, Optional[float]]:
+    """``({message id: weight}, r)`` for a list of messages AS SENT, decided
+    once from the whole list (``token_accounting.message_weights`` with the
+    counter's settings)."""
+    messages = list(messages)
+    weights, ratio = message_weights(
+        messages, dense=COUNTER_DENSE_TOKENS, weight_floor=COUNTER_WEIGHT_FLOOR
+    )
+    by_id = {
+        message.id: weight
+        for message, weight in zip(messages, weights)
+        if getattr(message, "id", None) is not None
+    }
+    return by_id, ratio
+
+
+def real_token_count(
+    messages: Any, weights_by_id: Optional[dict] = None, past_ids: frozenset = frozenset()
+) -> int:
+    """THE token counter of compaction, in real tokens, over the messages AS
+    SENT: each message costs ``ceil(weight * chars/4 of that copy)``.
+
+    ``weights_by_id`` is frozen once per call from the full state
+    (``frozen_weights``), so the count works on any list LangChain hands it --
+    suffixes, the reversed pool of ``trim_messages``, partial copies (same id,
+    shorter content: they cost their share). A ToolMessage whose id is in
+    ``past_ids`` is sent as its marker, and a marker costs the weight of its
+    OWN text, never the frozen weight of the result it replaces. A message
+    nothing was frozen for (a new summary, a re-ided copy) gets the counter's
+    rule 2 on the fly. Additive: ``count(a + b) == count(a) + count(b)``.
 
     A distinct function on purpose: handed ``count_tokens_approximately``
     itself, LangChain's ``SummarizationMiddleware`` swaps in a variant that
     rescales the count with the last AI message's reported usage -- a stale
     total that counts messages compaction already removed.
     """
-    from src.agents.middleware import STALE_TOOL_RESULT_MARKERS
-
-    messages = list(messages)
-    if past_ids:
-        messages = [
-            (
-                message.model_copy(
-                    update={"content": STALE_TOOL_RESULT_MARKERS[getattr(message, "name", None)]}
-                )
-                if getattr(message, "type", None) == "tool"
-                and message.id in past_ids
-                and getattr(message, "name", None) in STALE_TOOL_RESULT_MARKERS
-                else message
-            )
-            for message in messages
-        ]
-    return math.ceil(ratio * approx_token_count(messages))
+    weights_by_id = weights_by_id or {}
+    total = 0
+    for message in messages:
+        message_id = getattr(message, "id", None)
+        if past_ids and message_id in past_ids:
+            message = stale_result_copy(message)
+        if _is_marker(message):
+            weight = counter_weight(message)
+        else:
+            weight = weights_by_id.get(message_id) if message_id is not None else None
+            if weight is None:
+                weight = counter_weight(message)
+        total += weighted_cost(message, weight)
+    return total
 
 
 def _known_window(window: Any) -> bool:
@@ -460,10 +495,7 @@ def compaction_cutoff(
         cutoff = max(token_cut, cutoff)
     if cutoff <= 0:
         return 0
-    last_human = next(
-        (i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)),
-        None,
-    )
+    last_human = last_human_index(messages)
     if last_human is not None:
         cutoff = min(cutoff, last_human)
     if (
@@ -554,41 +586,42 @@ def _previous_summary_text(previous: Any) -> str:
     return text
 
 
-def _summary_placeholder(
-    previous: Any, max_tokens: Optional[int] = None, ratio: float = 1.0
-) -> str:
+def _summary_placeholder(previous: Any, max_tokens: Optional[int] = None) -> str:
     """What a compaction writes when no summary could be produced: the
     previous summary, carried over, plus one honest sentence. Bounded loss --
     the earlier memory survives -- and no compaction dead-lock.
 
     ``max_tokens`` (``summary_cap(W)`` when the window is known) caps the
-    carried text in REAL tokens -- ``cap * 4 / r`` characters, head kept: a
-    summary written under a larger window would otherwise keep the state above
-    a smaller window's trigger forever, and a CJK summary capped at ``cap * 4``
-    characters would carry ``r * cap`` real tokens while the keep reserves
-    ``cap``.
+    carried text in REAL tokens -- ``cap * 4 / w`` characters, ``w`` the
+    counter's weight of that text, head kept: a summary written under a larger
+    window would otherwise keep the state above a smaller window's trigger
+    forever, and a CJK summary capped at ``cap * 4`` characters would carry
+    several times ``cap`` real tokens while the keep reserves ``cap``.
     """
     text = _previous_summary_text(previous)
     if text and max_tokens is not None:
-        text = text[: int(max_tokens * _APPROX_CHARS_PER_TOKEN / ratio)].rstrip()
+        from langchain_core.messages import HumanMessage
+
+        weight = counter_weight(HumanMessage(text))
+        text = text[: int(max_tokens * _APPROX_CHARS_PER_TOKEN / weight)].rstrip()
     if text:
         return f"{text}\n\n{SUMMARY_LATER_LOST}"
     return SUMMARY_EARLIER_LOST
 
 
-def _truncate_for_summary(messages: list, budget: int, counter: Any, ratio: float = 1.0) -> list:
+def _truncate_for_summary(messages: list, budget: int, counter: Any, weight_of: Any) -> list:
     """Copies of ``messages`` whose content alone exceeds ``budget`` real
-    tokens, cut to fit it (the head is kept): ``(budget - 16) * 4 / r``
-    characters. Halving the input cannot fix a single oversized answer;
-    cutting it can."""
-    keep_chars = max(
-        0, int((budget - _TRUNCATION_OVERHEAD_TOKENS) * _APPROX_CHARS_PER_TOKEN / ratio)
-    )
+    tokens, cut to fit it (the head is kept): ``(budget / w - 16) * 4``
+    characters, ``w`` the message's own weight (``weight_of``; the role and
+    per-message overhead are weighed too). Halving the input cannot fix a
+    single oversized answer; cutting it can."""
     out = []
     for message in messages:
         if counter([message]) <= budget:
             out.append(message)
             continue
+        unscaled = budget / max(weight_of(message), 1e-6)
+        keep_chars = max(0, int((unscaled - _TRUNCATION_OVERHEAD_TOKENS) * _APPROX_CHARS_PER_TOKEN))
         text = message.text if isinstance(getattr(message, "text", None), str) else ""
         out.append(message.model_copy(update={"content": text[:keep_chars]}))
     return out
@@ -658,10 +691,11 @@ def _summarization_middleware_class():
         """The stock middleware, with what Erudi changes about compaction:
 
         * every count is in REAL tokens, as sent (``real_token_count``): a
-          ratio measured on this conversation, frozen once per call from the
-          full state (``_freeze``), with past KB/web results counted as their
-          markers through the frozen set of their message ids;
-        * the request overhead O (system prompt, KB block, tool schemas --
+          weight per message, frozen once per call from the full state
+          (``_freeze``: measured ratio before the anchor, exact output tokens,
+          script weights), with past KB/web results counted as their markers
+          through the frozen set of their message ids;
+        * the request overhead O (system prompt, tool schemas, KB block --
           not in the state) enters the trigger (``_should_summarize``) and the
           keep and futility guard (``compaction_cutoff``), never the counter
           itself (an O larger than the summarizer's trim budget would empty
@@ -670,8 +704,6 @@ def _summarization_middleware_class():
         * a performed compaction resets the engine's prefix cache, shielded
           (``run_reset_shielded``): the old prefix is garbage once the
           history is rewritten;
-        * the summary message carries the state's first-hop ratio
-          (``_build_new_messages``);
         * the summarizer input always carries the previous summary, reads
           past tool results as their markers, and a failed summary call never
           erases memory (``_acreate_summary``);
@@ -685,37 +717,41 @@ def _summarization_middleware_class():
             working_window: Optional[int],
             engine: Any,
             allocated_window: Optional[int] = None,
-            overhead_est: int = 0,
+            overhead: Optional[RequestOverhead] = None,
             **kwargs: Any,
         ):
             # The frozen per-call context, initialised before ``super()``
-            # binds the counter (the sync ``before_model`` path reaches it
-            # too); ``_freeze`` replaces it at every call.
-            self.overhead_est = max(0, int(overhead_est or 0))
-            self._ratio = COUNTER_FALLBACK_RATIO_FLOOR
+            # binds the counter; ``_freeze`` replaces it at every call.
+            self.overhead = overhead
+            self._weights: dict = {}
             self._past_ids: frozenset = frozenset()
-            self._first_hop_ratio: Optional[float] = None
-            self._overhead = math.ceil(self._ratio * self.overhead_est)
+            self._overhead = 0
             super().__init__(token_counter=self._real_count, **kwargs)
             self.working_window = working_window
             self.allocated_window = allocated_window
             self.engine = engine
 
         def _real_count(self, messages) -> int:
-            return real_token_count(messages, self._ratio, self._past_ids)
+            return real_token_count(messages, self._weights, self._past_ids)
+
+        def _weight_of(self, message) -> float:
+            weight = self._weights.get(getattr(message, "id", None))
+            return weight if weight is not None else counter_weight(message)
 
         def _freeze(self, messages) -> None:
-            """The per-call context, from the FULL raw state: r (the
-            counter's ratio), the first-hop ratio (for the summary message),
-            the past tool results' ids, and O scaled by r."""
+            """The per-call context, from the FULL raw state as sent: one
+            weight per message id, the past tool results' ids, and O."""
             from src.agents.middleware import past_tool_result_ids, strip_stale_tool_results
-            from src.agents.token_accounting import counter_ratio
 
             self._ensure_message_ids(messages)
             self._past_ids = past_tool_result_ids(messages)
-            self._ratio = counter_ratio(messages, strip_stale_tool_results(messages))
-            self._first_hop_ratio = first_hop_ratio(messages)
-            self._overhead = math.ceil(self._ratio * self.overhead_est)
+            self._weights, ratio = frozen_weights(strip_stale_tool_results(messages))
+            self._overhead = overhead_tokens(
+                self.overhead,
+                ratio,
+                dense=COUNTER_DENSE_TOKENS,
+                weight_floor=COUNTER_WEIGHT_FLOOR,
+            )
 
         def _determine_cutoff_index(self, messages):
             return compaction_cutoff(
@@ -736,15 +772,9 @@ def _summarization_middleware_class():
             # no longer there. The trigger counts what IS there.
             return False
 
-        def _build_new_messages(self, summary):
-            built = super()._build_new_messages(summary)
-            if self._first_hop_ratio is not None:
-                built[0].additional_kwargs[FIRST_HOP_RATIO_KWARG] = self._first_hop_ratio
-            return built
-
         def before_model(self, state, runtime):
-            self._freeze(state["messages"])
-            return super().before_model(state, runtime)
+            # The runner is async-only: no half-implemented sync path.
+            raise NotImplementedError("compaction runs through abefore_model only")
 
         async def abefore_model(self, state, runtime):
             self._freeze(state["messages"])
@@ -795,7 +825,7 @@ def _summarization_middleware_class():
                     return self._compacted(messages_to_summarize, summary)
                 retry_budget = max(1, budget // 2)
             truncated = _truncate_for_summary(
-                pool, retry_budget, self._partial_token_counter, self._ratio
+                pool, retry_budget, self._partial_token_counter, self._weight_of
             )
             trimmed = self._trim_for_summary(truncated, retry_budget, start_on=None)
             summary = await self._summarize(previous, trimmed, attempt="retry")
@@ -803,7 +833,7 @@ def _summarization_middleware_class():
                 cap = (
                     summary_cap(self.working_window) if _known_window(self.working_window) else None
                 )
-                summary = _summary_placeholder(previous, cap, self._ratio)
+                summary = _summary_placeholder(previous, cap)
             return self._compacted(messages_to_summarize, summary)
 
         def _trim_for_summary(self, messages, budget, *, start_on):
@@ -1236,14 +1266,16 @@ class AgentRunner:
         async with engine.generation_guard():
             try:
                 sampling = resolve_sampling_defaults(llm)
-                # The first-hop ratio of the state this turn starts from, read
-                # from the RAW checkpoint before the graph runs (a compaction
-                # during this turn's first model call does not change it, and
-                # no request rewrite -- the KB merge, Gemma's fold -- can lose
-                # it). The output budget scales its estimate by it on a first
-                # hop. Stateless turns (arena) have none: script fallback.
-                prompt_ratio = (
-                    await self._starting_first_hop_ratio(run_config) if stateful else None
+                # No implicit tools (#129): callers own the tool list (built by
+                # ``plan_turn``); ``tools=None`` means a zero-tool agent.
+                effective_tools = tools if tools is not None else []
+                # What every request of this turn carries beyond the state:
+                # the system prompt and the tool schemas, and the KB additions.
+                # The compaction middleware and the warning projection cost it
+                # in real tokens; the client stamps the KB part's size so the
+                # ratio it measures excludes a block the next request drops.
+                overhead = request_overhead(
+                    system_prompt, kb_context_block, kb_language_line, effective_tools
                 )
                 model = await run_in_threadpool(
                     build_chat_model,
@@ -1257,7 +1289,7 @@ class AgentRunner:
                     # The turn's reasoning effort (1.1.2): its wire value, when
                     # the artifact has a native lever for it.
                     effort_plan=effort_plan,
-                    prompt_ratio=prompt_ratio,
+                    kb_additions=overhead.added_text,
                     # Each call's usage feeds the turn's memory measurement
                     # (MLX); the summary and title clients push nothing.
                     record_usage=True,
@@ -1304,18 +1336,8 @@ class AgentRunner:
                     if summarize
                     else None
                 )
-                # No implicit tools (#129): callers own the tool list (built by
-                # ``plan_turn``); ``tools=None`` means a zero-tool agent.
-                effective_tools = tools if tools is not None else []
-                # O_est: what every request of this turn carries beyond the
-                # state -- the system prompt, the KB additions, the tool
-                # schemas -- unscaled; the compaction middleware and the
-                # warning projection scale it by their frozen ratio.
-                overhead_est = request_overhead_est(
-                    system_prompt, kb_context_block, kb_language_line, effective_tools
-                )
                 middleware = (
-                    self._build_middleware(summary_model, budget, overhead_est=overhead_est)
+                    self._build_middleware(summary_model, budget, overhead=overhead)
                     if summarize
                     else []
                 )
@@ -1625,7 +1647,12 @@ class AgentRunner:
                                 run_config,
                                 budget,
                                 working_window,
-                                overhead_est=overhead_est,
+                                # The KB block of the turn just answered is not
+                                # in the next request: the fixed part only.
+                                overhead=RequestOverhead(
+                                    fixed_est=overhead.fixed_est,
+                                    fixed_text=overhead.fixed_text,
+                                ),
                                 allocated_window=allocated_window,
                             )
                             if budget.used_fraction(0) is not None:
@@ -1866,16 +1893,9 @@ class AgentRunner:
                 if event["t"] == "answer":
                     yield event["text"]
 
-    async def _starting_first_hop_ratio(self, run_config) -> Optional[float]:
-        """``first_hop_ratio`` of the raw checkpoint state this turn starts
-        from (one checkpoint read), or ``None``."""
-        checkpoint = await self.checkpointer.aget_tuple(run_config)
-        if checkpoint is None:
-            return None
-        values = (checkpoint.checkpoint or {}).get("channel_values") or {}
-        return first_hop_ratio(values.get("messages") or [])
-
-    def _build_middleware(self, model, memory_budget=None, *, overhead_est: int = 0):
+    def _build_middleware(
+        self, model, memory_budget=None, *, overhead: Optional[RequestOverhead] = None
+    ):
         """Auto-summarization using the SAME local model, on the two-signal trigger.
 
         Runs per turn, after the child spawned, so the allocated window
@@ -1895,8 +1915,9 @@ class AgentRunner:
         tokens of history; without one it keeps the last
         ``SUMMARY_KEEP_MESSAGES`` messages and LangChain's 4000-token trim.
         Every count -- trigger, cutoff, trim, truncation -- goes through ONE
-        counter in real tokens (``real_token_count``), and ``overhead_est``
-        (O_est, unscaled) enters the trigger and the keep.
+        counter in real tokens (``real_token_count``), and ``overhead`` (the
+        request's system prompt, tool schemas and KB additions) enters the
+        trigger and the keep.
         """
         from src.agents.middleware import (
             _StripStaleImagesMiddleware,
@@ -1920,7 +1941,7 @@ class AgentRunner:
                 trim_tokens_to_summarize=summarize_trim_budget(working_window, allocated_window),
                 working_window=working_window,
                 allocated_window=allocated_window,
-                overhead_est=overhead_est,
+                overhead=overhead,
                 engine=config.LLM_Engine,
             ),
         ]
@@ -1962,7 +1983,7 @@ class AgentRunner:
         budget,
         working_window: Optional[int] = None,
         *,
-        overhead_est: int = 0,
+        overhead: Optional[RequestOverhead] = None,
         allocated_window: Optional[int] = None,
     ) -> Optional[dict]:
         """The ``memory_warning`` event for this turn, or ``None``.
@@ -1974,23 +1995,28 @@ class AgentRunner:
         then flicker off once compaction ran. Instead the post-turn thread
         state is projected the way the NEXT request will see it, in real
         tokens: the turn just answered is past (its KB/web results count as
-        markers, ``strip_stale_tool_results(all_past=True)``), the ratio is
-        the one the next first hop's counter will use (``first_hop_ratio``,
-        else ``max(1.5, script_ratio)``), and the request overhead O is on top.
-        When a compaction would happen (``compaction_cutoff`` > 0, futility
-        guard included): ``O + count(kept) + summary_cap(W)`` (or
-        ``SUMMARY_TOKEN_ALLOWANCE`` without a window); otherwise
-        ``O + count(all)`` -- no summary is added when nothing would be
-        compacted. The warning goes out only when even THAT projection leaves
-        the margin strictly under ``MEMORY_WARNING_MARGIN``: the model plus
-        the kept conversation would use more than 85 % of the memory budget
-        (``MemoryBudget.used_fraction``, a measured prior with a fixed part --
-        so it can show for a model whose weights alone are well below 85 %,
-        and from the first turn on a tight machine). The payload quotes the
-        projection: ``footprint_bytes`` (model and conversation, what the copy
-        shows) and ``conversation_bytes`` (what the conversation adds).
-        Advisory only: a failure here is logged and never sinks the turn.
+        markers, ``strip_stale_tool_results(all_past=True)``), an empty next
+        question is appended (so the cutoff is the one the next request's
+        compaction computes), every message is weighed as the counter weighs
+        it, and the request overhead O is on top -- the system prompt and the
+        tool schemas only (``overhead``; the KB block of the turn just
+        answered is not in the next request). When a compaction would happen
+        (``compaction_cutoff`` > 0, futility guard included):
+        ``O + count(kept) + summary_cap(W)`` (or ``SUMMARY_TOKEN_ALLOWANCE``
+        without a window); otherwise ``O + count(all)`` -- no summary is added
+        when nothing would be compacted. The warning goes out only when even
+        THAT projection leaves the margin strictly under
+        ``MEMORY_WARNING_MARGIN``: the model plus the kept conversation would
+        use more than 85 % of the memory budget (``MemoryBudget.used_fraction``,
+        a measured prior with a fixed part -- so it can show for a model whose
+        weights alone are well below 85 %, and from the first turn on a tight
+        machine). The payload quotes the projection: ``footprint_bytes``
+        (model and conversation, what the copy shows) and
+        ``conversation_bytes`` (what the conversation adds). Advisory only: a
+        failure here is logged and never sinks the turn.
         """
+        from langchain_core.messages import HumanMessage
+
         from src.agents.middleware import strip_stale_tool_results
 
         try:
@@ -1998,30 +2024,35 @@ class AgentRunner:
             messages = (state.values or {}).get("messages", []) if state else []
             if not messages:
                 return None
-            as_sent = strip_stale_tool_results(messages, all_past=True)
-            ratio = first_hop_ratio(messages)
-            if ratio is None:
-                ratio = max(COUNTER_FALLBACK_RATIO_FLOOR, script_ratio(as_sent))
+            projected = strip_stale_tool_results(messages, all_past=True) + [
+                HumanMessage(content="", id="erudi-next-request")
+            ]
+            weights, ratio = frozen_weights(projected)
 
             def counter(part):
-                return real_token_count(part, ratio)
+                return real_token_count(part, weights)
 
-            overhead = math.ceil(ratio * max(0, overhead_est or 0))
+            fixed = overhead_tokens(
+                overhead,
+                ratio,
+                dense=COUNTER_DENSE_TOKENS,
+                weight_floor=COUNTER_WEIGHT_FLOOR,
+            )
             cutoff = compaction_cutoff(
-                as_sent,
+                projected,
                 working_window,
                 counter,
-                overhead=overhead,
+                overhead=fixed,
                 allocated_window=allocated_window,
             )
-            conversation_tokens = overhead + counter(as_sent)
+            conversation_tokens = fixed + counter(projected)
             if cutoff > 0:
                 summary_tokens = (
                     summary_cap(working_window)
                     if _known_window(working_window)
                     else SUMMARY_TOKEN_ALLOWANCE
                 )
-                projected_tokens = overhead + counter(as_sent[cutoff:]) + summary_tokens
+                projected_tokens = fixed + counter(projected[cutoff:]) + summary_tokens
             else:
                 projected_tokens = conversation_tokens
             projected_margin = budget.memory_margin_fraction(projected_tokens)

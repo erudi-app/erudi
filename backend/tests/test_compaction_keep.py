@@ -15,7 +15,6 @@ from __future__ import annotations
 
 import inspect
 import logging
-import math
 from types import SimpleNamespace
 from typing import Any, ClassVar
 
@@ -43,7 +42,23 @@ from src.agents.runner import (
     summarize_trim_budget,
     summary_cap,
 )
-from src.agents.token_accounting import request_overhead_est
+from src.agents.token_accounting import (
+    COUNTER_DENSE_TOKENS,
+    COUNTER_WEIGHT_FLOOR,
+    RequestOverhead,
+    overhead_tokens,
+    request_overhead,
+)
+
+
+def _projection(state):
+    """The next request the warning projects: the state plus an empty next
+    question, every message weighed as the counter weighs it."""
+    projected = list(state) + [HumanMessage("", id="erudi-next-request")]
+    weights, ratio = runner_module.frozen_weights(projected)
+    return projected, (lambda part: real_token_count(part, weights)), ratio
+
+
 from src.core import config
 from src.engines.base_engine import BaseEngine
 from tests._helpers import ToolableFakeChatModel
@@ -71,12 +86,20 @@ def _previous_summary_message(text: str = _PREVIOUS) -> HumanMessage:
 
 
 def _measured(content: str, msg_id: str) -> AIMessage:
-    """An answer carrying a measured first-hop ratio of exactly 1.0, so the
-    real-token counter equals chars/4 on the state it belongs to."""
+    """An answer carrying a measured first-hop ratio of exactly 1.0 and an
+    exact output count equal to its own chars/4, so the real-token counter
+    equals chars/4 on every message up to it."""
+    from src.agents.token_accounting import estimate
+
+    output_tokens = estimate(AIMessage(content=content)) - estimate(AIMessage(content=""))
     return AIMessage(
         content=content,
         id=msg_id,
-        usage_metadata={"input_tokens": 1000, "output_tokens": 1, "total_tokens": 1001},
+        usage_metadata={
+            "input_tokens": 1000,
+            "output_tokens": output_tokens,
+            "total_tokens": 1000 + output_tokens,
+        },
         response_metadata={
             "erudi_request_est": 1000,
             "erudi_request_has_images": False,
@@ -278,13 +301,13 @@ async def test_a_long_answer_at_the_boundary_stays_out_and_the_state_stays_under
     cap = summary_cap(window)
     messages = [
         HumanMessage(_text(900), id="h0"),
-        _measured(_text(900), "a1"),
+        AIMessage(_text(900), id="a1"),
         HumanMessage(_text(200), id="h2"),
         AIMessage(_text(1500), id="a3-long"),
         HumanMessage(_text(100), id="h4"),
         AIMessage(_text(600), id="a5"),
         HumanMessage(_text(100), id="h6"),
-        AIMessage(_text(600), id="a7"),
+        _measured(_text(600), "a7"),
         HumanMessage(_text(50), id="q8"),
     ]
     token_cut = runner_module._token_cutoff(messages, keep_token_budget(window), approx_token_count)
@@ -999,10 +1022,18 @@ async def test_the_memory_warning_projects_the_kept_suffix_plus_the_summary_cap(
 
     state = await _state(cp, "w1")
     # A one-turn thread: nothing would be compacted, so the projection is
-    # O + count(all) in real tokens (nothing measured: r = 1.5), no summary.
-    assert compaction_cutoff(state, 10_000, approx_token_count) == 0
-    overhead = math.ceil(1.5 * request_overhead_est("s"))
-    assert calls[0] == overhead + real_token_count(state, 1.5)
+    # O + count(all) in real tokens (nothing measured: the counter's script
+    # weights), no summary.
+    projected, counter, ratio = _projection(state)
+    assert compaction_cutoff(projected, 10_000, counter) == 0
+    fixed = request_overhead("s")
+    overhead = overhead_tokens(
+        RequestOverhead(fixed_est=fixed.fixed_est, fixed_text=fixed.fixed_text),
+        ratio,
+        dense=COUNTER_DENSE_TOKENS,
+        weight_floor=COUNTER_WEIGHT_FLOOR,
+    )
+    assert calls[0] == overhead + counter(projected)
 
 
 class _RecordingBudget:
@@ -1035,7 +1066,9 @@ async def test_the_warning_never_counts_the_summary_twice():
 
     await AgentRunner()._memory_warning_event(_agent_with_state(state), {}, budget, 10_000)
 
-    assert budget.calls[0] == real_token_count(state, 1.5)
+    projected, counter, _ = _projection(state)
+    assert compaction_cutoff(projected, 10_000, counter) == 0
+    assert budget.calls[0] == counter(projected)
 
 
 async def test_without_a_window_the_warning_projects_what_the_middleware_keeps():
@@ -1048,9 +1081,9 @@ async def test_without_a_window_the_warning_projects_what_the_middleware_keeps()
 
     await AgentRunner()._memory_warning_event(_agent_with_state(state), {}, budget, None)
 
-    assert budget.calls[0] == real_token_count(state[cut:], 1.5) + (
-        runner_module.SUMMARY_TOKEN_ALLOWANCE
-    )
+    projected, counter, _ = _projection(state)
+    assert compaction_cutoff(projected, None, counter) == cut
+    assert budget.calls[0] == counter(projected[cut:]) + runner_module.SUMMARY_TOKEN_ALLOWANCE
 
 
 # ===================== the private LangChain surface this rests on =====================
