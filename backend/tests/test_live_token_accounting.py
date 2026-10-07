@@ -31,6 +31,8 @@ from src.agents.token_accounting import (
 pytestmark = pytest.mark.unit
 
 WINDOW = 32_768
+# Qwen2.5 splits numbers into single digits (its tokenizer.json pre-tokenizer).
+QWEN_DIGIT_TOKENS = 1.0
 LIVE = json.loads(
     (Path(__file__).parent / "fixtures" / "live_token_accounting.json").read_text(encoding="utf-8")
 )
@@ -72,7 +74,7 @@ def _hop(chars, input_tokens, est, output_tokens, filler="a", msg_id=None):
 
 
 def _passes(messages, real_prompt):
-    budget = compute_output_budget(messages, WINDOW)
+    budget = compute_output_budget(messages, WINDOW, digit_tokens=QWEN_DIGIT_TOKENS)
     return budget, real_prompt + budget <= WINDOW
 
 
@@ -168,8 +170,8 @@ def test_after_a_24_8k_token_looping_answer_the_budget_is_not_the_floor():
         looping,
         HumanMessage("Thanks. Now give me one sentence about Paris in winter."),
     ]
-    prompt = real_tokens_est(request, dense=BUDGET_DENSE_TOKENS)
-    budget = compute_output_budget(request, WINDOW)
+    prompt = real_tokens_est(request, dense=BUDGET_DENSE_TOKENS, digit_tokens=QWEN_DIGIT_TOKENS)
+    budget = compute_output_budget(request, WINDOW, digit_tokens=QWEN_DIGIT_TOKENS)
     # The margin applies to the estimated part only.
     assert budget == WINDOW - prompt.total - max(256, int(0.10 * (prompt.total - prompt.exact)))
     assert budget > 5000

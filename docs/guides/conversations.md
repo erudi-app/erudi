@@ -112,9 +112,12 @@ about to be sent:
 - an answer the server generated (without reasoning) costs exactly its `output_tokens`; with
   reasoning, only the text the history replays is weighed;
 - everything new — the question, a paste, a tool result of this turn, the knowledge-base block, a
-  summary — costs `chars / 4` × the **script weight** of its own text: digits one token each,
-  Chinese, Japanese and Korean characters 0.65 token each, other non-Latin letters 0.4 token each,
-  everything else `chars / 4`;
+  summary — costs `chars / 4` × the **script weight** of its own text: digits one token each when
+  the loaded model's tokenizer splits numbers digit by digit (read once from the model's
+  `tokenizer.json`, Qwen-style) and about a third of a token otherwise (Llama 3-style groups of
+  three, and whenever the tokenizer is unknown or the engine is llama.cpp), Chinese, Japanese and
+  Korean characters 0.65 token each, other non-Latin letters 0.4 token each, everything else
+  `chars / 4`;
 - the system prompt and the tool schemas cost the measured ratio, or their own script weight
   when nothing is measured yet (the first turn, the Arena).
 

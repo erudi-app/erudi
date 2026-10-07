@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Optional
 
 from src.agents.chat_model import erudi_chat_openai_class
 from src.agents.reasoning_effort import EffortPlan
+from src.engines.memory_budget import budget_digit_tokens
 from src.engines.working_window import working_context_tokens
 from src.core import config
 from src.core.logging import logger
@@ -129,6 +130,9 @@ def build_chat_model(
     # its handle), which is safe here because this factory runs in a
     # threadpool per turn.
     working_window = working_context_tokens(engine)
+    # What a digit costs on this child's tokenizer, for the output budget (a
+    # static fact read once per child from its tokenizer.json, MLX only).
+    digit_tokens = budget_digit_tokens(engine)
 
     # Extra sampling params absent from the OpenAI wire schema. mlx_vlm.server reads
     # the HF names natively; llama.cpp engines translate them to their wire names
@@ -218,6 +222,7 @@ def build_chat_model(
         working_context_tokens=working_window,
         auto_output_budget=auto_output_budget,
         kb_additions=kb_additions or "",
+        digit_tokens=digit_tokens,
         preflight_retry=preflight_retry,
         abandon_hook=abandon_hook,
         usage_hook=usage_hook,

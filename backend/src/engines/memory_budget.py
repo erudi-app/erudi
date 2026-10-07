@@ -357,9 +357,11 @@ def _static_facts(engine: Any, handle: Dict[str, Any]) -> Dict[str, Any]:
     kv: Optional[int] = None
     vocab: Optional[int] = None
     model_type: Optional[str] = None
+    digit_tokens: Optional[float] = None
     raw_path = handle.get("model_path")
     if raw_path:
         path = Path(raw_path)
+        digit_tokens = _digit_tokens_at(path if path.is_dir() else path.parent)
         weights = artifact_bytes(path)
         config_path = (path if path.is_dir() else path.parent) / "config.json"
         try:
@@ -390,9 +392,40 @@ def _static_facts(engine: Any, handle: Dict[str, Any]) -> Dict[str, Any]:
         "prefill_step": MLX_PREFILL_STEP_TOKENS,
         "working_set_bytes": working_set,
         "model_type": model_type,
+        "digit_tokens": digit_tokens,
     }
     handle["memory_facts"] = facts
     return facts
+
+
+def _digit_tokens_at(model_dir: Path) -> Optional[float]:
+    """Tokens per digit of the artifact's ``tokenizer.json``, or ``None``."""
+    from src.agents.token_accounting import digit_tokens_of
+
+    tokenizer_path = model_dir / "tokenizer.json"
+    try:
+        if not tokenizer_path.is_file():
+            return None
+        return digit_tokens_of(json.loads(tokenizer_path.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:
+        # The budget then assumes grouped digits (the safe side for it).
+        logger.info(f"tokenizer.json unreadable at {tokenizer_path}: {type(exc).__name__}: {exc}")
+        return None
+
+
+def budget_digit_tokens(engine: Any) -> float:
+    """Tokens per digit the OUTPUT BUDGET assumes for the loaded child: what
+    its tokenizer says on MLX (a static fact cached on the handle), else the
+    grouped weight -- the budget's safe side, and every llama.cpp engine."""
+    from src.agents.token_accounting import GROUPED_DIGIT_TOKENS
+
+    if engine is None or getattr(engine, "FORMAT_TAG", None) != "mlx":
+        return GROUPED_DIGIT_TOKENS
+    handle = getattr(engine, "_model", None)
+    if not isinstance(handle, dict):
+        return GROUPED_DIGIT_TOKENS
+    value = _static_facts(engine, handle).get("digit_tokens")
+    return value if isinstance(value, float) else GROUPED_DIGIT_TOKENS
 
 
 _DEFAULT_PRIOR = MEMORY_PRIORS[(MLX_PREFILL_STEP_TOKENS, MLX_BUFFER_CACHE_LIMIT)]

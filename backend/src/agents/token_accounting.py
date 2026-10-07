@@ -28,9 +28,11 @@ whole list:
    replays, so its text is weighed instead). Any other message -- a question,
    a paste, a tool result of the current turn, a summary, the KB block --
    costs ``w * est(m)``, ``w`` the script weight of ITS OWN text: ASCII digits
-   one token each (Qwen, Gemma, Mistral, DeepSeek split numbers per digit),
-   CJK/Kana/Hangul ``dense`` tokens each, other non-ASCII letters and marks
-   0.4, everything else chars/4.
+   one token each for the counter and, for the budget, as the loaded
+   tokenizer says (``digit_tokens_of``: 1.0 when it splits numbers per digit
+   like Qwen, Gemma, Mistral, DeepSeek; 0.34 when it groups them like Llama 3,
+   gpt-oss, Phi-4, or when unknown), CJK/Kana/Hangul ``dense`` tokens each,
+   other non-ASCII letters and marks 0.4, everything else chars/4.
 3. Nothing measured (the first turn, the Arena, right after a compaction that
    kept no stamped hop): rule 2 for every message.
 
@@ -72,6 +74,7 @@ from __future__ import annotations
 
 import json
 import math
+import re
 import unicodedata
 from dataclasses import dataclass
 from typing import Any, Iterable, List, NamedTuple, Optional, Sequence, Tuple
@@ -90,6 +93,11 @@ BUDGET_DENSE_TOKENS = 0.65
 
 # Per-character costs of the script weight.
 DIGIT_TOKENS = 1.0
+# A tokenizer that groups digits (Llama 3, gpt-oss, Phi-4: ``\p{N}{1,3}``)
+# spends about a third of a token per digit. The budget uses it unless the
+# loaded tokenizer is known to split digits one by one (``digit_tokens_of``):
+# for the budget an over-estimate silently truncates the answer.
+GROUPED_DIGIT_TOKENS = 0.34
 OTHER_LETTER_TOKENS = 0.4
 
 # The stamp ``Erudi_Chat_OpenAI._astream`` writes on the usage chunk's
@@ -261,6 +269,48 @@ def measured_anchor(messages: Sequence[Any]) -> Tuple[Optional[int], Optional[fl
 # --------------------------------------------------------------------------- script weight
 
 
+_GROUPED_DIGITS = re.compile(r"(\\p\{N\}|\\d)(\{\d*,?\d*\}|\+|\*)")
+_SINGLE_DIGIT = re.compile(r"(\\p\{N\}|\\d)(?![{+*])")
+
+
+def _pre_tokenizers(node: Any) -> list:
+    if not isinstance(node, dict):
+        return []
+    if node.get("type") == "Sequence":
+        out = []
+        for child in node.get("pretokenizers") or []:
+            out.extend(_pre_tokenizers(child))
+        return out
+    return [node]
+
+
+def digit_tokens_of(tokenizer: Any) -> Optional[float]:
+    """Tokens per digit of a ``tokenizer.json`` (a parsed dict), read off its
+    pre-tokenizer: digits split one by one (a ``Digits`` pre-tokenizer with
+    ``individual_digits``, or a ``Split`` regex matching a single
+    ``\\p{N}``) cost 1.0; grouped (``\\p{N}{1,3}``, ``\\p{N}+``, ``Digits``
+    without ``individual_digits``) cost ``GROUPED_DIGIT_TOKENS``; ``None``
+    when the pre-tokenizer says nothing about digits."""
+    if not isinstance(tokenizer, dict):
+        return None
+    verdict: Optional[float] = None
+    for node in _pre_tokenizers(tokenizer.get("pre_tokenizer")):
+        kind = node.get("type")
+        if kind == "Digits":
+            if node.get("individual_digits") is True:
+                return DIGIT_TOKENS
+            verdict = GROUPED_DIGIT_TOKENS
+        elif kind == "Split":
+            pattern = (node.get("pattern") or {}).get("Regex")
+            if not isinstance(pattern, str):
+                continue
+            if _GROUPED_DIGITS.search(pattern):
+                verdict = GROUPED_DIGIT_TOKENS
+            elif _SINGLE_DIGIT.search(pattern):
+                return DIGIT_TOKENS
+    return verdict
+
+
 def _is_dense_script(char: str) -> bool:
     """CJK ideographs, Kana and Hangul."""
     code = ord(char)
@@ -302,7 +352,7 @@ def message_text(message: Any) -> str:
     return text
 
 
-def script_weight(text: str, *, dense: float) -> float:
+def script_weight(text: str, *, dense: float, digit_tokens: float = DIGIT_TOKENS) -> float:
     """Real tokens per chars/4 token of ``text``: digits 1.0 token each,
     CJK/Kana/Hangul ``dense``, other non-ASCII letters and marks 0.4,
     everything else chars/4. English prose reads about 1.0, numbers and
@@ -312,7 +362,7 @@ def script_weight(text: str, *, dense: float) -> float:
     tokens = 0.0
     for char in text:
         if char.isascii():
-            tokens += DIGIT_TOKENS if char.isdigit() else 1.0 / APPROX_CHARS_PER_TOKEN
+            tokens += digit_tokens if char.isdigit() else 1.0 / APPROX_CHARS_PER_TOKEN
         elif _is_dense_script(char):
             tokens += dense
         elif unicodedata.category(char)[0] in ("L", "M"):
@@ -376,13 +426,22 @@ def exact_tokens(message: Any) -> Optional[int]:
     return output_tokens + _ai_overhead()
 
 
-def fresh_weight(message: Any, *, dense: float, weight_floor: float = 0.0) -> float:
+def fresh_weight(
+    message: Any,
+    *,
+    dense: float,
+    weight_floor: float = 0.0,
+    digit_tokens: float = DIGIT_TOKENS,
+) -> float:
     """Rule 2: the weight of a message that was never measured as input."""
     exact = exact_tokens(message)
     if exact is not None:
         return exact / max(1, estimate(message))
     viewed = history_view(message)
-    return max(weight_floor, script_weight(message_text(viewed), dense=dense))
+    return max(
+        weight_floor,
+        script_weight(message_text(viewed), dense=dense, digit_tokens=digit_tokens),
+    )
 
 
 def _is_summary(message: Any) -> bool:
@@ -395,7 +454,11 @@ def _measured_before_anchor(index: int, message: Any, k: Optional[int]) -> bool:
 
 
 def message_weights(
-    messages: Sequence[Any], *, dense: float, weight_floor: float = 0.0
+    messages: Sequence[Any],
+    *,
+    dense: float,
+    weight_floor: float = 0.0,
+    digit_tokens: float = DIGIT_TOKENS,
 ) -> Tuple[List[float], Optional[float]]:
     """``(weights, r)``: real tokens per estimated token for each message
     (position-aligned), decided once from the whole list, and the measured
@@ -405,7 +468,9 @@ def message_weights(
     weights = [
         ratio
         if _measured_before_anchor(i, message, k)
-        else fresh_weight(message, dense=dense, weight_floor=weight_floor)
+        else fresh_weight(
+            message, dense=dense, weight_floor=weight_floor, digit_tokens=digit_tokens
+        )
         for i, message in enumerate(messages)
     ]
     return weights, ratio
@@ -418,13 +483,13 @@ def weighted_cost(message: Any, weight: float) -> int:
     return math.ceil(weight * estimate(history_view(message)))
 
 
-def kb_stamp(added_text: str) -> dict:
+def kb_stamp(added_text: str, digit_tokens: float = GROUPED_DIGIT_TOKENS) -> dict:
     """The stamp keys of a request that carried ``added_text`` as its KB
     additions (empty when it carried none)."""
     if not added_text:
         return {}
     kb_est = math.ceil(len(added_text) / APPROX_CHARS_PER_TOKEN)
-    weight = script_weight(added_text, dense=BUDGET_DENSE_TOKENS)
+    weight = script_weight(added_text, dense=BUDGET_DENSE_TOKENS, digit_tokens=digit_tokens)
     return {REQUEST_KB_EST_KEY: kb_est, REQUEST_KB_REAL_KEY: math.ceil(weight * kb_est)}
 
 
@@ -472,6 +537,7 @@ def overhead_tokens(
     *,
     dense: float,
     weight_floor: float = 0.0,
+    digit_tokens: float = DIGIT_TOKENS,
 ) -> int:
     """O in real tokens: the fixed part at the anchor's r (else its own script
     weight), the KB additions at their own script weight."""
@@ -480,12 +546,18 @@ def overhead_tokens(
     fixed_weight = (
         ratio
         if ratio is not None
-        else max(weight_floor, script_weight(overhead.fixed_text, dense=dense))
+        else max(
+            weight_floor,
+            script_weight(overhead.fixed_text, dense=dense, digit_tokens=digit_tokens),
+        )
     )
     total = math.ceil(fixed_weight * overhead.fixed_est)
     if overhead.added_text:
         added_est = math.ceil(len(overhead.added_text) / APPROX_CHARS_PER_TOKEN)
-        added_weight = max(weight_floor, script_weight(overhead.added_text, dense=dense))
+        added_weight = max(
+            weight_floor,
+            script_weight(overhead.added_text, dense=dense, digit_tokens=digit_tokens),
+        )
         total += math.ceil(added_weight * added_est)
     return total
 
@@ -505,11 +577,14 @@ def real_tokens_est(
     weight_floor: float = 0.0,
     overhead: Optional[RequestOverhead] = None,
     tools: Optional[Iterable[Any]] = None,
+    digit_tokens: float = DIGIT_TOKENS,
 ) -> RealTokens:
     """THE real-token estimate of a list of messages (the module rules),
     plus the request overhead and the tool schemas it carries."""
     messages = list(messages)
-    weights, ratio = message_weights(messages, dense=dense, weight_floor=weight_floor)
+    weights, ratio = message_weights(
+        messages, dense=dense, weight_floor=weight_floor, digit_tokens=digit_tokens
+    )
     k, _ = measured_anchor(messages)
     total = 0
     exact = 0
@@ -525,8 +600,13 @@ def real_tokens_est(
         tools_weight = (
             ratio
             if ratio is not None
-            else max(weight_floor, script_weight(tools_text, dense=dense))
+            else max(
+                weight_floor,
+                script_weight(tools_text, dense=dense, digit_tokens=digit_tokens),
+            )
         )
         total += math.ceil(tools_weight * tools_est)
-    total += overhead_tokens(overhead, ratio, dense=dense, weight_floor=weight_floor)
+    total += overhead_tokens(
+        overhead, ratio, dense=dense, weight_floor=weight_floor, digit_tokens=digit_tokens
+    )
     return RealTokens(total=total, exact=exact)

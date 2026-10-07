@@ -113,6 +113,7 @@ from src.agents.token_accounting import (
     REQUEST_EST_KEY,
     REQUEST_FIRST_HOP_KEY,
     REQUEST_HAS_IMAGES_KEY,
+    GROUPED_DIGIT_TOKENS,
     kb_stamp,
     message_text,
     messages_have_images,
@@ -492,6 +493,13 @@ def erudi_chat_openai_class():
         # history). Empty: the turn carries no block.
         kb_additions: str = ""
 
+        # What a digit costs on the loaded tokenizer, for the output budget
+        # and the KB stamp (``memory_budget.budget_digit_tokens``, set by the
+        # factory): 1.0 when it splits digits one by one, the grouped 0.34
+        # otherwise or when unknown -- an over-estimate here silently
+        # truncates the answer.
+        digit_tokens: float = GROUPED_DIGIT_TOKENS
+
         # Whether a call the engine's context check rejected is retried once
         # with a smaller ``max_tokens`` (see ``preflight_retry_budget``). The
         # compaction summary client turns it off: its cap is deliberate, and a
@@ -586,7 +594,7 @@ def erudi_chat_openai_class():
             if self.kb_additions and getattr(last, "type", None) == "human":
                 block = self.kb_additions.split("\n\n\n\n", 1)[0]
                 if block and block in message_text(last):
-                    stamp.update(kb_stamp(self.kb_additions))
+                    stamp.update(kb_stamp(self.kb_additions, self.digit_tokens))
             return stamp
 
         def _stamp_usage_chunk(self, chunk, stamp: Optional[dict]) -> bool:
@@ -623,7 +631,11 @@ def erudi_chat_openai_class():
             )
             budget = (
                 compute_output_budget(
-                    messages, budget_window, override=output_budget_override(), tools=tools
+                    messages,
+                    budget_window,
+                    override=output_budget_override(),
+                    tools=tools,
+                    digit_tokens=self.digit_tokens,
                 )
                 if self.auto_output_budget
                 else None

@@ -66,7 +66,11 @@ from __future__ import annotations
 import os
 from typing import Any, Iterable, Optional
 
-from src.agents.token_accounting import BUDGET_DENSE_TOKENS, real_tokens_est
+from src.agents.token_accounting import (
+    BUDGET_DENSE_TOKENS,
+    GROUPED_DIGIT_TOKENS,
+    real_tokens_est,
+)
 from src.core.logging import logger
 
 # Never hand a model a budget below this, however full the window is.
@@ -110,12 +114,15 @@ def compute_output_budget(
     override: Optional[int] = None,
     *,
     tools: Optional[Iterable[Any]] = None,
+    digit_tokens: float = GROUPED_DIGIT_TOKENS,
 ) -> Optional[int]:
     """Tokens this call may generate, or ``None`` to leave the caller's value.
 
     ``messages`` is the request as sent (the stamped AI messages keep their
     usage through the strippers and the fold) and ``tools`` the schemas it
-    carries. Pure: the environment is read by :func:`output_budget_override`,
+    carries. ``digit_tokens`` is what a digit costs on the loaded tokenizer
+    (``memory_budget.budget_digit_tokens``: 1.0 when it splits digits one by
+    one, the grouped 0.34 otherwise or when unknown). Pure: the environment is read by :func:`output_budget_override`,
     which the caller passes in, so the arithmetic stays testable on its own.
     """
     if override is not None:
@@ -123,7 +130,12 @@ def compute_output_budget(
     if not effective_window_tokens or effective_window_tokens <= 0:
         return None
     try:
-        prompt = real_tokens_est(list(messages or ()), dense=BUDGET_DENSE_TOKENS, tools=tools)
+        prompt = real_tokens_est(
+            list(messages or ()),
+            dense=BUDGET_DENSE_TOKENS,
+            tools=tools,
+            digit_tokens=digit_tokens,
+        )
     except Exception:
         # The budget is an optimisation over a working default; it must never
         # be the reason a turn fails. A message shape the counter cannot read
