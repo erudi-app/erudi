@@ -341,6 +341,43 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         not end normally. No-op here."""
         return None
 
+    # The MLX child's memory is MEASURED around every conversation and Arena
+    # turn (``src.engines.memory_observations``); the llama.cpp engines
+    # allocate their KV cache in full at load and measure nothing. All three
+    # hooks are synchronous (they read process counters, and the last one
+    # writes a small file).
+
+    @classmethod
+    def begin_memory_window(cls) -> Any:
+        """Open a measurement window on the loaded child for one turn; the
+        returned token closes it (``end_memory_window``). No-op here."""
+        return None
+
+    @classmethod
+    def note_call_usage(
+        cls,
+        handle: Any,
+        input_tokens: int,
+        output_tokens: int,
+        cached_tokens: int = 0,
+        has_images: bool = False,
+    ) -> None:
+        """One model call's server-reported usage, pushed by the chat client
+        bound to ``handle``. No-op here."""
+        return None
+
+    @classmethod
+    def note_call_start(cls, handle: Any, estimated_prompt_tokens: int) -> None:
+        """A model call bound to ``handle`` is about to be sent, with the
+        client's estimate of its size. No-op here."""
+        return None
+
+    @classmethod
+    def end_memory_window(cls, token: Any, *, abandoned: bool = False) -> Any:
+        """Close the window ``token`` opened and record what the turn used.
+        No-op here."""
+        return None
+
     # Stored model links that download fine but FAIL TO RUN on this engine
     # (e.g. a quantized checkpoint the loader can't read). Overridden per engine.
     # is_runnable() uses it to ban such models from the catalog for this hardware.

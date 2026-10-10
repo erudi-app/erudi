@@ -1,10 +1,11 @@
-"""Deterministic memory accounting for the compaction memory signal (1.1.2).
+"""Memory accounting on a measured prior (Apple Silicon only).
 
-Pure math over facts read from disk and the engine's hardware totals — never
-``psutil available`` (macOS compression/swap makes it lie). Every test here is
-hand-computed: the KV formula is 2 (K and V) x layers x kv_heads x head_dim x
-2 bytes (f16) per token. Missing facts always answer ``None`` (signal off),
-never a guessed number.
+Pure math over facts read from disk, the child's measured base footprint and
+the engine's GPU working set -- never ``psutil available`` (macOS
+compression/swap makes it lie). Every test here is hand-computed: the KV
+formula is 2 (K and V) x layers x kv_heads x head_dim x 2 bytes (f16) per
+token, and ``predict(N) = m (t0 + step x vocab x 2 B + c0 x kv x N)``. Missing
+facts always answer ``None`` (accounting off), never a guessed number.
 """
 
 import json
@@ -14,16 +15,30 @@ import pytest
 
 from src.engines.base_engine import BaseEngine
 from src.engines.memory_budget import (
+    BASE_FALLBACK_OVERHEAD_BYTES,
+    LOGITS_BYTES_PER_VALUE,
+    MLX_PREFILL_STEP_TOKENS,
+    PRIOR_FIXED_BYTES,
+    PRIOR_KV_MULTIPLIER,
+    PRIOR_MARGIN,
     MemoryBudget,
     artifact_bytes,
     kv_bytes_per_token,
     total_memory_bytes,
+    vocab_size_of,
 )
 
 pytestmark = pytest.mark.unit
 
 
 # ===================== KV-per-token math =====================
+
+
+def test_the_vocabulary_is_read_from_the_top_level_or_the_text_config():
+    assert vocab_size_of({"vocab_size": 32_000}) == 32_000
+    assert vocab_size_of({"text_config": {"vocab_size": 262_144}}) == 262_144
+    assert vocab_size_of({}) is None
+    assert vocab_size_of({"vocab_size": True}) is None
 
 
 def test_kv_bytes_per_token_matches_hand_computed_value():
@@ -282,70 +297,149 @@ def test_total_memory_bytes_is_memoized_per_engine_class():
     assert len(calls) == 1
 
 
-# ===================== The budget =====================
+# ===================== The budget: a measured, structural prior =====================
 
 GIB = 1024**3
+KV = 114_688  # Qwen3-0.6B: 2 x 28 layers x 8 kv heads x 128 x 2 bytes
+VOCAB = 151_936
+STEP = 2048
 
 
-def test_margin_and_conversation_bytes_hand_computed():
-    # 10 GiB weights + 1 MiB/token KV on a 16 GiB machine.
-    budget = MemoryBudget(weights_bytes=10 * GIB, kv_token_bytes=1024**2, total_bytes=16 * GIB)
-    # 1024 tokens -> 1 GiB of KV -> used 11 GiB of 16 -> margin 5/16 = 0.3125.
-    assert budget.conversation_bytes(1024) == GIB
-    assert budget.memory_margin_fraction(1024) == pytest.approx(5 / 16)
-    assert budget.used_fraction(1024) == pytest.approx(11 / 16)
+def _budget(**overrides):
+    facts = dict(
+        base_bytes=2 * GIB,
+        total_bytes=10 * GIB,
+        kv_token_bytes=KV,
+        vocab_size=VOCAB,
+        prefill_step=STEP,
+        weights_bytes=GIB,
+    )
+    facts.update(overrides)
+    return MemoryBudget(**facts)
 
 
-def test_margin_is_lower_against_working_set_than_against_total_ram():
-    # Same weights + KV, two denominators. The corrected working-set budget
-    # (0.9 x ~12.7 GB usable) is far smaller than total RAM (16 GiB), so it
-    # reports a smaller margin and reaches its floor at fewer tokens -- the fix
-    # for the signal firing too late (#601).
-    weights = 8 * GIB
-    kv = 1024**2  # 1 MiB/token
-    total_ram = 16 * GIB
-    working_set = int(0.9 * 12_700_000_000)
-    tokens = 1024
-    ram_budget = MemoryBudget(weights_bytes=weights, kv_token_bytes=kv, total_bytes=total_ram)
-    ws_budget = MemoryBudget(weights_bytes=weights, kv_token_bytes=kv, total_bytes=working_set)
-    assert ws_budget.used_fraction(tokens) > ram_budget.used_fraction(tokens)
-    assert ws_budget.memory_margin_fraction(tokens) < ram_budget.memory_margin_fraction(tokens)
-    assert ws_budget.tokens_at_margin(0.15) < ram_budget.tokens_at_margin(0.15)
+def _hand_predict(n):
+    return PRIOR_MARGIN * (
+        PRIOR_FIXED_BYTES + STEP * VOCAB * LOGITS_BYTES_PER_VALUE + PRIOR_KV_MULTIPLIER * KV * n
+    )
 
 
-def test_margin_fifteen_percent_boundary():
-    budget = MemoryBudget(weights_bytes=10 * GIB, kv_token_bytes=1024**2, total_bytes=16 * GIB)
-    # margin hits exactly 0.15 when used = 0.85*16 = 13.6 GiB -> KV = 3.6 GiB
-    # -> 3.6 * 1024 tokens.
-    boundary_tokens = int(3.6 * 1024)
-    assert budget.memory_margin_fraction(boundary_tokens) == pytest.approx(0.15, abs=1e-3)
-    assert budget.tokens_at_margin(0.15) == boundary_tokens
+def test_the_ceiling_reserves_the_output_budgets_own_floor():
+    from src.agents.output_budget import OUTPUT_BUDGET_FLOOR_TOKENS
+    from src.engines import memory_budget
+
+    assert memory_budget._OUTPUT_FLOOR_TOKENS == OUTPUT_BUDGET_FLOOR_TOKENS
 
 
-def test_tokens_at_margin_negative_when_weights_alone_blow_the_floor():
-    budget = MemoryBudget(weights_bytes=15 * GIB, kv_token_bytes=1024**2, total_bytes=16 * GIB)
-    assert budget.tokens_at_margin(0.15) < 0
+def test_an_invalid_prior_scale_warns_once_per_process(monkeypatch, caplog):
+    from src.engines import memory_budget
+
+    monkeypatch.setattr(memory_budget, "_PRIOR_SCALE_WARNED", False)
+    monkeypatch.setenv(memory_budget.PRIOR_SCALE_ENV_VAR, "not-a-number")
+    with caplog.at_level(logging.WARNING):
+        assert memory_budget.prior_scale() == 1.0
+        assert memory_budget.prior_scale() == 1.0
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
 
-@pytest.mark.parametrize(
-    "budget",
-    [
-        MemoryBudget(weights_bytes=None, kv_token_bytes=1024, total_bytes=GIB),
-        MemoryBudget(weights_bytes=GIB, kv_token_bytes=None, total_bytes=GIB),
-        MemoryBudget(weights_bytes=GIB, kv_token_bytes=1024, total_bytes=None),
-    ],
-)
-def test_unaccountable_budget_disables_the_signal(budget):
+def test_the_priors_are_the_named_provisional_values():
+    assert PRIOR_FIXED_BYTES == 1 * GIB
+    assert PRIOR_KV_MULTIPLIER == 3.5
+    assert PRIOR_MARGIN == 1.10
+    assert BASE_FALLBACK_OVERHEAD_BYTES == int(0.45 * GIB)
+    assert MLX_PREFILL_STEP_TOKENS == 2048
+
+
+def test_predict_is_the_structural_prior_hand_computed():
+    budget = _budget()
+    for n in (0, 256, 4096, 32_768):
+        assert budget.predict(n) == int(_hand_predict(n))
+
+
+def test_predict_is_linear_and_monotone():
+    budget = _budget()
+    values = [budget.predict(n) for n in range(0, 40_000, 2_000)]
+    assert values == sorted(values)
+    steps = {b - a for a, b in zip(values, values[1:])}
+    assert max(steps) - min(steps) <= 1  # integer rounding only
+
+
+def test_the_logits_term_comes_from_the_vocabulary_and_the_step():
+    small = _budget(vocab_size=32_000)
+    big = _budget(vocab_size=262_144)
+    assert big.predict(0) - small.predict(0) == pytest.approx(
+        PRIOR_MARGIN * STEP * (262_144 - 32_000) * 2, abs=2
+    )
+    step_512 = _budget(prefill_step=512)
+    assert _budget().predict(0) - step_512.predict(0) == pytest.approx(
+        PRIOR_MARGIN * (2048 - 512) * VOCAB * 2, abs=2
+    )
+
+
+@pytest.mark.parametrize("missing", ["kv_token_bytes", "vocab_size", "prefill_step"])
+def test_an_unknown_shape_fact_turns_the_prediction_off(missing):
+    budget = _budget(**{missing: None})
+    assert budget.predict(100) is None
+    assert budget.footprint_bytes(100) is None
+    assert budget.conversation_bytes(100) is None
+    assert budget.used_fraction(100) is None
     assert budget.memory_margin_fraction(100) is None
-    assert budget.tokens_at_margin(0.15) is None
+    assert budget.tokens_at_ceiling() is None
+
+
+def test_footprint_conversation_and_fractions_hand_computed():
+    budget = _budget()
+    n = 8192
+    predicted = int(_hand_predict(n))
+    assert budget.conversation_bytes(n) == predicted
+    assert budget.footprint_bytes(n) == 2 * GIB + predicted
+    assert budget.used_fraction(n) == pytest.approx((2 * GIB + predicted) / (10 * GIB))
+    assert budget.memory_margin_fraction(n) == pytest.approx(1 - (2 * GIB + predicted) / (10 * GIB))
+
+
+def test_tokens_at_ceiling_closed_form_reserves_the_output_floor():
+    budget = _budget()
+    headroom = 10 * GIB - 2 * GIB
+    expected = (
+        headroom / PRIOR_MARGIN - PRIOR_FIXED_BYTES - STEP * VOCAB * LOGITS_BYTES_PER_VALUE
+    ) / (PRIOR_KV_MULTIPLIER * KV) - 512
+    assert budget.tokens_at_ceiling() == int(expected)
+    # At the ceiling plus the 512-token floor the footprint reaches the budget.
+    at = budget.tokens_at_ceiling() + 512
+    assert budget.footprint_bytes(at) <= 10 * GIB < budget.footprint_bytes(at + 2)
+
+
+def test_tokens_at_ceiling_is_non_positive_when_the_fixed_part_alone_blows_it():
+    budget = _budget(base_bytes=9 * GIB)
+    assert budget.tokens_at_ceiling() <= 0
+
+
+@pytest.mark.parametrize("missing", ["base_bytes", "total_bytes"])
+def test_without_base_or_total_there_is_no_ceiling(missing):
+    budget = _budget(**{missing: None})
+    assert budget.tokens_at_ceiling() is None
     assert budget.used_fraction(100) is None
 
 
-def test_conversation_bytes_only_needs_the_kv_fact():
-    budget = MemoryBudget(weights_bytes=None, kv_token_bytes=100, total_bytes=None)
-    assert budget.conversation_bytes(10) == 1000
-    budget = MemoryBudget(weights_bytes=GIB, kv_token_bytes=None, total_bytes=GIB)
-    assert budget.conversation_bytes(10) is None
+def test_a_regression_pin_bench5_points_stay_under_the_prediction():
+    """NOT a proof -- the priors were fitted on these points. The 107 points
+    of the measurement campaign (``tests/fixtures/memory_prior_bench5.json``:
+    three models, prefill steps 2048 and 512, dirty points included) stay
+    under ``predict``; a change of the priors that puts one above fails
+    here. The gate campaign's clean points join this fixture before merge."""
+    from pathlib import Path
+
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "memory_prior_bench5.json").read_text()
+    )
+    worst_slack = None
+    for model, step, kv, vocab, n, measured_gib, _dirty in fixture["points"]:
+        budget = _budget(kv_token_bytes=kv, vocab_size=vocab, prefill_step=step)
+        slack = budget.predict(n) - measured_gib * GIB
+        assert slack > 0, (model, step, n)
+        worst_slack = slack if worst_slack is None else min(worst_slack, slack)
+    assert len(fixture["points"]) == 107
+    assert worst_slack > 0.35 * GIB
 
 
 # ===================== from_engine =====================
@@ -357,16 +451,19 @@ def _loaded_engine(flat: dict, model_path, format_tag: str = "mlx", working_set=
     return engine
 
 
-def test_from_engine_mlx_directory(tmp_path, monkeypatch):
+def _mlx_dir(tmp_path, **config):
     (tmp_path / "weights.safetensors").write_bytes(b"w" * 5000)
-    (tmp_path / "config.json").write_text(
-        json.dumps({"num_hidden_layers": 24, "num_key_value_heads": 8, "head_dim": 128}),
-        encoding="utf-8",
-    )
-    working_set = 12 * 1024**3
-    engine = _loaded_engine(
-        {"backend_type": "mlx", "total_memory_gb": 16.0}, tmp_path, working_set=working_set
-    )
+    shape = {"num_hidden_layers": 24, "num_key_value_heads": 8, "head_dim": 128}
+    shape.update(config)
+    (tmp_path / "config.json").write_text(json.dumps(shape), encoding="utf-8")
+    return tmp_path
+
+
+def test_from_engine_mlx_reads_the_static_facts_and_the_measured_base(tmp_path):
+    model = _mlx_dir(tmp_path, vocab_size=VOCAB)
+    working_set = 12 * GIB
+    engine = _loaded_engine({"backend_type": "mlx"}, model, working_set=working_set)
+    engine._model["base_footprint_bytes"] = 3 * GIB
     try:
         budget = MemoryBudget.from_engine(engine)
     finally:
@@ -374,14 +471,41 @@ def test_from_engine_mlx_directory(tmp_path, monkeypatch):
     config_bytes = (tmp_path / "config.json").stat().st_size
     assert budget.weights_bytes == 5000 + config_bytes
     assert budget.kv_token_bytes == 98304
+    assert budget.vocab_size == VOCAB
+    assert budget.prefill_step == MLX_PREFILL_STEP_TOKENS
+    assert budget.base_bytes == 3 * GIB
     assert budget.total_bytes == int(0.9 * working_set)
 
 
-def test_from_engine_llama_cpp_never_warns_even_with_full_facts(tmp_path):
-    # [H1 refined] The downloader saves config.json next to the .gguf, so the
-    # KV fact IS derivable -- but a llama.cpp engine's budget still cannot
-    # warn: its pool is None by policy (upfront KV allocation, the fit
-    # settled it at load; see total_memory_bytes).
+def test_from_engine_without_a_measured_base_falls_back_to_the_weights_plus_overhead(tmp_path):
+    model = _mlx_dir(tmp_path, vocab_size=VOCAB)
+    engine = _loaded_engine({"backend_type": "mlx"}, model, working_set=12 * GIB)
+    try:
+        budget = MemoryBudget.from_engine(engine)
+    finally:
+        engine._model = None
+    assert budget.base_bytes == budget.weights_bytes + BASE_FALLBACK_OVERHEAD_BYTES
+
+
+def test_the_static_facts_are_read_once_per_child_and_cached_on_the_handle(tmp_path, monkeypatch):
+    import src.engines.memory_budget as mb
+
+    model = _mlx_dir(tmp_path, vocab_size=VOCAB)
+    engine = _loaded_engine({"backend_type": "mlx"}, model, working_set=12 * GIB)
+    reads = []
+    real = mb.artifact_bytes
+    monkeypatch.setattr(mb, "artifact_bytes", lambda path: reads.append(path) or real(path))
+    try:
+        first = MemoryBudget.from_engine(engine)
+        second = MemoryBudget.from_engine(engine)
+        assert "memory_facts" in engine._model
+    finally:
+        engine._model = None
+    assert len(reads) == 1
+    assert first == second
+
+
+def test_from_engine_llama_cpp_is_all_none_and_writes_nothing(tmp_path):
     gguf = tmp_path / "model-q4.gguf"
     gguf.write_bytes(b"g" * 4000)
     (tmp_path / "config.json").write_text(
@@ -393,40 +517,26 @@ def test_from_engine_llama_cpp_never_warns_even_with_full_facts(tmp_path):
         {"backend_type": "cuda", "total_memory_gb": 64.0, "vram_total_gb": 12.0},
     ):
         engine = _loaded_engine(flat, gguf, format_tag="gguf")
+        handle = engine._model
         try:
             budget = MemoryBudget.from_engine(engine)
         finally:
             engine._model = None
-        assert budget.kv_token_bytes == 98304  # the fact reads fine
-        assert budget.total_bytes is None  # the policy keeps the signal off
-        assert budget.memory_margin_fraction(100) is None
-        assert budget.tokens_at_margin(0.15) is None
-
-
-def test_from_engine_gguf_without_config_disables_the_kv_fact(tmp_path):
-    # A GGUF folder downloaded without its config.json: the KV fact is
-    # underivable, the signal off no matter the engine (weights still resolve).
-    gguf = tmp_path / "model-q4.gguf"
-    gguf.write_bytes(b"g" * 4000)
-    engine = _loaded_engine({"backend_type": "cpu", "total_memory_gb": 8.0}, gguf, "gguf")
-    try:
-        budget = MemoryBudget.from_engine(engine)
-    finally:
-        engine._model = None
-    assert budget.weights_bytes == 4000
-    assert budget.kv_token_bytes is None
-    assert budget.memory_margin_fraction(100) is None
+        assert budget == MemoryBudget.unaccounted()
+        assert budget.predict(100) is None
+        assert budget.tokens_at_ceiling() is None
+        assert set(handle) == {"model_path"}, "no handle writes on llama.cpp"
 
 
 def test_from_engine_without_a_loaded_child_is_all_none():
-    engine = _engine_with_flat_data({"backend_type": "cpu", "total_memory_gb": 8.0})
+    engine = _engine_with_flat_data({"backend_type": "mlx"})
     engine._model = None
     budget = MemoryBudget.from_engine(engine)
-    assert budget.weights_bytes is None
-    assert budget.kv_token_bytes is None
+    assert budget.predict(100) is None
     assert budget.memory_margin_fraction(100) is None
 
 
 def test_from_engine_none_engine_is_all_none():
     budget = MemoryBudget.from_engine(None)
     assert budget.memory_margin_fraction(100) is None
+    assert budget.tokens_at_ceiling() is None

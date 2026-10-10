@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, Optional
 
 from src.agents.chat_model import erudi_chat_openai_class
 from src.agents.reasoning_effort import EffortPlan
+from src.engines.memory_budget import budget_digit_tokens
 from src.engines.working_window import working_context_tokens
 from src.core import config
 from src.core.logging import logger
@@ -55,6 +56,9 @@ def build_chat_model(
     auto_output_budget: bool = True,
     sampling: Optional[SamplingDefaults] = None,
     effort_plan: Optional[EffortPlan] = None,
+    kb_additions: str = "",
+    preflight_retry: bool = True,
+    record_usage: bool = False,
 ) -> ChatOpenAI:
     """Resolve the engine child for ``llm`` and wrap it as a ``ChatOpenAI``.
 
@@ -73,7 +77,23 @@ def build_chat_model(
     ``max_tokens`` is normally only the FALLBACK output budget: the client
     recomputes a real one per model call from the window it is running in
     (``src.agents.output_budget``). ``auto_output_budget=False`` turns that off
-    for the caller whose small budget is deliberate -- the one-shot title path.
+    for the callers whose budget is deliberate -- the one-shot title path and
+    the capped compaction summary.
+
+    ``kb_additions`` is the KB text this turn's requests carry (block, joins,
+    language line): a request that carried it stamps its size, so the ratio
+    it measured excludes a block the next request no longer holds.
+    ``preflight_retry=False``
+    turns off the single retry with a smaller cap after a context-check
+    rejection (the summary client: a smaller cap would truncate the summary).
+
+    Every client asks the server for usage (``stream_usage=True``): the last
+    chunk then carries the real prompt size, which the client stamps with its
+    own estimate of the request (``Erudi_Chat_OpenAI._astream``).
+    ``record_usage=True`` (the conversation and Arena clients only) also
+    pushes each call's usage to the engine handle the client was built
+    against (``note_call_usage``), where the MLX engine measures what a turn
+    really used; the summary and title clients push nothing.
 
     ``effort_plan`` carries the turn's reasoning effort (1.1.2). Its
     ``wire_effort`` rides the NATIVE ``reasoning_effort`` request field, not
@@ -106,9 +126,13 @@ def build_chat_model(
     # candidates -- src.engines.working_window). Only the output budget reads
     # it; the first-chunk watchdog and preflight retry keep the raw allocated
     # window above. ``working_context_tokens`` calls ``MemoryBudget.from_engine``
-    # (disk I/O to read the loaded artifact + its config.json), which is safe
-    # here because this factory runs in a threadpool per turn.
+    # (the loaded child's static facts are read from disk once and cached on
+    # its handle), which is safe here because this factory runs in a
+    # threadpool per turn.
     working_window = working_context_tokens(engine)
+    # What a digit costs on this child's tokenizer, for the output budget (a
+    # static fact read once per child from its tokenizer.json, MLX only).
+    digit_tokens = budget_digit_tokens(engine)
 
     # Extra sampling params absent from the OpenAI wire schema. mlx_vlm.server reads
     # the HF names natively; llama.cpp engines translate them to their wire names
@@ -149,6 +173,16 @@ def build_chat_model(
     # must flag its own child, not whichever child is loaded by then.
     note_abandoned = getattr(engine, "note_stream_abandoned", None)
     abandon_hook = functools.partial(note_abandoned, handle) if callable(note_abandoned) else None
+    # Same binding for the usage a call reports: it belongs to the turn's
+    # measurement window on THIS child.
+    note_usage = getattr(engine, "note_call_usage", None)
+    usage_hook = (
+        functools.partial(note_usage, handle) if record_usage and callable(note_usage) else None
+    )
+    note_start = getattr(engine, "note_call_start", None)
+    call_start_hook = (
+        functools.partial(note_start, handle) if record_usage and callable(note_start) else None
+    )
 
     # Log the extra_body AS SENT (post-translation, so llama.cpp's wire names
     # show up), one key=value per entry on the same line: the optional profile
@@ -191,7 +225,15 @@ def build_chat_model(
         effective_context_tokens=effective_window,
         working_context_tokens=working_window,
         auto_output_budget=auto_output_budget,
+        kb_additions=kb_additions or "",
+        digit_tokens=digit_tokens,
+        preflight_retry=preflight_retry,
         abandon_hook=abandon_hook,
+        usage_hook=usage_hook,
+        call_start_hook=call_start_hook,
         streaming=True,
-        stream_usage=False,  # local servers may not emit usage in SSE; summarization triggers on count
+        # ``stream_options.include_usage``: both local servers then end the
+        # stream with a usage chunk (mlx_vlm 0.6.17 and llama-server alike);
+        # a server that sends none leaves every consumer on its estimate.
+        stream_usage=True,
     )

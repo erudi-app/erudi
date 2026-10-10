@@ -101,3 +101,79 @@ class TestStripStaleToolResults:
         req = _FakeRequest([AIMessage(content="hello")])
         out = _StripStaleToolResults()._strip(req)
         assert out is req
+
+
+# ===================== the pure function shared with the counters =====================
+
+
+def _kb_history(call_id="functions.search_knowledge_base:0"):
+    """Two KB turns whose parser reuses the SAME call id every turn (mlx_vlm's
+    kimi_k2 parser emits ``functions.<name>:0``), then the current question."""
+    past = [
+        HumanMessage(content="q1", id="h1"),
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "search_knowledge_base", "args": {}, "id": call_id}],
+            id="a1",
+        ),
+        ToolMessage(
+            content="PAST " * 100, name="search_knowledge_base", tool_call_id=call_id, id="t1"
+        ),
+        AIMessage(content="answer one", id="a2"),
+    ]
+    current = [
+        HumanMessage(content="q2", id="h2"),
+        AIMessage(
+            content="",
+            tool_calls=[{"name": "search_knowledge_base", "args": {}, "id": call_id}],
+            id="a3",
+        ),
+        ToolMessage(
+            content="CURRENT " * 100, name="search_knowledge_base", tool_call_id=call_id, id="t2"
+        ),
+    ]
+    return past + current
+
+
+def test_the_pure_function_is_what_the_middleware_applies():
+    from src.agents.middleware import strip_stale_tool_results
+
+    messages = _kb_history()
+    via_middleware = _StripStaleToolResults()._strip(_FakeRequest(messages)).messages
+    assert [m.content for m in strip_stale_tool_results(messages)] == [
+        m.content for m in via_middleware
+    ]
+    assert via_middleware[2].content == _StripStaleToolResults._MARKERS["search_knowledge_base"]
+    assert via_middleware[6].content.startswith("CURRENT")
+
+
+def test_all_past_strips_every_marked_result_including_the_last_turns():
+    from src.agents.middleware import strip_stale_tool_results
+
+    out = strip_stale_tool_results(_kb_history(), all_past=True)
+    marker = _StripStaleToolResults._MARKERS["search_knowledge_base"]
+    assert out[2].content == marker
+    assert out[6].content == marker
+
+
+def test_the_pure_function_never_mutates_its_input():
+    from src.agents.middleware import strip_stale_tool_results
+
+    messages = _kb_history()
+    strip_stale_tool_results(messages, all_past=True)
+    assert messages[2].content.startswith("PAST")
+    assert messages[6].content.startswith("CURRENT")
+
+
+def test_past_results_are_designated_by_message_id_not_call_id():
+    """A parser with deterministic call ids reuses them every turn: the past
+    set holds ToolMessage ids, so the current result is never marked."""
+    from src.agents.middleware import past_tool_result_ids
+
+    assert past_tool_result_ids(_kb_history()) == frozenset({"t1"})
+
+
+def test_no_user_message_means_no_past_results():
+    from src.agents.middleware import past_tool_result_ids
+
+    assert past_tool_result_ids([AIMessage(content="a")]) == frozenset()

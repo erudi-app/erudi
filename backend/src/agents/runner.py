@@ -58,6 +58,7 @@ itself LangChain-free at import time (``ChatOpenAI`` is deferred inside it).
 
 from __future__ import annotations
 
+import asyncio
 import contextlib
 import functools
 import json
@@ -76,14 +77,29 @@ from src.agents.chat_model import (
 )
 from src.agents.isolated_stream import isolated_stream
 from src.agents.model_factory import build_chat_model
+from src.agents.output_budget import OUTPUT_BUDGET_FLOOR_TOKENS
 from src.agents.overflow import ContextOverflow, parse_context_overflow
 from src.agents.reasoning_effort import NO_REASONING_PLAN, EffortPlan
+from src.agents.token_accounting import (
+    COUNTER_DENSE_TOKENS,
+    COUNTER_WEIGHT_FLOOR,
+    STALE_TOOL_RESULT_MARKERS,
+    SUMMARY_SOURCE_MARKER,
+    RequestOverhead,
+    fresh_weight,
+    last_human_index,
+    message_weights,
+    overhead_tokens,
+    request_overhead,
+    stale_result_copy,
+    weighted_cost,
+)
 from src.database.generation_hints import resolve_sampling_defaults
 from src.agents.think_splitter import ThinkSplitter
 from src.core import config
 from src.core.exceptions import EngineException, GenerationTimeoutException
 from src.core.logging import logger
-from src.engines.base_engine import BaseEngine, run_reset_shielded
+from src.engines.base_engine import BaseEngine, run_reset_shielded, wait_shielded
 from src.engines.memory_budget import MemoryBudget
 from src.engines.working_window import canonical_working_window
 
@@ -91,14 +107,14 @@ if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
 
-# Auto-summarization (compaction) fires on TWO signals, whichever comes first,
-# recomputed PER TURN (``_build_middleware`` runs after the child spawned, so
-# the allocated window is fresh):
-#   1. the WINDOW signal -- the conversation reaches 80 % of the ALLOCATED
-#      context window (``BaseEngine.effective_context_tokens``);
-#   2. the MEMORY signal -- the machine's deterministic memory margin
-#      (``src.engines.memory_budget``) would drop under 15 %, expressed as the
-#      conversation token count at which that happens.
+# Auto-summarization (compaction) fires at 80 % of the WORKING window, the
+# smaller of two values recomputed PER TURN (``_build_middleware`` runs after
+# the child spawned, so both are fresh):
+#   1. the ALLOCATED context window (``BaseEngine.effective_context_tokens``);
+#   2. the MEMORY ceiling (Apple Silicon) -- the conversation token count at
+#      which the child's predicted footprint reaches the memory budget
+#      (``MemoryBudget.tokens_at_ceiling``, a measured prior; no margin is
+#      stacked on top of it).
 # The 20-message floor stays as the trigger when no window is readable
 # (``W_eff=None``), and always rides along with OR semantics. Once triggered,
 # older turns are summarized by the same local model and replaced in the
@@ -124,18 +140,12 @@ SUMMARY_PROMPT = (
 SUMMARY_TRIGGER_MESSAGES = 20
 SUMMARY_KEEP_MESSAGES = 10
 COMPACTION_WINDOW_FRACTION = 0.8
-# Shared floor of the memory signal AND the amber warning: under 15 % of
-# deterministic margin, compaction fires; the warning is emitted only when
-# even a compaction down to the keep-tail could not restore that margin
-# (see ``_memory_warning_event``). The floor stays 15 % on top of the
-# corrected denominator: the margin is now measured against the GPU's usable
-# working set, not total RAM (see memory_budget.total_memory_bytes), which is
-# already ~2.4x smaller. Issue #601 asked to raise it to 30 %, but that was
-# against the old total-RAM denominator; raising it on top of the smaller,
-# honest one would over-trigger (spurious compactions and amber notices). To
-# be confirmed in the 1.1.3 QA pass -- if auto-compaction fires too late on
-# the saturation scenario, raise the floor then.
-MEMORY_MARGIN_FLOOR = 0.15
+# The amber warning's threshold: it shows when, even after compacting to the
+# kept budget, the model plus the kept conversation would use more than 85 %
+# of the memory budget (see ``_memory_warning_event``). It is the warning's
+# threshold ONLY: the compaction ceiling is the honest one, with no margin
+# stacked on top (the prior carries its own margin, ``memory_budget``).
+MEMORY_WARNING_MARGIN = 0.15
 # Token allowance for the summary a compaction would insert, used when
 # projecting the post-compaction size the warning is judged on -- ONLY when no
 # working window is known. With a window, the projection uses the summary's
@@ -171,20 +181,25 @@ SUMMARY_CAP_CEILING_TOKENS = 1024
 # at every compaction. With a known window the budget is
 #   max(256, min(max(4000, 0.8 W - cap),
 #                W - 2 cap - 256,
-#                (W_alloc - 2 cap - 512) // 3))
+#                (W_alloc - 2 cap - 512) // 2))
 # -- the second term keeps the summarizer prompt (input + the prepended
 # previous summary + the summary it writes, each up to ``cap``) inside the
-# MEMORY window, the third inside the ALLOCATED window even when chars/4
-# under-counts threefold (CJK). The previous summary is always prepended on
-# top of this budget, never trimmed away.
+# MEMORY window, the third inside the ALLOCATED window. The counter is in real
+# tokens now (a measured ratio), but that ratio is a whole-REQUEST average: an
+# English system prompt and tool schemas around a CJK history (O_est 1500 at
+# r ~ 1.1, history at r ~ 3: r = 2.37) under-count the history by ~1.3x. The
+# factor 2 covers that heterogeneity; with no factor the summarizer prompt at
+# W = 8192 would leave ~9 % of slack in the allocated window. The previous
+# summary is always prepended on top of this budget, never trimmed away.
 SUMMARY_TRIM_DEFAULT_TOKENS = 4000
 SUMMARY_TRIM_FLOOR_TOKENS = 256
 SUMMARY_TRIM_MEMORY_MARGIN_TOKENS = 256
 SUMMARY_TRIM_ALLOCATED_MARGIN_TOKENS = 512
-SUMMARY_TRIM_UNDERCOUNT_FACTOR = 3
+SUMMARY_TRIM_HETEROGENEITY_FACTOR = 2
 
 # chars per token of ``count_tokens_approximately`` (its default), used to
-# truncate an oversized message to a token budget.
+# truncate an oversized message to a token budget (divided by the measured
+# ratio, so the cut is in real tokens).
 _APPROX_CHARS_PER_TOKEN = 4
 # Room left for the role and per-message overhead when truncating a message.
 _TRUNCATION_OVERHEAD_TOKENS = 16
@@ -194,7 +209,6 @@ _TRIM_FALLBACK_MESSAGE_COUNT = 15
 # The summary message LangChain inserts (``_build_new_messages``, pinned in
 # tests/test_compaction_keep.py) and the marker it carries.
 SUMMARY_MESSAGE_PREFIX = "Here is a summary of the conversation to date:\n\n"
-SUMMARY_SOURCE_MARKER = "summarization"
 # The placeholder a compaction writes when the summary could not be produced
 # (see ``_summary_placeholder``). ASCII, addressed to the model.
 SUMMARY_LATER_LOST = "Later messages of this conversation could not be summarized."
@@ -210,15 +224,12 @@ def summarization_triggers(working_window: Optional[int]) -> list:
     known). Its 80 % (``COMPACTION_WINDOW_FRACTION``) becomes the token
     threshold, OR'd with the ``SUMMARY_TRIGGER_MESSAGES`` message floor. The
     memory fold happens at the call site, so this function sees a single value:
-    ``None`` (no window and no memory signal) leaves the message floor alone.
+    ``None`` (no window and no memory ceiling) leaves the message floor alone.
 
     Deliberately never ``("fraction", ...)``: that form needs a
     ``model.profile`` our local chat clients do not carry (the middleware's
-    ``__init__`` would raise). The token counter passed is
-    ``approx_token_count``: plain ``count_tokens_approximately`` (chars / 4,
-    the same base counter the output budget uses) behind a distinct name, so
-    langchain 1.3.9 does not swap in its usage-scaled variant -- the trigger
-    and the keep count with one unscaled estimator.
+    ``__init__`` would raise). The middleware tests the token clause against
+    ``count + O`` in real tokens (``_should_summarize``).
     """
     triggers: list = []
     if (
@@ -229,6 +240,33 @@ def summarization_triggers(working_window: Optional[int]) -> list:
         triggers.append(("tokens", max(1, int(COMPACTION_WINDOW_FRACTION * working_window))))
     triggers.append(("messages", SUMMARY_TRIGGER_MESSAGES))
     return triggers
+
+
+def _close_memory_window(engine: Any, token: Any, *, abandoned: bool) -> None:
+    """Close the turn's memory measurement window; a failure costs the
+    observation, never the turn (one WARNING)."""
+    if token is None:
+        return
+    try:
+        engine.end_memory_window(token, abandoned=abandoned)
+    except Exception:
+        logger.warning("Closing the memory measurement window failed", exc_info=True)
+
+
+def _track_memory_warning(engine: Any, thread_id: Optional[str], active: bool) -> None:
+    """Per-conversation warning state on the loaded child's handle, with ONE
+    INFO line at each transition (start, end). Lost when the child is reaped
+    or swapped: the next warning simply starts again."""
+    handle = getattr(engine, "_model", None)
+    if not isinstance(handle, dict):
+        return
+    state = handle.setdefault("warning_state", {})
+    if active and thread_id not in state:
+        state[thread_id] = True
+        logger.info(f"Memory warning started: thread_id={thread_id}")
+    elif not active and thread_id in state:
+        state.pop(thread_id, None)
+        logger.info(f"Memory warning ended: thread_id={thread_id}")
 
 
 def _flag_abandoned(abandon_hook: Any) -> None:
@@ -264,20 +302,69 @@ def _engine_overrides(engine: Any, hook_name: str) -> bool:
     return getattr(hook, "__func__", hook) is not getattr(base, "__func__", base)
 
 
-def approx_token_count(messages: Any) -> int:
-    """THE token counter of compaction: ``count_tokens_approximately``
-    (chars / 4), unscaled.
+def _is_marker(message: Any) -> bool:
+    """A tool result already sent as its stale-result marker."""
+    return getattr(message, "type", None) == "tool" and getattr(
+        message, "content", None
+    ) == STALE_TOOL_RESULT_MARKERS.get(getattr(message, "name", None))
+
+
+def counter_weight(message: Any) -> float:
+    """The counter's weight for a message nothing was frozen for (rule 2 with
+    the counter's settings: CJK one token per character, floor 1.2)."""
+    return fresh_weight(message, dense=COUNTER_DENSE_TOKENS, weight_floor=COUNTER_WEIGHT_FLOOR)
+
+
+def frozen_weights(messages: Any) -> tuple[dict, Optional[float]]:
+    """``({message id: weight}, r)`` for a list of messages AS SENT, decided
+    once from the whole list (``token_accounting.message_weights`` with the
+    counter's settings)."""
+    messages = list(messages)
+    weights, ratio = message_weights(
+        messages, dense=COUNTER_DENSE_TOKENS, weight_floor=COUNTER_WEIGHT_FLOOR
+    )
+    by_id = {
+        message.id: weight
+        for message, weight in zip(messages, weights)
+        if getattr(message, "id", None) is not None
+    }
+    return by_id, ratio
+
+
+def real_token_count(
+    messages: Any, weights_by_id: Optional[dict] = None, past_ids: frozenset = frozenset()
+) -> int:
+    """THE token counter of compaction, in real tokens, over the messages AS
+    SENT: each message costs ``ceil(weight * chars/4 of that copy)``.
+
+    ``weights_by_id`` is frozen once per call from the full state
+    (``frozen_weights``), so the count works on any list LangChain hands it --
+    suffixes, the reversed pool of ``trim_messages``, partial copies (same id,
+    shorter content: they cost their share). A ToolMessage whose id is in
+    ``past_ids`` is sent as its marker, and a marker costs the weight of its
+    OWN text, never the frozen weight of the result it replaces. A message
+    nothing was frozen for (a new summary, a re-ided copy) gets the counter's
+    rule 2 on the fly. Additive: ``count(a + b) == count(a) + count(b)``.
 
     A distinct function on purpose: handed ``count_tokens_approximately``
     itself, LangChain's ``SummarizationMiddleware`` swaps in a variant that
     rescales the count with the last AI message's reported usage -- a stale
-    total that counts messages compaction already removed. Through this
-    wrapper the trigger, the cutoff, the summarizer trim, the truncation and
-    the amber-warning projection all count with one plain estimator.
+    total that counts messages compaction already removed.
     """
-    from langchain_core.messages.utils import count_tokens_approximately
-
-    return count_tokens_approximately(messages)
+    weights_by_id = weights_by_id or {}
+    total = 0
+    for message in messages:
+        message_id = getattr(message, "id", None)
+        if past_ids and message_id in past_ids:
+            message = stale_result_copy(message)
+        if _is_marker(message):
+            weight = counter_weight(message)
+        else:
+            weight = weights_by_id.get(message_id) if message_id is not None else None
+            if weight is None:
+                weight = counter_weight(message)
+        total += weighted_cost(message, weight)
+    return total
 
 
 def _known_window(window: Any) -> bool:
@@ -318,21 +405,31 @@ def summarize_trim_budget(working_window: Optional[int], allocated_window: Optio
     if _known_window(allocated_window):
         terms.append(
             (allocated_window - 2 * cap - SUMMARY_TRIM_ALLOCATED_MARGIN_TOKENS)
-            // SUMMARY_TRIM_UNDERCOUNT_FACTOR
+            // SUMMARY_TRIM_HETEROGENEITY_FACTOR
         )
     return max(SUMMARY_TRIM_FLOOR_TOKENS, min(terms))
 
 
-def compaction_cutoff(messages: list, working_window: Optional[int], counter: Any) -> int:
+def compaction_cutoff(
+    messages: list,
+    working_window: Optional[int],
+    counter: Any,
+    *,
+    overhead: int = 0,
+    allocated_window: Optional[int] = None,
+) -> int:
     """Index of the first message a compaction keeps (0: nothing to compact).
 
     THE cutoff rule, pure: the summarization middleware uses it, and so does
     the amber-warning projection (which has no middleware instance).
+    ``counter`` counts real tokens as sent; ``overhead`` is O, what the
+    request carries beyond the state (system prompt, KB block, tool schemas),
+    already scaled.
 
     1. With a known window, the later of two cutoffs -- the earliest suffix
-       that fits ``keep_token_budget(W)`` tokens and the one keeping
-       ``SUMMARY_KEEP_MESSAGES`` messages -- so the kept tail respects BOTH
-       bounds. Without a window, the message cutoff alone.
+       that fits ``max(1, keep_token_budget(W) - O)`` tokens and the one
+       keeping ``SUMMARY_KEEP_MESSAGES`` messages -- so the kept tail
+       respects BOTH bounds. Without a window, the message cutoff alone.
     2. Never past the LAST user message: the question the current turn
        answers is never summarized away mid-turn (a tool round after it can
        be large on its own).
@@ -351,6 +448,23 @@ def compaction_cutoff(messages: list, working_window: Optional[int], counter: An
     5. If only the previous summary would be summarized (cutoff <= 1 after a
        summary), nothing is: re-summarizing a summary alone adds nothing and
        would reset the prefix cache for nothing.
+    6. Futility guard -- only with a known window and only when the TOKEN
+       trigger fired (``count + O >= 0.8 W``; the 20-message clause alone
+       keeps the rules above): a compaction whose gain
+       ``count(all) - count(kept) - summary_cap(W)`` is below
+       ``POST_COMPACTION_MARGIN_TOKENS`` (256) -- nothing at all included --
+       is skipped unless the request would overflow without it: against the
+       allocated window (``O + count + 512 > W_alloc``, the output budget's
+       floor) or the working window (``O + count > W``). A small gain is not
+       worth a summary call and a prefix-cache reset; any compaction that may
+       save an overflowing turn is taken (the gain is reckoned with the
+       summary's CAP, the real summary is often shorter).
+
+    Termination: every compaction strictly lowers the number of messages
+    before the last user message; steps 2-3 bound the cutoff at
+    the answer before the current question, and there step 5 returns 0 on
+    the next hop -- the kept tail can stay above the trigger, so termination
+    rests on step 5, not on a margin under the trigger.
 
     With ordinary messages the kept tail stays inside the token budget. It
     exceeds it only by the answer before the current question when the cut
@@ -368,14 +482,12 @@ def compaction_cutoff(messages: list, working_window: Optional[int], counter: An
     else:
         cutoff = safe_point(messages, len(messages) - SUMMARY_KEEP_MESSAGES)
     if _known_window(working_window):
-        token_cut = _token_cutoff(messages, keep_token_budget(working_window), counter)
+        keep_budget = max(1, keep_token_budget(working_window) - overhead)
+        token_cut = _token_cutoff(messages, keep_budget, counter)
         cutoff = max(token_cut, cutoff)
     if cutoff <= 0:
         return 0
-    last_human = next(
-        (i for i in range(len(messages) - 1, -1, -1) if isinstance(messages[i], HumanMessage)),
-        None,
-    )
+    last_human = last_human_index(messages)
     if last_human is not None:
         cutoff = min(cutoff, last_human)
     if (
@@ -407,6 +519,17 @@ def compaction_cutoff(messages: list, working_window: Optional[int], counter: An
             break
     if cutoff <= 1 and messages and _is_previous_summary(messages[0]):
         return 0
+    if cutoff > 0 and _known_window(working_window):
+        total = counter(messages)
+        threshold = max(1, int(COMPACTION_WINDOW_FRACTION * working_window))
+        if total + overhead >= threshold:
+            gain = total - counter(messages[cutoff:]) - summary_cap(working_window)
+            overflows = overhead + total > working_window or (
+                _known_window(allocated_window)
+                and overhead + total + OUTPUT_BUDGET_FLOOR_TOKENS > allocated_window
+            )
+            if gain < POST_COMPACTION_MARGIN_TOKENS and not overflows:
+                return 0
     return cutoff
 
 
@@ -461,27 +584,36 @@ def _summary_placeholder(previous: Any, max_tokens: Optional[int] = None) -> str
     the earlier memory survives -- and no compaction dead-lock.
 
     ``max_tokens`` (``summary_cap(W)`` when the window is known) caps the
-    carried text, head kept: a summary written under a larger window would
-    otherwise keep the state above a smaller window's trigger forever.
+    carried text in REAL tokens -- ``cap * 4 / w`` characters, ``w`` the
+    counter's weight of that text, head kept: a summary written under a larger
+    window would otherwise keep the state above a smaller window's trigger
+    forever, and a CJK summary capped at ``cap * 4`` characters would carry
+    several times ``cap`` real tokens while the keep reserves ``cap``.
     """
     text = _previous_summary_text(previous)
     if text and max_tokens is not None:
-        text = text[: max_tokens * _APPROX_CHARS_PER_TOKEN].rstrip()
+        from langchain_core.messages import HumanMessage
+
+        weight = counter_weight(HumanMessage(text))
+        text = text[: int(max_tokens * _APPROX_CHARS_PER_TOKEN / weight)].rstrip()
     if text:
         return f"{text}\n\n{SUMMARY_LATER_LOST}"
     return SUMMARY_EARLIER_LOST
 
 
-def _truncate_for_summary(messages: list, budget: int, counter: Any) -> list:
-    """Copies of ``messages`` whose content alone exceeds ``budget`` tokens,
-    cut to fit it (the head is kept). Halving the input cannot fix a single
-    oversized answer; cutting it can."""
-    keep_chars = max(0, (budget - _TRUNCATION_OVERHEAD_TOKENS) * _APPROX_CHARS_PER_TOKEN)
+def _truncate_for_summary(messages: list, budget: int, counter: Any, weight_of: Any) -> list:
+    """Copies of ``messages`` whose content alone exceeds ``budget`` real
+    tokens, cut to fit it (the head is kept): ``(budget / w - 16) * 4``
+    characters, ``w`` the message's own weight (``weight_of``; the role and
+    per-message overhead are weighed too). Halving the input cannot fix a
+    single oversized answer; cutting it can."""
     out = []
     for message in messages:
         if counter([message]) <= budget:
             out.append(message)
             continue
+        unscaled = budget / max(weight_of(message), 1e-6)
+        keep_chars = max(0, int((unscaled - _TRUNCATION_OVERHEAD_TOKENS) * _APPROX_CHARS_PER_TOKEN))
         text = message.text if isinstance(getattr(message, "text", None), str) else ""
         out.append(message.model_copy(update={"content": text[:keep_chars]}))
     return out
@@ -550,23 +682,81 @@ def _summarization_middleware_class():
     class _Logged_Summarization_Middleware(SummarizationMiddleware):
         """The stock middleware, with what Erudi changes about compaction:
 
+        * every count is in REAL tokens, as sent (``real_token_count``): a
+          weight per message, frozen once per call from the full state
+          (``_freeze``: measured ratio before the anchor, exact output tokens,
+          script weights), with past KB/web results counted as their markers
+          through the frozen set of their message ids;
+        * the request overhead O (system prompt, tool schemas, KB block --
+          not in the state) enters the trigger (``_should_summarize``) and the
+          keep and futility guard (``compaction_cutoff``), never the counter
+          itself (an O larger than the summarizer's trim budget would empty
+          the trim);
         * the cutoff is ``compaction_cutoff`` (token AND message bound);
         * a performed compaction resets the engine's prefix cache, shielded
           (``run_reset_shielded``): the old prefix is garbage once the
           history is rewritten;
-        * the summarizer input always carries the previous summary, and a
-          failed summary call never erases memory (``_acreate_summary``);
+        * the summarizer input always carries the previous summary, reads
+          past tool results as their markers, and a failed summary call never
+          erases memory (``_acreate_summary``);
         * the ONE aggregate log line the QA spec promises ("backend.log
           records the summarization"). ASCII, INFO: the app did its job.
         """
 
-        def __init__(self, *, working_window: Optional[int], engine: Any, **kwargs: Any):
-            super().__init__(**kwargs)
+        def __init__(
+            self,
+            *,
+            working_window: Optional[int],
+            engine: Any,
+            allocated_window: Optional[int] = None,
+            overhead: Optional[RequestOverhead] = None,
+            **kwargs: Any,
+        ):
+            # The frozen per-call context, initialised before ``super()``
+            # binds the counter; ``_freeze`` replaces it at every call.
+            self.overhead = overhead
+            self._weights: dict = {}
+            self._past_ids: frozenset = frozenset()
+            self._overhead = 0
+            super().__init__(token_counter=self._real_count, **kwargs)
             self.working_window = working_window
+            self.allocated_window = allocated_window
             self.engine = engine
 
+        def _real_count(self, messages) -> int:
+            return real_token_count(messages, self._weights, self._past_ids)
+
+        def _weight_of(self, message) -> float:
+            weight = self._weights.get(getattr(message, "id", None))
+            return weight if weight is not None else counter_weight(message)
+
+        def _freeze(self, messages) -> None:
+            """The per-call context, from the FULL raw state as sent: one
+            weight per message id, the past tool results' ids, and O."""
+            from src.agents.middleware import past_tool_result_ids, strip_stale_tool_results
+
+            self._ensure_message_ids(messages)
+            self._past_ids = past_tool_result_ids(messages)
+            self._weights, ratio = frozen_weights(strip_stale_tool_results(messages))
+            self._overhead = overhead_tokens(
+                self.overhead,
+                ratio,
+                dense=COUNTER_DENSE_TOKENS,
+                weight_floor=COUNTER_WEIGHT_FLOOR,
+            )
+
         def _determine_cutoff_index(self, messages):
-            return compaction_cutoff(messages, self.working_window, self._partial_token_counter)
+            return compaction_cutoff(
+                messages,
+                self.working_window,
+                self._real_count,
+                overhead=self._overhead,
+                allocated_window=self.allocated_window,
+            )
+
+        def _should_summarize(self, messages, total_tokens):
+            # The token clause judges the whole request: the state plus O.
+            return super()._should_summarize(messages, total_tokens + self._overhead)
 
         def _should_summarize_based_on_reported_tokens(self, messages, threshold):
             # Never: the usage a preserved AI message reports is the stale
@@ -574,7 +764,12 @@ def _summarization_middleware_class():
             # no longer there. The trigger counts what IS there.
             return False
 
+        def before_model(self, state, runtime):
+            # The runner is async-only: no half-implemented sync path.
+            raise NotImplementedError("compaction runs through abefore_model only")
+
         async def abefore_model(self, state, runtime):
+            self._freeze(state["messages"])
             # Non-None exactly when the history was rewritten.
             result = await super().abefore_model(state, runtime)
             if result is not None:
@@ -596,10 +791,17 @@ def _summarization_middleware_class():
             One WARNING per failed attempt; an unexpected error is one ERROR
             with its traceback.
             """
+            from src.agents.middleware import strip_stale_tool_results
+
             if not messages_to_summarize:
                 return "No previous conversation history."
             previous = next((m for m in messages_to_summarize if _is_previous_summary(m)), None)
-            pool = [m for m in messages_to_summarize if m is not previous]
+            # The pool holds only past turns: their KB/web results are read as
+            # the markers the model last saw, so what the summarizer reads is
+            # what its trim counts.
+            pool = strip_stale_tool_results(
+                [m for m in messages_to_summarize if m is not previous], all_past=True
+            )
             budget = self.trim_tokens_to_summarize or SUMMARY_TRIM_DEFAULT_TOKENS
             retry_budget = budget
             trimmed = self._trim_for_summary(pool, budget, start_on="human")
@@ -614,7 +816,9 @@ def _summarization_middleware_class():
                 if summary is not None:
                     return self._compacted(messages_to_summarize, summary)
                 retry_budget = max(1, budget // 2)
-            truncated = _truncate_for_summary(pool, retry_budget, self._partial_token_counter)
+            truncated = _truncate_for_summary(
+                pool, retry_budget, self._partial_token_counter, self._weight_of
+            )
             trimmed = self._trim_for_summary(truncated, retry_budget, start_on=None)
             summary = await self._summarize(previous, trimmed, attempt="retry")
             if summary is None:
@@ -735,6 +939,76 @@ EMPTY_ANSWER_STOP_MESSAGE = (
     "The model finished its turn without writing an answer. "
     "Send a follow-up asking it to continue."
 )
+
+# What closes a stateful turn the client interrupted before anything was
+# streamed (a disconnect, Stop, a closed tab): the model node was cancelled
+# before it wrote an answer, and the history must still alternate -- strict
+# chat templates (Gemma, Mistral) reject two user messages in a row. When
+# answer text was streamed, that text closes the turn instead (it is what the
+# conversation service persists). ASCII, addressed to the model.
+INTERRUPTED_ANSWER_MESSAGE = "[The answer was interrupted.]"
+# The result written for a tool call the interruption left unanswered: a
+# call without its result is as invalid to a chat template as two user
+# messages in a row. ASCII, addressed to the model.
+INTERRUPTED_TOOL_RESULT = "[The tool call was interrupted.]"
+# How long closing an interrupted turn may take (a checkpointer write). The
+# guard waits for it; past this, the turn is released with one WARNING.
+INTERRUPTED_WRITE_TIMEOUT_S = 10.0
+
+
+def _interrupted_answer(text: str) -> Any:
+    """The AIMessage that closes an interrupted turn in the thread state."""
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(content=text if text.strip() else INTERRUPTED_ANSWER_MESSAGE)
+
+
+def _closing_messages(committed: list, answer_text: str) -> list:
+    """What closes a turn the COMMITTED state leaves open, or ``[]``.
+
+    * ends with the turn's question: the answer;
+    * ends with an AI message whose tool calls are not all answered (or with
+      some of their results): one result per unanswered call, then the answer;
+    * ends with a tool result, every call answered: the answer;
+    * ends with an AI message without tool calls: nothing -- the turn is closed.
+    """
+    from langchain_core.messages import ToolMessage
+
+    if not committed:
+        return []
+    last = committed[-1]
+    if last.type == "human":
+        return [_interrupted_answer(answer_text)]
+    if last.type not in ("ai", "tool"):
+        return []
+    if last.type == "ai" and not getattr(last, "tool_calls", None):
+        return []
+    caller_index = next(
+        (
+            i
+            for i in range(len(committed) - 1, -1, -1)
+            if committed[i].type == "ai" and getattr(committed[i], "tool_calls", None)
+        ),
+        None,
+    )
+    closing = []
+    if caller_index is not None:
+        answered = {
+            getattr(m, "tool_call_id", None)
+            for m in committed[caller_index + 1 :]
+            if m.type == "tool"
+        }
+        closing = [
+            ToolMessage(
+                content=INTERRUPTED_TOOL_RESULT,
+                tool_call_id=call.get("id"),
+                name=call.get("name"),
+            )
+            for call in committed[caller_index].tool_calls
+            if call.get("id") not in answered
+        ]
+    return closing + [_interrupted_answer(answer_text)]
+
 
 # Curated turns for a stream that ran out of wall-clock budget (#573). The two
 # silences are not the same failure and must not read the same: one says the
@@ -1054,6 +1328,17 @@ class AgentRunner:
         async with engine.generation_guard():
             try:
                 sampling = resolve_sampling_defaults(llm)
+                # No implicit tools (#129): callers own the tool list (built by
+                # ``plan_turn``); ``tools=None`` means a zero-tool agent.
+                effective_tools = tools if tools is not None else []
+                # What every request of this turn carries beyond the state:
+                # the system prompt and the tool schemas, and the KB additions.
+                # The compaction middleware and the warning projection cost it
+                # in real tokens; the client stamps the KB part's size so the
+                # ratio it measures excludes a block the next request drops.
+                overhead = request_overhead(
+                    system_prompt, kb_context_block, kb_language_line, effective_tools
+                )
                 model = await run_in_threadpool(
                     build_chat_model,
                     llm,
@@ -1066,16 +1351,23 @@ class AgentRunner:
                     # The turn's reasoning effort (1.1.2): its wire value, when
                     # the artifact has a native lever for it.
                     effort_plan=effort_plan,
+                    kb_additions=overhead.added_text,
+                    # Each call's usage feeds the turn's memory measurement
+                    # (MLX); the summary and title clients push nothing.
+                    record_usage=True,
                 )
-                # Memory accounting for the compaction signal and the amber
-                # warning (1.1.2). Derived AFTER build_chat_model so the child
-                # is up and the handle carries the loaded artifact; file I/O
-                # and hardware probes -> threadpool. ``from_engine`` never
-                # raises; an unaccountable model just carries None facts.
+                # Memory accounting for the compaction ceiling and the amber
+                # warning. Derived AFTER build_chat_model so the child is up
+                # and the handle carries the loaded artifact and its measured
+                # base; file I/O and hardware probes -> threadpool.
+                # ``from_engine`` never raises; an unaccountable model just
+                # carries None facts.
                 budget = (
                     await run_in_threadpool(MemoryBudget.from_engine, engine) if summarize else None
                 )
-                working_window = self._compaction_windows(budget)[1] if summarize else None
+                allocated_window, working_window = (
+                    self._compaction_windows(budget) if summarize else (None, None)
+                )
                 # The compaction summary ALWAYS runs at effort "none" (1.1.2):
                 # summarizing is machine work, and a reasoning model would spend
                 # the call deliberating about it instead of writing it. Same
@@ -1083,8 +1375,10 @@ class AgentRunner:
                 # the length differ, so the second client costs a cached
                 # handle lookup. Its length is BOUNDED to ``summary_cap(W)``,
                 # with no automatic output budget (which would hand it the
-                # whole window): the keep arithmetic reserves exactly that much
-                # for it. No known window: today's budget.
+                # whole window) and no preflight retry (a smaller cap would
+                # silently truncate the summary; a rejection takes the
+                # summarizer's size path instead): the keep arithmetic reserves
+                # exactly that much for it. No known window: today's budget.
                 summary_model = (
                     await run_in_threadpool(
                         build_chat_model,
@@ -1099,11 +1393,16 @@ class AgentRunner:
                         sampling=sampling,
                         effort_plan=NO_REASONING_PLAN,
                         auto_output_budget=not _known_window(working_window),
+                        preflight_retry=False,
                     )
                     if summarize
                     else None
                 )
-                middleware = self._build_middleware(summary_model, budget) if summarize else []
+                middleware = (
+                    self._build_middleware(summary_model, budget, overhead=overhead)
+                    if summarize
+                    else []
+                )
                 if kb_context_block:
                     # After summarization: the merge must see the final
                     # message list that actually reaches the model.
@@ -1126,9 +1425,6 @@ class AgentRunner:
                     # turn. Innermost (added last), so it folds the FINAL messages
                     # after the KB merge has shaped the last user message.
                     middleware = [*middleware, _FoldSystemIntoUserMiddleware()]
-                # No implicit tools (#129): callers own the tool list (built by
-                # ``plan_turn``); ``tools=None`` means a zero-tool agent.
-                effective_tools = tools if tools is not None else []
                 agent = create_agent(
                     model,
                     tools=effective_tools,
@@ -1162,6 +1458,17 @@ class AgentRunner:
             # before its next prefix-cache reset. Deterministic, at guard
             # release, in addition to the client-level flag.
             abandon_hook = getattr(model, "abandon_hook", None)
+            memory_token = None
+            # The answer text this turn has handed to its consumer -- what the
+            # conversation service persists. An interrupted stateful turn is
+            # closed in the thread state with it (``_close_interrupted_turn``).
+            streamed_answer: list = []
+
+            def _record(event: dict) -> dict:
+                if event.get("t") == "answer":
+                    streamed_answer.append(event.get("text") or "")
+                return event
+
             try:
                 # The prefix cache belongs to ONE conversation (MLX; a no-op
                 # on llama.cpp): claim it for this thread -- or for the arena --
@@ -1171,6 +1478,12 @@ class AgentRunner:
                 if _engine_overrides(engine, "claim_prefix"):
                     owner = f"conv:{thread_id}" if stateful else "arena"
                     await run_reset_shielded(functools.partial(engine.claim_prefix, owner))
+                # What this turn really uses is measured on the child (MLX
+                # only): the window opens after the claim (its reset is not
+                # this turn's memory) and closes at the end of the turn,
+                # inside the guard.
+                if _engine_overrides(engine, "begin_memory_window"):
+                    memory_token = await run_in_threadpool(engine.begin_memory_window)
 
                 # Aggregate-only stream accounting (never log per token): start,
                 # first-token latency, then one completion line with totals.
@@ -1305,7 +1618,7 @@ class AgentRunner:
                                             # Real <think> content (fallback splitter
                                             # families): flows immediately.
                                             reasoning_chars += len(event["text"])
-                                            yield event
+                                            yield _record(event)
                                         elif agentic and hop_has_tool_call:
                                             # Post-tool-call text in a narrating hop
                                             # (#297): also narration -> thinking.
@@ -1320,7 +1633,7 @@ class AgentRunner:
                                             if event["text"].strip():
                                                 emitted_model_text = True
                                             char_count += len(event["text"])
-                                            yield event
+                                            yield _record(event)
                         # The final hop ended without a tool call: its buffered text IS
                         # the final answer (#297) -- flush it as ANSWER events (this is
                         # the only place buffered text counts as emitted answer).
@@ -1328,7 +1641,7 @@ class AgentRunner:
                             if text.strip():
                                 emitted_model_text = True
                             char_count += len(text)
-                            yield {"t": "answer", "text": text}
+                            yield _record({"t": "answer", "text": text})
                         hop_text_buffer.clear()
                         # Flush any buffered splitter text (a trailing partial tag, or an
                         # unclosed <think> -> thinking) BEFORE the empty-final decision.
@@ -1339,7 +1652,7 @@ class AgentRunner:
                                 char_count += len(event["text"])
                             else:
                                 reasoning_chars += len(event["text"])
-                            yield event
+                            yield _record(event)
                         # Empty/blank final answer, but a tool produced a result this
                         # turn: deliver that last tool result AS THE ANSWER (#90) so a
                         # correct value is streamed and persisted instead of crashing the
@@ -1352,7 +1665,7 @@ class AgentRunner:
                                 f"tool_result_chars={len(last_tool_result)}"
                             )
                             char_count += len(last_tool_result)
-                            yield {"t": "answer", "text": last_tool_result}
+                            yield _record({"t": "answer", "text": last_tool_result})
                         # A tool call that never produced a ToolMessage this turn (rare):
                         # emit it now so the trace still records the attempt.
                         for tc_event in _drain_tool_calls(pending_tool_calls):
@@ -1388,18 +1701,32 @@ class AgentRunner:
                                 # keeps the EMPTY AIMessage the model node committed
                                 # and the next turn replays an empty assistant turn.
                                 await self._write_curated_empty_turn(agent, run_config, curated)
-                            yield {"t": "answer", "text": curated}
+                            yield _record({"t": "answer", "text": curated})
                         # Amber warning check (1.1.2), at end of turn on the
                         # POST-turn thread state: one ``memory_warning`` event goes
-                        # out ONLY when even a compaction down to the keep-tail could
-                        # not restore the memory margin (see ``_memory_warning_event``
-                        # for the projection). The conversation service forwards it to
-                        # the wire and never persists it (it is a statement about NOW,
-                        # on THIS machine).
+                        # out ONLY when even a compaction down to the keep-tail would
+                        # leave the model and the conversation above 85 % of the
+                        # memory budget (see ``_memory_warning_event`` for the
+                        # projection). The conversation service forwards it to the
+                        # wire and never persists it (it is a statement about NOW,
+                        # on THIS machine). Its start and end per conversation are
+                        # one INFO line each (``_track_memory_warning``).
                         if stateful and budget is not None:
                             warning = await self._memory_warning_event(
-                                agent, run_config, budget, working_window
+                                agent,
+                                run_config,
+                                budget,
+                                working_window,
+                                # The KB block of the turn just answered is not
+                                # in the next request: the fixed part only.
+                                overhead=RequestOverhead(
+                                    fixed_est=overhead.fixed_est,
+                                    fixed_text=overhead.fixed_text,
+                                ),
+                                allocated_window=allocated_window,
                             )
+                            if budget.used_fraction(0) is not None:
+                                _track_memory_warning(engine, thread_id, warning is not None)
                             if warning is not None:
                                 yield warning
                         duration_ms = (time.perf_counter() - stream_start_s) * 1000
@@ -1429,20 +1756,20 @@ class AgentRunner:
                             if text.strip():
                                 emitted_model_text = True
                             char_count += len(text)
-                            yield {"t": "answer", "text": text}
+                            yield _record({"t": "answer", "text": text})
                         hop_text_buffer.clear()
                         for event in splitter.flush():
                             if event["t"] == "answer":
                                 if event["text"].strip():
                                     emitted_model_text = True
                                 char_count += len(event["text"])
-                            yield event
+                            yield _record(event)
                         if not emitted_model_text:
                             if last_tool_result is not None:
                                 char_count += len(last_tool_result)
-                                yield {"t": "answer", "text": last_tool_result}
+                                yield _record({"t": "answer", "text": last_tool_result})
                             else:
-                                yield {"t": "answer", "text": LOOP_LIMIT_MESSAGE}
+                                yield _record({"t": "answer", "text": LOOP_LIMIT_MESSAGE})
                         if stateful:
                             await self._repair_alternation(agent, run_config)
                     except GenerationTimeoutException as exc:
@@ -1462,9 +1789,9 @@ class AgentRunner:
                         # Same parity as the generic failure below: text buffered before
                         # the timeout is delivered ahead of the curated turn.
                         for text in hop_text_buffer:
-                            yield {"t": "answer", "text": text}
+                            yield _record({"t": "answer", "text": text})
                         hop_text_buffer.clear()
-                        yield {"t": "answer", "text": _stream_timeout_message(exc)}
+                        yield _record({"t": "answer", "text": _stream_timeout_message(exc)})
                     except Exception as exc:
                         overflow = parse_context_overflow(exc)
                         if overflow is not None:
@@ -1481,9 +1808,11 @@ class AgentRunner:
                             if stateful:
                                 await self._repair_alternation(agent, run_config)
                             for text in hop_text_buffer:
-                                yield {"t": "answer", "text": text}
+                                yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
-                            yield {"t": "answer", "text": _context_overflow_message(overflow)}
+                            yield _record(
+                                {"t": "answer", "text": _context_overflow_message(overflow)}
+                            )
                         elif is_child_prefill_timeout(exc):
                             # Defense in depth (#573 alignment): the MLX child's
                             # token-queue timeout is sized ABOVE the parent's first-chunk
@@ -1505,15 +1834,18 @@ class AgentRunner:
                             if stateful:
                                 await self._repair_alternation(agent, run_config)
                             for text in hop_text_buffer:
-                                yield {"t": "answer", "text": text}
+                                yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
                             # Reuse the parent watchdog's curated first-chunk turn.
-                            yield {
-                                "t": "answer",
-                                "text": PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
-                                    sentinel=ERROR_SENTINEL, minutes=max(1, round(ceiling / 60))
-                                ),
-                            }
+                            yield _record(
+                                {
+                                    "t": "answer",
+                                    "text": PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
+                                        sentinel=ERROR_SENTINEL,
+                                        minutes=max(1, round(ceiling / 60)),
+                                    ),
+                                }
+                            )
                         else:
                             # A stream that breaks because the inference child died shows
                             # up here as a connection error; the engine knows the exit
@@ -1529,12 +1861,29 @@ class AgentRunner:
                             # failure would already have been yielded, so flush it ahead of
                             # the sentinel instead of dropping it.
                             for text in hop_text_buffer:
-                                yield {"t": "answer", "text": text}
+                                yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
-                            yield {"t": "answer", "text": ERROR_MESSAGE}
-            except BaseException:
+                            yield _record({"t": "answer", "text": ERROR_MESSAGE})
+            except BaseException as exit_in_flight:
                 _flag_abandoned(abandon_hook)
+                # Synchronous on purpose: the exit in flight (a closed
+                # consumer, a cancellation) must not wait on a thread. It
+                # reads two process counters and writes one small file.
+                _close_memory_window(engine, memory_token, abandoned=True)
+                if stateful:
+                    # The cancelled model node never committed this turn's
+                    # answer: close the turn in the thread state, inside the
+                    # guard, or the next question makes two user messages in
+                    # a row. A cancellation absorbed while that write ran is
+                    # not lost: re-raised, unless one is already in flight.
+                    absorbed = await self._close_interrupted_turn(
+                        agent, run_config, "".join(streamed_answer)
+                    )
+                    if absorbed and not isinstance(exit_in_flight, asyncio.CancelledError):
+                        raise asyncio.CancelledError()
                 raise
+            if memory_token is not None:
+                await run_in_threadpool(_close_memory_window, engine, memory_token, abandoned=False)
 
     async def astream_oneshot(
         self,
@@ -1630,7 +1979,9 @@ class AgentRunner:
                 if event["t"] == "answer":
                     yield event["text"]
 
-    def _build_middleware(self, model, memory_budget=None):
+    def _build_middleware(
+        self, model, memory_budget=None, *, overhead: Optional[RequestOverhead] = None
+    ):
         """Auto-summarization using the SAME local model, on the two-signal trigger.
 
         Runs per turn, after the child spawned, so the allocated window
@@ -1650,7 +2001,9 @@ class AgentRunner:
         tokens of history; without one it keeps the last
         ``SUMMARY_KEEP_MESSAGES`` messages and LangChain's 4000-token trim.
         Every count -- trigger, cutoff, trim, truncation -- goes through ONE
-        unscaled counter, ``approx_token_count``.
+        counter in real tokens (``real_token_count``), and ``overhead`` (the
+        request's system prompt, tool schemas and KB additions) enters the
+        trigger and the keep.
         """
         from src.agents.middleware import (
             _StripStaleImagesMiddleware,
@@ -1670,10 +2023,11 @@ class AgentRunner:
                 model=model,
                 trigger=summarization_triggers(working_window),
                 keep=keep,
-                token_counter=approx_token_count,
                 summary_prompt=SUMMARY_PROMPT,
                 trim_tokens_to_summarize=summarize_trim_budget(working_window, allocated_window),
                 working_window=working_window,
+                allocated_window=allocated_window,
+                overhead=overhead,
                 engine=config.LLM_Engine,
             ),
         ]
@@ -1690,15 +2044,13 @@ class AgentRunner:
         window_probe = getattr(engine, "effective_context_tokens", None)
         effective_window = window_probe() if callable(window_probe) else None
         memory_token_ceiling = (
-            memory_budget.tokens_at_margin(MEMORY_MARGIN_FLOOR)
-            if memory_budget is not None
-            else None
+            memory_budget.tokens_at_ceiling() if memory_budget is not None else None
         )
-        # Compact-ASAP safety net: a non-positive ceiling means the weights
-        # alone already blow the 15 % floor. Clamp it up to 1 so the working
-        # window is 1 and compaction fires as early as it can -- replacing N
-        # messages with one summary shrinks the live KV, which is exactly what
-        # relieves a weights-dominated machine. This clamp is DELIBERATELY only
+        # Compact-ASAP safety net: a non-positive ceiling means the child's
+        # fixed part alone already fills the memory budget. Clamp it up to 1 so
+        # the working window is 1 and compaction fires as early as it can --
+        # replacing N messages with one summary shrinks the live KV, which is
+        # exactly what relieves such a machine. This clamp is DELIBERATELY only
         # on the compaction path: the output budget (working_context_tokens,
         # which does NOT clamp) keeps sizing from the allocated window in this
         # corner, precisely what it did before PR3.1. Both views get unified
@@ -1711,7 +2063,14 @@ class AgentRunner:
         return effective_window, canonical_working_window(effective_window, memory_token_ceiling)
 
     async def _memory_warning_event(
-        self, agent, run_config, budget, working_window: Optional[int] = None
+        self,
+        agent,
+        run_config,
+        budget,
+        working_window: Optional[int] = None,
+        *,
+        overhead: Optional[RequestOverhead] = None,
+        allocated_window: Optional[int] = None,
     ) -> Optional[dict]:
         """The ``memory_warning`` event for this turn, or ``None``.
 
@@ -1720,67 +2079,150 @@ class AgentRunner:
         THIS turn is compacted on the NEXT turn -- judging the warning on the
         current size would flag every conversation for exactly one turn and
         then flicker off once compaction ran. Instead the post-turn thread
-        state is projected past an ideal compaction: the suffix
-        ``compaction_cutoff`` would keep (with or without a known window,
-        exactly what the middleware keeps) plus the summary it would write --
-        ``summary_cap(W)`` tokens (the summary client's own cap), or the
-        ``SUMMARY_TOKEN_ALLOWANCE`` without a window, and nothing when no
-        compaction would happen on a state that already holds its summary.
-        Both are counted with the
-        SAME ``approx_token_count`` the compaction trigger uses. Only when
-        even THAT projected size leaves the margin strictly under the floor
-        does the warning go out -- the honest meaning of "compaction had its
-        chance": it cannot restore the margin. The event still reports the
-        CURRENT numbers (what the user's machine holds right now). Advisory
-        only: a failure here is logged and never sinks the turn.
+        state is projected the way the NEXT request will see it, in real
+        tokens: the turn just answered is past (its KB/web results count as
+        markers, ``strip_stale_tool_results(all_past=True)``), an empty next
+        question is appended (so the cutoff is the one the next request's
+        compaction computes), every message is weighed as the counter weighs
+        it, and the request overhead O is on top -- the system prompt and the
+        tool schemas only (``overhead``; the KB block of the turn just
+        answered is not in the next request). When a compaction would happen
+        (``compaction_cutoff`` > 0, futility guard included):
+        ``O + count(kept) + summary_cap(W)`` (or ``SUMMARY_TOKEN_ALLOWANCE``
+        without a window); otherwise ``O + count(all)`` -- no summary is added
+        when nothing would be compacted. The warning goes out only when even
+        THAT projection leaves the margin strictly under
+        ``MEMORY_WARNING_MARGIN``: the model plus the kept conversation would
+        use more than 85 % of the memory budget (``MemoryBudget.used_fraction``,
+        a measured prior with a fixed part -- so it can show for a model whose
+        weights alone are well below 85 %, and from the first turn on a tight
+        machine). The payload quotes the projection: ``footprint_bytes``
+        (model and conversation, what the copy shows) and
+        ``conversation_bytes`` (what the conversation adds). Advisory only: a
+        failure here is logged and never sinks the turn.
         """
+        from langchain_core.messages import HumanMessage
+
+        from src.agents.middleware import strip_stale_tool_results
+
         try:
             state = await agent.aget_state(run_config)
             messages = (state.values or {}).get("messages", []) if state else []
             if not messages:
                 return None
-            # What the middleware would actually keep, plus the summary it
-            # would write -- unless nothing would be compacted on a state that
-            # already holds its summary (counting that summary twice would
-            # warn for nothing).
-            cutoff = compaction_cutoff(messages, working_window, approx_token_count)
-            summary_tokens = (
-                summary_cap(working_window)
-                if _known_window(working_window)
-                else SUMMARY_TOKEN_ALLOWANCE
+            projected = strip_stale_tool_results(messages, all_past=True) + [
+                HumanMessage(content="", id="erudi-next-request")
+            ]
+            weights, ratio = frozen_weights(projected)
+
+            def counter(part):
+                return real_token_count(part, weights)
+
+            fixed = overhead_tokens(
+                overhead,
+                ratio,
+                dense=COUNTER_DENSE_TOKENS,
+                weight_floor=COUNTER_WEIGHT_FLOOR,
             )
-            if cutoff == 0 and _is_previous_summary(messages[0]):
-                summary_tokens = 0
-            projected_tokens = approx_token_count(messages[cutoff:]) + summary_tokens
+            cutoff = compaction_cutoff(
+                projected,
+                working_window,
+                counter,
+                overhead=fixed,
+                allocated_window=allocated_window,
+            )
+            conversation_tokens = fixed + counter(projected)
+            if cutoff > 0:
+                summary_tokens = (
+                    summary_cap(working_window)
+                    if _known_window(working_window)
+                    else SUMMARY_TOKEN_ALLOWANCE
+                )
+                projected_tokens = fixed + counter(projected[cutoff:]) + summary_tokens
+            else:
+                projected_tokens = conversation_tokens
             projected_margin = budget.memory_margin_fraction(projected_tokens)
-            if projected_margin is None or projected_margin >= MEMORY_MARGIN_FLOOR:
+            if projected_margin is None or projected_margin >= MEMORY_WARNING_MARGIN:
                 return None
-            conversation_tokens = approx_token_count(messages)
-            current_margin = budget.memory_margin_fraction(conversation_tokens)
-            margin = current_margin if current_margin is not None else projected_margin
             logger.warning(
-                f"Memory margin under the floor even after a projected compaction: "
-                f"current_margin={margin:.3f}, projected_margin={projected_margin:.3f}, "
+                f"Memory budget over 85 % even after a projected compaction: "
+                f"projected_margin={projected_margin:.3f}, "
+                f"projected_tokens={projected_tokens}, "
                 f"conversation_tokens={conversation_tokens}"
             )
-            conversation_kv = budget.conversation_bytes(conversation_tokens)
-            weights = getattr(budget, "weights_bytes", None)
             return {
                 "t": "memory_warning",
-                "used_fraction": round(1.0 - margin, 4),
-                "conversation_bytes": conversation_kv,
+                "used_fraction": round(1.0 - projected_margin, 4),
+                "conversation_bytes": budget.conversation_bytes(projected_tokens),
                 # What the warning copy quotes: the conversation AND its
                 # loaded model together (the two things the user can act on).
-                "footprint_bytes": (
-                    conversation_kv + weights
-                    if conversation_kv is not None and weights is not None
-                    else None
-                ),
+                "footprint_bytes": budget.footprint_bytes(projected_tokens),
             }
         except Exception:
             # Advisory signal: losing it costs one warning, never the answer.
             logger.exception("Memory-margin evaluation failed; skipping the warning")
             return None
+
+    async def _close_interrupted_turn(self, agent, run_config, streamed_text: str) -> bool:
+        """Close an interrupted stateful turn in the thread state, shielded;
+        returns whether a native cancellation arrived meanwhile.
+
+        Runs while a cancellation or a ``GeneratorExit`` is in flight, inside
+        the generation guard: the write runs in its own task, awaited through
+        ``wait_shielded`` (the pattern of the prefix-cache reset), so the
+        cancellation that triggered it cannot cut it short. The caller
+        re-raises its own exit afterwards (and a cancellation absorbed here);
+        a failed or timed-out write is one WARNING inside
+        ``_write_interrupted_turn`` and never replaces that exit.
+        """
+        task = asyncio.get_running_loop().create_task(
+            self._write_interrupted_turn(agent, run_config, streamed_text)
+        )
+        return await wait_shielded(task)
+
+    async def _write_interrupted_turn(self, agent, run_config, streamed_text: str) -> None:
+        """``_append_closure``, bounded by ``INTERRUPTED_WRITE_TIMEOUT_S``."""
+        try:
+            await asyncio.wait_for(
+                self._append_closure(agent, run_config, streamed_text),
+                timeout=INTERRUPTED_WRITE_TIMEOUT_S,
+            )
+        except asyncio.TimeoutError:
+            # Degraded, one record: the thread may end with the turn's
+            # question unanswered; the turn itself is released.
+            logger.warning(
+                f"Closing an interrupted turn in the thread state timed out after "
+                f"{INTERRUPTED_WRITE_TIMEOUT_S:.0f} s; its question may stay unanswered"
+            )
+        except Exception:
+            # The exit in flight is what propagates; this record says the
+            # thread may now end with the turn's question unanswered.
+            logger.warning("Closing an interrupted turn in the thread state failed", exc_info=True)
+
+    async def _committed_messages(self, run_config) -> list:
+        """The thread's messages as COMMITTED in its latest checkpoint.
+
+        Not ``agent.aget_state``: it also applies the PENDING writes of the
+        interrupted step (a model node that finished while nobody read its
+        stream leaves its answer there), which the next turn's input discards
+        -- deciding on them would skip a closure the history needs. And not
+        ``aget_state`` at an explicit checkpoint id either: it applies that
+        checkpoint's pending writes the same way. ``aupdate_state`` builds on
+        exactly this committed checkpoint.
+        """
+        checkpoint = await self.checkpointer.aget_tuple(run_config)
+        if checkpoint is None:
+            return []
+        values = (checkpoint.checkpoint or {}).get("channel_values") or {}
+        return list(values.get("messages") or [])
+
+    async def _append_closure(self, agent, run_config, answer_text: str) -> None:
+        """Append what closes the turn the committed state leaves open
+        (``_closing_messages``), as the ``model`` node -- one update, so the
+        tool results and the answer land together."""
+        closing = _closing_messages(await self._committed_messages(run_config), answer_text)
+        if closing:
+            await agent.aupdate_state(run_config, {"messages": closing}, as_node="model")
 
     async def _write_curated_empty_turn(self, agent, run_config, text: str) -> None:
         """Write the curated empty-answer line into the thread state (#554).
@@ -1799,7 +2241,7 @@ class AgentRunner:
         try:
             state = await agent.aget_state(run_config)
             messages = (state.values or {}).get("messages", []) if state else []
-            replace_id = None
+            curated = AIMessage(content=text)
             if messages:
                 last = messages[-1]
                 if (
@@ -1807,12 +2249,19 @@ class AgentRunner:
                     and not getattr(last, "tool_calls", None)
                     and not str(getattr(last, "text", "") or "").strip()
                 ):
-                    replace_id = last.id
-            await agent.aupdate_state(
-                run_config,
-                {"messages": [AIMessage(content=text, id=replace_id)]},
-                as_node="model",
-            )
+                    # A copy of the empty message: same id (replaced in
+                    # place), and its usage and stamp survive -- the request
+                    # it answered is still a measurement. Its output count is
+                    # the replaced generation's (a whitespace loop can be 20k
+                    # tokens), not the curated line's: none is kept.
+                    usage = dict(last.usage_metadata or {})
+                    if usage:
+                        usage["output_tokens"] = 0
+                        usage["total_tokens"] = usage.get("input_tokens", 0)
+                    curated = last.model_copy(
+                        update={"content": text, "usage_metadata": usage or None}
+                    )
+            await agent.aupdate_state(run_config, {"messages": [curated]}, as_node="model")
         except Exception:
             # Accepted trade: a failed state write leaves SQL ahead of the
             # thread state (the user still gets the curated line; the next
@@ -1824,24 +2273,19 @@ class AgentRunner:
     async def _repair_alternation(self, agent, run_config) -> None:
         """Preserve role alternation in the checkpointer after a failed turn.
 
-        If the failed super-step left a dangling ``HumanMessage`` as the last
-        message, the next turn would send two consecutive user messages and the
-        local chat template would 400 ("roles must alternate"). Append an error
-        ``AIMessage`` so the thread stays well-formed. If the super-step never
-        committed (last message is not a human, or state is empty), do nothing.
+        Decided on the COMMITTED checkpoint (``_committed_messages``): when the
+        failed super-step left the turn open -- its question last, or tool
+        calls without their results -- the next turn would send two
+        consecutive user messages (or unanswered calls) and the local chat
+        template would 400 ("roles must alternate"). The closing tool results
+        and an error ``AIMessage`` are appended (``_closing_messages``) so the
+        thread stays well-formed. A turn already closed is left alone.
         """
-        from langchain_core.messages import AIMessage
-
         try:
-            state = await agent.aget_state(run_config)
-            messages = (state.values or {}).get("messages", []) if state else []
-            if messages and messages[-1].type == "human":
+            closing = _closing_messages(await self._committed_messages(run_config), ERROR_MESSAGE)
+            if closing:
                 # as_node="model" is required: updating a non-empty thread is
                 # otherwise "ambiguous". "model" is the create_agent node name.
-                await agent.aupdate_state(
-                    run_config,
-                    {"messages": [AIMessage(content=ERROR_MESSAGE)]},
-                    as_node="model",
-                )
+                await agent.aupdate_state(run_config, {"messages": closing}, as_node="model")
         except Exception:
             logger.exception("Failed to repair conversation alternation after error")

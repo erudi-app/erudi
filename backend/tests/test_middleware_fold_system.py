@@ -77,3 +77,20 @@ class TestFoldSystemIntoUser:
         parts = out.messages[0].content
         assert parts[0] == {"type": "text", "text": "SYS\n\nlook"}
         assert parts[1]["type"] == "image_url"  # image kept for the VLM
+
+    def test_the_fold_keeps_the_messages_metadata_and_id(self):
+        """The summary's ``lc_source`` and any other metadata (and the
+        message id) survive into the request on system-role-less models."""
+        summary = HumanMessage(
+            content="Here is a summary of the conversation to date:\n\nfacts",
+            additional_kwargs={"lc_source": "summarization", "note": "kept"},
+            id="summary-id",
+        )
+        out = _fold([summary, AIMessage(content="a"), HumanMessage(content="q")], "SYS")
+        folded = out.messages[0]
+        assert folded.content.startswith("SYS\n\nHere is a summary")
+        assert folded.additional_kwargs == {
+            "lc_source": "summarization",
+            "note": "kept",
+        }
+        assert folded.id == "summary-id"

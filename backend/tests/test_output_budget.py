@@ -22,9 +22,9 @@ from src.agents.output_budget import (
     MAX_TOKENS_ENV_VAR,
     OUTPUT_BUDGET_FLOOR_TOKENS,
     compute_output_budget,
-    estimate_prompt_tokens,
     output_budget_override,
 )
+from src.agents.token_accounting import request_tokens_est as estimate_prompt_tokens
 
 pytestmark = pytest.mark.unit
 
@@ -450,13 +450,23 @@ def test_the_two_estimators_stay_comparable_on_english():
     assert byte_bound_estimate(english) < 6 * estimate_prompt_tokens(english)
 
 
-def test_the_budget_estimator_is_the_summarization_middlewares_counter():
+def test_one_estimator_for_the_stamp_the_counter_and_the_budget():
+    """chars/4 through ``count_tokens_approximately`` with its defaults: the
+    budget, the request stamp and the compaction counter all read this one
+    function, so the three can never disagree about the unscaled size."""
+    import inspect
+
     from langchain_core.messages import AIMessage
     from langchain_core.messages.utils import count_tokens_approximately
+
+    from src.agents import chat_model, output_budget
 
     messages = [_Msg("hello world"), AIMessage("and a second turn")]
 
     assert estimate_prompt_tokens(messages) == count_tokens_approximately(messages)
+    assert "real_tokens_est" in inspect.getsource(output_budget.estimate_prompt)
+    assert "estimate_prompt" in inspect.getsource(output_budget.compute_output_budget)
+    assert "request_tokens_est" in inspect.getsource(chat_model)
 
 
 # ===================== where the budget lands in the request =====================
@@ -646,7 +656,7 @@ def test_the_factory_stamps_both_the_allocated_and_working_windows(monkeypatch):
     monkeypatch.setattr(
         ww.MemoryBudget,
         "from_engine",
-        staticmethod(lambda engine: SimpleNamespace(tokens_at_margin=lambda margin: 8000)),
+        staticmethod(lambda engine: SimpleNamespace(tokens_at_ceiling=lambda: 8000)),
     )
 
     chat = build_chat_model(_Llm(), temperature=0.3, top_p=0.8, max_tokens=55)
@@ -769,3 +779,227 @@ async def test_the_budget_composes_with_the_first_chunk_watchdog(monkeypatch):
             pass
     # The budget was still applied to the call the watchdog then bounded.
     assert captured["max_tokens"] == compute_output_budget([HumanMessage("hi")], 32768)
+
+
+# ===================== the budget in real tokens (plan 3.2b v17) =====================
+#
+# The prompt is costed message by message (``real_tokens_est``): what the
+# server measured at its measured ratio, its answers at their exact output
+# tokens, everything new at the script weight of its own text (CJK 0.65 token
+# per character, no floor), the tool schemas included. The margin applies to
+# the ESTIMATED part only. The live cases are pinned in
+# ``test_live_token_accounting.py``.
+
+
+def _stamped_hop(input_tokens, est, *, first=True, output_tokens=5, content="", **kwargs):
+    from langchain_core.messages import AIMessage
+
+    return AIMessage(
+        content=content,
+        usage_metadata={
+            "input_tokens": input_tokens,
+            "output_tokens": output_tokens,
+            "total_tokens": input_tokens + output_tokens,
+        },
+        response_metadata={
+            "erudi_request_est": est,
+            "erudi_request_has_images": False,
+            "erudi_request_first_hop": first,
+        },
+        **kwargs,
+    )
+
+
+def test_a_request_with_tool_schemas_gets_a_smaller_budget():
+    from langchain_core.tools import tool
+
+    @tool
+    def search_knowledge_base(query: str) -> str:
+        """Search the documents of the knowledge base for the passages that answer it."""
+        return ""
+
+    messages = [_Msg(_text(500))]
+
+    assert compute_output_budget(messages, 8192, tools=[search_knowledge_base]) < (
+        compute_output_budget(messages, 8192)
+    )
+
+
+def test_a_first_turn_english_paste_keeps_todays_budget():
+    """Nothing measured yet: English prose weighs 1.0, so the budget is the
+    chars/4 one -- with the compaction's floor (1.2) it would be ~1000
+    tokens smaller."""
+    messages = [_Msg(_text(4800))]
+    est = estimate_prompt_tokens(messages)
+
+    budget = compute_output_budget(messages, 8192)
+
+    assert budget == 8192 - est - int(MARGIN_FRACTION * est)
+    assert budget > 2800
+
+
+def test_a_first_turn_cjk_paste_is_sized_at_the_budgets_density():
+    from src.agents.token_accounting import (
+        BUDGET_DENSE_TOKENS,
+        estimate,
+        script_weight,
+    )
+
+    messages = [_Msg(_CJK)]
+    weight = script_weight(_CJK, dense=BUDGET_DENSE_TOKENS)
+    assert 2.0 <= weight <= 2.6
+    prompt = -(-weight * estimate(messages[0]) // 1)
+
+    budget = compute_output_budget(messages, 32768)
+
+    assert budget == 32768 - prompt - max(MARGIN_FLOOR_TOKENS, int(MARGIN_FRACTION * prompt))
+    assert budget < compute_output_budget([_Msg(_text(len(_CJK) // 4))], 32768)
+
+
+def test_the_margin_applies_to_the_estimated_part_only():
+    from src.agents.token_accounting import BUDGET_DENSE_TOKENS, real_tokens_est
+
+    looping = _stamped_hop(7926, 6701, output_tokens=24_778, content="z" * 100_000)
+    messages = [_Msg("summary " * 200), looping, _Msg("next question")]
+    prompt = real_tokens_est(messages, dense=BUDGET_DENSE_TOKENS)
+
+    budget = compute_output_budget(messages, 32768)
+
+    assert prompt.exact > 24_778
+    assert budget == 32768 - prompt.total - max(256, int(0.10 * (prompt.total - prompt.exact)))
+
+
+async def test_the_stream_budgets_the_request_as_sent_with_its_tools(monkeypatch):
+    from langchain_core.messages import ToolMessage
+    from langchain_core.utils.function_calling import convert_to_openai_tool
+    from langchain_openai import ChatOpenAI
+
+    captured: dict = {}
+
+    async def _capture(self, messages, *args, **kwargs):
+        captured.update(kwargs)
+        yield "chunk"
+
+    def web_search(query: str) -> str:
+        """Search the web for fresh facts about the query and return snippets."""
+        return ""
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _capture)
+    tools = [convert_to_openai_tool(web_search)]
+    messages = [
+        HumanMessage(_text(300)),
+        _stamped_hop(2000, 1000, tool_calls=[{"name": "web_search", "args": {}, "id": "c1"}]),
+        ToolMessage(_text(2000), tool_call_id="c1"),
+    ]
+    client = _client(max_tokens=1234, effective_context_tokens=32768)
+
+    assert [c async for c in client._astream(messages, tools=tools)] == ["chunk"]
+    assert captured["max_tokens"] == compute_output_budget(messages, 32768, tools=tools)
+    assert captured["max_tokens"] < compute_output_budget(messages, 32768)
+
+
+async def test_the_tools_reach_the_budget_through_create_agents_tool_binding(monkeypatch):
+    from langchain.agents import create_agent
+    from langchain_core.messages import AIMessageChunk
+    from langchain_core.outputs import ChatGenerationChunk
+    from langchain_core.tools import tool
+    from langchain_openai import ChatOpenAI
+
+    @tool
+    def search_knowledge_base(query: str) -> str:
+        """Search the documents of the knowledge base."""
+        return ""
+
+    seen: dict = {}
+
+    async def _server(self, messages, *args, **kwargs):
+        seen["messages"] = list(messages)
+        seen["kwargs"] = dict(kwargs)
+        yield ChatGenerationChunk(message=AIMessageChunk(content="done"))
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    client = _client(max_tokens=1234, effective_context_tokens=8192, streaming=True)
+    agent = create_agent(client, tools=[search_knowledge_base], system_prompt="be brief")
+
+    await agent.ainvoke({"messages": [HumanMessage(_text(200))]})
+
+    assert seen["kwargs"]["tools"], "the request carried the tool schemas"
+    assert seen["kwargs"]["max_tokens"] == compute_output_budget(
+        seen["messages"], 8192, tools=seen["kwargs"]["tools"]
+    )
+
+
+# ===================== the preflight retry, per client =====================
+
+
+async def test_the_summary_client_is_never_retried_with_a_smaller_cap(monkeypatch):
+    """The retry substitutes a smaller ``max_tokens``; on the summary client
+    (capped at ``summary_cap(W)``) that would silently truncate the summary.
+    Its rejection reaches the summarizer instead, which takes the size path."""
+    from langchain_openai import ChatOpenAI
+
+    window = 8192
+    attempts = []
+
+    async def _server(self, messages, *args, **kwargs):
+        attempts.append(kwargs.get("max_tokens"))
+        raise _PreflightRejection(prompt=8000, generation=1024, window=window)
+        yield  # pragma: no cover
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    client = _client(
+        max_tokens=1024,
+        effective_context_tokens=window,
+        auto_output_budget=False,
+        preflight_retry=False,
+    )
+
+    with pytest.raises(_PreflightRejection):
+        _ = [c async for c in client._astream([HumanMessage(_CJK)])]
+
+    assert len(attempts) == 1
+
+
+async def test_a_giant_first_message_still_gets_a_title_through_the_retry(monkeypatch):
+    from langchain_openai import ChatOpenAI
+
+    window = 8192
+    real_prompt = 8185
+    attempts = []
+
+    async def _server(self, messages, *args, **kwargs):
+        attempts.append(kwargs.get("max_tokens"))
+        if real_prompt + (kwargs.get("max_tokens") or 12) > window:
+            raise _PreflightRejection(real_prompt, kwargs.get("max_tokens") or 12, window)
+        yield "A title"
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    client = _client(max_tokens=12, effective_context_tokens=window, auto_output_budget=False)
+
+    assert client.preflight_retry is True
+    assert [c async for c in client._astream([HumanMessage(_CJK)])] == ["A title"]
+    assert len(attempts) == 2
+
+
+def test_the_factory_streams_usage_and_carries_the_kb_text_and_the_retry_flag(monkeypatch):
+    from src.agents.model_factory import build_chat_model
+    from src.core import config
+
+    monkeypatch.setattr(config, "LLM_Engine", _Engine)
+
+    default = build_chat_model(_Llm(), temperature=0.3, top_p=0.8, max_tokens=55)
+    assert default.stream_usage is True
+    assert default._should_stream_usage() is True
+    assert default.kb_additions == ""
+    assert default.preflight_retry is True
+
+    summary = build_chat_model(
+        _Llm(),
+        temperature=0.3,
+        top_p=0.8,
+        max_tokens=55,
+        kb_additions="BLOCK\n\n\n\nAnswer in English.",
+        preflight_retry=False,
+    )
+    assert summary.kb_additions == "BLOCK\n\n\n\nAnswer in English."
+    assert summary.preflight_retry is False

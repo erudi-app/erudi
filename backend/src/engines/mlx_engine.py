@@ -385,8 +385,11 @@ class MLX_Engine(BaseChatServerEngine):
         # memory-bounded by --max-kv-size above), so a 2nd+ turn reuses the
         # cached prefix instead of re-prefilling the whole history. The pool
         # fills lazily and mlx-vlm's own guards bound it; no derivable window
-        # leaves mlx-vlm's 2048-block default. NB: this pool counts toward our
-        # resident memory and will be accounted in memory_budget in a later PR.
+        # leaves mlx-vlm's 2048-block default. The pool counts toward the
+        # child's footprint: the memory prior accounts it in its per-token
+        # multiplier (``memory_budget.PRIOR_KV_MULTIPLIER``: the KV cache plus
+        # its prefix-cache copy and MLX's buffer cache), and every turn's real
+        # peak is measured against it (``end_memory_window``).
         apc_num_blocks: Optional[int] = (
             math.ceil(context_tokens / APC_BLOCK_SIZE_TOKENS)
             if context_tokens is not None
@@ -439,6 +442,12 @@ class MLX_Engine(BaseChatServerEngine):
             # stays) on the content channel.
             "--enable-thinking",
         ]
+        # The prefill step the memory prior was measured at (its logits term
+        # and t0 depend on it): on the command line, because mlx_vlm's CLI
+        # rewrites PREFILL_STEP_SIZE from this option (server/cli.py).
+        from src.engines.memory_budget import MLX_PREFILL_STEP_TOKENS
+
+        argv += ["--prefill-step-size", str(MLX_PREFILL_STEP_TOKENS)]
         if context_tokens is not None:
             argv += ["--max-kv-size", str(context_tokens)]
         argv += [
@@ -489,9 +498,10 @@ class MLX_Engine(BaseChatServerEngine):
             "api_key": api_key,
             # The ALLOCATED window (`BaseEngine.effective_context_tokens`):
             # for MLX it equals the preflight bound passed above, known at
-            # spawn -- hence `_read_server_properties` stays the base no-op
-            # here (nothing to read back, unlike llama-server whose fit
-            # resolves the window at load). None = unbounded child.
+            # spawn -- nothing to read back, unlike llama-server whose fit
+            # resolves the window at load (MLX's `_read_server_properties`
+            # measures the child's base footprint instead). None = unbounded
+            # child.
             "context_tokens": context_tokens,
             # Who the child's prefix cache belongs to (see `claim_prefix`). A
             # new child starts with an EMPTY pool, so the first claim takes it
@@ -553,11 +563,14 @@ class MLX_Engine(BaseChatServerEngine):
 
     @classmethod
     def on_history_rewritten(cls) -> None:
-        """Compaction rewrote the history: the cached prefix is garbage."""
+        """Compaction rewrote the history: the cached prefix is garbage, and
+        the turn's memory measurement restarts (the summary call's peak and
+        the hops before it never count)."""
         handle = cls._model
         if not isinstance(handle, dict):
             return
         cls._reset_prefix_cache(handle, reason="compaction")
+        cls._restart_memory_window(handle)
 
     @classmethod
     def note_stream_abandoned(cls, handle: Any) -> None:
@@ -649,6 +662,244 @@ class MLX_Engine(BaseChatServerEngine):
             )
             return False
         return True
+
+    # ======================= MEASURED MEMORY =======================
+    #
+    # The memory prior (``src.engines.memory_budget``) is checked against what
+    # the child really uses. The child's footprint right after its readiness
+    # probe is its BASE (measured at every spawn). Around every conversation
+    # and Arena turn (never a title) a measurement window is open: the
+    # footprint interval is reset through the macOS SPI
+    # (``process_footprint.begin_peak_window``), the conversation and Arena
+    # clients push each call's usage (``note_call_usage``, bound to the handle
+    # by the factory), and the end of the turn records one observation --
+    # ``n = max over calls of prompt + completion`` (the decode KV is in the
+    # peak; mixing the largest prompt of one hop with the longest answer of
+    # another would over-size n), the peak above base, and ``predict(n)``.
+    # A compaction restarts the window (a new sequence number: the hops before
+    # it and the summary call never count). Recorded only when the window
+    # really started on a measured base, and usage was reported -- or the
+    # turn was abandoned with a call in flight (recorded at the client's
+    # estimate, ``n_est``, announced before the call: ``note_call_start``), or
+    # the child died. A peak above the prediction on a turn without images,
+    # for a measured ``n``, is ONE WARNING per child and key; nothing is
+    # corrected automatically.
+
+    @classmethod
+    def _read_server_properties(cls, handle: Dict[str, Any]) -> None:
+        """The child is up: measure its base footprint. Degrades, never raises."""
+        from src.engines import process_footprint
+
+        pid = handle.get("pid")
+        try:
+            handle["base_footprint_bytes"] = process_footprint.footprint(pid) if pid else None
+        except Exception:
+            # Costs the measured base only: the weights-on-disk fallback applies.
+            logger.warning("[MLX_Engine] Base footprint unreadable after spawn", exc_info=True)
+            handle["base_footprint_bytes"] = None
+
+    @classmethod
+    def begin_memory_window(cls) -> Any:
+        """Open the turn's measurement window on the loaded child; returns the
+        ``(handle, pid, window)`` token ``end_memory_window`` closes it with
+        (``window`` numbers the turn's window on this child: a token of an
+        earlier window never closes a later one)."""
+        from src.engines import process_footprint
+
+        handle = cls._model
+        if not isinstance(handle, dict) or not handle.get("pid"):
+            return None
+        pid = handle["pid"]
+        previous = handle.get("memory_window") or {}
+        base = handle.get("base_footprint_bytes")
+        current = process_footprint.footprint(pid)
+        window_id = int(previous.get("window", 0)) + 1
+        handle["memory_window"] = {
+            "window": window_id,
+            "seq": int(previous.get("seq", 0)) + 1,
+            "open": True,
+            # What the previous request left behind (MLX's buffer cache):
+            # it can raise this turn's peak.
+            "residue_at_start_bytes": (
+                current - base if current is not None and base is not None else None
+            ),
+            "swapouts_start": process_footprint.swapouts(),
+            "pressure_start": process_footprint.pressure_level(),
+            "spi_started": process_footprint.begin_peak_window(pid),
+            "calls": [],
+        }
+        return (handle, pid, window_id)
+
+    @classmethod
+    def _restart_memory_window(cls, handle: Dict[str, Any]) -> None:
+        """A new measurement window inside the same turn (after a compaction)."""
+        from src.engines import process_footprint
+
+        window = handle.get("memory_window")
+        if not isinstance(window, dict) or not window.get("open") or not handle.get("pid"):
+            return
+        window["seq"] = int(window.get("seq", 0)) + 1
+        window["spi_started"] = process_footprint.begin_peak_window(handle["pid"])
+
+    @classmethod
+    def note_call_usage(
+        cls,
+        handle: Any,
+        input_tokens: int,
+        output_tokens: int,
+        cached_tokens: int = 0,
+        has_images: bool = False,
+    ) -> None:
+        """One call's usage, with the window's sequence number at push time."""
+        window = handle.get("memory_window") if isinstance(handle, dict) else None
+        if not isinstance(window, dict) or not window.get("open"):
+            return
+        window.pop("in_flight", None)
+        window["calls"].append(
+            {
+                "seq": window["seq"],
+                "n_in": int(input_tokens or 0),
+                "n_out": int(output_tokens or 0),
+                "cached": int(cached_tokens or 0),
+                "has_images": bool(has_images),
+            }
+        )
+
+    @classmethod
+    def note_call_start(cls, handle: Any, estimated_prompt_tokens: int) -> None:
+        """A call is in flight: its estimated size, until its usage arrives."""
+        window = handle.get("memory_window") if isinstance(handle, dict) else None
+        if not isinstance(window, dict) or not window.get("open"):
+            return
+        window["in_flight"] = {"seq": window["seq"], "n_est": int(estimated_prompt_tokens or 0)}
+
+    @classmethod
+    def end_memory_window(cls, token: Any, *, abandoned: bool = False) -> Optional[Dict[str, Any]]:
+        """Close the window and record the turn's observation; returns it, or
+        ``None`` when nothing could be recorded.
+
+        Recorded only on a MEASURED base (never the weights-on-disk fallback)
+        and a window that really started. A child that died during the window
+        is recorded too, ``child_died`` and no peak: it is the ground truth of
+        an under-prediction. An ABANDONED turn whose call was cut before its
+        usage arrived is recorded with ``n_est`` (the client's estimate of the
+        call in flight) and no measured ``n``; an estimate never raises the
+        exceeded-prediction WARNING."""
+        import time
+        import uuid
+
+        from src.engines import memory_observations, process_footprint
+        from src.engines._mlx_vlm_server_runner import APC_BLOCK_SIZE_TOKENS
+        from src.engines.memory_budget import MLX_BUFFER_CACHE_LIMIT, MemoryBudget, prior_scale
+
+        if not token:
+            return None
+        handle, pid, window_id = token
+        window = handle.get("memory_window") if isinstance(handle, dict) else None
+        if (
+            not isinstance(window, dict)
+            or not window.get("open")
+            or handle.get("pid") != pid
+            or window.get("window") != window_id
+        ):
+            return None
+        window["open"] = False
+        calls = [call for call in window["calls"] if call["seq"] == window["seq"]]
+        base = handle.get("base_footprint_bytes")
+        if not window.get("spi_started") or base is None:
+            return None
+        in_flight = window.get("in_flight")
+        n_est = (
+            in_flight.get("n_est")
+            if isinstance(in_flight, dict) and in_flight.get("seq") == window["seq"]
+            else None
+        )
+        peak = process_footprint.peak_since(pid, True)
+        child_died = peak is None and not cls._proc_is_alive(handle.get("proc"))
+        measured = bool(calls) or child_died or (abandoned and n_est is not None)
+        if (peak is None and not child_died) or not measured:
+            return None
+        budget = MemoryBudget.from_handle(cls, handle)
+        if calls:
+            largest = max(calls, key=lambda call: call["n_in"] + call["n_out"])
+        else:
+            largest = {"n_in": None, "n_out": None, "cached": None}
+        n = (
+            largest["n_in"] + largest["n_out"]
+            if largest["n_in"] is not None and largest["n_out"] is not None
+            else None
+        )
+        scale = prior_scale()
+        size = n if n is not None else n_est
+        predicted = budget.predict(size) if size is not None else None
+        if predicted is not None and scale != 1.0:
+            predicted = int(predicted * scale)
+        swap_start, swap_end = window.get("swapouts_start"), process_footprint.swapouts()
+        pressures = [
+            level
+            for level in (window.get("pressure_start"), process_footprint.pressure_level())
+            if level is not None
+        ]
+        has_images = any(call["has_images"] for call in calls)
+        observation = {
+            "id": uuid.uuid4().hex,
+            "at": time.time(),
+            "n": n,
+            "n_est": n_est,
+            "n_in": largest["n_in"],
+            "n_out": largest["n_out"],
+            "y_bytes": peak - base if peak is not None else None,
+            "predicted_bytes": predicted,
+            "cache_read": largest["cached"],
+            "has_images": has_images,
+            "abandoned": bool(abandoned),
+            "residue_at_start_bytes": window.get("residue_at_start_bytes"),
+            "pressure_level": max(pressures) if pressures else None,
+            "swapouts": (
+                swap_end - swap_start if swap_start is not None and swap_end is not None else None
+            ),
+            "spi_started": True,
+            "child_died": child_died,
+        }
+        if scale != 1.0:
+            observation["prior_scale"] = scale
+        facts = handle.get("memory_facts") or {}
+        components = memory_observations.key_components(
+            model=facts.get("model_type"),
+            artifact_bytes=facts.get("weights_bytes"),
+            working_set_bytes=facts.get("working_set_bytes"),
+            runtime={
+                "apc_block_size": APC_BLOCK_SIZE_TOKENS,
+                "prefill_step": facts.get("prefill_step"),
+                "buffer_cache_limit": MLX_BUFFER_CACHE_LIMIT,
+            },
+        )
+        try:
+            memory_observations.record(components, base, observation)
+        except Exception:
+            # The observation is lost, nothing else: the turn already ended.
+            logger.warning("[MLX_Engine] Recording a memory observation failed", exc_info=True)
+        if (
+            predicted is not None
+            and n is not None
+            and observation["y_bytes"] is not None
+            and not has_images
+            and observation["y_bytes"] > predicted
+        ):
+            warned = handle.setdefault("memory_exceeded_warned", set())
+            key = memory_observations.entry_key(components)
+            if key not in warned:
+                warned.add(key)
+                model = str(facts.get("model_type")).encode("ascii", "backslashreplace").decode()
+                logger.warning(
+                    f"Memory prediction exceeded on this machine (the app's memory estimate "
+                    f"was wrong here; nothing is corrected automatically): model={model}, "
+                    f"n_in={largest['n_in']}, n_out={largest['n_out']}, "
+                    f"peak_above_base_bytes={observation['y_bytes']}, "
+                    f"predicted_bytes={predicted}, "
+                    f"residue_bytes={observation['residue_at_start_bytes']}"
+                )
+        return observation
 
     @classmethod
     def _trained_window_of(cls, model_path: Path) -> Optional[int]:
@@ -1423,8 +1674,9 @@ class MLX_Engine(BaseChatServerEngine):
         On Apple Silicon Metal caps the GPU at a recommended working set well
         below total unified memory (~74 % of RAM; mlx-vlm pins the wired limit
         to it on every generation). That working set -- not total RAM -- is the
-        hard ceiling the compaction memory signal accounts against, so
-        ``memory_budget.total_memory_bytes`` reads it here (#601).
+        hard ceiling the memory accounting plans against, so
+        ``memory_budget.total_memory_bytes`` reads it here (#601), and the
+        recorded memory observations carry it as part of their key.
 
         Kept deliberately off ``get_flat_hardware_data`` /
         ``get_performance_evaluation``: this fact does not belong in the
@@ -1442,5 +1694,5 @@ class MLX_Engine(BaseChatServerEngine):
         except Exception:
             # No record here on purpose: the caller
             # (memory_budget.total_memory_bytes) writes the single degraded
-            # record and simply leaves the memory signal off when this is None.
+            # record and simply leaves the memory accounting off when this is None.
             return None

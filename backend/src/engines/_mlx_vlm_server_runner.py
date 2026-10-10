@@ -279,9 +279,9 @@ def _apply_child_runtime_env(
       already memory-bounded by ``--max-kv-size``); a ``None`` count leaves
       mlx-vlm's own default (2048 blocks), for a child spawned without a window.
       The pool fills lazily and mlx-vlm's own ``APC_MAX_POOL_TENSORS`` + Metal
-      memory-pressure guard bound it. NB: this pool counts toward Erudi's
-      resident memory and will be accounted in ``memory_budget`` in a later PR
-      (not touched here).
+      memory-pressure guard bound it. The pool counts toward the child's
+      footprint, which ``memory_budget``'s prior accounts per token and the
+      engine measures every turn (``MLX_Engine.end_memory_window``).
     - ``MLX_VLM_TOKEN_QUEUE_TIMEOUT`` lifts the child's per-token wait above the
       parent's first-chunk watchdog ceiling so a long cold prefill trips the
       parent's curated timeout, not the child's raw error; ``None`` leaves
@@ -300,6 +300,14 @@ def _apply_child_runtime_env(
       guard. The cost is a wait right after an abandon: any request sent then
       (not only the barrier) waits for the cancelled request to leave the
       batch, typically one prefill step.
+
+    The prefill step is NOT set here: mlx-vlm's CLI rewrites ``PREFILL_STEP_SIZE``
+    from its own ``--prefill-step-size`` option, so the parent passes it on the
+    command line (``MLX_Engine._spawn_child``).
+
+    Nothing here may import ``src.core.logging`` (directly or through another
+    ``src`` module): it would install the backend's handlers in the child
+    before mlx-vlm's ``logging.basicConfig``, which would then do nothing.
 
     Uses ``os.environ.update`` (not ``os.environ[name] = ...``) on purpose: these
     are knobs the parent WRITES for the mlx-vlm child, not configuration the

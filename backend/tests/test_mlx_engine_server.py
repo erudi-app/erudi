@@ -638,6 +638,50 @@ class TestChildRuntimeEnv:
         runner._apply_child_runtime_env(apc_num_blocks=num_blocks, token_queue_timeout_s=timeout)
         assert env["MLX_VLM_MAX_NUM_SEQS"] == "1"
 
+    @pytest.mark.parametrize("num_blocks,timeout", [(2048, 1401.0), (None, None)])
+    def test_leaves_the_prefill_step_to_the_command_line(self, monkeypatch, num_blocks, timeout):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        env = self._fresh_env(monkeypatch)
+        runner._apply_child_runtime_env(apc_num_blocks=num_blocks, token_queue_timeout_s=timeout)
+        assert "PREFILL_STEP_SIZE" not in env
+
+    def test_the_child_runner_never_configures_logging(self):
+        """The child must not import ``src.core.logging``: it would install
+        the backend's file handler in the child before mlx-vlm's
+        ``logging.basicConfig`` (which then does nothing), so the child's INFO
+        lines vanish from its own log and its warnings land in backend.log
+        from a second process."""
+        import subprocess
+        import sys
+        from pathlib import Path
+
+        probe = (
+            "import sys\n"
+            "import src.engines._mlx_vlm_server_runner as runner\n"
+            "runner._apply_child_runtime_env(apc_num_blocks=16, token_queue_timeout_s=60.0)\n"
+            "assert 'src.core.logging' not in sys.modules, 'src.core.logging imported'\n"
+            "print('ok')\n"
+        )
+        out = subprocess.run(
+            [sys.executable, "-c", probe],
+            capture_output=True,
+            text=True,
+            cwd=str(Path(__file__).resolve().parents[1]),
+            timeout=120,
+        )
+        assert out.returncode == 0, out.stderr
+        assert out.stdout.strip() == "ok"
+
+    def test_the_pinned_step_is_mlx_vlms_own_default(self):
+        """mlx_vlm's CLI rewrites ``PREFILL_STEP_SIZE`` from its own
+        ``--prefill-step-size`` default: the pin only holds while the two
+        agree, which this test watches on a host where mlx_vlm imports."""
+        common = pytest.importorskip("mlx_vlm.generate.common")
+        from src.engines.memory_budget import MLX_PREFILL_STEP_TOKENS
+
+        assert common.DEFAULT_PREFILL_STEP_SIZE == MLX_PREFILL_STEP_TOKENS
+
     def test_falls_back_to_upstream_defaults_when_unknown(self, monkeypatch):
         from src.engines import _mlx_vlm_server_runner as runner
 
@@ -1014,6 +1058,11 @@ class TestSpawnArgv:
             "--log-level",
             "INFO",
             "--enable-thinking",
+            # The prefill step the memory prior was measured at: on the
+            # command line, because mlx_vlm's CLI rewrites PREFILL_STEP_SIZE
+            # from its own option (``server/cli.py``).
+            "--prefill-step-size",
+            "2048",
         ]
         assert handle["port"] == 9087
         assert handle["alias"] == "erudi-x"

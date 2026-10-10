@@ -1,45 +1,115 @@
-"""Deterministic memory accounting behind the compaction memory signal.
+"""Memory accounting behind the compaction ceiling and the amber warning.
 
-The compaction middleware and the amber memory warning both need to know how
-close the machine is to memory saturation. ``psutil``'s ``available`` is
-deliberately NOT used: on macOS, compression and swap make it swing with
-whatever else the machine is doing, so a conversation would trigger (or miss)
-compaction non-deterministically. Instead the accounting is derived from facts
-that do not move during a chat:
+The compaction ceiling and the amber memory warning both need to know how much
+memory a conversation of N tokens costs on THIS machine. ``psutil``'s
+``available`` is deliberately NOT used: on macOS, compression and swap make it
+swing with whatever else the machine is doing. Instead the accounting is a
+MEASURED, structural prior over facts that do not move during a chat:
 
-* **weights**: the on-disk size of the loaded artifact (the whole MLX snapshot
-  directory, or the selected ``.gguf`` file) — what the child has mapped;
-* **KV cache**: per-token cost from the model's own ``config.json``,
-  ``2 (K and V) x layers x kv_heads x head_dim x 2 bytes (f16)``, multiplied by
-  the conversation's token count by the caller;
-* **denominator**: the GPU's usable working set on Apple Silicon —
+* **base**: the inference child's physical footprint right after its readiness
+  probe, measured at every spawn (``src.engines.process_footprint``; fallback:
+  the artifact's on-disk size + ``BASE_FALLBACK_OVERHEAD_BYTES``);
+* **kv**: KV-cache bytes per token from the model's own ``config.json``,
+  ``2 (K and V) x layers x kv_heads x head_dim x 2 bytes (f16)``;
+* **vocab** and the child's **prefill step**: the last prefill chunk computes
+  full-sequence logits, ``step x vocab x 2 bytes`` at their largest;
+* **total**: the GPU's usable working set on Apple Silicon --
   ``MEMORY_SIGNAL_SAFETY_FRACTION`` of the engine's
   ``max_recommended_working_set_bytes`` (Metal's recommended working set, well
-  below total RAM). The signal is **MLX-only**. On both llama.cpp engines (CPU
-  and CUDA) the KV cache is allocated in full at load: memory use does not grow
-  with the conversation, and the engine's own fit already guaranteed the
-  allocation fits, so there is nothing per-token to measure — the signal is OFF
-  by policy there (see ``total_memory_bytes``, which also names the
-  partial-offload reason on discrete cards).
+  below total RAM). It is not net of the app's other processes (Electron, the
+  backend and its embedding model, Postgres).
 
-The deliberate blind spot — the OS and other processes — is absorbed by the
-margin floor the callers compare against (15 % in ``src.agents.runner``).
+The prediction above base for a conversation of N tokens is
 
-Any fact that cannot be read answers ``None`` and the signal is simply OFF for
-that model (the app's downloader fetches a repo's small aux files next to the
-``.gguf``, so most GGUF folders do carry a ``config.json`` — but one without it
-runs with the signal off); a number is never guessed.
+    predict(N) = m * (t0 + step * vocab * 2 B + c0 * kv * N)
+
+with named priors measured on one M4 16 GB (cold prefills, three models up to
+4B): ``c0`` (the marginal cost in KV units: the KV cache, its prefix-cache
+copy, MLX's buffer cache), ``t0`` (the bounded prefill transient) and ``m``
+(margin over the rep-to-rep noise). They are PROVISIONAL: a measurement
+campaign confirms or replaces them before release. Nothing is learned at
+runtime; every turn's real peak is recorded next to its prediction
+(``src.engines.memory_observations``) and a peak above the prediction is one
+WARNING. Requests that carry images are outside the predictor's scope (a
+vision tower's activations do not scale with kv).
+
+The ceiling the compaction and the output budget plan against is the token
+count at which ``base + predict(N)`` reaches the total, minus the output
+budget's 512-token floor (a turn can exceed the window by up to that much).
+No margin is stacked on top: 15 % is the amber warning's threshold only.
+
+The accounting is **MLX-only**. On both llama.cpp engines (CPU and CUDA) the KV
+cache is allocated in full at load: memory use does not grow with the
+conversation, and the engine's own fit already guaranteed the allocation fits,
+so there is nothing per-token to measure -- every fact is ``None`` there, and
+nothing is written on their handle (``total_memory_bytes`` also names the
+partial-offload reason on discrete cards).
+
+Any fact that cannot be read answers ``None`` and the ceiling and the warning
+are simply OFF for that model -- notably a KV shape the formula cannot model
+(sliding window, MLA: ``_formula_cannot_model``); a number is never guessed.
 """
 
 from __future__ import annotations
 
 import json
+import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Dict, Optional
 
 from src.core.logging import logger
+
+_GIB = 1024**3
+
+# --- The measured prior (PROVISIONAL) ---------------------------------------
+#
+# Fitted on ONE machine (M4 16 GB, mlx 0.32.2 / mlx-vlm 0.6.17, prefill steps
+# 2048 and 512, default buffer cache): with these values all 107 points of the
+# campaign stay under ``predict`` (minimum ratio 1.20, minimum slack 0.35 GiB;
+# ``tests/fixtures/memory_prior_bench5.json``). The gate campaign of plan 3.2b
+# Part II confirms or replaces them before release.
+#
+# t0 and c0 belong to a runtime configuration of the child (its prefill step
+# and buffer-cache limit): ``MEMORY_PRIORS`` is keyed by it, and a child whose
+# configuration has no measured prior gets no prediction at all.
+PRIOR_FIXED_BYTES = int(1.0 * _GIB)  # t0: the bounded prefill transient
+PRIOR_KV_MULTIPLIER = 3.5  # c0: marginal cost per token, in KV units
+PRIOR_MARGIN = 1.10  # m: over the 8-11 % rep-to-rep noise
+# Base when the child's footprint could not be measured at spawn: the weights
+# on disk plus the runtime's own resident memory.
+BASE_FALLBACK_OVERHEAD_BYTES = int(0.45 * _GIB)
+# The last prefill chunk's full-sequence logits: step x vocab, f16.
+LOGITS_BYTES_PER_VALUE = 2
+# The child's prefill step: Erudi does not pass ``--prefill-step-size``, so
+# mlx_vlm's own default applies (``DEFAULT_PREFILL_STEP_SIZE``, 0.6.17).
+MLX_PREFILL_STEP_TOKENS = 2048
+# The child's MLX buffer-cache limit: not set by Erudi (MLX's default).
+MLX_BUFFER_CACHE_LIMIT = "default"
+# The output budget's floor (``src.agents.output_budget``): a turn can run
+# past the window by up to this much, so the ceiling reserves it.
+_OUTPUT_FLOOR_TOKENS = 512
+
+
+@dataclass(frozen=True)
+class MemoryPrior:
+    """t0 and c0 of one runtime configuration of the child."""
+
+    fixed_bytes: int
+    kv_multiplier: float
+
+
+MEMORY_PRIORS: Dict[tuple, MemoryPrior] = {
+    (MLX_PREFILL_STEP_TOKENS, MLX_BUFFER_CACHE_LIMIT): MemoryPrior(
+        fixed_bytes=PRIOR_FIXED_BYTES, kv_multiplier=PRIOR_KV_MULTIPLIER
+    ),
+}
+
+# QA/dev seam (``backend/.env.example``): multiplies the prediction the
+# exceeded-prediction check compares against, so a live run can force the
+# WARNING. Never set in normal use.
+PRIOR_SCALE_ENV_VAR = "ERUDI_MEMORY_PRIOR_SCALE"
 
 # f16 KV cache: 2 bytes per stored value, and each token stores a K and a V
 # vector per layer. llama-server and mlx_vlm both keep the cache in f16 by
@@ -145,6 +215,26 @@ def kv_bytes_per_token(config: Any) -> Optional[int]:
     return _KV_TENSORS_PER_TOKEN * layers * kv_heads * head_dim * _KV_BYTES_PER_VALUE
 
 
+def model_type_of(config: Any) -> Optional[str]:
+    """The architecture a ``config.json`` declares (``model_type``, top level
+    first, then the VLM text container), or ``None``."""
+    if not isinstance(config, dict):
+        return None
+    for scope in _scopes(config):
+        value = scope.get("model_type")
+        if isinstance(value, str) and value:
+            return value
+    return None
+
+
+def vocab_size_of(config: Any) -> Optional[int]:
+    """The vocabulary size a ``config.json`` declares (top level or the VLM
+    text container), or ``None``."""
+    if not isinstance(config, dict):
+        return None
+    return _scoped_fact(config, "vocab_size")
+
+
 # A split GGUF part: "<stem>-00002-of-00003.gguf". The engine resolves the
 # FIRST part; the server maps the whole family.
 _GGUF_SPLIT_RE = re.compile(r"^(?P<stem>.+)-\d{5}-of-(?P<total>\d{5})\.gguf$", re.IGNORECASE)
@@ -234,61 +324,212 @@ def total_memory_bytes(engine: Any) -> Optional[int]:
     return total
 
 
+_PRIOR_SCALE_WARNED = False
+
+
+def prior_scale() -> float:
+    """``ERUDI_MEMORY_PRIOR_SCALE`` as a positive float, else 1.0 (an invalid
+    value is one WARNING per process, not one per turn)."""
+    global _PRIOR_SCALE_WARNED
+    raw = os.getenv(PRIOR_SCALE_ENV_VAR)
+    if raw is None or not raw.strip():
+        return 1.0
+    try:
+        value = float(raw.strip())
+    except ValueError:
+        value = 0.0
+    if value <= 0:
+        if not _PRIOR_SCALE_WARNED:
+            _PRIOR_SCALE_WARNED = True
+            logger.warning(f"{PRIOR_SCALE_ENV_VAR}={raw!r} is not a positive number; ignoring it")
+        return 1.0
+    return value
+
+
+def _static_facts(engine: Any, handle: Dict[str, Any]) -> Dict[str, Any]:
+    """The facts of the loaded child that never change while it runs,
+    computed once and cached on its handle: weights on disk, KV bytes per
+    token, vocabulary, prefill step, raw GPU working set."""
+    cached = handle.get("memory_facts")
+    if isinstance(cached, dict):
+        return cached
+    weights: Optional[int] = None
+    kv: Optional[int] = None
+    vocab: Optional[int] = None
+    model_type: Optional[str] = None
+    digit_tokens: Optional[float] = None
+    raw_path = handle.get("model_path")
+    if raw_path:
+        path = Path(raw_path)
+        digit_tokens = _digit_tokens_at(path if path.is_dir() else path.parent)
+        weights = artifact_bytes(path)
+        config_path = (path if path.is_dir() else path.parent) / "config.json"
+        try:
+            if config_path.is_file():
+                config = json.loads(config_path.read_text(encoding="utf-8"))
+                kv = kv_bytes_per_token(config)
+                vocab = vocab_size_of(config)
+                model_type = model_type_of(config)
+        except (OSError, ValueError) as exc:
+            # A corrupt config disables the accounting for this model; the
+            # model itself keeps running, so one INFO record is enough.
+            logger.info(
+                f"config.json unreadable at {config_path}; memory accounting off: "
+                f"{type(exc).__name__}: {exc}"
+            )
+    working_set: Optional[int] = None
+    probe = getattr(engine, "max_recommended_working_set_bytes", None)
+    if callable(probe):
+        try:
+            working_set = _positive_int(probe())
+        except Exception:
+            # Degraded: ``total_memory_bytes`` writes the one record about it.
+            working_set = None
+    facts = {
+        "weights_bytes": weights,
+        "kv_token_bytes": kv,
+        "vocab_size": vocab,
+        "prefill_step": MLX_PREFILL_STEP_TOKENS,
+        "working_set_bytes": working_set,
+        "model_type": model_type,
+        "digit_tokens": digit_tokens,
+    }
+    handle["memory_facts"] = facts
+    return facts
+
+
+def _digit_tokens_at(model_dir: Path) -> Optional[float]:
+    """Tokens per digit of the artifact's ``tokenizer.json``, or ``None``."""
+    from src.agents.token_accounting import digit_tokens_of
+
+    tokenizer_path = model_dir / "tokenizer.json"
+    try:
+        if not tokenizer_path.is_file():
+            return None
+        return digit_tokens_of(json.loads(tokenizer_path.read_text(encoding="utf-8")))
+    except (OSError, ValueError) as exc:
+        # The budget then assumes grouped digits (the safe side for it).
+        logger.info(f"tokenizer.json unreadable at {tokenizer_path}: {type(exc).__name__}: {exc}")
+        return None
+
+
+def budget_digit_tokens(engine: Any) -> float:
+    """Tokens per digit the OUTPUT BUDGET assumes for the loaded child: what
+    its tokenizer says on MLX (a static fact cached on the handle), else the
+    grouped weight -- the budget's safe side, and every llama.cpp engine."""
+    from src.agents.token_accounting import GROUPED_DIGIT_TOKENS
+
+    if engine is None or getattr(engine, "FORMAT_TAG", None) != "mlx":
+        return GROUPED_DIGIT_TOKENS
+    handle = getattr(engine, "_model", None)
+    if not isinstance(handle, dict):
+        return GROUPED_DIGIT_TOKENS
+    value = _static_facts(engine, handle).get("digit_tokens")
+    return value if isinstance(value, float) else GROUPED_DIGIT_TOKENS
+
+
+_DEFAULT_PRIOR = MEMORY_PRIORS[(MLX_PREFILL_STEP_TOKENS, MLX_BUFFER_CACHE_LIMIT)]
+
+
 @dataclass(frozen=True)
 class MemoryBudget:
-    """The three facts of the accounting; any ``None`` disables what needs it."""
+    """The accounting of one loaded child; any ``None`` disables what needs it.
 
-    weights_bytes: Optional[int]
-    kv_token_bytes: Optional[int]
+    ``base_bytes``: the child's footprint after its readiness probe;
+    ``total_bytes``: 0.9 x the GPU working set; ``kv_token_bytes``,
+    ``vocab_size``, ``prefill_step``: the shape facts ``predict`` needs;
+    ``weights_bytes``: the artifact on disk (the base fallback); ``prior``:
+    t0 and c0 of the child's runtime configuration (``None``: no measured
+    prior, no prediction).
+    """
+
+    base_bytes: Optional[int]
     total_bytes: Optional[int]
+    kv_token_bytes: Optional[int]
+    vocab_size: Optional[int]
+    prefill_step: Optional[int]
+    weights_bytes: Optional[int] = None
+    prior: Optional[MemoryPrior] = _DEFAULT_PRIOR
+    margin: float = PRIOR_MARGIN
+
+    @classmethod
+    def unaccounted(cls) -> "MemoryBudget":
+        """Every fact ``None``: the accounting is off."""
+        return cls(
+            base_bytes=None,
+            total_bytes=None,
+            kv_token_bytes=None,
+            vocab_size=None,
+            prefill_step=None,
+            weights_bytes=None,
+            prior=None,
+        )
 
     @classmethod
     def from_engine(cls, engine: Any) -> "MemoryBudget":
-        """Derive the budget from the CURRENTLY LOADED child of ``engine``.
+        """The accounting of the CURRENTLY LOADED child of ``engine``. Never
+        raises: an unreadable fact is a ``None`` field."""
+        if engine is None or getattr(engine, "FORMAT_TAG", None) != "mlx":
+            # llama.cpp: KV allocated in full at load -- nothing to account,
+            # and nothing written on the handle.
+            return cls.unaccounted()
+        return cls.from_handle(engine, getattr(engine, "_model", None))
 
-        Reads the live handle's ``model_path`` (stamped at spawn by every
-        engine family): the artifact size on disk, the ``config.json`` beside
-        it (the directory's own for MLX; the aux file the downloader saved
-        next to a ``.gguf`` — absent, the KV fact is ``None`` and the signal
-        off), and the family's memory total. Never raises: an unreadable fact
-        is a ``None`` field.
-        """
-        handle = getattr(engine, "_model", None)
-        raw_path = handle.get("model_path") if isinstance(handle, dict) else None
-        weights: Optional[int] = None
-        kv: Optional[int] = None
-        if raw_path:
-            path = Path(raw_path)
-            weights = artifact_bytes(path)
-            config_path = (path if path.is_dir() else path.parent) / "config.json"
-            try:
-                if config_path.is_file():
-                    kv = kv_bytes_per_token(json.loads(config_path.read_text(encoding="utf-8")))
-            except (OSError, ValueError) as exc:
-                # A corrupt config disables the signal for this model; the
-                # model itself keeps running, so one INFO record is enough.
-                logger.info(
-                    f"config.json unreadable at {config_path}; memory signal off: "
-                    f"{type(exc).__name__}: {exc}"
-                )
+    @classmethod
+    def from_handle(cls, engine: Any, handle: Any) -> "MemoryBudget":
+        """The accounting of the child ``handle`` describes (its static facts
+        are cached on it at the first call)."""
+        if not isinstance(handle, dict):
+            return cls.unaccounted()
+        facts = _static_facts(engine, handle)
+        weights = facts.get("weights_bytes")
+        base = _positive_int(handle.get("base_footprint_bytes"))
+        if base is None and weights is not None:
+            base = weights + BASE_FALLBACK_OVERHEAD_BYTES
         return cls(
-            weights_bytes=weights,
-            kv_token_bytes=kv,
+            base_bytes=base,
             total_bytes=total_memory_bytes(engine),
+            kv_token_bytes=facts.get("kv_token_bytes"),
+            vocab_size=facts.get("vocab_size"),
+            prefill_step=facts.get("prefill_step"),
+            weights_bytes=weights,
+            prior=MEMORY_PRIORS.get((facts.get("prefill_step"), MLX_BUFFER_CACHE_LIMIT)),
         )
 
-    def conversation_bytes(self, conversation_tokens: int) -> Optional[int]:
-        """KV bytes the conversation costs at its current token count."""
-        if self.kv_token_bytes is None:
+    def _shape_known(self) -> bool:
+        return bool(
+            self.prior is not None and self.kv_token_bytes and self.vocab_size and self.prefill_step
+        )
+
+    def _fixed_bytes(self) -> float:
+        return self.prior.fixed_bytes + self.prefill_step * self.vocab_size * LOGITS_BYTES_PER_VALUE
+
+    def predict(self, conversation_tokens: int) -> Optional[int]:
+        """Bytes above base a conversation of that many tokens is predicted to
+        peak at: ``m * (t0 + step * vocab * 2 + c0 * kv * N)``."""
+        if not self._shape_known():
             return None
-        return self.kv_token_bytes * max(0, conversation_tokens)
+        per_token = self.prior.kv_multiplier * self.kv_token_bytes
+        return int(self.margin * (self._fixed_bytes() + per_token * max(0, conversation_tokens)))
+
+    def conversation_bytes(self, conversation_tokens: int) -> Optional[int]:
+        """What the conversation adds to the loaded child: ``predict(N)``."""
+        return self.predict(conversation_tokens)
+
+    def footprint_bytes(self, conversation_tokens: int) -> Optional[int]:
+        """The child's predicted peak: ``base + predict(N)`` -- the model and
+        the conversation together."""
+        predicted = self.predict(conversation_tokens)
+        if predicted is None or self.base_bytes is None:
+            return None
+        return self.base_bytes + predicted
 
     def used_fraction(self, conversation_tokens: int) -> Optional[float]:
-        """(weights + conversation KV) / total, or ``None`` if unaccountable."""
-        kv = self.conversation_bytes(conversation_tokens)
-        if self.weights_bytes is None or kv is None or not self.total_bytes:
+        """``footprint / total``, or ``None`` if unaccountable."""
+        footprint = self.footprint_bytes(conversation_tokens)
+        if footprint is None or not self.total_bytes:
             return None
-        return (self.weights_bytes + kv) / self.total_bytes
+        return footprint / self.total_bytes
 
     def memory_margin_fraction(self, conversation_tokens: int) -> Optional[float]:
         """Fraction of the pool still free under this accounting (may go
@@ -296,13 +537,16 @@ class MemoryBudget:
         used = self.used_fraction(conversation_tokens)
         return None if used is None else 1.0 - used
 
-    def tokens_at_margin(self, margin: float) -> Optional[int]:
-        """The conversation token count at which the margin reaches ``margin``.
+    def tokens_at_ceiling(self) -> Optional[int]:
+        """The conversation token count the ceiling allows:
+        ``(H / m - t0 - logits) / (c0 * kv) - 512`` with ``H = total - base``.
 
-        May be negative when the weights alone already blow the floor; callers
-        clamp. ``None`` when the accounting is off.
+        Zero or negative when the fixed part alone already fills the budget;
+        callers clamp. ``None`` when the accounting is off.
         """
-        if self.weights_bytes is None or not self.kv_token_bytes or not self.total_bytes:
+        if not self._shape_known() or self.base_bytes is None or not self.total_bytes:
             return None
-        budget = (1.0 - margin) * self.total_bytes - self.weights_bytes
-        return int(budget // self.kv_token_bytes)
+        headroom = self.total_bytes - self.base_bytes
+        per_token = self.prior.kv_multiplier * self.kv_token_bytes
+        tokens = (headroom / self.margin - self._fixed_bytes()) / per_token
+        return int(tokens) - _OUTPUT_FLOOR_TOKENS

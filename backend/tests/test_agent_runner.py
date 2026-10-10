@@ -2495,6 +2495,38 @@ async def test_stop_with_no_answer_yields_the_curated_stop_turn(monkeypatch):
     assert str(msgs[-1].text) == runner_module.EMPTY_ANSWER_STOP_MESSAGE
 
 
+async def test_the_curated_turn_keeps_the_replaced_messages_usage_and_stamp():
+    """The empty answer is replaced in place by a copy: same id, and the usage
+    and request stamp of the call it answered survive (still a measurement)."""
+    empty = AIMessage(
+        content="",
+        id="empty-1",
+        usage_metadata={"input_tokens": 900, "output_tokens": 3, "total_tokens": 903},
+        response_metadata={"erudi_request_est": 1000, "erudi_request_first_hop": True},
+    )
+    updates = []
+
+    async def aget_state(config):
+        return SimpleNamespace(values={"messages": [HumanMessage("q"), empty]})
+
+    async def aupdate_state(config, values, as_node=None):
+        updates.append(values["messages"][0])
+
+    agent = SimpleNamespace(aget_state=aget_state, aupdate_state=aupdate_state)
+
+    await AgentRunner()._write_curated_empty_turn(agent, {}, "curated line")
+
+    (written,) = updates
+    assert written.id == "empty-1"
+    assert written.content == "curated line"
+    assert written.usage_metadata["input_tokens"] == 900
+    # Its output count would be the replaced generation's (a 20k-token
+    # whitespace loop): the curated line is not that, so none is exact.
+    assert written.usage_metadata["output_tokens"] == 0
+    assert written.usage_metadata["total_tokens"] == 900
+    assert written.response_metadata["erudi_request_est"] == 1000
+
+
 async def test_curated_turn_state_is_written_before_the_event_is_emitted(monkeypatch):
     """A client that disconnects right after receiving the curated event closes
     the generator at that yield -- nothing after it runs. The thread-state
@@ -2607,8 +2639,8 @@ def test_summarization_triggers_clamps_a_tiny_window_to_at_least_one():
 def _compaction_tokens(allocated, memory):
     # Mirror ``_build_middleware`` exactly: a KNOWN memory ceiling is clamped up
     # to >= 1 before folding (the compact-ASAP safety net for the corner where
-    # the weights alone already blow the 15 % floor), then canonical_working
-    # takes the min.
+    # the model's fixed part alone already fills the memory budget), then
+    # canonical_working takes the min.
     from src.engines.working_window import canonical_working_window
 
     if memory is not None:
@@ -2651,9 +2683,9 @@ def test_compaction_with_neither_signal_has_no_token_trigger():
     ]
 
 
-def test_compaction_fires_asap_when_the_weights_blow_the_floor():
-    # A non-positive ceiling means the weights alone already exceed the 15 %
-    # floor. The call site clamps it up to 1, so the working window is 1 and
+def test_compaction_fires_asap_when_the_fixed_part_fills_the_budget():
+    # A non-positive ceiling means the model's fixed part alone already fills
+    # the memory budget. The call site clamps it up to 1, so the working window is 1 and
     # compaction fires as early as it can -- the historical safety net, kept
     # until the reactive memory brake replaces it (PR3.4).
     assert _compaction_tokens(10000, -3) == 1
@@ -2668,20 +2700,20 @@ def test_build_middleware_composes_the_two_signal_trigger(monkeypatch):
     # Memory bites (5000 < 10000): the working window is the 5000 ceiling, and
     # compaction fires at 80 % of it -- int(0.8 * 5000) == 4000, earlier than
     # the ceiling itself (the safe direction).
-    budget = SimpleNamespace(tokens_at_margin=lambda margin: 5000)
+    budget = SimpleNamespace(tokens_at_ceiling=lambda: 5000)
     built = AgentRunner()._build_middleware(ToolableFakeChatModel(messages=iter([])), budget)
     mw = next(m for m in built if isinstance(m, SummarizationMiddleware))
     assert mw.trigger == [("tokens", 4000), ("messages", 20)]
 
 
 def test_build_middleware_keeps_the_compact_asap_net_on_weights_overflow(monkeypatch):
-    # The weights alone already blow the 15 % floor: tokens_at_margin comes back
+    # The fixed part alone already exceeds the ceiling: tokens_at_ceiling comes back
     # non-positive. The call site clamps it up to 1 so the trigger is ("tokens",
     # 1) -- compact ASAP, exactly as before PR3.1.
     from langchain.agents.middleware import SummarizationMiddleware
 
     monkeypatch.setattr(_FakeEngine, "effective_context_tokens", classmethod(lambda cls: 10000))
-    budget = SimpleNamespace(tokens_at_margin=lambda margin: -3)
+    budget = SimpleNamespace(tokens_at_ceiling=lambda: -3)
     built = AgentRunner()._build_middleware(ToolableFakeChatModel(messages=iter([])), budget)
     mw = next(m for m in built if isinstance(m, SummarizationMiddleware))
     assert mw.trigger == [("tokens", 1), ("messages", 20)]
@@ -2712,7 +2744,14 @@ class _StubBudget:
     def conversation_bytes(self, conversation_tokens):
         return self._bytes
 
-    def tokens_at_margin(self, margin):
+    def footprint_bytes(self, conversation_tokens):
+        return self._bytes + self.weights_bytes
+
+    def used_fraction(self, conversation_tokens):
+        margin = self.memory_margin_fraction(conversation_tokens)
+        return None if margin is None else 1.0 - margin
+
+    def tokens_at_ceiling(self):
         return 999999
 
 
@@ -2750,9 +2789,9 @@ async def test_memory_warning_emitted_once_after_the_answer(monkeypatch):
     assert warnings[0]["footprint_bytes"] == 1234 + 10000
     last_answer = max(i for i, e in enumerate(events) if e["t"] == "answer")
     assert events.index(warnings[0]) > last_answer
-    # The warn decision was taken on the PROJECTED post-compaction size: the
-    # keep-tail plus the summary allowance (>= 512 on this tiny thread).
-    assert any(tokens >= runner_module.SUMMARY_TOKEN_ALLOWANCE for tokens in stub.margin_calls)
+    # Nothing would be compacted on this tiny thread: the projection is the
+    # request as it stands (O + count), with no summary allowance on top.
+    assert 0 < stub.margin_calls[0] < runner_module.SUMMARY_TOKEN_ALLOWANCE
 
 
 async def test_no_memory_warning_when_compaction_could_restore_the_margin(monkeypatch):
@@ -2761,13 +2800,27 @@ async def test_no_memory_warning_when_compaction_could_restore_the_margin(monkey
     keep-tail restore the margin? Here the CURRENT size is under the floor
     but the projected keep-tail is comfortably fine -> no warning (compaction
     will save this conversation; warning now would flicker for one turn)."""
+    from langchain.agents import create_agent
+
     fake = ToolableFakeChatModel(messages=iter([AIMessage(content="hello")]))
     _patch_model(monkeypatch, fake)
-    # Tiny thread: current tokens are far below 100; the projection adds the
-    # 512-token summary allowance, so it lands above 100.
-    stub = _StubBudget(margin=lambda tokens: 0.05 if tokens <= 100 else 0.40)
+    # A long thread: the current size is under the floor, the projected
+    # keep-tail (ten messages and the summary allowance) is comfortably fine.
+    stub = _StubBudget(margin=lambda tokens: 0.05 if tokens > 20_000 else 0.40)
     _patch_budget(monkeypatch, stub)
-    runner = AgentRunner(checkpointer=InMemorySaver())
+    checkpointer = InMemorySaver()
+    # 18 alternating messages ending with an answer (under the 20-message
+    # clause, so this turn compacts nothing; the projection keeps ten).
+    seed = [
+        (HumanMessage if i % 2 == 0 else AIMessage)("x" * 3200, id=f"seed{i}") for i in range(18)
+    ]
+    probe = create_agent(
+        ToolableFakeChatModel(messages=iter([])), tools=[], checkpointer=checkpointer
+    )
+    await probe.aupdate_state(
+        {"configurable": {"thread_id": "mw5"}}, {"messages": seed}, as_node="model"
+    )
+    runner = AgentRunner(checkpointer=checkpointer)
 
     events = await _events(
         runner,
@@ -2778,7 +2831,10 @@ async def test_no_memory_warning_when_compaction_could_restore_the_margin(monkey
         thread_id="mw5",
         summarize=True,
     )
+    assert [e["text"] for e in events if e["t"] == "answer"] == ["hello"]
     assert not any(e["t"] == "memory_warning" for e in events)
+    # Decided on the projected keep-tail, not on the current size.
+    assert 0 < stub.margin_calls[0] <= 20_000
 
 
 async def test_no_memory_warning_when_the_margin_is_fine(monkeypatch):

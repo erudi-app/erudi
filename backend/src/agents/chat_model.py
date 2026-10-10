@@ -1,7 +1,7 @@
 """The ChatOpenAI seam: what Erudi changes about the stock client, and where.
 
 ``Erudi_Chat_OpenAI`` (built lazily by :func:`erudi_chat_openai_class`) carries
-five behaviours, each on the narrowest hook that expresses it:
+six behaviours, each on the narrowest hook that expresses it:
 
 1. **The #573 two-phase streaming watchdog**, in ``_astream`` -- the single
    place ``ChatOpenAI`` routes async streaming through, and the only hook that
@@ -34,6 +34,12 @@ five behaviours, each on the narrowest hook that expresses it:
    ``abandon_hook`` -- bound by the factory to the engine handle the client was
    built against -- so the MLX engine sends a barrier before its next prefix
    cache reset (``src.engines.mlx_engine``).
+6. **The request stamp**, also in ``_astream``: every client asks for usage
+   (``stream_usage=True``), and the chunk carrying it is stamped with the
+   estimate of the request this call sent (``erudi_request_est``), whether it
+   carried images and whether it was a first hop -- the two sides of the
+   measured ratio ``src.agents.token_accounting`` reads back. One chunk only
+   (see ``_stamp_usage_chunk``).
 
 The hooks are disjoint -- the conversion runs INSIDE the budgeted stream, so
 extraction never loosens the watchdog -- and all of them rest on upstream
@@ -100,9 +106,23 @@ import contextlib
 from functools import lru_cache
 from typing import Any, AsyncIterator, Callable, Iterable, Optional
 
-from src.agents.output_budget import compute_output_budget, output_budget_override
+from src.agents.output_budget import (
+    compute_output_budget,
+    estimate_prompt,
+    output_budget_override,
+)
 from src.agents.overflow import parse_context_overflow
 from src.agents.reasoning_stream import REASONING_KWARG, extract_reasoning_delta
+from src.agents.token_accounting import (
+    REQUEST_EST_KEY,
+    REQUEST_FIRST_HOP_KEY,
+    REQUEST_HAS_IMAGES_KEY,
+    GROUPED_DIGIT_TOKENS,
+    kb_stamp,
+    message_text,
+    messages_have_images,
+    request_tokens_est,
+)
 from src.core.exceptions import GenerationTimeoutException
 from src.core.logging import logger
 
@@ -310,13 +330,14 @@ def is_child_prefill_timeout(exc: object) -> bool:
 
 # --- Retrying a call the engine's context check rejected --------------------
 #
-# The output budget is sized from an ESTIMATE of the prompt (chars/4, see
+# The output budget is sized from an ESTIMATE of the prompt (measured parts at
+# their measured ratio, new text at a script weight, see
 # src.agents.output_budget). llama-server clamps its own generation against
 # what is left of the window, so an over-estimate costs nothing there.
 # mlx_vlm.server does not: it validates `prompt + max_tokens <= window` against
-# the REAL tokenised prompt and answers 400. On text the estimate under-counts
-# -- Chinese and Japanese, roughly threefold -- the app would then reject its
-# own turn on a conversation that fits perfectly well.
+# the REAL tokenised prompt and answers 400. Where the new text's script weight
+# under-counts this tokenizer, the app would then reject its own turn on a
+# conversation that fits perfectly well.
 #
 # The rejection carries the cure: it names the exact prompt count. So the call
 # is retried once with a budget built from that number instead of an estimate.
@@ -458,14 +479,38 @@ def erudi_chat_openai_class():
         working_context_tokens: Optional[int] = None
 
         # Whether this client's ``max_tokens`` is a fallback the automatic
-        # budget may replace (chat turns and the summarization calls that ride
-        # the same client) or a DELIBERATE budget it must leave alone. The
-        # one-shot utility path sets this False: a conversation title runs on
-        # ~12 tokens on purpose (#266), and handing it the whole window would
-        # make it ramble for thousands of tokens before the sanitizer took its
-        # first four words. ``ainvoke`` on a ``streaming=True`` client routes
-        # through ``_astream``, so the distinction has to live here.
+        # budget may replace (chat turns) or a DELIBERATE budget it must leave
+        # alone. Two clients set this False: the one-shot utility path -- a
+        # conversation title runs on ~12 tokens on purpose (#266), and handing
+        # it the whole window would make it ramble for thousands of tokens
+        # before the sanitizer took its first four words -- and, with a known
+        # working window, the compaction summary client, capped at
+        # ``summary_cap(W)``. ``ainvoke`` on a ``streaming=True`` client
+        # routes through ``_astream``, so the distinction has to live here.
         auto_output_budget: bool = True
+
+        # The KB additions this turn's requests carry (``_KbContextMiddleware``:
+        # the block, two blank-line joins, the language line), set by the
+        # runner through the factory. A request that carried them stamps their
+        # size next to its own estimate, so its measured ratio is taken on
+        # what the NEXT request still holds (the block is not kept in the
+        # history). Empty: the turn carries no block.
+        kb_additions: str = ""
+
+        # What a digit costs on the loaded tokenizer, for the output budget
+        # and the KB stamp (``memory_budget.budget_digit_tokens``, set by the
+        # factory): 1.0 when it splits digits one by one, the grouped 0.34
+        # otherwise or when unknown -- an over-estimate here silently
+        # truncates the answer.
+        digit_tokens: float = GROUPED_DIGIT_TOKENS
+
+        # Whether a call the engine's context check rejected is retried once
+        # with a smaller ``max_tokens`` (see ``preflight_retry_budget``). The
+        # compaction summary client turns it off: its cap is deliberate, and a
+        # smaller one would silently truncate the summary -- its rejection
+        # reaches the summarizer, which takes its size path instead. Titles
+        # keep it: the retry is what gives a giant first message a title.
+        preflight_retry: bool = True
 
         # Called when a model call's stream did not end normally (closed by
         # its consumer, cancelled, timed out, failed -- or rejected by the
@@ -477,6 +522,50 @@ def erudi_chat_openai_class():
         # The MLX engine then sends a barrier request before its next prefix
         # cache reset (``src.engines.mlx_engine``). ``None``: nothing to tell.
         abandon_hook: Optional[Callable[[], None]] = Field(default=None, exclude=True)
+
+        # Called once per model call with the server-reported usage
+        # ``(input_tokens, output_tokens, cached_tokens, has_images)``. The
+        # factory binds it to the engine handle (``note_call_usage``) on the
+        # conversation and Arena clients only, so the MLX engine can record
+        # what a turn really used next to its memory prediction; the summary
+        # and title clients carry none (a title generated while a turn's
+        # window is open never enters it). ``None``: nothing to tell.
+        usage_hook: Optional[Callable[..., None]] = Field(default=None, exclude=True)
+
+        # Called once per model call, BEFORE it is sent, with the client's own
+        # estimate of the request in real tokens. Bound like ``usage_hook``
+        # (conversation and Arena clients only): a turn whose stream is cut
+        # before the usage chunk -- often the heaviest -- is still measured,
+        # at that estimate.
+        call_start_hook: Optional[Callable[[int], None]] = Field(default=None, exclude=True)
+
+        def _announce_call(self, messages, tools) -> None:
+            hook = self.call_start_hook
+            if hook is None:
+                return
+            try:
+                hook(estimate_prompt(messages, tools=tools, digit_tokens=self.digit_tokens).total)
+            except Exception:
+                # A measurement aid: losing it costs the estimate of one
+                # abandoned turn, never the call.
+                logger.warning("Announcing a call's estimated size failed", exc_info=True)
+
+        def _push_usage(self, usage: Any, stamp: Optional[dict]) -> None:
+            hook = self.usage_hook
+            if hook is None:
+                return
+            try:
+                details = usage.get("input_token_details") or {}
+                hook(
+                    int(usage.get("input_tokens") or 0),
+                    int(usage.get("output_tokens") or 0),
+                    int(details.get("cache_read") or 0),
+                    bool((stamp or {}).get(REQUEST_HAS_IMAGES_KEY)),
+                )
+            except Exception:
+                # A measurement aid: losing it costs one observation, never
+                # the call.
+                logger.warning("Pushing a call's usage failed", exc_info=True)
 
         def _notify_abandoned(self) -> None:
             hook = self.abandon_hook
@@ -505,12 +594,52 @@ def erudi_chat_openai_class():
                 model_name=self.model_name,
             )
 
+        def _request_stamp(self, messages, tools) -> Optional[dict]:
+            """What the usage chunk of this call is stamped with: the estimate
+            of THIS request (the one estimator, tool schemas included),
+            whether it carried images, and whether it is a FIRST hop (it ends
+            with a user message). ``None`` when the messages cannot be
+            estimated: the call then simply carries no measurement."""
+            try:
+                estimate = request_tokens_est(messages, tools)
+            except Exception:
+                # The stamp is a measurement aid, never a reason to fail a
+                # call: an unreadable shape costs this hop's ratio only.
+                logger.debug("Request estimate unavailable; no stamp", exc_info=True)
+                return None
+            last = messages[-1] if messages else None
+            stamp = {
+                REQUEST_EST_KEY: estimate,
+                REQUEST_HAS_IMAGES_KEY: messages_have_images(messages),
+                REQUEST_FIRST_HOP_KEY: getattr(last, "type", None) == "human",
+            }
+            if self.kb_additions and getattr(last, "type", None) == "human":
+                block = self.kb_additions.split("\n\n\n\n", 1)[0]
+                if block and block in message_text(last):
+                    stamp.update(kb_stamp(self.kb_additions, self.digit_tokens))
+            return stamp
+
+        def _stamp_usage_chunk(self, chunk, stamp: Optional[dict]) -> bool:
+            """Stamp ``chunk`` if it is the one carrying the server's usage;
+            True when it did. ONE chunk only: LangChain's ``merge_dicts`` sums
+            two differing ints under one key and rejects two differing bools,
+            so a stamp on several chunks would corrupt the aggregate."""
+            message = getattr(chunk, "message", None)
+            if message is None or getattr(message, "usage_metadata", None) is None:
+                return False
+            if stamp is not None:
+                message.response_metadata.update(stamp)
+            self._push_usage(message.usage_metadata, stamp)
+            return True
+
         async def _astream(self, messages, *args, **kwargs):
             estimated = estimate_prompt_tokens(messages)
-            # What this call may generate: the window minus what the turn
-            # already occupies. Per model call, not per turn -- every hop of a
-            # tool turn sends a longer history and gets a smaller budget. A
-            # kwarg wins over the constructor's ``max_tokens`` in
+            tools = kwargs.get("tools")
+            stamp = self._request_stamp(messages, tools)
+            # What this call may generate: the window minus what the request
+            # occupies, in real tokens. Per model call, not per turn -- every
+            # hop of a tool turn sends a longer history and gets a smaller
+            # budget. A kwarg wins over the constructor's ``max_tokens`` in
             # ``_get_request_payload`` (pinned); ``None`` leaves that value
             # alone, which is what an engine with no reportable window gets.
             # The budget is a MEMORY consumer: it is sized from the working
@@ -523,12 +652,19 @@ def erudi_chat_openai_class():
                 else self.effective_context_tokens
             )
             budget = (
-                compute_output_budget(messages, budget_window, override=output_budget_override())
+                compute_output_budget(
+                    messages,
+                    budget_window,
+                    override=output_budget_override(),
+                    tools=tools,
+                    digit_tokens=self.digit_tokens,
+                )
                 if self.auto_output_budget
                 else None
             )
             if budget is not None:
                 kwargs["max_tokens"] = budget
+            self._announce_call(messages, tools)
 
             # Every attempt is consumed under ``aclosing``: when this
             # generator is closed (GeneratorExit at the yield) or cancelled,
@@ -537,6 +673,7 @@ def erudi_chat_openai_class():
             # cancels the request at once. Only after that is the abandon
             # hook called.
             ended_normally = False
+            usage_seen = False
             try:
                 yielded = 0
                 try:
@@ -545,6 +682,8 @@ def erudi_chat_openai_class():
                     ) as stream:
                         async for chunk in stream:
                             yielded += 1
+                            if not usage_seen:
+                                usage_seen = self._stamp_usage_chunk(chunk, stamp)
                             yield chunk
                     ended_normally = True
                     return
@@ -562,9 +701,13 @@ def erudi_chat_openai_class():
                     # precisely to reproduce exact budgets, so a preflight
                     # rejection of the pinned value re-raises into the honest
                     # overflow turn instead of silently running a different one.
+                    # Never on a client that turned it off (the compaction
+                    # summary: a smaller cap would silently truncate it).
                     retry_budget = (
                         preflight_retry_budget(exc, self.effective_context_tokens)
-                        if yielded == 0 and output_budget_override() is None
+                        if self.preflight_retry
+                        and yielded == 0
+                        and output_budget_override() is None
                         else None
                     )
                     if retry_budget is None:
@@ -587,6 +730,8 @@ def erudi_chat_openai_class():
                     self._budgeted_stream(messages, estimated, *args, **kwargs)
                 ) as stream:
                     async for chunk in stream:
+                        if not usage_seen:
+                            usage_seen = self._stamp_usage_chunk(chunk, stamp)
                         yield chunk
             finally:
                 if not ended_normally:
