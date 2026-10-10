@@ -116,6 +116,6 @@
     "connectionInterrupted": "Connexion interrompue pendant la génération de la réponse."
   },
   "memoryWarning": {
-    "text": "La mémoire de votre machine est presque saturée par cette conversation et son modèle (environ {{size}}). Pensez à démarrer une nouvelle conversation ou à passer à un modèle plus petit."
+    "text": "La mémoire de votre machine limite cette conversation : ce dont elle a besoin remplit presque la place laissée à côté du modèle (environ {{size}} à eux deux). Démarrez une nouvelle conversation, envoyez moins à la fois ou passez à un modèle plus petit."
   }
 }

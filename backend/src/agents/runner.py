@@ -110,7 +110,9 @@ if TYPE_CHECKING:
 # Auto-summarization (compaction) fires at 80 % of the WORKING window, the
 # smaller of two values recomputed PER TURN (``_build_middleware`` runs after
 # the child spawned, so both are fresh):
-#   1. the ALLOCATED context window (``BaseEngine.effective_context_tokens``);
+#   1. the ALLOCATED context window (``BaseEngine.effective_context_tokens``;
+#      on Apple Silicon, already lowered to the memory bound the child
+#      enforces when memory binds -- ``BaseEngine.memory_bound_tokens``);
 #   2. the MEMORY ceiling (Apple Silicon) -- the conversation token count at
 #      which the child's predicted footprint reaches the memory budget
 #      (``MemoryBudget.tokens_at_ceiling``, a measured prior; no margin is
@@ -140,17 +142,15 @@ SUMMARY_PROMPT = (
 SUMMARY_TRIGGER_MESSAGES = 20
 SUMMARY_KEEP_MESSAGES = 10
 COMPACTION_WINDOW_FRACTION = 0.8
-# The amber warning's threshold: it shows when, even after compacting to the
-# kept budget, the model plus the kept conversation would use more than 85 %
-# of the memory budget (see ``_memory_warning_event``). It is the warning's
-# threshold ONLY: the compaction ceiling is the honest one, with no margin
-# stacked on top (the prior carries its own margin, ``memory_budget``).
-MEMORY_WARNING_MARGIN = 0.15
-# Token allowance for the summary a compaction would insert, used when
-# projecting the post-compaction size the warning is judged on -- ONLY when no
-# working window is known. With a window, the projection uses the summary's
-# real cap, ``summary_cap(W)``.
-SUMMARY_TOKEN_ALLOWANCE = 512
+# The amber warning's threshold (Y of #612): it shows only when the machine's
+# memory bounds the loaded child's window (``memory_bound_tokens``) and, even
+# after compacting to the kept budget, the next request would fill 85 % of the
+# working window (see ``_memory_warning_event``). When the model's own window
+# binds, memory is not the limiting factor and no memory warning applies. It
+# is the warning's threshold ONLY: the compaction ceiling is the honest one,
+# with no margin stacked on top (the prior carries its own margin,
+# ``memory_budget``).
+MEMORY_WARNING_FRACTION = 0.85
 
 # What a compaction keeps (#611). The kept tail is bounded TWICE: at most
 # ``SUMMARY_KEEP_MESSAGES`` messages AND at most ``KEEP_FRACTION`` of the
@@ -251,6 +251,14 @@ def _close_memory_window(engine: Any, token: Any, *, abandoned: bool) -> None:
         engine.end_memory_window(token, abandoned=abandoned)
     except Exception:
         logger.warning("Closing the memory measurement window failed", exc_info=True)
+
+
+def _memory_bound_of(engine: Any) -> Optional[int]:
+    """The loaded child's memory bound (``BaseEngine.memory_bound_tokens``),
+    read defensively like the window probe: an engine without the accessor
+    has none."""
+    probe = getattr(engine, "memory_bound_tokens", None)
+    return probe() if callable(probe) else None
 
 
 def _track_memory_warning(engine: Any, thread_id: Optional[str], active: bool) -> None:
@@ -1033,7 +1041,11 @@ DECODE_TIMEOUT_MESSAGE = (
 # (src.agents.overflow.parse_context_overflow discriminates it from a generic
 # 400). Surfacing those numbers beats the catch-all apology below -- the user
 # learns exactly why and what to do -- and the app never silently truncates
-# or shifts the conversation to make it fit.
+# or shifts the conversation to make it fit. The turn names what limits the
+# conversation: the MEMORY wording when the limit the engine refused on is the
+# memory bound the MLX child enforces (``BaseEngine.memory_bound_tokens``),
+# the model-window wording otherwise (llama.cpp, a failed memory bound, an
+# inherited ``MAX_KV_SIZE``).
 CONTEXT_OVERFLOW_MESSAGE_TEMPLATE = (
     f"{ERROR_SENTINEL} This conversation no longer fits the model's context window "
     "(the request needs about {prompt_tokens} tokens; the window holds {context_tokens}). "
@@ -1043,14 +1055,27 @@ CONTEXT_OVERFLOW_MESSAGE = (
     f"{ERROR_SENTINEL} This conversation no longer fits the model's context window. "
     "Start a new conversation or send less at once."
 )
+MEMORY_OVERFLOW_MESSAGE_TEMPLATE = (
+    f"{ERROR_SENTINEL} This conversation no longer fits what your machine's memory can "
+    "hold for this model (the request needs about {prompt_tokens} tokens; memory allows "
+    "{context_tokens}). Start a new conversation, send less at once, or switch to a "
+    "smaller model."
+)
 
 
-def _context_overflow_message(overflow: ContextOverflow) -> str:
+def _context_overflow_message(overflow: ContextOverflow, memory_bound: Optional[int]) -> str:
     """The curated turn a parsed ``ContextOverflow`` becomes: the numbers
     when the wire error carried them, a numberless variant when it matched
-    but didn't parse (still an honest overflow message, just without figures)."""
+    but didn't parse (still an honest overflow message, just without figures).
+    ``memory_bound`` is the loaded engine's ``memory_bound_tokens()``: a limit
+    equal to it is the machine's memory, not the model's window."""
     if overflow.prompt_tokens is None or overflow.context_tokens is None:
         return CONTEXT_OVERFLOW_MESSAGE
+    if memory_bound is not None and overflow.context_tokens == memory_bound:
+        return MEMORY_OVERFLOW_MESSAGE_TEMPLATE.format(
+            prompt_tokens=overflow.prompt_tokens,
+            context_tokens=overflow.context_tokens,
+        )
     return CONTEXT_OVERFLOW_MESSAGE_TEMPLATE.format(
         prompt_tokens=overflow.prompt_tokens,
         context_tokens=overflow.context_tokens,
@@ -1702,12 +1727,13 @@ class AgentRunner:
                                 # and the next turn replays an empty assistant turn.
                                 await self._write_curated_empty_turn(agent, run_config, curated)
                             yield _record({"t": "answer", "text": curated})
-                        # Amber warning check (1.1.2), at end of turn on the
-                        # POST-turn thread state: one ``memory_warning`` event goes
-                        # out ONLY when even a compaction down to the keep-tail would
-                        # leave the model and the conversation above 85 % of the
-                        # memory budget (see ``_memory_warning_event`` for the
-                        # projection). The conversation service forwards it to the
+                        # Amber warning check, at end of turn on the POST-turn
+                        # thread state: one ``memory_warning`` event goes out ONLY
+                        # when memory bounds the child's window and even a
+                        # compaction down to the keep-tail would leave the next
+                        # request at 85 % of the working window or more (see
+                        # ``_memory_warning_event`` for the projection). The
+                        # conversation service forwards it to the
                         # wire and never persists it (it is a statement about NOW,
                         # on THIS machine). Its start and end per conversation are
                         # one INFO line each (``_track_memory_warning``).
@@ -1724,6 +1750,7 @@ class AgentRunner:
                                     fixed_text=overhead.fixed_text,
                                 ),
                                 allocated_window=allocated_window,
+                                engine=engine,
                             )
                             if budget.used_fraction(0) is not None:
                                 _track_memory_warning(engine, thread_id, warning is not None)
@@ -1811,7 +1838,12 @@ class AgentRunner:
                                 yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
                             yield _record(
-                                {"t": "answer", "text": _context_overflow_message(overflow)}
+                                {
+                                    "t": "answer",
+                                    "text": _context_overflow_message(
+                                        overflow, _memory_bound_of(engine)
+                                    ),
+                                }
                             )
                         elif is_child_prefill_timeout(exc):
                             # Defense in depth (#573 alignment): the MLX child's
@@ -2062,6 +2094,72 @@ class AgentRunner:
         # allocated window stays with the time/bound consumers elsewhere.
         return effective_window, canonical_working_window(effective_window, memory_token_ceiling)
 
+    async def _project_next_request(
+        self,
+        agent,
+        run_config,
+        working_window: int,
+        *,
+        overhead: Optional[RequestOverhead] = None,
+        allocated_window: Optional[int] = None,
+    ) -> Optional[tuple[int, int]]:
+        """``(projected_tokens, conversation_tokens)`` of the NEXT request,
+        or ``None`` on an empty thread.
+
+        The summarization middleware runs in ``before_model``, so the growth
+        of THIS turn is compacted on the NEXT turn -- judging the warning on
+        the current size would flag every conversation for exactly one turn
+        and then flicker off once compaction ran. Instead the post-turn thread
+        state is projected the way the NEXT request will see it, in real
+        tokens: the turn just answered is past (its KB/web results count as
+        markers, ``strip_stale_tool_results(all_past=True)``), an empty next
+        question is appended (so the cutoff is the one the next request's
+        compaction computes), every message is weighed as the counter weighs
+        it, and the request overhead O is on top -- the system prompt and the
+        tool schemas only (``overhead``; the KB block of the turn just
+        answered is not in the next request). When a compaction would happen
+        (``compaction_cutoff`` > 0, futility guard included) the projection is
+        ``O + count(kept) + summary_cap(W)``; otherwise ``O + count(all)`` --
+        no summary is added when nothing would be compacted.
+        ``conversation_tokens`` is ``O + count(all)``, the request before any
+        compaction.
+        """
+        from langchain_core.messages import HumanMessage
+
+        from src.agents.middleware import strip_stale_tool_results
+
+        state = await agent.aget_state(run_config)
+        messages = (state.values or {}).get("messages", []) if state else []
+        if not messages:
+            return None
+        projected = strip_stale_tool_results(messages, all_past=True) + [
+            HumanMessage(content="", id="erudi-next-request")
+        ]
+        weights, ratio = frozen_weights(projected)
+
+        def counter(part):
+            return real_token_count(part, weights)
+
+        fixed = overhead_tokens(
+            overhead,
+            ratio,
+            dense=COUNTER_DENSE_TOKENS,
+            weight_floor=COUNTER_WEIGHT_FLOOR,
+        )
+        cutoff = compaction_cutoff(
+            projected,
+            working_window,
+            counter,
+            overhead=fixed,
+            allocated_window=allocated_window,
+        )
+        conversation_tokens = fixed + counter(projected)
+        if cutoff > 0:
+            projected_tokens = fixed + counter(projected[cutoff:]) + summary_cap(working_window)
+        else:
+            projected_tokens = conversation_tokens
+        return projected_tokens, conversation_tokens
+
     async def _memory_warning_event(
         self,
         agent,
@@ -2071,96 +2169,57 @@ class AgentRunner:
         *,
         overhead: Optional[RequestOverhead] = None,
         allocated_window: Optional[int] = None,
+        engine: Any = None,
     ) -> Optional[dict]:
         """The ``memory_warning`` event for this turn, or ``None``.
 
-        Warn ONLY IF compaction cannot save this conversation. The
-        summarization middleware runs in ``before_model``, so the growth of
-        THIS turn is compacted on the NEXT turn -- judging the warning on the
-        current size would flag every conversation for exactly one turn and
-        then flicker off once compaction ran. Instead the post-turn thread
-        state is projected the way the NEXT request will see it, in real
-        tokens: the turn just answered is past (its KB/web results count as
-        markers, ``strip_stale_tool_results(all_past=True)``), an empty next
-        question is appended (so the cutoff is the one the next request's
-        compaction computes), every message is weighed as the counter weighs
-        it, and the request overhead O is on top -- the system prompt and the
-        tool schemas only (``overhead``; the KB block of the turn just
-        answered is not in the next request). When a compaction would happen
-        (``compaction_cutoff`` > 0, futility guard included):
-        ``O + count(kept) + summary_cap(W)`` (or ``SUMMARY_TOKEN_ALLOWANCE``
-        without a window); otherwise ``O + count(all)`` -- no summary is added
-        when nothing would be compacted. The warning goes out only when even
-        THAT projection leaves the margin strictly under
-        ``MEMORY_WARNING_MARGIN``: the model plus the kept conversation would
-        use more than 85 % of the memory budget (``MemoryBudget.used_fraction``,
-        a measured prior with a fixed part -- so it can show for a model whose
-        weights alone are well below 85 %, and from the first turn on a tight
-        machine). The payload quotes the projection: ``footprint_bytes``
-        (model and conversation, what the copy shows) and
-        ``conversation_bytes`` (what the conversation adds). Advisory only: a
-        failure here is logged and never sinks the turn.
+        Warn ONLY IF memory is what limits this conversation AND compaction
+        cannot save it. Memory limits it when the engine bounded the loaded
+        child's window by memory (``engine.memory_bound_tokens()`` is set: the
+        memory ceiling is the binding side of ``W = min(model window, memory
+        ceiling)``); when the model's own window binds, memory is not the
+        limiting factor and no memory warning applies, however full the budget
+        is in bytes. Compaction cannot save it when even the projected NEXT
+        request (``_project_next_request``: after a compaction to the kept
+        budget, when one would happen) reaches ``MEMORY_WARNING_FRACTION`` of
+        the working window ``W`` -- the compaction path's window, whose memory
+        ceiling is clamped to 1, so a model that alone fills the budget (the
+        child bounded at the 4096 floor) always warns. The payload is the one
+        number the copy quotes, ``footprint_bytes``: the loaded model and the
+        projected conversation together (``MemoryBudget.footprint_bytes``); no
+        number to quote, no event. The projection's numbers go to the log.
+        Advisory only: a failure here is logged and never sinks the turn.
         """
-        from langchain_core.messages import HumanMessage
-
-        from src.agents.middleware import strip_stale_tool_results
-
         try:
-            state = await agent.aget_state(run_config)
-            messages = (state.values or {}).get("messages", []) if state else []
-            if not messages:
+            if _memory_bound_of(engine) is None or not _known_window(working_window):
                 return None
-            projected = strip_stale_tool_results(messages, all_past=True) + [
-                HumanMessage(content="", id="erudi-next-request")
-            ]
-            weights, ratio = frozen_weights(projected)
-
-            def counter(part):
-                return real_token_count(part, weights)
-
-            fixed = overhead_tokens(
-                overhead,
-                ratio,
-                dense=COUNTER_DENSE_TOKENS,
-                weight_floor=COUNTER_WEIGHT_FLOOR,
-            )
-            cutoff = compaction_cutoff(
-                projected,
+            projection = await self._project_next_request(
+                agent,
+                run_config,
                 working_window,
-                counter,
-                overhead=fixed,
+                overhead=overhead,
                 allocated_window=allocated_window,
             )
-            conversation_tokens = fixed + counter(projected)
-            if cutoff > 0:
-                summary_tokens = (
-                    summary_cap(working_window)
-                    if _known_window(working_window)
-                    else SUMMARY_TOKEN_ALLOWANCE
-                )
-                projected_tokens = fixed + counter(projected[cutoff:]) + summary_tokens
-            else:
-                projected_tokens = conversation_tokens
-            projected_margin = budget.memory_margin_fraction(projected_tokens)
-            if projected_margin is None or projected_margin >= MEMORY_WARNING_MARGIN:
+            if projection is None:
+                return None
+            projected_tokens, conversation_tokens = projection
+            if projected_tokens < MEMORY_WARNING_FRACTION * working_window:
+                return None
+            # What the warning copy quotes: the conversation AND its loaded
+            # model together (the two things the user can act on).
+            footprint = budget.footprint_bytes(projected_tokens)
+            if footprint is None:
                 return None
             logger.warning(
-                f"Memory budget over 85 % even after a projected compaction: "
-                f"projected_margin={projected_margin:.3f}, "
-                f"projected_tokens={projected_tokens}, "
+                f"Memory-bound conversation over 85 % of the working window even after "
+                f"a projected compaction: projected_tokens={projected_tokens}, "
+                f"working_window={working_window}, "
                 f"conversation_tokens={conversation_tokens}"
             )
-            return {
-                "t": "memory_warning",
-                "used_fraction": round(1.0 - projected_margin, 4),
-                "conversation_bytes": budget.conversation_bytes(projected_tokens),
-                # What the warning copy quotes: the conversation AND its
-                # loaded model together (the two things the user can act on).
-                "footprint_bytes": budget.footprint_bytes(projected_tokens),
-            }
+            return {"t": "memory_warning", "footprint_bytes": footprint}
         except Exception:
             # Advisory signal: losing it costs one warning, never the answer.
-            logger.exception("Memory-margin evaluation failed; skipping the warning")
+            logger.exception("Memory warning evaluation failed; skipping the warning")
             return None
 
     async def _close_interrupted_turn(self, agent, run_config, streamed_text: str) -> bool:

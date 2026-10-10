@@ -137,12 +137,12 @@ def test_working_context_tokens_on_none_engine_is_none():
     assert working_context_tokens(None) is None
 
 
-def test_15_percent_is_the_amber_warnings_threshold():
+def test_85_percent_of_the_working_window_is_the_amber_warnings_threshold():
     """The ceiling is the honest one (``MemoryBudget.tokens_at_ceiling``);
-    15 % is the amber warning's threshold only."""
+    85 % of the working window is the amber warning's threshold only."""
     from src.agents import runner
 
-    assert runner.MEMORY_WARNING_MARGIN == 0.15
+    assert runner.MEMORY_WARNING_FRACTION == 0.85
 
 
 # ===================== the MLX child's memory bound =====================

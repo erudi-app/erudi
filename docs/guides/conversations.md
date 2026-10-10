@@ -131,8 +131,8 @@ generating and rejects the whole call otherwise. Where the ratio lags — the fi
 script, the first turn after a model swap — that rejection carries its own cure: it names the
 exact prompt count. So the call is retried once, with a budget built from that number instead of
 an estimate. Nothing is lost — the rejection arrives before any generation — and the turn then
-answers normally. The retry checks the **allocated** window only; the memory ceiling has no such
-net. A prompt that fills the window on its own is not retried: no budget makes it fit, and it is
+answers normally. The retry checks the **allocated** window only — on Apple Silicon, the memory
+bound the child enforces when memory binds. A prompt that fills the window on its own is not retried: no budget makes it fit, and it is
 reported as a genuine overflow with the real numbers (see [When the prompt no longer fits the
 context window](#when-the-prompt-no-longer-fits-the-context-window)). The compaction summary call
 is never retried this way (see below).
@@ -193,7 +193,7 @@ their contents through history forever.
 | `thinking` | `text` | A chunk of the model's reasoning (see below) |
 | `tool_call` | `name`, `args` | The agent called a tool (`search_knowledge_base`, `web_search`, `calculator`) |
 | `tool_result` | `name`, `text` | What that tool returned |
-| `memory_warning` | `used_fraction`, `conversation_bytes`, `footprint_bytes` | Even after compacting, the model and the kept conversation would use more than 85 % of the memory budget (see below); `footprint_bytes` = the loaded model and the conversation together, `conversation_bytes` = what the conversation adds (the predicted peak above the model's own footprint, not just its KV cache) |
+| `memory_warning` | `footprint_bytes` | The machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
 | `error` | `text` | The turn failed; the text is the curated error message |
 | `done` | — | Terminal event, always sent, including after an `error` |
 
@@ -294,6 +294,14 @@ an honest `error` turn instead of the generic one:
 
 `This conversation no longer fits the model's context window (the request needs about N tokens; the
 window holds W). Start a new conversation or send less at once.`
+
+When the limit the engine refused on is the memory bound the Apple-Silicon child enforces
+(`memory_bound_tokens()`, see [Engines](../dev/architecture/engines.md#the-memory-bound-mlx)), the
+turn names memory instead:
+
+`This conversation no longer fits what your machine's memory can hold for this model (the request
+needs about N tokens; memory allows W). Start a new conversation, send less at once, or switch to a
+smaller model.`
 
 When the wire error matched but its numbers didn't parse, the turn drops the figures but keeps the
 same honest wording. There is no silent truncation or shifting of the conversation to make it fit --
@@ -481,7 +489,9 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
      discrete card, partial layer offload would make any single-pool accounting dishonest anyway).
      The accounting deliberately never reads the OS's "available" memory (macOS compression and swap
      make it non-deterministic); a model whose facts cannot be read simply runs without the memory
-     ceiling.
+     ceiling. When the ceiling is smaller than the model's trained window, the child itself is
+     bounded to it right after it loads, so the allocated window is that bound (see
+     [Engines](../dev/architecture/engines.md#the-memory-bound-mlx)).
 
    over whichever of the two is known. When only the allocated window is known — the common case,
    and every llama.cpp engine — the working window is the allocated window; when the model's
@@ -563,22 +573,31 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    conversation could not be summarized." The conversation keeps working, and `backend.log`
    carries one warning per failed attempt.
 
-   **Warn only when compaction cannot save you**: the middleware compacts in `before_model`, so
+   **Warn only when memory limits the conversation and compaction cannot save it**: the memory
+   notice concerns only a model whose window the machine's memory bounds — on Apple Silicon, when
+   the memory ceiling is smaller than the model's trained window, the inference child is lowered to
+   that bound right after it loads (see [Engines](../dev/architecture/engines.md#the-memory-bound-mlx))
+   and `memory_bound_tokens()` reports it. When the model's own window is the smaller one, memory is
+   not the limiting factor and no memory notice is shown, however close to the budget the model
+   runs in bytes. For a memory-bound model, the middleware compacts in `before_model`, so
    this turn's growth is compacted on the *next* turn. At the end of each turn the runner therefore
    projects the next request in real tokens — the turn just answered counted as past, an empty
    next question appended (so the projection keeps what the next request's compaction keeps), the
    system prompt and tool schemas on top (not the knowledge-base block of the turn just answered,
-   which the next request does not carry): when a compaction would happen, `O` + the tail `compaction_cutoff` would
-   keep + a `summary_cap(W)`-token summary (a 512-token allowance when no window is known);
-   otherwise `O` + the whole conversation, with no summary added — and emits one `memory_warning`
-   event only if, even after compacting to the kept budget, the model plus the kept conversation
-   would use more than **85 %** of the memory budget. Because the prediction carries a fixed part,
-   the warning can appear for a model whose weights alone are well below 85 %, and from the first
-   turn on a tight machine. The renderer then shows an amber notice above the composer with the
-   approximate memory size of the model and the conversation. The warning is about the machine
-   *now*, so it is never persisted and clears on the next turn that carries none; `backend.log`
-   records one `Memory warning started` / `Memory warning ended` line per conversation at each
-   transition.
+   which the next request does not carry): when a compaction would happen, `O` + the tail
+   `compaction_cutoff` would keep + a `summary_cap(W)`-token summary; otherwise `O` + the whole
+   conversation, with no summary added — and emits one `memory_warning` event only if, even after
+   compacting to the kept budget, that projection reaches **85 % of the working window** `W`. A
+   model that alone nearly fills the budget (bounded at the 4096-token floor, with a memory ceiling
+   below it) gets the notice from the first turn. The renderer then shows an amber notice above the
+   composer with the approximate memory size of the model and the conversation together
+   (`footprint_bytes`); the projection's numbers go to `backend.log` in one
+   `Memory-bound conversation over 85 % of the working window ...` warning. The warning is about
+   the machine *now*, so it is never persisted and clears on the next turn that carries none;
+   `backend.log` records one `Memory warning started` / `Memory warning ended` line per
+   conversation at each transition. A child whose memory bound could not be applied (the GPU
+   working set readable only after the load, a refused request, an unreadable base footprint or
+   model facts) stays at its spawn window, and no memory notice can show for it.
 
 Two more middlewares run alongside it: stale images and stale tool results are stripped from the
 replayed state before the model is called.

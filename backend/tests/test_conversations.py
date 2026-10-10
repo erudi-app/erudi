@@ -1092,7 +1092,7 @@ class TestConversationService:
             llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
         )
 
-        warning = {"t": "memory_warning", "used_fraction": 0.91, "conversation_bytes": 4096}
+        warning = {"t": "memory_warning", "footprint_bytes": 4096}
 
         async def fake_stream(**kwargs):
             yield {"t": "thinking", "text": "hm"}

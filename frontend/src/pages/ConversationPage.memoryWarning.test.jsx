@@ -3,9 +3,10 @@ import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
 
-// 1.1.2 — the amber memory warning:
+// The amber memory warning:
 //  - a `memory_warning` stream event renders an amber alert near the composer
-//    with the localized copy and the conversation's approximate memory size;
+//    with the localized copy and the approximate memory the model and the
+//    conversation take together (`footprint_bytes`, the payload's one field);
 //  - the warning is transient state only: it never lands in the answer bubble
 //    (so it cannot be copied with the message) and a LATER turn that carries
 //    no warning clears it.
@@ -146,13 +147,13 @@ describe("ConversationPage memory warning", () => {
     fireEvent.click(screen.getByText("SEND"));
     await runTurn(turn, [
       '{"t":"answer","text":"Fine."}\n',
-      '{"t":"memory_warning","used_fraction":0.91,"conversation_bytes":1073741824,"footprint_bytes":4294967296}\n',
+      '{"t":"memory_warning","footprint_bytes":4294967296}\n',
       '{"t":"done"}\n',
     ]);
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain("4.0 GB");
-    expect(alert.textContent).toContain("memory");
+    expect(alert.textContent).toContain("Your machine's memory limits this conversation");
     // Never part of the message content (so never in the copy path).
     for (const bubble of screen.getAllByTestId("answer")) {
       expect(bubble.textContent).not.toContain("4.0 GB");
@@ -169,7 +170,7 @@ describe("ConversationPage memory warning", () => {
     fireEvent.click(screen.getByText("SEND"));
     await runTurn(first, [
       '{"t":"answer","text":"Long."}\n',
-      '{"t":"memory_warning","used_fraction":0.9,"conversation_bytes":1048576}\n',
+      '{"t":"memory_warning","footprint_bytes":1048576}\n',
       '{"t":"done"}\n',
     ]);
     await screen.findByRole("alert");
@@ -195,7 +196,7 @@ describe("ConversationPage memory warning", () => {
     fireEvent.click(screen.getByText("SEND"));
     await runTurn(turn, [
       '{"t":"answer","text":"Long."}\n',
-      '{"t":"memory_warning","used_fraction":0.9,"conversation_bytes":1048576}\n',
+      '{"t":"memory_warning","footprint_bytes":1048576}\n',
       '{"t":"done"}\n',
     ]);
     await screen.findByRole("alert");

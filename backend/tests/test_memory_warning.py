@@ -1,11 +1,13 @@
-"""The amber memory warning on honest numbers (a real ``MemoryBudget``).
+"""The amber memory warning: 85 % of the working window, only when memory binds.
 
-Contract: the warning shows when, even after compacting to the kept budget,
-the model plus the kept conversation would use more than 85 % of the memory
-budget (``MEMORY_WARNING_MARGIN``). ``predict`` carries a fixed part, so the
-warning can appear for a model whose weights alone are well below 85 %, and
-from the first turn on a tight machine. The payload quotes the projection:
-``footprint_bytes`` (model and conversation) and ``conversation_bytes``.
+Contract: the warning shows only when the loaded child's window is bounded by
+memory (``engine.memory_bound_tokens()`` is set -- the memory ceiling is the
+binding side of ``W = min(model window, memory ceiling)``) AND the projected
+next request, even after a projected compaction to the kept budget, reaches
+85 % of the working window (``MEMORY_WARNING_FRACTION``). When the model's own
+window binds, memory is not the limiting factor and no memory warning applies,
+however full the budget is in bytes. The payload is the one number the copy
+quotes: ``footprint_bytes`` (the model and the conversation together).
 """
 
 from __future__ import annotations
@@ -19,7 +21,7 @@ from langchain_core.messages import AIMessage, HumanMessage
 
 from src.agents import runner as runner_module
 from src.agents.runner import (
-    MEMORY_WARNING_MARGIN,
+    MEMORY_WARNING_FRACTION,
     AgentRunner,
     compaction_cutoff,
     frozen_weights,
@@ -27,6 +29,7 @@ from src.agents.runner import (
     summary_cap,
 )
 from src.agents.token_accounting import RequestOverhead
+from src.engines.base_engine import BaseEngine
 from src.engines.memory_budget import MemoryBudget
 
 pytestmark = pytest.mark.unit
@@ -38,13 +41,27 @@ VOCAB = 151_936
 
 def _budget(base_gib, total_gib=10.0):
     return MemoryBudget(
-        base_bytes=int(base_gib * GIB),
+        base_bytes=int(base_gib * GIB) if base_gib is not None else None,
         total_bytes=int(total_gib * GIB),
         kv_token_bytes=KV,
         vocab_size=VOCAB,
         prefill_step=2048,
         weights_bytes=GIB,
     )
+
+
+class _Engine:
+    """The loaded child's memory bound, as the engine reports it."""
+
+    def __init__(self, bound):
+        self._bound = bound
+
+    def memory_bound_tokens(self):
+        return self._bound
+
+
+class _LlamaLikeEngine(BaseEngine):
+    """An engine that never bounds its window by memory (BaseEngine's default)."""
 
 
 def _agent_with_state(messages):
@@ -66,7 +83,18 @@ def _long_thread(pairs=12, tokens_each=900):
     return out
 
 
-async def _warning(state, budget, window):
+def _oversized_thread(tokens):
+    # The last answer is oversized: the next request's compaction keeps it
+    # whole (the answer before the next question is never summarized away).
+    return [
+        HumanMessage("hi", id="h0"),
+        AIMessage("yo", id="a0"),
+        HumanMessage("go", id="h1"),
+        AIMessage(_text(tokens), id="huge"),
+    ]
+
+
+async def _warning(state, budget, window, engine):
     return await AgentRunner()._memory_warning_event(
         _agent_with_state(state),
         {},
@@ -74,43 +102,15 @@ async def _warning(state, budget, window):
         window,
         overhead=RequestOverhead(fixed_est=200, fixed_text="system prompt"),
         allocated_window=window,
+        engine=engine,
     )
 
 
-def test_the_warning_threshold_is_15_percent():
-    assert MEMORY_WARNING_MARGIN == 0.15
-
-
-async def test_the_warning_fires_from_the_first_turn_when_the_fixed_part_alone_exceeds_85():
-    # base + m (t0 + logits) is about 7.7 + 1.1 x (1 + 0.58) GiB = 9.4 GiB > 8.5.
-    budget = _budget(base_gib=7.7)
-    assert budget.used_fraction(0) > 1 - MEMORY_WARNING_MARGIN
-    state = [HumanMessage("hello", id="h"), AIMessage("hi there", id="a")]
-
-    event = await _warning(state, budget, 32_768)
-
-    assert event is not None and event["t"] == "memory_warning"
-
-
-async def test_the_warning_waits_for_the_compaction_point_when_base_is_high():
-    budget = _budget(base_gib=5.0)
-    window = 32_768
-    short = [HumanMessage("hello", id="h"), AIMessage("hi there", id="a")]
-    assert await _warning(short, budget, window) is None
-
-    # A long thread that even a compaction to the kept budget cannot bring
-    # under 85 %: kept tail + summary + O.
-    long = _long_thread(pairs=14, tokens_each=1800)
-    event = await _warning(long, budget, window)
-    assert event is not None
-
-
-async def test_the_payload_quotes_the_projection():
-    budget = _budget(base_gib=5.0)
-    window = 32_768
-    state = _long_thread(pairs=14, tokens_each=1800)
-    # Nothing measured: every message at the counter's floored script weight,
-    # the overhead too; an empty next question closes the projection.
+def _projected(state, window):
+    """The projection, computed independently: the state plus an empty next
+    question, every message at the counter's floored script weight (nothing
+    measured), the overhead too; kept tail + summary cap when a compaction
+    would happen, else the whole request."""
     projected_state = state + [HumanMessage("", id="erudi-next-request")]
     weights, _ = frozen_weights(projected_state)
 
@@ -121,34 +121,88 @@ async def test_the_payload_quotes_the_projection():
     cut = compaction_cutoff(
         projected_state, window, counter, overhead=overhead, allocated_window=window
     )
-    assert cut > 0
-    projected = overhead + counter(projected_state[cut:]) + summary_cap(window)
-
-    event = await _warning(state, budget, window)
-
-    assert event["footprint_bytes"] == budget.footprint_bytes(projected)
-    assert event["conversation_bytes"] == budget.conversation_bytes(projected)
-    assert event["used_fraction"] == round(budget.used_fraction(projected), 4)
-    assert event["footprint_bytes"] > (1 - MEMORY_WARNING_MARGIN) * budget.total_bytes
+    if cut > 0:
+        return overhead + counter(projected_state[cut:]) + summary_cap(window)
+    return overhead + counter(projected_state)
 
 
-async def test_an_oversized_last_message_is_projected_whole():
-    budget = _budget(base_gib=5.0)
+def test_the_warning_threshold_is_85_percent_of_the_working_window():
+    assert MEMORY_WARNING_FRACTION == 0.85
+
+
+async def test_no_warning_when_the_model_window_binds_even_at_99_percent_of_the_budget():
+    # The fixed part alone fills the budget in bytes, but nothing bounded the
+    # child's window by memory: the model window binds, no memory notice.
+    budget = _budget(base_gib=8.4)
+    assert budget.used_fraction(0) >= 0.99
     window = 32_768
-    # The last answer is oversized: the next request's compaction keeps it
-    # whole (the answer before the next question is never summarized away).
-    huge = AIMessage(_text(26_000), id="huge")
-    state = [
-        HumanMessage("hi", id="h0"),
-        AIMessage("yo", id="a0"),
-        HumanMessage("go", id="h1"),
-        huge,
-    ]
+    state = _oversized_thread(26_000)
+    assert _projected(state, window) >= MEMORY_WARNING_FRACTION * window
 
-    event = await _warning(state, budget, window)
+    assert await _warning(state, budget, window, _Engine(None)) is None
 
-    assert event is not None
-    assert event["conversation_bytes"] >= budget.conversation_bytes(real_token_count([huge]))
+
+async def test_the_warning_fires_when_memory_binds_and_the_projection_reaches_85_percent():
+    budget = _budget(base_gib=2.0)
+    window = 32_768
+    state = _oversized_thread(26_000)
+    projected = _projected(state, window)
+    assert projected >= MEMORY_WARNING_FRACTION * window
+
+    event = await _warning(state, budget, window, _Engine(window))
+
+    assert event == {"t": "memory_warning", "footprint_bytes": budget.footprint_bytes(projected)}
+
+
+async def test_no_warning_under_85_percent_of_the_working_window():
+    budget = _budget(base_gib=8.4)
+    window = 32_768
+    short = [HumanMessage("hello", id="h"), AIMessage("hi there", id="a")]
+    assert _projected(short, window) < MEMORY_WARNING_FRACTION * window
+
+    assert await _warning(short, budget, window, _Engine(window)) is None
+
+
+async def test_the_warning_waits_for_what_compaction_cannot_save():
+    # A long thread well past the window: a compaction to the kept budget
+    # brings the next request back under 85 % -- no warning now.
+    budget = _budget(base_gib=2.0)
+    window = 16_000
+    state = _long_thread(pairs=14, tokens_each=1800)
+    assert _projected(state, window) < MEMORY_WARNING_FRACTION * window
+
+    assert await _warning(state, budget, window, _Engine(window)) is None
+
+
+async def test_no_warning_without_a_base_to_quote():
+    # Nothing to quote in the copy: no notice.
+    budget = _budget(base_gib=None)
+    window = 32_768
+    state = _oversized_thread(26_000)
+
+    assert await _warning(state, budget, window, _Engine(window)) is None
+
+
+async def test_a_trained_window_at_the_floor_with_a_tiny_ceiling_warns():
+    # Trained 4096, ceiling 1000: the bound is the 4096 floor (no PATCH), the
+    # working window is the 1000-token ceiling, and the model alone nearly
+    # fills the budget -- the notice speaks for it.
+    budget = _budget(base_gib=2.0)
+    window = 1000
+    state = _oversized_thread(1200)
+    projected = _projected(state, window)
+    assert projected >= MEMORY_WARNING_FRACTION * window
+
+    event = await _warning(state, budget, window, _Engine(4096))
+
+    assert event == {"t": "memory_warning", "footprint_bytes": budget.footprint_bytes(projected)}
+
+
+async def test_a_llama_cpp_engine_never_warns():
+    window = 8192
+    state = _oversized_thread(26_000)
+
+    assert await _warning(state, MemoryBudget.unaccounted(), window, _LlamaLikeEngine) is None
 
 
 async def test_a_model_whose_prediction_is_off_never_warns():
@@ -160,7 +214,28 @@ async def test_a_model_whose_prediction_is_off_never_warns():
         prefill_step=2048,
         weights_bytes=GIB,
     )
-    assert await _warning([HumanMessage("hello", id="h")], budget, 32_768) is None
+    state = _oversized_thread(26_000)
+    assert await _warning(state, budget, 32_768, _Engine(32_768)) is None
+
+
+async def test_the_warning_is_logged_with_the_projection_in_ascii(caplog):
+    budget = _budget(base_gib=2.0)
+    window = 32_768
+    state = _oversized_thread(26_000)
+    projected = _projected(state, window)
+
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        await _warning(state, budget, window, _Engine(window))
+
+    lines = [
+        r.getMessage() for r in caplog.records if "Memory-bound conversation" in r.getMessage()
+    ]
+    assert len(lines) == 1
+    assert lines[0].startswith(
+        "Memory-bound conversation over 85 % of the working window even after a projected "
+        f"compaction: projected_tokens={projected}, working_window={window}, conversation_tokens="
+    )
+    assert lines[0].isascii()
 
 
 # ===================== one INFO line per transition =====================
