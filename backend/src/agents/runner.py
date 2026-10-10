@@ -2183,8 +2183,10 @@ class AgentRunner:
         request (``_project_next_request``: after a compaction to the kept
         budget, when one would happen) reaches ``MEMORY_WARNING_FRACTION`` of
         the working window ``W`` -- the compaction path's window, whose memory
-        ceiling is clamped to 1, so a model that alone fills the budget (the
-        child bounded at the 4096 floor) always warns. The payload is the one
+        ceiling is clamped to 1, so a model that alone fills the budget (a
+        ceiling at or below zero: ``W`` is 1) warns from the first turn; any
+        other memory-bound model warns once the projection reaches 85 % of
+        its ceiling. The payload is the one
         number the copy quotes, ``footprint_bytes``: the loaded model and the
         projected conversation together (``MemoryBudget.footprint_bytes``); no
         number to quote, no event. The projection's numbers go to the log.

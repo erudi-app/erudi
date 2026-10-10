@@ -587,17 +587,19 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    which the next request does not carry): when a compaction would happen, `O` + the tail
    `compaction_cutoff` would keep + a `summary_cap(W)`-token summary; otherwise `O` + the whole
    conversation, with no summary added — and emits one `memory_warning` event only if, even after
-   compacting to the kept budget, that projection reaches **85 % of the working window** `W`. A
-   model that alone nearly fills the budget (bounded at the 4096-token floor, with a memory ceiling
-   below it) gets the notice from the first turn. The renderer then shows an amber notice above the
+   compacting to the kept budget, that projection reaches **85 % of the working window** `W` — for
+   a memory-bound model, 85 % of the memory ceiling. Only a model that alone fills the budget (a
+   memory ceiling at or below zero: the working window is clamped to 1 token) gets the notice from
+   the first turn; any other memory-bound model gets it as soon as the projected next request
+   reaches 85 % of the ceiling. The renderer then shows an amber notice above the
    composer with the approximate memory size of the model and the conversation together
    (`footprint_bytes`); the projection's numbers go to `backend.log` in one
    `Memory-bound conversation over 85 % of the working window ...` warning. The warning is about
    the machine *now*, so it is never persisted and clears on the next turn that carries none;
    `backend.log` records one `Memory warning started` / `Memory warning ended` line per
    conversation at each transition. A child whose memory bound could not be applied (the GPU
-   working set readable only after the load, a refused request, an unreadable base footprint or
-   model facts) stays at its spawn window, and no memory notice can show for it.
+   working set readable only after the load, a request the child did not apply, an unreadable
+   base footprint or model facts) stays at its spawn window, and no memory notice can show for it.
 
 Two more middlewares run alongside it: stale images and stale tool results are stripped from the
 replayed state before the model is called.

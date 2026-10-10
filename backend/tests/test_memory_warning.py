@@ -185,8 +185,8 @@ async def test_no_warning_without_a_base_to_quote():
 
 async def test_a_trained_window_at_the_floor_with_a_tiny_ceiling_warns():
     # Trained 4096, ceiling 1000: the bound is the 4096 floor (no PATCH), the
-    # working window is the 1000-token ceiling, and the model alone nearly
-    # fills the budget -- the notice speaks for it.
+    # working window is the 1000-token ceiling, and a next request past 85 %
+    # of it warns although the child itself allows 4096.
     budget = _budget(base_gib=2.0)
     window = 1000
     state = _oversized_thread(1200)
@@ -199,10 +199,37 @@ async def test_a_trained_window_at_the_floor_with_a_tiny_ceiling_warns():
 
 
 async def test_a_llama_cpp_engine_never_warns():
-    window = 8192
+    # A budget that WOULD quote a footprint: only the missing memory bound
+    # keeps the engine silent.
+    budget = _budget(base_gib=2.0)
+    window = 32_768
     state = _oversized_thread(26_000)
+    projected = _projected(state, window)
+    assert projected >= MEMORY_WARNING_FRACTION * window
+    assert budget.footprint_bytes(projected) is not None
 
-    assert await _warning(state, MemoryBudget.unaccounted(), window, _LlamaLikeEngine) is None
+    assert await _warning(state, budget, window, _LlamaLikeEngine) is None
+
+
+@pytest.mark.parametrize(
+    "projected,fires",
+    [(850, True), (849, False)],
+)
+async def test_the_threshold_is_inclusive_at_85_percent_of_the_window(
+    monkeypatch, projected, fires
+):
+    async def _projection(self, *args, **kwargs):
+        return projected, projected
+
+    monkeypatch.setattr(AgentRunner, "_project_next_request", _projection)
+    budget = _budget(base_gib=2.0)
+
+    event = await _warning([HumanMessage("hi", id="h")], budget, 1000, _Engine(1000))
+
+    if fires:
+        assert event == {"t": "memory_warning", "footprint_bytes": budget.footprint_bytes(850)}
+    else:
+        assert event is None
 
 
 async def test_a_model_whose_prediction_is_off_never_warns():
