@@ -127,11 +127,15 @@ measuring the base footprint and before anything but the readiness ping reached 
 child, computes `kv_bound(trained window, ceiling)` — the ceiling, never below 4096 (the
 floor `--fit` applies on llama.cpp) and never above the trained window — and sends it
 once through `PATCH /v1/settings` (`{"max_kv_size": bound}`, the per-spawn API key as a
-Bearer token, 2 s timeout). On success the bound becomes the handle's `context_tokens`,
+Bearer token, 2 s timeout). When the answer does not confirm it — an error status, a
+timeout (which can fire after the child applied the change), an unreadable or unexpected
+body — one `GET /v1/settings` with the same key and timeout reads the child's live
+`max_kv_size` back, and the handle follows what the child really enforces. Once the
+child enforces the bound, it becomes the handle's `context_tokens`,
 so every consumer of the allocated window (the model-info card, the first-token
 watchdog, the preflight retry, compaction) follows it unchanged, exactly as with a
 window `--fit` reduced, and `memory_bound_tokens()` reports it; `backend.log` carries
-`MLX window bounded by memory: trained=..., ceiling=..., bound=...`. A trained window
+`[MLX_Engine] Window bounded by memory: trained=..., ceiling=..., bound=...`. A trained window
 already at or below the floor needs no request: the child enforces it since its spawn,
 and it is recorded as the memory bound all the same. The prefix-cache pool stays sized on
 the trained window (it fills lazily), and a child spawned without a trained window waits
@@ -144,10 +148,14 @@ which keeps the child on the safe side and its bound equal to the window the out
 budget plans against. Nothing re-applies it during the child's life. Where it cannot be
 applied, the child stays at its spawn bound and no memory bound is recorded — so no amber
 memory notice can fire for that child: a working-set total that only resolves after the
-load, a `PATCH` the child refused or did not answer (one WARNING with the HTTP status or
-the exception's class name, never the key or the response body), an unreadable base
-footprint (one INFO line), unreadable static facts. A failure there never fails the load.
-A stopped child clears the trained window and the memory bound with `context_tokens`.
+load, a `PATCH` the child did not apply (or whose read-back failed), an unreadable base
+footprint, unreadable static facts. Each failure is one record — a WARNING naming the
+HTTP status or the exception's class name, never the key or a response body; an
+unreadable base is the base measurement's own WARNING when it raised, otherwise one INFO
+line. A lost answer the read-back settles in the child's favour is one WARNING too, and
+the bound is recorded. A failure there never fails the load. A stopped MLX child clears
+the trained window and the memory bound with `context_tokens` (`MLX_Engine`'s own
+`_stop_server_if_running`; the llama.cpp handles never carry those keys).
 
 `BaseLlamaCppEngine._find_llama_server` tries the configured flavour first and falls back
 to the other one: a CUDA-built artifact runs CPU inference fine, whereas the CPU artifact

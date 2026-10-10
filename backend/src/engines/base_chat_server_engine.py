@@ -446,12 +446,8 @@ class BaseChatServerEngine(BaseEngine):
                     cls._wait_port_closed(port)
             # A stopped child holds no KV memory: its ALLOCATED window dies
             # with it, so `effective_context_tokens()` must answer None even
-            # while the stale handle lingers until the next swap/cleanup. The
-            # trained window and the memory bound (MLX) go with it; every
-            # spawn path hands out a fresh handle.
+            # while the stale handle lingers until the next swap/cleanup.
             model["context_tokens"] = None
-            model["trained_context_tokens"] = None
-            model["memory_bound_tokens"] = None
         # Always clear the atexit handler — even if the proc was already dead,
         # the registered lambda still holds a reference to it.
         if cls._atexit_handler is not None:

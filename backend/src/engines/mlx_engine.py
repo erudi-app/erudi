@@ -98,7 +98,7 @@ import secrets
 import subprocess
 import time  # used by hardware warm-up loop
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import requests
 
@@ -709,13 +709,15 @@ class MLX_Engine(BaseChatServerEngine):
         from src.engines import process_footprint
 
         pid = handle.get("pid")
+        base_failed = False
         try:
             handle["base_footprint_bytes"] = process_footprint.footprint(pid) if pid else None
         except Exception:
             # Costs the measured base only: the weights-on-disk fallback applies.
             logger.warning("[MLX_Engine] Base footprint unreadable after spawn", exc_info=True)
             handle["base_footprint_bytes"] = None
-        cls._bound_window_by_memory(handle)
+            base_failed = True
+        cls._bound_window_by_memory(handle, base_failed=base_failed)
 
     # ======================= THE MEMORY BOUND =======================
     #
@@ -728,10 +730,13 @@ class MLX_Engine(BaseChatServerEngine):
     # allocated window (`context_tokens`), so every consumer of the allocated
     # window (model info, first-chunk watchdog, preflight retry, compaction)
     # is right without knowing about it, exactly as with a llama.cpp window
-    # its fit reduced at load. The ceiling is constant for the life of a child
-    # except in the degraded corners below, where the child stays at its
-    # spawn bound and no memory bound is recorded: a total that resolves only
-    # after load, a failed PATCH, an unreadable base, unreadable static facts.
+    # its fit reduced at load. When the PATCH answer is lost or unreadable,
+    # one `GET /v1/settings` reads the child's live value back, so the handle
+    # never disagrees with what the child enforces. The ceiling is constant
+    # for the life of a child except in the degraded corners below, where the
+    # child stays at its spawn bound and no memory bound is recorded: a total
+    # that resolves only after load, a PATCH the child did not apply, an
+    # unreadable base, unreadable static facts.
 
     _SETTINGS_TIMEOUT_S = 2.0
 
@@ -747,13 +752,24 @@ class MLX_Engine(BaseChatServerEngine):
         return None
 
     @classmethod
-    def _bound_window_by_memory(cls, handle: Dict[str, Any]) -> None:
+    def _stop_server_if_running(cls) -> None:
+        """The shared stop, then the MLX window keys of the stopped handle:
+        its trained window and its memory bound die with the child."""
+        handle = cls._model
+        super()._stop_server_if_running()
+        if isinstance(handle, dict):
+            handle["trained_context_tokens"] = None
+            handle["memory_bound_tokens"] = None
+
+    @classmethod
+    def _bound_window_by_memory(cls, handle: Dict[str, Any], *, base_failed: bool) -> None:
         """Lower the child's window to the memory bound when memory binds.
 
         One guard around the whole step (computing the budget reads the
         disk): any failure is one WARNING with the exception's class name,
         the handle unchanged, and the load goes on. Never logs the key, the
-        request headers or the response body.
+        request headers or a response body. ``base_failed``: the base
+        measurement raised and already wrote its WARNING.
         """
         from src.engines.memory_budget import MemoryBudget
         from src.engines.working_window import kv_bound
@@ -761,8 +777,12 @@ class MLX_Engine(BaseChatServerEngine):
         try:
             if handle.get("base_footprint_bytes") is None:
                 # The budget would price the weights on disk instead: not a
-                # number to bound a live child on.
-                logger.info("[MLX_Engine] Base footprint unknown; the child keeps its spawn window")
+                # number to bound a live child on. One record per failure: a
+                # measurement that raised has written its own.
+                if not base_failed:
+                    logger.info(
+                        "[MLX_Engine] Base footprint unknown; the child keeps its spawn window"
+                    )
                 return
             trained = handle.get("trained_context_tokens")
             ceiling = MemoryBudget.from_handle(cls, handle).tokens_at_ceiling()
@@ -777,8 +797,8 @@ class MLX_Engine(BaseChatServerEngine):
             handle["context_tokens"] = bound
             handle["memory_bound_tokens"] = bound
             logger.info(
-                f"MLX window bounded by memory: trained={trained}, ceiling={ceiling}, "
-                f"bound={bound}"
+                f"[MLX_Engine] Window bounded by memory: trained={trained}, "
+                f"ceiling={ceiling}, bound={bound}"
             )
         except Exception as exc:
             logger.warning(
@@ -789,31 +809,79 @@ class MLX_Engine(BaseChatServerEngine):
     @classmethod
     def _apply_max_kv_size(cls, handle: Dict[str, Any], bound: int) -> bool:
         """``PATCH /v1/settings`` ``{"max_kv_size": bound}`` on the child;
-        True iff it answered 200 and applied exactly ``bound``. A refusal is
-        one WARNING; a transport error propagates to the caller's guard."""
+        True iff the child enforces ``bound`` afterwards.
+
+        A 200 that names ``bound`` as applied settles it. Anything else -- an
+        error status, a lost answer (a timeout can fire after the child
+        applied the change), an unreadable or unexpected body -- is checked
+        with one ``GET /v1/settings`` read-back of the live value: the child
+        enforcing ``bound`` is a success, anything else a failure. Either way
+        it is ONE WARNING, with the HTTP status or the exception's class name
+        only.
+        """
+        url = f"{handle.get('base_url')}/v1/settings"
         api_key = handle.get("api_key")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
-        resp = requests.patch(
-            f"{handle.get('base_url')}/v1/settings",
-            json={"max_kv_size": bound},
-            headers=headers,
-            timeout=cls._SETTINGS_TIMEOUT_S,
-        )
-        if resp.status_code != 200:
-            logger.warning(
-                f"[MLX_Engine] Memory bound of the window not applied "
-                f"(HTTP {resp.status_code}); the child keeps its spawn window"
+        try:
+            resp = requests.patch(
+                url,
+                json={"max_kv_size": bound},
+                headers=headers,
+                timeout=cls._SETTINGS_TIMEOUT_S,
             )
-            return False
+            failure = cls._unconfirmed(resp, bound)
+        except Exception as exc:
+            # The answer is lost, not necessarily the change: the read-back
+            # below says which, and the WARNING names the class.
+            failure = type(exc).__name__
+        if failure is None:
+            return True
+        live, read_back = cls._live_max_kv_size(url, headers)
+        if live == bound:
+            logger.warning(
+                f"[MLX_Engine] Memory bound of the window unconfirmed ({failure}); "
+                f"the child reports max_kv_size={bound}, so it applies"
+            )
+            return True
+        logger.warning(
+            f"[MLX_Engine] Memory bound of the window not applied ({failure}; "
+            f"read back: {read_back}); the child keeps its spawn window"
+        )
+        return False
+
+    @staticmethod
+    def _unconfirmed(resp: Any, bound: int) -> Optional[str]:
+        """``None`` when the PATCH answer confirms ``bound``, else why not
+        (never the body itself). ``resp.json()`` may raise: the caller's
+        handler names it."""
+        if resp.status_code != 200:
+            return f"HTTP {resp.status_code}"
         body = resp.json()
         applied = body.get("applied") if isinstance(body, dict) else None
-        if not isinstance(applied, dict) or applied.get("max_kv_size") != bound:
-            logger.warning(
-                f"[MLX_Engine] Memory bound of the window not applied (the child "
-                f"did not apply max_kv_size={bound}); the child keeps its spawn window"
-            )
-            return False
-        return True
+        if isinstance(applied, dict) and applied.get("max_kv_size") == bound:
+            return None
+        return "max_kv_size not confirmed"
+
+    @classmethod
+    def _live_max_kv_size(
+        cls, url: str, headers: Optional[Dict[str, str]]
+    ) -> Tuple[Optional[int], str]:
+        """The child's live ``max_kv_size`` (``GET /v1/settings``) and a
+        loggable description of the read-back (never the body)."""
+        try:
+            resp = requests.get(url, headers=headers, timeout=cls._SETTINGS_TIMEOUT_S)
+            if resp.status_code != 200:
+                return None, f"HTTP {resp.status_code}"
+            body = resp.json()
+            current = body.get("current") if isinstance(body, dict) else None
+            value = current.get("max_kv_size") if isinstance(current, dict) else None
+        except Exception as exc:
+            # Reported in the caller's single WARNING, by class name: a
+            # read-back that fails leaves the handle at its spawn window.
+            return None, type(exc).__name__
+        if isinstance(value, int) and not isinstance(value, bool):
+            return value, f"max_kv_size={value}"
+        return None, "no max_kv_size"
 
     @classmethod
     def begin_memory_window(cls) -> Any:
