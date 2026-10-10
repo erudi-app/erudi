@@ -1597,6 +1597,96 @@ async def test_events_mlx_overflow_yields_curated_turn_with_numbers(monkeypatch)
     assert text != runner_module.ERROR_MESSAGE
 
 
+def _mlx_overflow_model(limit: int):
+    class _MlxOverflowModel(_OverflowRaisingModel):
+        overflow_exc: ClassVar[Exception] = _FakeBadRequestError(
+            f"Request needs {limit + 941} context tokens ({limit + 933} prompt + 8 max "
+            f"generation), but MAX_KV_SIZE is {limit}.",
+            body={},
+        )
+
+    return _MlxOverflowModel(messages=iter([]))
+
+
+_MEMORY_WORDING = "no longer fits what your machine's memory can hold for this model"
+_MODEL_WORDING = "no longer fits the model's context window"
+
+
+@pytest.mark.parametrize(
+    "bound",
+    [
+        20_000,  # trained window known (32 768), lowered to the memory bound
+        4096,  # trained window unknown, the bound is the 4096 floor
+    ],
+)
+async def test_events_an_overflow_on_the_memory_bound_says_memory_limits_it(monkeypatch, bound):
+    monkeypatch.setattr(_FakeEngine, "memory_bound_tokens", classmethod(lambda cls: bound))
+    _patch_model(monkeypatch, _mlx_overflow_model(bound))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id=f"eoverflow-memory-{bound}",
+    )
+
+    text = _answers(events)
+    assert text == (
+        f"{ERROR_SENTINEL} This conversation no longer fits what your machine's memory can "
+        f"hold for this model (the request needs about {bound + 941} tokens; memory allows "
+        f"{bound}). Start a new conversation, send less at once, or switch to a smaller model."
+    )
+    assert text.isascii()
+
+
+async def test_events_an_overflow_on_the_trained_window_keeps_the_model_wording(monkeypatch):
+    # The PATCH failed: the child still enforces its trained window, which is
+    # not the memory bound -- the model's window is what refused the turn.
+    monkeypatch.setattr(_FakeEngine, "memory_bound_tokens", classmethod(lambda cls: None))
+    _patch_model(monkeypatch, _mlx_overflow_model(32_768))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="eoverflow-trained",
+    )
+
+    text = _answers(events)
+    assert _MODEL_WORDING in text
+    assert _MEMORY_WORDING not in text
+
+
+async def test_events_a_llama_overflow_keeps_the_model_wording(monkeypatch):
+    class _LlamaOverflowModel(_OverflowRaisingModel):
+        overflow_exc: ClassVar[Exception] = _FakeBadRequestError(
+            "Error code: 400",
+            body={"type": "exceed_context_size_error", "n_prompt_tokens": 9030, "n_ctx": 8192},
+        )
+
+    _patch_model(monkeypatch, _LlamaOverflowModel(messages=iter([])))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="eoverflow-llama-wording",
+    )
+
+    text = _answers(events)
+    assert _MODEL_WORDING in text
+    assert _MEMORY_WORDING not in text
+
+
 async def test_events_a_real_overflow_survives_the_output_budget_retry(monkeypatch):
     """The budget's retry must never swallow a genuine overflow (PR-E).
 
@@ -2728,47 +2818,42 @@ def test_build_middleware_without_window_or_budget_keeps_the_messages_floor():
 
 
 class _StubBudget:
-    """Accounting stub: margin (a value, or a callable of the token count)
-    plus fixed conversation bytes; records every margin evaluation."""
+    """Accounting stub: a memory ceiling in tokens plus fixed byte figures;
+    records the token count every footprint is computed for."""
 
-    def __init__(self, margin, conversation_bytes=1234, weights_bytes=10000):
-        self._margin = margin
+    def __init__(self, ceiling, conversation_bytes=1234, weights_bytes=10000):
+        self._ceiling = ceiling
         self._bytes = conversation_bytes
         self.weights_bytes = weights_bytes
-        self.margin_calls = []
-
-    def memory_margin_fraction(self, conversation_tokens):
-        self.margin_calls.append(conversation_tokens)
-        return self._margin(conversation_tokens) if callable(self._margin) else self._margin
-
-    def conversation_bytes(self, conversation_tokens):
-        return self._bytes
+        self.footprint_calls = []
 
     def footprint_bytes(self, conversation_tokens):
+        self.footprint_calls.append(conversation_tokens)
         return self._bytes + self.weights_bytes
 
     def used_fraction(self, conversation_tokens):
-        margin = self.memory_margin_fraction(conversation_tokens)
-        return None if margin is None else 1.0 - margin
+        return 0.5
 
     def tokens_at_ceiling(self):
-        return 999999
+        return self._ceiling
 
 
-def _patch_budget(monkeypatch, budget):
+def _patch_budget(monkeypatch, budget, *, memory_bound=None):
     monkeypatch.setattr(
         runner_module, "MemoryBudget", SimpleNamespace(from_engine=lambda engine: budget)
     )
+    monkeypatch.setattr(_FakeEngine, "memory_bound_tokens", classmethod(lambda cls: memory_bound))
 
 
 async def test_memory_warning_emitted_once_after_the_answer(monkeypatch):
-    """Margin under 15 % even for the projected keep-tail (compaction cannot
-    restore it): ONE ``memory_warning`` event, after the answer events, and
-    the projection includes the summary allowance."""
+    """Memory binds and even the projected next request fills 85 % of the
+    working window (a 10-token ceiling): ONE ``memory_warning`` event, after
+    the answer events, carrying the footprint the copy quotes and nothing
+    else."""
     fake = ToolableFakeChatModel(messages=iter([AIMessage(content="hello")]))
     _patch_model(monkeypatch, fake)
-    stub = _StubBudget(margin=0.10)
-    _patch_budget(monkeypatch, stub)
+    stub = _StubBudget(ceiling=10)
+    _patch_budget(monkeypatch, stub, memory_bound=4096)
     runner = AgentRunner(checkpointer=InMemorySaver())
 
     events = await _events(
@@ -2782,37 +2867,44 @@ async def test_memory_warning_emitted_once_after_the_answer(monkeypatch):
     )
 
     warnings = [e for e in events if e["t"] == "memory_warning"]
-    assert len(warnings) == 1
-    assert warnings[0]["used_fraction"] == pytest.approx(0.90)
-    assert warnings[0]["conversation_bytes"] == 1234
     # The copy quotes conversation + model: KV bytes plus the weights.
-    assert warnings[0]["footprint_bytes"] == 1234 + 10000
+    assert warnings == [{"t": "memory_warning", "footprint_bytes": 1234 + 10000}]
     last_answer = max(i for i, e in enumerate(events) if e["t"] == "answer")
     assert events.index(warnings[0]) > last_answer
-    # Nothing would be compacted on this tiny thread: the projection is the
-    # request as it stands (O + count), with no summary allowance on top.
-    assert 0 < stub.margin_calls[0] < runner_module.SUMMARY_TOKEN_ALLOWANCE
+    assert len(stub.footprint_calls) == 1 and stub.footprint_calls[0] > 0
 
 
 async def test_no_memory_warning_when_compaction_could_restore_the_margin(monkeypatch):
     """[M1] The middleware only compacts on the NEXT turn's before_model, so
     the honest question at end of turn is: would compaction down to the
-    keep-tail restore the margin? Here the CURRENT size is under the floor
-    but the projected keep-tail is comfortably fine -> no warning (compaction
-    will save this conversation; warning now would flicker for one turn)."""
+    keep-tail bring the next request under 85 % of the working window? Here
+    the CURRENT size is over it but the projected keep-tail is comfortably
+    under -> no warning (compaction will save this conversation; warning now
+    would flicker for one turn)."""
     from langchain.agents import create_agent
 
-    fake = ToolableFakeChatModel(messages=iter([AIMessage(content="hello")]))
+    # A long answer lifts the thread past 85 % of the window after this
+    # turn's compaction check (at 80 %, before the model) already passed.
+    long_answer = "y" * 12_000
+    fake = ToolableFakeChatModel(messages=iter([AIMessage(content=long_answer)]))
     _patch_model(monkeypatch, fake)
-    # A long thread: the current size is under the floor, the projected
-    # keep-tail (ten messages and the summary allowance) is comfortably fine.
-    stub = _StubBudget(margin=lambda tokens: 0.05 if tokens > 20_000 else 0.40)
-    _patch_budget(monkeypatch, stub)
+    stub = _StubBudget(ceiling=16_000)
+    _patch_budget(monkeypatch, stub, memory_bound=16_000)
+    seen = []
+    project = AgentRunner._project_next_request
+
+    async def _spy(self, *args, **kwargs):
+        result = await project(self, *args, **kwargs)
+        seen.append(result)
+        return result
+
+    monkeypatch.setattr(AgentRunner, "_project_next_request", _spy)
     checkpointer = InMemorySaver()
     # 18 alternating messages ending with an answer (under the 20-message
-    # clause, so this turn compacts nothing; the projection keeps ten).
+    # clause and under 80 % of the window, so this turn compacts nothing;
+    # the projection keeps the tail).
     seed = [
-        (HumanMessage if i % 2 == 0 else AIMessage)("x" * 3200, id=f"seed{i}") for i in range(18)
+        (HumanMessage if i % 2 == 0 else AIMessage)("x" * 2000, id=f"seed{i}") for i in range(18)
     ]
     probe = create_agent(
         ToolableFakeChatModel(messages=iter([])), tools=[], checkpointer=checkpointer
@@ -2831,16 +2923,17 @@ async def test_no_memory_warning_when_compaction_could_restore_the_margin(monkey
         thread_id="mw5",
         summarize=True,
     )
-    assert [e["text"] for e in events if e["t"] == "answer"] == ["hello"]
+    assert "".join(e["text"] for e in events if e["t"] == "answer") == long_answer
     assert not any(e["t"] == "memory_warning" for e in events)
     # Decided on the projected keep-tail, not on the current size.
-    assert 0 < stub.margin_calls[0] <= 20_000
+    projected_tokens, conversation_tokens = seen[0]
+    assert conversation_tokens >= 0.85 * 16_000 > projected_tokens > 0
 
 
-async def test_no_memory_warning_when_the_margin_is_fine(monkeypatch):
+async def test_no_memory_warning_when_the_projection_is_fine(monkeypatch):
     fake = ToolableFakeChatModel(messages=iter([AIMessage(content="hello")]))
     _patch_model(monkeypatch, fake)
-    _patch_budget(monkeypatch, _StubBudget(margin=0.50))
+    _patch_budget(monkeypatch, _StubBudget(ceiling=16_000), memory_bound=16_000)
     runner = AgentRunner(checkpointer=InMemorySaver())
 
     events = await _events(
@@ -2855,11 +2948,13 @@ async def test_no_memory_warning_when_the_margin_is_fine(monkeypatch):
     assert not any(e["t"] == "memory_warning" for e in events)
 
 
-async def test_no_memory_warning_at_the_exact_boundary(monkeypatch):
-    # The floor is STRICT: exactly 15 % of margin left does not warn.
+async def test_no_memory_warning_when_the_model_window_binds(monkeypatch):
+    # Even a projection far past the working window: nothing bounded the
+    # child's window by memory, so memory is not what limits this turn.
     fake = ToolableFakeChatModel(messages=iter([AIMessage(content="hello")]))
     _patch_model(monkeypatch, fake)
-    _patch_budget(monkeypatch, _StubBudget(margin=0.15))
+    stub = _StubBudget(ceiling=10)
+    _patch_budget(monkeypatch, stub, memory_bound=None)
     runner = AgentRunner(checkpointer=InMemorySaver())
 
     events = await _events(
@@ -2872,13 +2967,14 @@ async def test_no_memory_warning_at_the_exact_boundary(monkeypatch):
         summarize=True,
     )
     assert not any(e["t"] == "memory_warning" for e in events)
+    assert stub.footprint_calls == []
 
 
 async def test_no_memory_warning_when_the_accounting_is_off(monkeypatch):
-    # A model whose facts are unreadable (margin None) never warns.
+    # A model whose facts are unreadable (no ceiling) never warns.
     fake = ToolableFakeChatModel(messages=iter([AIMessage(content="hello")]))
     _patch_model(monkeypatch, fake)
-    _patch_budget(monkeypatch, _StubBudget(margin=None))
+    _patch_budget(monkeypatch, _StubBudget(ceiling=None), memory_bound=None)
     runner = AgentRunner(checkpointer=InMemorySaver())
 
     events = await _events(

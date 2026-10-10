@@ -36,7 +36,10 @@ vision tower's activations do not scale with kv).
 The ceiling the compaction and the output budget plan against is the token
 count at which ``base + predict(N)`` reaches the total, minus the output
 budget's 512-token floor (a turn can exceed the window by up to that much).
-No margin is stacked on top: 15 % is the amber warning's threshold only.
+When it binds below the model's trained window, the MLX engine makes the
+child enforce it (``working_window.kv_bound``). No margin is stacked on top:
+85 % of the working window is the amber warning's threshold only, and the
+warning quotes ``footprint_bytes``.
 
 The accounting is **MLX-only**. On both llama.cpp engines (CPU and CUDA) the KV
 cache is allocated in full at load: memory use does not grow with the
@@ -512,10 +515,6 @@ class MemoryBudget:
         per_token = self.prior.kv_multiplier * self.kv_token_bytes
         return int(self.margin * (self._fixed_bytes() + per_token * max(0, conversation_tokens)))
 
-    def conversation_bytes(self, conversation_tokens: int) -> Optional[int]:
-        """What the conversation adds to the loaded child: ``predict(N)``."""
-        return self.predict(conversation_tokens)
-
     def footprint_bytes(self, conversation_tokens: int) -> Optional[int]:
         """The child's predicted peak: ``base + predict(N)`` -- the model and
         the conversation together."""
@@ -530,12 +529,6 @@ class MemoryBudget:
         if footprint is None or not self.total_bytes:
             return None
         return footprint / self.total_bytes
-
-    def memory_margin_fraction(self, conversation_tokens: int) -> Optional[float]:
-        """Fraction of the pool still free under this accounting (may go
-        negative when the model plus the conversation exceed it)."""
-        used = self.used_fraction(conversation_tokens)
-        return None if used is None else 1.0 - used
 
     def tokens_at_ceiling(self) -> Optional[int]:
         """The conversation token count the ceiling allows:

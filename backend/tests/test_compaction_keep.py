@@ -997,21 +997,28 @@ async def test_a_summary_overflow_degrades_to_a_placeholder_and_the_turn_succeed
 async def test_the_memory_warning_projects_the_kept_suffix_plus_the_summary_cap(monkeypatch):
     _WindowEngine.window = 10_000
     _models(monkeypatch, ["hello"], _ScriptedSummaryModel(messages=iter([])))
-    calls = []
+    monkeypatch.setattr(_WindowEngine, "memory_bound_tokens", classmethod(lambda cls: 10_000))
+    seen = []
+    project = AgentRunner._project_next_request
+
+    async def _spy(self, *args, **kwargs):
+        result = await project(self, *args, **kwargs)
+        seen.append(result)
+        return result
 
     class _Budget:
         weights_bytes = 10
 
         def tokens_at_ceiling(self):
-            return None
+            return 10_000
 
-        def memory_margin_fraction(self, tokens):
-            calls.append(tokens)
+        def used_fraction(self, tokens):
             return 0.5
 
-        def conversation_bytes(self, tokens):
+        def footprint_bytes(self, tokens):
             return 1
 
+    monkeypatch.setattr(AgentRunner, "_project_next_request", _spy)
     monkeypatch.setattr(
         runner_module, "MemoryBudget", SimpleNamespace(from_engine=lambda engine: _Budget())
     )
@@ -1033,21 +1040,7 @@ async def test_the_memory_warning_projects_the_kept_suffix_plus_the_summary_cap(
         dense=COUNTER_DENSE_TOKENS,
         weight_floor=COUNTER_WEIGHT_FLOOR,
     )
-    assert calls[0] == overhead + counter(projected)
-
-
-class _RecordingBudget:
-    weights_bytes = 10
-
-    def __init__(self):
-        self.calls = []
-
-    def memory_margin_fraction(self, tokens):
-        self.calls.append(tokens)
-        return 0.5
-
-    def conversation_bytes(self, tokens):
-        return 1
+    assert seen[0][0] == overhead + counter(projected)
 
 
 def _agent_with_state(messages):
@@ -1062,28 +1055,14 @@ async def test_the_warning_never_counts_the_summary_twice():
     state already holds its summary -- no second ``summary_cap`` on top."""
     state = [_previous_summary_message(), AIMessage(_text(300)), HumanMessage("q"), AIMessage("a")]
     assert compaction_cutoff(state, 10_000, approx_token_count) == 0
-    budget = _RecordingBudget()
 
-    await AgentRunner()._memory_warning_event(_agent_with_state(state), {}, budget, 10_000)
+    projected_tokens, _ = await AgentRunner()._project_next_request(
+        _agent_with_state(state), {}, 10_000
+    )
 
     projected, counter, _ = _projection(state)
     assert compaction_cutoff(projected, 10_000, counter) == 0
-    assert budget.calls[0] == counter(projected)
-
-
-async def test_without_a_window_the_warning_projects_what_the_middleware_keeps():
-    # 30 messages ending with an answer: the last-10 slice would start on a
-    # user message; the middleware's cutoff moves forward to the answer.
-    state = _alternating(30, 50)
-    cut = compaction_cutoff(state, None, approx_token_count)
-    assert cut == 21
-    budget = _RecordingBudget()
-
-    await AgentRunner()._memory_warning_event(_agent_with_state(state), {}, budget, None)
-
-    projected, counter, _ = _projection(state)
-    assert compaction_cutoff(projected, None, counter) == cut
-    assert budget.calls[0] == counter(projected[cut:]) + runner_module.SUMMARY_TOKEN_ALLOWANCE
+    assert projected_tokens == counter(projected)
 
 
 # ===================== the private LangChain surface this rests on =====================

@@ -100,16 +100,62 @@ mechanisms**, each kept inside its own engine:
 |  | llama-server (CPU / CUDA) | mlx_vlm.server (MLX) |
 |---|---|---|
 | KV allocation | **Fixed upfront**: the whole window's KV cache is allocated (and touched) at load — a ggml architectural fact (static graphs, fixed-shape tensors), linear in the window size | **Native lazy growth**: nothing allocated upfront, the cache grows with the conversation |
-| Window resolution | **Fit at load**: with no `-c`, the server itself resolves the window to the model's trained window and *continuously reduces* it against measured free memory, down to a 4096 floor, logging `context size reduced from X to Y` (`--fit`, ON by default in the pinned b10883) | **Preflight bound at spawn**: the engine reads the trained window from the local artifact's `config.json` (`read_local_generation_hints`) and passes it as `--max-kv-size` — a validator, not a rotating cache |
+| Window resolution | **Fit at load**: with no `-c`, the server itself resolves the window to the model's trained window and *continuously reduces* it against measured free memory, down to a 4096 floor, logging `context size reduced from X to Y` (`--fit`, ON by default in the pinned b10883) | **Preflight bound at spawn, lowered by memory after load**: the engine reads the trained window from the local artifact's `config.json` (`read_local_generation_hints`) and passes it as `--max-kv-size` — a validator, not a rotating cache. Once the child is up and its base footprint measured, a memory ceiling below the trained window lowers that bound live (see below), down to a 4096 floor |
 | `ERUDI_CTX` set | Passed verbatim as `-c`; llama-server honours an explicit `-c` unchanged ("no change") | Not read — the bound always comes from the artifact |
 | Overflow behaviour | Honest 400 carrying `n_prompt_tokens` and `n_ctx` | Honest 400 naming the exact budget (`prompt + max generation` vs `MAX_KV_SIZE`); *without* the bound, an oversized prompt would return 200 with silently degenerate output |
-| How the allocated window is known | **Read back after boot**: `_read_server_properties` (called by `_start_server` right after the probe) does one bounded `GET /props` and stamps `default_generation_settings.n_ctx`, `chat_template_caps` and `chat_template` on the handle | **Known at spawn**: the bound just passed *is* the window; `_read_server_properties` stays the base no-op |
+| How the allocated window is known | **Read back after boot**: `_read_server_properties` (called by `_start_server` right after the probe) does one bounded `GET /props` and stamps `default_generation_settings.n_ctx`, `chat_template_caps` and `chat_template` on the handle | **Known at spawn, rewritten when memory binds**: the bound just passed *is* the window; `_read_server_properties` measures the child's base footprint and, when memory binds, stamps the memory bound as the window |
 | No derivable window | Cannot happen — the server always resolves one | No `--max-kv-size` (today's unbounded behaviour, one WARNING); a number is never invented |
 
 Either way, a `/props` failure or a missing window degrades to `context_tokens = None`
 (one WARNING) and the model still loads; consumers treat `None` as "window unknown". A
 stopped child clears `context_tokens` on its handle: a dead child holds no KV memory,
 so its allocated window dies with it.
+
+### The memory bound (MLX)
+
+The window a conversation plans against is the **working window**,
+`min(allocated window, memory ceiling)` (`src/engines/working_window.py`); the memory
+ceiling is the conversation token count at which the child's predicted footprint
+reaches the memory budget (`MemoryBudget.tokens_at_ceiling`, Apple Silicon only). When
+the model's window is the smaller of the two, nothing below runs. When the memory
+ceiling is smaller, the MLX child itself must refuse what memory cannot hold, and two
+facts make that cheap: the ceiling is constant for the life of a child (its inputs — the
+measured base, the working-set total, the model's shape and the prior — do not move while
+it runs), and mlx_vlm re-reads `max_kv_size` on every request (a live setting, outside
+the fingerprint that triggers a model reload). So `_read_server_properties`, right after
+measuring the base footprint and before anything but the readiness ping reached the
+child, computes `kv_bound(trained window, ceiling)` — the ceiling, never below 4096 (the
+floor `--fit` applies on llama.cpp) and never above the trained window — and sends it
+once through `PATCH /v1/settings` (`{"max_kv_size": bound}`, the per-spawn API key as a
+Bearer token, 2 s timeout). When the answer does not confirm it — an error status, a
+timeout (which can fire after the child applied the change), an unreadable or unexpected
+body — one `GET /v1/settings` with the same key and timeout reads the child's live
+`max_kv_size` back, and the handle follows what the child really enforces. Once the
+child enforces the bound, it becomes the handle's `context_tokens`,
+so every consumer of the allocated window (the model-info card, the first-token
+watchdog, the preflight retry, compaction) follows it unchanged, exactly as with a
+window `--fit` reduced, and `memory_bound_tokens()` reports it; `backend.log` carries
+`[MLX_Engine] Window bounded by memory: trained=..., ceiling=..., bound=...`. A trained window
+already at or below the floor needs no request: the child enforces it since its spawn,
+and it is recorded as the memory bound all the same. The prefix-cache pool stays sized on
+the trained window (it fills lazily), and a child spawned without a trained window waits
+3660 s per token (the first-token watchdog's absolute maximum plus 60 s), so it outlives
+any ceiling a memory bound can give the parent.
+
+The bound is the ceiling, which already reserves the output budget's 512-token floor, and
+the child counts `prompt + max_tokens` against it: those 512 tokens are counted twice,
+which keeps the child on the safe side and its bound equal to the window the output
+budget plans against. Nothing re-applies it during the child's life. Where it cannot be
+applied, the child stays at its spawn bound and no memory bound is recorded — so no amber
+memory notice can fire for that child: a working-set total that only resolves after the
+load, a `PATCH` the child did not apply (or whose read-back failed), an unreadable base
+footprint, unreadable static facts. Each failure is one record — a WARNING naming the
+HTTP status or the exception's class name, never the key or a response body; an
+unreadable base is the base measurement's own WARNING when it raised, otherwise one INFO
+line. A lost answer the read-back settles in the child's favour is one WARNING too, and
+the bound is recorded. A failure there never fails the load. A stopped MLX child clears
+the trained window and the memory bound with `context_tokens` (`MLX_Engine`'s own
+`_stop_server_if_running`; the llama.cpp handles never carry those keys).
 
 `BaseLlamaCppEngine._find_llama_server` tries the configured flavour first and falls back
 to the other one: a CUDA-built artifact runs CPU inference fine, whereas the CPU artifact

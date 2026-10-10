@@ -381,20 +381,17 @@ def test_an_unknown_shape_fact_turns_the_prediction_off(missing):
     budget = _budget(**{missing: None})
     assert budget.predict(100) is None
     assert budget.footprint_bytes(100) is None
-    assert budget.conversation_bytes(100) is None
     assert budget.used_fraction(100) is None
-    assert budget.memory_margin_fraction(100) is None
     assert budget.tokens_at_ceiling() is None
 
 
-def test_footprint_conversation_and_fractions_hand_computed():
+def test_footprint_and_fraction_hand_computed():
     budget = _budget()
     n = 8192
     predicted = int(_hand_predict(n))
-    assert budget.conversation_bytes(n) == predicted
+    assert budget.predict(n) == predicted
     assert budget.footprint_bytes(n) == 2 * GIB + predicted
     assert budget.used_fraction(n) == pytest.approx((2 * GIB + predicted) / (10 * GIB))
-    assert budget.memory_margin_fraction(n) == pytest.approx(1 - (2 * GIB + predicted) / (10 * GIB))
 
 
 def test_tokens_at_ceiling_closed_form_reserves_the_output_floor():
@@ -533,10 +530,10 @@ def test_from_engine_without_a_loaded_child_is_all_none():
     engine._model = None
     budget = MemoryBudget.from_engine(engine)
     assert budget.predict(100) is None
-    assert budget.memory_margin_fraction(100) is None
+    assert budget.used_fraction(100) is None
 
 
 def test_from_engine_none_engine_is_all_none():
     budget = MemoryBudget.from_engine(None)
-    assert budget.memory_margin_fraction(100) is None
+    assert budget.used_fraction(100) is None
     assert budget.tokens_at_ceiling() is None

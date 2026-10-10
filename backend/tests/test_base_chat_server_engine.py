@@ -724,8 +724,13 @@ class TestEffectiveContextTokens:
             "model_path": Path("/m"),
             "context_tokens": 8192,
         }
+        handle = _TestEngine._model
         _TestEngine._stop_server_if_running()
         assert _TestEngine.effective_context_tokens() is None
+        # The shared stop writes only the shared key: the MLX window keys
+        # never land on another engine's handle.
+        assert "trained_context_tokens" not in handle
+        assert "memory_bound_tokens" not in handle
 
     def test_cleared_after_cleanup(self):
         _TestEngine._model = {

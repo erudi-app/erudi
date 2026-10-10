@@ -280,15 +280,30 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         Read from the live engine handle (``_model``): llama.cpp engines stamp
         it from the server's ``/props`` after boot (their fit resolves the
         window at load and may shrink it below the model's trained window when
-        memory demands); MLX stamps the preflight bound it passed at spawn.
-        Never persisted anywhere -- the same model gets a different window on a
-        different machine or memory state, so the only truthful source is the
-        running child."""
+        memory demands); MLX stamps the trained window it passed at spawn as
+        the preflight bound, then lowers it to the memory bound once the
+        child's base footprint is measured, when memory binds
+        (``memory_bound_tokens``). Never persisted anywhere -- the same model
+        gets a different window on a different machine or memory state, so the
+        only truthful source is the running child."""
         model = cls._model
         if isinstance(model, dict):
             window = model.get("context_tokens")
             if isinstance(window, int) and not isinstance(window, bool) and window > 0:
                 return window
+        return None
+
+    @classmethod
+    def memory_bound_tokens(cls) -> Optional[int]:
+        """The window the machine's MEMORY imposed on the loaded child, or
+        ``None`` when memory is not what bounds it.
+
+        Set only by an engine that lowers its child's window to the memory
+        ceiling after load (MLX); then it equals the allocated window. ``None``
+        means the model's own window binds (or the bound could not be applied):
+        no memory notice and no memory wording on an overflow apply. The
+        llama.cpp engines answer ``None``: their fit sizes the window at load,
+        and the memory accounting is off there."""
         return None
 
     @classmethod

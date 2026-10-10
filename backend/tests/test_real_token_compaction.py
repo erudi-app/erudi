@@ -590,25 +590,21 @@ async def test_the_runner_hands_the_kb_text_to_the_client_and_reads_no_checkpoin
 # ===================== the warning projection =====================
 
 
-class _RecordingBudget:
+class _BoundEngine:
+    """An engine whose loaded child's window is bounded by memory."""
+
+    def __init__(self, bound):
+        self._bound = bound
+
+    def memory_bound_tokens(self):
+        return self._bound
+
+
+class _FootprintBudget:
     weights_bytes = 10
-
-    def __init__(self, margin=0.5):
-        self.calls = []
-        self.margin = margin
-
-    def memory_margin_fraction(self, tokens):
-        self.calls.append(tokens)
-        return self.margin
-
-    def conversation_bytes(self, tokens):
-        return tokens
 
     def footprint_bytes(self, tokens):
         return tokens + self.weights_bytes
-
-    def used_fraction(self, tokens):
-        return 1.0 - self.margin
 
 
 def _agent_with_state(messages):
@@ -626,17 +622,21 @@ def _projection(state):
     return projected, (lambda part: real_token_count(part, weights)), ratio
 
 
+async def _project(state, window, **kwargs):
+    projected_tokens, _ = await AgentRunner()._project_next_request(
+        _agent_with_state(state), {}, window, allocated_window=window, **kwargs
+    )
+    return projected_tokens
+
+
 async def test_the_projection_is_overhead_plus_all_when_nothing_would_be_compacted():
     state = [HumanMessage("hello", id="h"), AIMessage("hi", id="a")]
-    budget = _RecordingBudget()
 
-    await AgentRunner()._memory_warning_event(
-        _agent_with_state(state), {}, budget, 10_000, overhead=_fixed(400), allocated_window=10_000
-    )
+    projected_tokens = await _project(state, 10_000, overhead=_fixed(400))
 
     projected, counter, _ = _projection(state)
     # Nothing measured: O at its own script weight, floored.
-    assert budget.calls[0] == math.ceil(FLOOR * 400) + counter(projected)
+    assert projected_tokens == math.ceil(FLOOR * 400) + counter(projected)
 
 
 async def test_the_projection_is_overhead_plus_kept_plus_the_cap_otherwise():
@@ -647,17 +647,14 @@ async def test_the_projection_is_overhead_plus_kept_plus_the_cap_otherwise():
         HumanMessage(_text(3000), id="h1"),
         AIMessage(_text(500), id="a1"),
     ]
-    budget = _RecordingBudget()
     projected, counter, ratio = _projection(state)
     assert ratio == 1.0
     cut = compaction_cutoff(projected, window, counter, overhead=300, allocated_window=window)
     assert cut > 0
 
-    await AgentRunner()._memory_warning_event(
-        _agent_with_state(state), {}, budget, window, overhead=_fixed(300), allocated_window=window
-    )
+    projected_tokens = await _project(state, window, overhead=_fixed(300))
 
-    assert budget.calls[0] == 300 + counter(projected[cut:]) + summary_cap(window)
+    assert projected_tokens == 300 + counter(projected[cut:]) + summary_cap(window)
 
 
 async def test_the_projection_keeps_what_the_next_requests_compaction_keeps():
@@ -672,42 +669,48 @@ async def test_the_projection_keeps_what_the_next_requests_compaction_keeps():
     ]
     projected, counter, _ = _projection(state)
     cut = compaction_cutoff(projected, window, counter, allocated_window=window)
-    budget = _RecordingBudget()
 
-    await AgentRunner()._memory_warning_event(
-        _agent_with_state(state), {}, budget, window, allocated_window=window
-    )
+    projected_tokens = await _project(state, window)
 
     assert cut == 3  # the last answer is kept; the sentinel is the "current question"
-    assert budget.calls[0] == counter(projected[cut:]) + summary_cap(window)
+    assert projected_tokens == counter(projected[cut:]) + summary_cap(window)
 
 
 async def test_the_projection_counts_the_turn_just_answered_as_past():
     window = 100_000
     state = _kb_round(1, 5000, first_r=1.0, last_r=2.14)
-    budget = _RecordingBudget()
 
-    await AgentRunner()._memory_warning_event(
-        _agent_with_state(state), {}, budget, window, allocated_window=window
-    )
+    projected_tokens = await _project(state, window)
 
     projected, counter, _ = _projection(state)
     assert projected[2].content == KB_MARKER
-    assert budget.calls[0] == counter(projected)
+    assert projected_tokens == counter(projected)
 
 
 async def test_the_warning_payload_includes_the_overhead():
     state = [HumanMessage("hello", id="h"), AIMessage("hi", id="a")]
-    budget = _RecordingBudget(margin=0.01)
+    window = 520
+    budget = _FootprintBudget()
 
     event = await AgentRunner()._memory_warning_event(
-        _agent_with_state(state), {}, budget, 10_000, overhead=_fixed(400), allocated_window=10_000
+        _agent_with_state(state),
+        {},
+        budget,
+        window,
+        overhead=_fixed(400),
+        allocated_window=window,
+        engine=_BoundEngine(window),
     )
 
     projected, counter, _ = _projection(state)
-    expected = math.ceil(FLOOR * 400) + counter(projected)
-    assert event["conversation_bytes"] == expected
-    assert event["footprint_bytes"] == expected + budget.weights_bytes
+    # Nothing measured: O at its own script weight, floored. The overhead
+    # alone is past the trigger, so the projection is O + kept + summary cap.
+    overhead = math.ceil(FLOOR * 400)
+    cut = compaction_cutoff(projected, window, counter, overhead=overhead, allocated_window=window)
+    assert cut > 0
+    expected = overhead + counter(projected[cut:]) + summary_cap(window)
+    assert expected >= 0.85 * window
+    assert event == {"t": "memory_warning", "footprint_bytes": expected + budget.weights_bytes}
 
 
 async def test_the_runner_projects_without_the_kb_block_of_the_turn_just_answered(monkeypatch):

@@ -194,7 +194,11 @@ Conversations and Arena share one streaming primitive, `AgentRunner`
   checkpointer, so history is restored from the checkpointer (only the new message is
   sent) and older turns are summarized in the agent state. A compaction keeps at most
   10 messages and at most a token budget of the working window, and its summary is
-  capped (see the [Conversations guide](guides/conversations.md)).
+  capped (see the [Conversations guide](guides/conversations.md)). On Apple Silicon,
+  when the memory ceiling is smaller than the model's trained window, the inference
+  child itself enforces it (see [Engines](dev/architecture/engines.md#context-windows)),
+  and the amber memory notice appears only then — when even the projected next request
+  fills 85 % of the working window.
 - **Token counts are real tokens without a tokenizer in the backend**
   (`agents/token_accounting.py`), costed message by message: every client streams the
   server's usage, and the chunk that carries it is stamped with the `chars / 4` estimate

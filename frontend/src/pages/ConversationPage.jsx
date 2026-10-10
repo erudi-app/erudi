@@ -502,8 +502,6 @@ export default function ConversationPage() {
                 // it survives neither the copy path nor a reload.
                 sawMemoryWarning = true;
                 setMemoryWarning({
-                  usedFraction: evt.used_fraction,
-                  conversationBytes: evt.conversation_bytes,
                   // Conversation + loaded model: what the copy quotes.
                   footprintBytes: evt.footprint_bytes,
                 });
@@ -1134,9 +1132,10 @@ export default function ConversationPage() {
         </div>
         <div className="sticky bottom-0 left-0 right-0 px-10 py-10 backdrop-blur-md flex justify-center w-full">
           <div className="w-full max-w-lg">
-            {/* Amber memory warning (1.1.2): the machine is close to memory
-                saturation even after auto-compaction had its chance. Same
-                amber vocabulary as the DragDropArea rejection toast. */}
+            {/* Amber memory warning: the machine's memory bounds this
+                conversation, and even after auto-compaction had its chance
+                the next request nearly fills that bound. Same amber
+                vocabulary as the DragDropArea rejection toast. */}
             {memoryWarning && (
               <div
                 role="alert"
@@ -1145,10 +1144,7 @@ export default function ConversationPage() {
                 <AlertTriangle className="w-4 h-4 flex-shrink-0" />
                 <span>
                   {t("chat:memoryWarning.text", {
-                    size:
-                      formatBytes(memoryWarning.footprintBytes) ??
-                      formatBytes(memoryWarning.conversationBytes) ??
-                      "?",
+                    size: formatBytes(memoryWarning.footprintBytes) ?? "?",
                   })}
                 </span>
               </div>

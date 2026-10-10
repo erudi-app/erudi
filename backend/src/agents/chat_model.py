@@ -373,10 +373,12 @@ def preflight_retry_budget(exc: Exception, window_tokens: Optional[int]) -> Opti
     if overflow is None or overflow.prompt_only_tokens is None:
         return None
     # Self-correcting: the rejection also NAMES the server's own limit
-    # ("MAX_KV_SIZE is N"). Today it equals the window we stamped at spawn,
-    # but if the two ever drift (an mlx_vlm bump, a spawn-time adjustment),
-    # the server's number is the one the next check will enforce -- computing
-    # against the smaller of the two cannot produce a second rejection.
+    # ("MAX_KV_SIZE is N"). It equals the allocated window on the handle (the
+    # trained window stamped at spawn, or the memory bound applied after
+    # load), but if the two ever drift (an mlx_vlm bump, an inherited
+    # MAX_KV_SIZE), the server's number is the one the next check will
+    # enforce -- computing against the smaller of the two cannot produce a
+    # second rejection.
     if overflow.context_tokens is not None and overflow.context_tokens > 0:
         window_tokens = min(window_tokens, overflow.context_tokens)
     prompt_tokens = overflow.prompt_only_tokens
