@@ -152,8 +152,10 @@ describe("ConversationPage memory warning", () => {
     ]);
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toContain("4.0 GB");
-    expect(alert.textContent).toContain("Your machine's memory limits this conversation");
+    expect(alert.textContent).toContain(
+      "Your machine's memory limits this conversation: the model and this conversation " +
+        "together take about 4.0 GB, nearly all the room memory allows."
+    );
     // Never part of the message content (so never in the copy path).
     for (const bubble of screen.getAllByTestId("answer")) {
       expect(bubble.textContent).not.toContain("4.0 GB");
