@@ -112,7 +112,8 @@ def build_chat_model(
     model_field = engine._payload_model_value(handle)
 
     # The ALLOCATED window of the child just resolved (llama-server: read from
-    # /props after its fit; MLX: the --max-kv-size bound stamped at spawn).
+    # /props after its fit; MLX: the --max-kv-size bound stamped at spawn, or
+    # the memory bound the child was lowered to after load when memory binds).
     # Handed to the client so the first-chunk watchdog ceiling scales with the
     # window a full-window prompt can now legitimately fill -- without it, the
     # dynamic context window would recreate the #573 kill (a healthy long

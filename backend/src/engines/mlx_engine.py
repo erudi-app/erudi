@@ -368,24 +368,28 @@ class MLX_Engine(BaseChatServerEngine):
         # trained window read from the LOCAL artifact's own config.json --
         # stamped here at spawn, the one moment the artifact and the child are
         # both in hand. No derivable window: no flag (today's unbounded
-        # behaviour), never an invented number. The hot PATCH /v1/settings
-        # path is deliberately not used in this release (spawn-time only).
+        # behaviour), never an invented number. The bound is a per-request
+        # validator mlx_vlm re-reads at call time, so when the machine's memory
+        # binds below it, `_read_server_properties` lowers it ONCE per child
+        # through `PATCH /v1/settings`, right after the base footprint is
+        # measured (no respawn); when the model window binds, nothing runs.
         context_tokens = cls._trained_window_of(model_path)
         # Automatic Prefix Caching pool + the aligned child token-queue timeout,
         # both derived from the window here (the one moment the artifact and the
         # child are in hand) and passed to the child as explicit args. Deferred
         # imports keep the engine layer off the agent stack at boot and match
-        # this file's other function-scoped imports; `first_chunk_ceiling_s` is
-        # langchain-free at import (`chat_model` defers `langchain_openai`), so
-        # there is no import cycle.
-        from src.agents.chat_model import first_chunk_ceiling_s
+        # this file's other function-scoped imports; `chat_model` is
+        # langchain-free at import (it defers `langchain_openai`), so there is
+        # no import cycle.
+        from src.agents.chat_model import FIRST_CHUNK_ABSOLUTE_MAX_S, first_chunk_ceiling_s
         from src.engines._mlx_vlm_server_runner import APC_BLOCK_SIZE_TOKENS
 
-        # Size the APC pool to exactly cover the allocated window (already
-        # memory-bounded by --max-kv-size above), so a 2nd+ turn reuses the
-        # cached prefix instead of re-prefilling the whole history. The pool
-        # fills lazily and mlx-vlm's own guards bound it; no derivable window
-        # leaves mlx-vlm's 2048-block default. The pool counts toward the
+        # Size the APC pool to exactly cover the TRAINED window (the spawn's
+        # --max-kv-size above), so a 2nd+ turn reuses the cached prefix
+        # instead of re-prefilling the whole history. A memory bound applied
+        # after load leaves the pool as is: it fills lazily, so over-sizing it
+        # costs nothing, and mlx-vlm's own guards bound it; no derivable
+        # window leaves mlx-vlm's 2048-block default. The pool counts toward the
         # child's footprint: the memory prior accounts it in its per-token
         # multiplier (``memory_budget.PRIOR_KV_MULTIPLIER``: the KV cache plus
         # its prefix-cache copy and MLX's buffer cache), and every turn's real
@@ -400,10 +404,17 @@ class MLX_Engine(BaseChatServerEngine):
         # parent clamps its budget to), so a legitimately long cold prefill is
         # ended by the parent's curated turn (src.agents.runner) -- never by the
         # child's raw "Increase MLX_VLM_TOKEN_QUEUE_TIMEOUT" error. +60s margin
-        # so the child comfortably outlives the ceiling; computed even without a
-        # window, since the child's own 600s default is below the 900s ceiling
-        # `first_chunk_ceiling_s(None)` returns.
-        token_queue_timeout_s: float = first_chunk_ceiling_s(context_tokens) + 60.0
+        # so the child comfortably outlives the ceiling. A memory bound applied
+        # after load only LOWERS a known window, hence the parent's ceiling.
+        # Without a trained window, though, the bound becomes the parent's
+        # first window and can raise its ceiling up to the absolute max: the
+        # child then waits the absolute max + 60s (the timeout only fires on a
+        # wedged worker; an abandoned request is cancelled at HTTP close).
+        token_queue_timeout_s: float = (
+            first_chunk_ceiling_s(context_tokens) + 60.0
+            if context_tokens is not None
+            else FIRST_CHUNK_ABSOLUTE_MAX_S + 60.0
+        )
         # Before the roll below, so a file the PREVIOUS child on this port left
         # behind is older than this mark and cannot be read as ours.
         started_at = time.time()
@@ -497,12 +508,18 @@ class MLX_Engine(BaseChatServerEngine):
             # both read the key from here. Never log the handle wholesale.
             "api_key": api_key,
             # The ALLOCATED window (`BaseEngine.effective_context_tokens`):
-            # for MLX it equals the preflight bound passed above, known at
-            # spawn -- nothing to read back, unlike llama-server whose fit
-            # resolves the window at load (MLX's `_read_server_properties`
-            # measures the child's base footprint instead). None = unbounded
-            # child.
+            # at spawn it equals the preflight bound passed above -- nothing
+            # to read back, unlike llama-server whose fit resolves the window
+            # at load. `_read_server_properties` measures the child's base
+            # footprint and, when memory binds, lowers the child's bound and
+            # rewrites this to it. None = unbounded child.
             "context_tokens": context_tokens,
+            # The model's trained window, kept as stamped at spawn: the
+            # memory bound is judged against it (`working_window.kv_bound`).
+            "trained_context_tokens": context_tokens,
+            # Set by `_read_server_properties` when the machine's memory, not
+            # the model, bounds the child's window (`memory_bound_tokens`).
+            "memory_bound_tokens": None,
             # Who the child's prefix cache belongs to (see `claim_prefix`). A
             # new child starts with an EMPTY pool, so the first claim takes it
             # without a reset. No `abandoned` flag either: nothing ran yet.
@@ -687,7 +704,8 @@ class MLX_Engine(BaseChatServerEngine):
 
     @classmethod
     def _read_server_properties(cls, handle: Dict[str, Any]) -> None:
-        """The child is up: measure its base footprint. Degrades, never raises."""
+        """The child is up: measure its base footprint, then bound its window
+        by memory when memory binds. Degrades, never raises."""
         from src.engines import process_footprint
 
         pid = handle.get("pid")
@@ -697,6 +715,105 @@ class MLX_Engine(BaseChatServerEngine):
             # Costs the measured base only: the weights-on-disk fallback applies.
             logger.warning("[MLX_Engine] Base footprint unreadable after spawn", exc_info=True)
             handle["base_footprint_bytes"] = None
+        cls._bound_window_by_memory(handle)
+
+    # ======================= THE MEMORY BOUND =======================
+    #
+    # The working window is min(model window, memory ceiling). When the
+    # memory ceiling is the binding side, the child itself must enforce it:
+    # mlx_vlm re-reads `max_kv_size` per request (a live knob, outside the
+    # reload fingerprint), so the bound is lowered once per child through
+    # `PATCH /v1/settings`, right after the base is measured -- before
+    # anything but the readiness ping reached the child. The bound then IS the
+    # allocated window (`context_tokens`), so every consumer of the allocated
+    # window (model info, first-chunk watchdog, preflight retry, compaction)
+    # is right without knowing about it, exactly as with a llama.cpp window
+    # its fit reduced at load. The ceiling is constant for the life of a child
+    # except in the degraded corners below, where the child stays at its
+    # spawn bound and no memory bound is recorded: a total that resolves only
+    # after load, a failed PATCH, an unreadable base, unreadable static facts.
+
+    _SETTINGS_TIMEOUT_S = 2.0
+
+    @classmethod
+    def memory_bound_tokens(cls) -> Optional[int]:
+        """The memory bound applied to the loaded child, or ``None``."""
+        handle = cls._model
+        if not isinstance(handle, dict):
+            return None
+        bound = handle.get("memory_bound_tokens")
+        if isinstance(bound, int) and not isinstance(bound, bool) and bound > 0:
+            return bound
+        return None
+
+    @classmethod
+    def _bound_window_by_memory(cls, handle: Dict[str, Any]) -> None:
+        """Lower the child's window to the memory bound when memory binds.
+
+        One guard around the whole step (computing the budget reads the
+        disk): any failure is one WARNING with the exception's class name,
+        the handle unchanged, and the load goes on. Never logs the key, the
+        request headers or the response body.
+        """
+        from src.engines.memory_budget import MemoryBudget
+        from src.engines.working_window import kv_bound
+
+        try:
+            if handle.get("base_footprint_bytes") is None:
+                # The budget would price the weights on disk instead: not a
+                # number to bound a live child on.
+                logger.info("[MLX_Engine] Base footprint unknown; the child keeps its spawn window")
+                return
+            trained = handle.get("trained_context_tokens")
+            ceiling = MemoryBudget.from_handle(cls, handle).tokens_at_ceiling()
+            bound = kv_bound(trained, ceiling)
+            if bound is None:
+                return
+            if bound != trained and not cls._apply_max_kv_size(handle, bound):
+                return
+            # bound == trained (a trained window at or below the floor): the
+            # child already enforces it since its spawn -- no HTTP call, but
+            # memory binds, and the notice must be able to say so.
+            handle["context_tokens"] = bound
+            handle["memory_bound_tokens"] = bound
+            logger.info(
+                f"MLX window bounded by memory: trained={trained}, ceiling={ceiling}, "
+                f"bound={bound}"
+            )
+        except Exception as exc:
+            logger.warning(
+                f"[MLX_Engine] Memory bound of the window not applied "
+                f"({type(exc).__name__}); the child keeps its spawn window"
+            )
+
+    @classmethod
+    def _apply_max_kv_size(cls, handle: Dict[str, Any], bound: int) -> bool:
+        """``PATCH /v1/settings`` ``{"max_kv_size": bound}`` on the child;
+        True iff it answered 200 and applied exactly ``bound``. A refusal is
+        one WARNING; a transport error propagates to the caller's guard."""
+        api_key = handle.get("api_key")
+        headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
+        resp = requests.patch(
+            f"{handle.get('base_url')}/v1/settings",
+            json={"max_kv_size": bound},
+            headers=headers,
+            timeout=cls._SETTINGS_TIMEOUT_S,
+        )
+        if resp.status_code != 200:
+            logger.warning(
+                f"[MLX_Engine] Memory bound of the window not applied "
+                f"(HTTP {resp.status_code}); the child keeps its spawn window"
+            )
+            return False
+        body = resp.json()
+        applied = body.get("applied") if isinstance(body, dict) else None
+        if not isinstance(applied, dict) or applied.get("max_kv_size") != bound:
+            logger.warning(
+                f"[MLX_Engine] Memory bound of the window not applied (the child "
+                f"did not apply max_kv_size={bound}); the child keeps its spawn window"
+            )
+            return False
+        return True
 
     @classmethod
     def begin_memory_window(cls) -> Any:

@@ -1268,16 +1268,267 @@ class TestSpawnApcAndTimeout:
         assert token_queue_timeout > ceiling
         assert token_queue_timeout == pytest.approx(ceiling + 60.0)
 
-    def test_unknown_window_falls_back_to_defaults_but_still_aligns_timeout(self, tmp_path):
-        from src.agents.chat_model import first_chunk_ceiling_s
+    def test_unknown_window_falls_back_to_defaults_and_outlives_any_parent_ceiling(self, tmp_path):
+        from src.agents.chat_model import FIRST_CHUNK_ABSOLUTE_MAX_S, first_chunk_ceiling_s
 
         _handle, args = self._spawn_capture_args(tmp_path, {"architectures": ["FooModel"]})
         # No derivable window -> mlx-vlm's own 2048-block APC default (no override).
         assert args[2] is None
-        # ...but the child (default 600s) would still die before the parent's
-        # 900s ceiling, so the timeout is aligned even without a window.
-        assert args[3] == pytest.approx(first_chunk_ceiling_s(None) + 60.0)
+        # A memory bound applied after the spawn becomes the parent's window,
+        # and can raise its ceiling up to the absolute max: the child must
+        # outlive every ceiling the parent can reach.
+        assert args[3] == pytest.approx(FIRST_CHUNK_ABSOLUTE_MAX_S + 60.0) == 3660.0
         assert args[3] > first_chunk_ceiling_s(None)
+        assert args[3] > first_chunk_ceiling_s(60_000)
+
+    def test_spawn_stamps_the_trained_window(self, tmp_path):
+        handle, _args = self._spawn_capture_args(tmp_path, {"max_position_embeddings": 32768})
+        assert handle["trained_context_tokens"] == 32768
+        assert handle["context_tokens"] == 32768
+
+    def test_spawn_stamps_an_unknown_trained_window(self, tmp_path):
+        handle, _args = self._spawn_capture_args(tmp_path, {"architectures": ["FooModel"]})
+        assert "trained_context_tokens" in handle
+        assert handle["trained_context_tokens"] is None
+
+
+_KEY = "k-secret-never-logged-0123456789abcdef"
+_GIB = 1024**3
+
+
+def _bound_handle(tmp_path, *, trained=32768, base=2 * _GIB):
+    """A handle as `_spawn_child` returns it, for a child that just got ready."""
+    model_dir = tmp_path / "model"
+    model_dir.mkdir(exist_ok=True)
+    (model_dir / "config.json").write_text(
+        json.dumps(
+            {
+                "max_position_embeddings": trained,
+                "num_hidden_layers": 24,
+                "num_attention_heads": 14,
+                "num_key_value_heads": 2,
+                "hidden_size": 896,
+                "vocab_size": 151_936,
+            }
+        ),
+        encoding="utf-8",
+    )
+    return {
+        "pid": 4321,
+        "proc": None,
+        "port": 9087,
+        "base_url": "http://127.0.0.1:9087",
+        "alias": "erudi-x",
+        "model_path": str(model_dir),
+        "api_key": _KEY,
+        "context_tokens": trained,
+        "trained_context_tokens": trained,
+    }, base
+
+
+def _settings_response(status=200, applied=None, rejected=None):
+    response = MagicMock()
+    response.status_code = status
+    response.json.return_value = {
+        "op": "merge",
+        "applied": applied if applied is not None else {},
+        "rejected": rejected if rejected is not None else [],
+    }
+    return response
+
+
+@pytest.mark.unit
+class TestMemoryBoundWindow:
+    """After the base is measured, a binding memory ceiling lowers the child's
+    live `max_kv_size` through `PATCH /v1/settings` -- once per child, never
+    below the 4096 floor, never failing the load."""
+
+    def _apply(self, handle, base, *, ceiling=None, patch_mock=None):
+        from src.engines.memory_budget import MemoryBudget
+
+        if patch_mock is None:
+            patch_mock = Mock(return_value=_settings_response())
+        with (
+            patch("src.engines.process_footprint.footprint", return_value=base),
+            patch.object(MemoryBudget, "tokens_at_ceiling", lambda self: ceiling),
+            patch("src.engines.mlx_engine.requests.patch", patch_mock),
+        ):
+            MLX_Engine._read_server_properties(handle)
+        MLX_Engine._model = handle
+        return patch_mock
+
+    def test_a_binding_ceiling_patches_the_child_once_with_the_key(self, tmp_path):
+        handle, base = _bound_handle(tmp_path)
+        patch_mock = Mock(return_value=_settings_response(applied={"max_kv_size": 20_000}))
+
+        self._apply(handle, base, ceiling=20_000, patch_mock=patch_mock)
+
+        assert patch_mock.call_count == 1
+        args, kwargs = patch_mock.call_args
+        assert args[0] == "http://127.0.0.1:9087/v1/settings"
+        assert kwargs["json"] == {"max_kv_size": 20_000}
+        assert kwargs["headers"] == {"Authorization": f"Bearer {_KEY}"}
+        assert kwargs["timeout"] == 2.0
+        assert handle["context_tokens"] == 20_000
+        assert MLX_Engine.memory_bound_tokens() == 20_000
+        assert MLX_Engine.effective_context_tokens() == 20_000
+        # The trained window stays known to the engine.
+        assert handle["trained_context_tokens"] == 32768
+
+    def test_a_ceiling_below_the_floor_patches_the_floor(self, tmp_path):
+        handle, base = _bound_handle(tmp_path)
+        patch_mock = Mock(return_value=_settings_response(applied={"max_kv_size": 4096}))
+
+        self._apply(handle, base, ceiling=-300, patch_mock=patch_mock)
+
+        assert patch_mock.call_args.kwargs["json"] == {"max_kv_size": 4096}
+        assert MLX_Engine.memory_bound_tokens() == 4096
+        assert MLX_Engine.effective_context_tokens() == 4096
+
+    def test_the_bounded_window_is_logged_once_in_ascii(self, tmp_path, caplog):
+        handle, base = _bound_handle(tmp_path)
+        patch_mock = Mock(return_value=_settings_response(applied={"max_kv_size": 20_000}))
+
+        with caplog.at_level(logging.INFO):
+            self._apply(handle, base, ceiling=20_000, patch_mock=patch_mock)
+
+        lines = [
+            r.getMessage()
+            for r in caplog.records
+            if "MLX window bounded by memory" in r.getMessage()
+        ]
+        assert lines == ["MLX window bounded by memory: trained=32768, ceiling=20000, bound=20000"]
+        assert all(line.isascii() for line in lines)
+        assert not any(_KEY in r.getMessage() for r in caplog.records)
+
+    def test_a_non_binding_ceiling_changes_nothing(self, tmp_path):
+        handle, base = _bound_handle(tmp_path)
+
+        patch_mock = self._apply(handle, base, ceiling=40_000)
+
+        patch_mock.assert_not_called()
+        assert MLX_Engine.memory_bound_tokens() is None
+        assert handle["context_tokens"] == 32768
+
+    def test_a_trained_window_at_the_floor_is_bound_without_a_patch(self, tmp_path):
+        # The child already enforces 4096 since its spawn: no HTTP call, but
+        # memory binds -- the notice must be able to fire.
+        handle, base = _bound_handle(tmp_path, trained=4096)
+
+        patch_mock = self._apply(handle, base, ceiling=1000)
+
+        patch_mock.assert_not_called()
+        assert MLX_Engine.memory_bound_tokens() == 4096
+        assert handle["context_tokens"] == 4096
+
+    def test_an_unreadable_base_is_no_bound(self, tmp_path, caplog):
+        handle, _base = _bound_handle(tmp_path)
+
+        with caplog.at_level(logging.INFO):
+            patch_mock = self._apply(handle, None, ceiling=1000)
+
+        patch_mock.assert_not_called()
+        assert MLX_Engine.memory_bound_tokens() is None
+        assert handle["context_tokens"] == 32768
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_an_unreadable_total_is_no_bound(self, tmp_path):
+        handle, base = _bound_handle(tmp_path)
+        patch_mock = Mock(return_value=_settings_response())
+
+        with (
+            patch("src.engines.process_footprint.footprint", return_value=base),
+            patch("src.engines.memory_budget.total_memory_bytes", return_value=None),
+            patch("src.engines.mlx_engine.requests.patch", patch_mock),
+        ):
+            MLX_Engine._read_server_properties(handle)
+        MLX_Engine._model = handle
+
+        patch_mock.assert_not_called()
+        assert MLX_Engine.memory_bound_tokens() is None
+        assert handle["context_tokens"] == 32768
+
+    def test_unreadable_static_facts_never_fail_the_load(self, tmp_path, caplog):
+        handle, base = _bound_handle(tmp_path)
+        patch_mock = Mock(return_value=_settings_response())
+
+        with (
+            caplog.at_level(logging.INFO),
+            patch.object(MLX_Engine, "_spawn_child", return_value=handle),
+            patch.object(MLX_Engine, "_probe_ready"),
+            patch("src.engines.process_footprint.footprint", return_value=base),
+            patch("src.engines.memory_budget._static_facts", side_effect=OSError("disk gone")),
+            patch("src.engines.mlx_engine.requests.patch", patch_mock),
+        ):
+            loaded = MLX_Engine._start_server(
+                model_path=Path(handle["model_path"]), alias="erudi-x", port=9087
+            )
+        MLX_Engine._model = loaded
+
+        patch_mock.assert_not_called()
+        assert loaded is handle
+        assert MLX_Engine.memory_bound_tokens() is None
+        assert handle["context_tokens"] == 32768
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "OSError" in warnings[0].getMessage()
+        assert "disk gone" not in warnings[0].getMessage()
+
+    @pytest.mark.parametrize(
+        "outcome",
+        ["http_500", "timeout", "rejected", "applied_mismatch"],
+    )
+    def test_a_failed_patch_keeps_the_spawn_window(self, tmp_path, caplog, outcome):
+        import requests as requests_lib
+
+        handle, base = _bound_handle(tmp_path)
+        if outcome == "http_500":
+            patch_mock = Mock(return_value=_settings_response(status=500))
+        elif outcome == "timeout":
+            patch_mock = Mock(side_effect=requests_lib.Timeout(f"Bearer {_KEY} timed out"))
+        elif outcome == "rejected":
+            patch_mock = Mock(
+                return_value=_settings_response(
+                    rejected=[{"name": "max_kv_size", "reason": f"bad value {_KEY}"}]
+                )
+            )
+        else:
+            patch_mock = Mock(return_value=_settings_response(applied={"max_kv_size": 19_999}))
+
+        with caplog.at_level(logging.INFO):
+            self._apply(handle, base, ceiling=20_000, patch_mock=patch_mock)
+
+        assert patch_mock.call_count == 1
+        assert MLX_Engine.memory_bound_tokens() is None
+        assert handle["context_tokens"] == 32768
+        assert MLX_Engine.effective_context_tokens() == 32768
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        for record in caplog.records:
+            assert _KEY not in record.getMessage()
+            assert "Bearer" not in record.getMessage()
+
+    def test_stop_resets_the_three_window_fields(self, tmp_path):
+        handle, _base = _bound_handle(tmp_path)
+        handle["context_tokens"] = 20_000
+        handle["memory_bound_tokens"] = 20_000
+        MLX_Engine._model = handle
+
+        MLX_Engine._stop_server_if_running()
+
+        assert handle["context_tokens"] is None
+        assert handle["trained_context_tokens"] is None
+        assert handle["memory_bound_tokens"] is None
+        assert MLX_Engine.memory_bound_tokens() is None
+
+    @pytest.mark.parametrize("value", [None, 0, -5, True, "20000", 20_000.0])
+    def test_the_accessor_answers_only_a_positive_int(self, value):
+        MLX_Engine._model = {"memory_bound_tokens": value}
+        assert MLX_Engine.memory_bound_tokens() is None
+
+    def test_the_accessor_is_none_without_a_child(self):
+        MLX_Engine._model = None
+        assert MLX_Engine.memory_bound_tokens() is None
 
 
 @pytest.mark.unit
@@ -1483,6 +1734,66 @@ class TestSubprocessReal:
             # And the same file is what a crash report would quote.
             assert mlx_child_log.read_child_log_tail(log_path)
             assert model["api_key"] not in MLX_Engine._read_child_output(proc)
+        finally:
+            MLX_Engine.cleanup()
+
+    def test_a_binding_memory_ceiling_bounds_the_live_child(self, mlx_test_model_path, monkeypatch):
+        """The real child, with a memory ceiling forced below the model's
+        trained window: the engine lowers the child's live `max_kv_size`, the
+        child refuses a request above the bound with its own 400 and serves
+        one under it -- the same child throughout, no respawn."""
+        import requests
+
+        from src.engines.memory_budget import MemoryBudget
+
+        monkeypatch.setattr(MemoryBudget, "tokens_at_ceiling", lambda self: 6000)
+        try:
+            model, _ = MLX_Engine.get_model_and_tokenizer(
+                llm_id="qwen-test",
+                llm_local_path=str(mlx_test_model_path),
+            )
+            pid = model["pid"]
+            assert model["trained_context_tokens"] == 32768
+            assert MLX_Engine.memory_bound_tokens() == 6000
+            assert MLX_Engine.effective_context_tokens() == 6000
+            base_url = model["base_url"]
+            headers = {"Authorization": f"Bearer {model['api_key']}"}
+
+            r = requests.get(f"{base_url}/v1/settings", headers=headers, timeout=5)
+            assert r.status_code == 200, r.text
+            assert r.json()["current"]["max_kv_size"] == 6000
+
+            over = {
+                "model": model["model_path"],
+                "messages": [{"role": "user", "content": "ping"}],
+                "max_tokens": 6000,
+                "stream": False,
+            }
+            r = requests.post(
+                f"{base_url}/v1/chat/completions", json=over, headers=headers, timeout=30
+            )
+            assert r.status_code == 400, r.text
+            assert "MAX_KV_SIZE is 6000" in r.text
+
+            under = dict(over, max_tokens=8, stream=True)
+            with requests.post(
+                f"{base_url}/v1/chat/completions",
+                json=under,
+                headers=headers,
+                timeout=60,
+                stream=True,
+            ) as r:
+                assert r.status_code == 200
+                body = b"".join(r.iter_content(chunk_size=None))
+            assert b"data:" in body
+
+            again, _ = MLX_Engine.get_model_and_tokenizer(
+                llm_id="qwen-test",
+                llm_local_path=str(mlx_test_model_path),
+            )
+            assert again["pid"] == pid
+            assert again["proc"].is_alive()
+            assert MLX_Engine.memory_bound_tokens() == 6000
         finally:
             MLX_Engine.cleanup()
 

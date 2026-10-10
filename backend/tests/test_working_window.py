@@ -15,7 +15,9 @@ arithmetic; the memory consumers that route onto it are pinned in
 import pytest
 
 from src.engines.working_window import (
+    MIN_KV_BOUND_TOKENS,
     canonical_working_window,
+    kv_bound,
     working_context_tokens,
 )
 
@@ -141,3 +143,57 @@ def test_15_percent_is_the_amber_warnings_threshold():
     from src.agents import runner
 
     assert runner.MEMORY_WARNING_MARGIN == 0.15
+
+
+# ===================== the MLX child's memory bound =====================
+
+
+def test_the_bound_floor_is_llama_cpps_fit_floor():
+    assert MIN_KV_BOUND_TOKENS == 4096
+
+
+def test_no_ceiling_is_no_bound():
+    assert kv_bound(32_768, None) is None
+    assert kv_bound(None, None) is None
+
+
+@pytest.mark.parametrize("ceiling", [32_768, 40_000])
+def test_a_ceiling_at_or_above_the_trained_window_is_no_bound(ceiling):
+    # The model window binds: memory is not the limiting factor.
+    assert kv_bound(32_768, ceiling) is None
+
+
+def test_a_ceiling_below_the_trained_window_is_the_bound():
+    assert kv_bound(32_768, 20_000) == 20_000
+
+
+def test_a_ceiling_below_the_floor_is_lifted_to_the_floor():
+    assert kv_bound(32_768, 1000) == 4096
+
+
+@pytest.mark.parametrize("ceiling", [0, -1, -50_000])
+def test_a_nonpositive_ceiling_is_the_floor(ceiling):
+    assert kv_bound(32_768, ceiling) == 4096
+
+
+def test_a_trained_window_at_the_floor_with_a_smaller_ceiling_is_the_trained_window():
+    assert kv_bound(4096, 1000) == 4096
+
+
+def test_a_trained_window_below_the_floor_caps_the_bound():
+    # Never above what the model was trained on, even at the floor.
+    assert kv_bound(2048, 1000) == 2048
+
+
+def test_an_unknown_trained_window_takes_the_ceiling():
+    assert kv_bound(None, 20_000) == 20_000
+
+
+def test_an_unknown_trained_window_with_a_small_ceiling_takes_the_floor():
+    assert kv_bound(None, 1000) == 4096
+
+
+@pytest.mark.parametrize("bad", [True, False, 1.5, "8000", object()])
+def test_a_bool_or_non_int_is_rejected(bad):
+    assert kv_bound(32_768, bad) is None
+    assert kv_bound(bad, 20_000) is None

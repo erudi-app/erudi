@@ -275,8 +275,9 @@ def _apply_child_runtime_env(
     - ``APC_ENABLED`` / ``APC_BLOCK_SIZE`` / ``APC_NUM_BLOCKS`` turn on Automatic
       Prefix Caching, so a 2nd+ turn prefills only the suffix of the
       conversation instead of the whole history. The pool is sized by the parent
-      to cover the allocated window (``ceil(window / APC_BLOCK_SIZE_TOKENS)``,
-      already memory-bounded by ``--max-kv-size``); a ``None`` count leaves
+      to cover the model's trained window, the spawn's ``--max-kv-size``
+      (``ceil(window / APC_BLOCK_SIZE_TOKENS)``; a memory bound applied after
+      load leaves it as is, since the pool fills lazily); a ``None`` count leaves
       mlx-vlm's own default (2048 blocks), for a child spawned without a window.
       The pool fills lazily and mlx-vlm's own ``APC_MAX_POOL_TENSORS`` + Metal
       memory-pressure guard bound it. The pool counts toward the child's
@@ -343,7 +344,7 @@ def run_mlx_vlm_server(
             descriptors inherited from the backend, which is what unit tests
             and any caller without a writable log directory get.
         apc_num_blocks: Automatic Prefix Caching pool size in blocks, sized by
-            the parent to cover the allocated window; ``None`` leaves mlx-vlm's
+            the parent to cover the model's trained window; ``None`` leaves mlx-vlm's
             2048-block default. See ``_apply_child_runtime_env``.
         token_queue_timeout_s: The child's per-token wait, sized by the parent
             above its own first-chunk watchdog ceiling; ``None`` leaves
