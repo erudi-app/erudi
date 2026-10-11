@@ -7,9 +7,9 @@ every OS; a provider chosen once per process on ``sys.platform`` gives them:
   critical) and a CUMULATIVE paging counter in bytes, ``damage_total_bytes``
   -- the harm the brake exists for; the caller diffs it between samples.
   ``None`` means no counter on this machine, which is not a zero delta.
-* ``child_footprint_bytes(pid)``: what the child holds, for the unload's share.
 * ``child_anonymous_bytes(pid)``: the child's ANONYMOUS memory (clean
-  file-backed mappings excluded: the mapped weights), for the post-load check.
+  file-backed mappings excluded: the mapped weights), for the unload's share
+  and the post-load check.
 * ``effective_total_ram_bytes()``: the physical RAM the window budget and the
   shares are computed on.
 
@@ -17,7 +17,7 @@ Providers:
 
 * **macOS**: ``kern.memorystatus_vm_pressure_level`` and the swap-outs of
   ``host_statistics64`` (16 KiB pages), through ``process_footprint``; the
-  physical footprint is both the footprint and the anonymous counter.
+  physical footprint is the anonymous counter.
 * **Linux**: PSI, the SYSTEM ``/proc/pressure/memory`` -- our cgroup v2
   ``memory.pressure`` only when the same cgroup's ``memory.max`` is finite (a
   real container: a desktop's systemd scope counts only our own stalls, and an
@@ -26,15 +26,16 @@ Providers:
   ``PSI_MIN_SAMPLE_INTERVAL_S`` passed, else on the kernel's ``avg10``.
   Without PSI (kernel < 4.20, ``CONFIG_PSI=n``, ``psi=0``): the swap-out and
   major-fault rates (``/proc/vmstat``). Damage: ``psutil``'s swap-out bytes.
-  Footprint: USS + swap; anonymous: ``Anonymous:`` + ``Swap:`` of
-  ``/proc/<pid>/smaps_rollup``. RAM: bounded by a finite ``memory.max`` of our
+  Anonymous memory: ``Anonymous:`` + ``Swap:`` of ``/proc/<pid>/smaps_rollup``
+  (USS would count a repacked model's cold mapped pages while they stay
+  resident). RAM: bounded by a finite ``memory.max`` of our
   own cgroup (ancestors are not read).
 * **Windows**: the commit charge from ``GlobalMemoryStatusEx``
   (``1 - ullAvailPageFile / ullTotalPageFile``); the paging counter is PDH's
   ``\\Memory\\Pages Output/sec`` added by its English name (locale-proof),
   read RAW (cumulative pages, 4 KiB); without PDH the tiers stand and the
-  brake decides on the level alone. Footprint and anonymous: the private
-  commit (``memory_info().private``).
+  brake decides on the level alone. Anonymous memory: the private commit
+  (``memory_info().private``).
 
 Every threshold for Linux and Windows is a starting value, to be calibrated
 on real machines. Nothing native is loaded at import: the Windows and macOS
@@ -110,9 +111,6 @@ class _NullProvider:
     def read(self) -> PressureReading:
         return PressureReading(None, None, unavailable=f"no sensor on {sys.platform}")
 
-    def footprint(self, pid: int) -> Optional[int]:
-        return None
-
     def anonymous(self, pid: int) -> Optional[int]:
         return None
 
@@ -134,13 +132,11 @@ class _MacProvider(_NullProvider):
             unavailable=None if level is not None else "kern.memorystatus_vm_pressure_level",
         )
 
-    def footprint(self, pid: int) -> Optional[int]:
+    def anonymous(self, pid: int) -> Optional[int]:
+        """``phys_footprint``: clean file-backed mappings are already out."""
         from src.engines import process_footprint
 
         return process_footprint.footprint(pid)
-
-    # phys_footprint already excludes clean file-backed mappings.
-    anonymous = footprint
 
 
 def _tier(some: float, full: float) -> int:
@@ -291,10 +287,6 @@ class _LinuxProvider(_NullProvider):
             unavailable=None if level is not None else "no PSI, no /proc/vmstat, no swap counter",
         )
 
-    def footprint(self, pid: int) -> Optional[int]:
-        info = psutil.Process(pid).memory_full_info()
-        return int(info.uss) + int(getattr(info, "swap", 0) or 0)
-
     def anonymous(self, pid: int) -> Optional[int]:
         try:
             text = (self._proc / str(pid) / "smaps_rollup").read_text(encoding="ascii")
@@ -410,12 +402,10 @@ class _WindowsProvider(_NullProvider):
                 )
         return PressureReading(level, damage)
 
-    def footprint(self, pid: int) -> Optional[int]:
+    def anonymous(self, pid: int) -> Optional[int]:
+        """The private commit: paged-out KV and a repacked weights copy
+        count, the mapped weights never do."""
         return int(psutil.Process(pid).memory_info().private)
-
-    # The private commit counts paged-out KV and a repacked weights copy, never
-    # the mapped weights.
-    anonymous = footprint
 
 
 def _provider() -> Any:
@@ -473,13 +463,9 @@ def _guarded(read: Callable[[], Optional[int]]) -> Optional[int]:
     return int(value) if isinstance(value, int) and value > 0 else None
 
 
-def child_footprint_bytes(pid: Optional[int]) -> Optional[int]:
-    """What the child holds (the unload's share), or None."""
-    return _guarded(lambda: _provider().footprint(pid)) if pid else None
-
-
 def child_anonymous_bytes(pid: Optional[int]) -> Optional[int]:
-    """The child's anonymous memory (the post-load check), or None."""
+    """The child's anonymous memory (the unload's share, the post-load
+    check), or None."""
     return _guarded(lambda: _provider().anonymous(pid)) if pid else None
 
 

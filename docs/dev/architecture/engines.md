@@ -359,10 +359,10 @@ mis-size.
 **Sensors** (`src/engines/memory_pressure.py`, one provider per OS; every Linux and
 Windows threshold is a starting value to calibrate on real machines):
 
-| | Pressure level (1/2/4) | Paging counter (the damage) | Footprint (unload share) |
+| | Pressure level (1/2/4) | Paging counter (the damage) | Anonymous memory (unload share, post-load check) |
 |---|---|---|---|
 | macOS | `kern.memorystatus_vm_pressure_level` | swap-outs × 16 KiB | `phys_footprint` |
-| Linux | PSI: the system's `/proc/pressure/memory` — our cgroup's `memory.pressure` only inside a real container (finite `memory.max`: a desktop's systemd scope counts only our own stalls, and an idle `llama-server` never stalls). Warning at 10 % of `some` stall, critical at 5 % of `full`, on the fraction since the previous sample when 5 s or more passed, else on `avg10`. Without PSI: swap-out ≥ 8 MiB/s or major faults ≥ 200/s warn, swap-out ≥ 64 MiB/s is critical | swap-out bytes (`psutil`) | USS + swap |
+| Linux | PSI: the system's `/proc/pressure/memory` — our cgroup's `memory.pressure` only inside a real container (finite `memory.max`: a desktop's systemd scope counts only our own stalls, and an idle `llama-server` never stalls). Warning at 10 % of `some` stall, critical at 5 % of `full`, on the fraction since the previous sample when 5 s or more passed, else on `avg10`. Without PSI: swap-out ≥ 8 MiB/s or major faults ≥ 200/s warn, swap-out ≥ 64 MiB/s is critical | swap-out bytes (`psutil`) | `Anonymous:` + `Swap:` of `/proc/<pid>/smaps_rollup` |
 | Windows | Commit charge `1 − ullAvailPageFile / ullTotalPageFile` (`GlobalMemoryStatusEx`): warning at 85 %, critical at 93 % | `\Memory\Pages Output/sec` read raw through PDH by its English name (× 4 KiB) | private commit |
 
 An unreadable level turns the brake off with one WARNING naming why; a missing paging

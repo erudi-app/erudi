@@ -2,8 +2,8 @@
 
 ``src.engines.memory_pressure`` answers the same questions everywhere -- a
 pressure level on the 1/2/4 scale, a cumulative paging counter (the damage
-the brake exists for), the child's footprint and its anonymous memory, the
-machine's physical RAM -- from a provider chosen on ``sys.platform``: macOS
+the brake exists for), the child's anonymous memory (the unload's share and the
+post-load check), the machine's physical RAM -- from a provider chosen on ``sys.platform``: macOS
 (the kernel's pressure level and swap-outs), Linux (PSI, a ``vmstat``
 fallback, cgroup v2 only inside a real container), Windows (the commit
 charge from ``GlobalMemoryStatusEx``, the paging counter from PDH). The
@@ -130,7 +130,6 @@ def test_macos_wraps_the_kernel_level_and_counts_swapouts_in_bytes(monkeypatch):
     reading = provider.read()
     assert reading.level == 2
     assert reading.damage_total_bytes == 10 * 16384
-    assert provider.footprint(1) == 3 * GIB
     # phys_footprint already excludes clean file-backed mappings.
     assert provider.anonymous(1) == 3 * GIB
 
@@ -249,16 +248,6 @@ def test_linux_anonymous_memory_is_read_from_smaps_rollup(tmp_path, monkeypatch)
     assert provider.anonymous(43) is None
 
 
-def test_linux_footprint_is_uss_plus_swap(tmp_path, monkeypatch):
-    provider, *_ = _linux(tmp_path, monkeypatch)
-    monkeypatch.setattr(
-        mp.psutil,
-        "Process",
-        lambda pid: SimpleNamespace(memory_full_info=lambda: SimpleNamespace(uss=GIB, swap=MIB)),
-    )
-    assert provider.footprint(7) == GIB + MIB
-
-
 @pytest.mark.parametrize(
     "limit, expected",
     [(4 * GIB, 4 * GIB), ("max", 16 * GIB), (None, 16 * GIB), (64 * GIB, 16 * GIB)],
@@ -328,15 +317,13 @@ def test_windows_commit_unreadable_has_no_level():
     assert "GlobalMemoryStatusEx" in reading.unavailable
 
 
-def test_windows_footprint_and_anonymous_are_the_private_commit(monkeypatch):
+def test_windows_anonymous_memory_is_the_private_commit(monkeypatch):
     monkeypatch.setattr(
         mp.psutil,
         "Process",
         lambda pid: SimpleNamespace(memory_info=lambda: SimpleNamespace(private=2 * GIB)),
     )
-    provider = _FakeWindows()
-    assert provider.footprint(9) == 2 * GIB
-    assert provider.anonymous(9) == 2 * GIB
+    assert _FakeWindows().anonymous(9) == 2 * GIB
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the native Windows calls")
@@ -399,9 +386,6 @@ def test_the_module_surface_delegates_to_the_provider(monkeypatch):
     class _Fake:
         name = "fake"
 
-        def footprint(self, pid):
-            return pid * 10
-
         def anonymous(self, pid):
             return pid * 20
 
@@ -409,26 +393,23 @@ def test_the_module_surface_delegates_to_the_provider(monkeypatch):
             return 8 * GIB
 
     monkeypatch.setattr(mp, "_PROVIDER", _Fake())
-    assert mp.child_footprint_bytes(3) == 30
     assert mp.child_anonymous_bytes(3) == 60
     assert mp.effective_total_ram_bytes() == 8 * GIB
-    assert mp.child_footprint_bytes(None) is None
+    assert mp.child_anonymous_bytes(None) is None
+    assert not hasattr(mp, "child_footprint_bytes")
 
 
 def test_a_failing_counter_reads_as_none(monkeypatch):
     class _Broken:
         name = "broken"
 
-        def footprint(self, pid):
+        def anonymous(self, pid):
             raise PermissionError("denied")
-
-        anonymous = footprint
 
         def total_ram_bytes(self):
             raise OSError("no")
 
     monkeypatch.setattr(mp, "_PROVIDER", _Broken())
-    assert mp.child_footprint_bytes(3) is None
     assert mp.child_anonymous_bytes(3) is None
     assert mp.effective_total_ram_bytes() is None
 

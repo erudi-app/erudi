@@ -98,7 +98,6 @@ class _World:
         self.level = 1
         self.damage = 0
         self.total = 16 * GIB
-        self.footprint = 6 * GIB
         self.anonymous = None
         self.spawns = []
         self.probe_timeouts = []
@@ -115,7 +114,6 @@ class _World:
             return PressureReading(world.level, world.damage)
 
         monkeypatch.setattr(memory_pressure, "read_pressure", _read_pressure)
-        monkeypatch.setattr(memory_pressure, "child_footprint_bytes", lambda pid: world.footprint)
         monkeypatch.setattr(
             memory_pressure,
             "child_anonymous_bytes",
@@ -435,6 +433,18 @@ def test_two_idle_criticals_unload_and_carry_the_episode(world, caplog):
     assert len(unloads) == 1 and unloads[0].levelno == logging.WARNING
     # The window memory also keeps the cap for the reload.
     assert CPU_Engine._window_memory["erudi-7"]["cap"] == record["cap"]
+
+
+def test_the_unload_share_is_the_child_anonymous_memory(world):
+    _load(world)
+    # A child holding little anonymous memory is not worth an unload.
+    world.anonymous = 100 * MIB
+    world.level = 4
+    CPU_Engine._last_used = datetime.now() - timedelta(seconds=600)
+    CPU_Engine.brake_point("idle")
+    CPU_Engine._model["brake"].last_sample_at -= mb.BRAKE_IDLE_INTERVAL_S
+    assert CPU_Engine.brake_point("idle") == BrakeOutcome()
+    assert CPU_Engine._model is not None
 
 
 # ===================== the window memory and the seeds =====================

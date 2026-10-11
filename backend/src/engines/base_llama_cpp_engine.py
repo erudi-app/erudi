@@ -910,7 +910,8 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
                 )
             return BrakeOutcome()
         total = memory_pressure.effective_total_ram_bytes()
-        footprint = memory_pressure.child_footprint_bytes(handle.get("pid"))
+        # What the child holds, without the mapped weights' clean pages.
+        footprint = memory_pressure.child_anonymous_bytes(handle.get("pid"))
         window = handle.get("context_tokens")
         kv = handle.get("kv_token_bytes")
         current, last = reading.damage_total_bytes, handle.get("damage_last")
