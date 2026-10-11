@@ -25,7 +25,9 @@ Providers:
   stall fraction since the previous sample when at least
   ``PSI_MIN_SAMPLE_INTERVAL_S`` passed, else on the kernel's ``avg10``.
   Without PSI (kernel < 4.20, ``CONFIG_PSI=n``, ``psi=0``): the swap-out and
-  major-fault rates (``/proc/vmstat``). Damage: ``psutil``'s swap-out bytes.
+  major-fault rates (``/proc/vmstat``). Damage: ``psutil``'s swap-out bytes;
+  on a machine without swap, the major faults times the page size (paging is
+  then file pages, the mapped weights, read back from disk).
   Anonymous memory: ``Anonymous:`` + ``Swap:`` of ``/proc/<pid>/smaps_rollup``
   (USS would count a repacked model's cold mapped pages while they stay
   resident). RAM: bounded by a finite ``memory.max`` of our
@@ -50,6 +52,7 @@ so on the llama.cpp engines only: the MLX brake reads ``process_footprint``.
 
 from __future__ import annotations
 
+import mmap
 import os
 import sys
 import time
@@ -274,16 +277,24 @@ class _LinuxProvider(_NullProvider):
 
     def read(self) -> PressureReading:
         try:
-            swapout: Optional[int] = int(psutil.swap_memory().sout)
+            swap = psutil.swap_memory()
+            swapout: Optional[int] = int(swap.sout)
+            has_swap = int(swap.total) > 0
         except Exception:
             # No swap accounting readable: the damage counter is unavailable.
-            swapout = None
+            swapout, has_swap = None, True
         level = self._psi_level()
         if level is None:
             level = self._rates_level_of(swapout)
+        damage = swapout
+        if not has_swap:
+            # Without swap nothing is swapped out: the paging the machine
+            # suffers is file pages (the mapped weights) read back from disk.
+            faults = self._major_faults()
+            damage = faults * mmap.PAGESIZE if faults is not None else None
         return PressureReading(
             level,
-            swapout,
+            damage,
             unavailable=None if level is not None else "no PSI, no /proc/vmstat, no swap counter",
         )
 
@@ -335,7 +346,8 @@ class _WindowsProvider(_NullProvider):
 
         status = _MemoryStatusEx()
         status.dwLength = ctypes.sizeof(_MemoryStatusEx)
-        if not ctypes.windll.kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        if not kernel32.GlobalMemoryStatusEx(ctypes.byref(status)):
             raise OSError(ctypes.get_last_error())
         return int(status.ullAvailPageFile), int(status.ullTotalPageFile)
 

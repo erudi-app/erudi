@@ -14,6 +14,7 @@ CI leg; the native calls themselves run on their own OS only.
 from __future__ import annotations
 
 import logging
+import mmap
 import sys
 from types import SimpleNamespace
 
@@ -77,10 +78,14 @@ def _linux_tree(tmp_path, *, psi=PSI_CALM, cgroup_max=None, cgroup_psi=None, vms
     return proc, cgroup, scope
 
 
-def _linux(tmp_path, monkeypatch, *, sout=0, **tree):
+def _linux(tmp_path, monkeypatch, *, sout=0, swap_total=8 * GIB, **tree):
     proc, cgroup, scope = _linux_tree(tmp_path, **tree)
-    swap = {"sout": sout}
-    monkeypatch.setattr(mp.psutil, "swap_memory", lambda: SimpleNamespace(sout=swap["sout"]))
+    swap = {"sout": sout, "total": swap_total}
+    monkeypatch.setattr(
+        mp.psutil,
+        "swap_memory",
+        lambda: SimpleNamespace(sout=swap["sout"], total=swap["total"]),
+    )
     clock = _Clock()
     provider = mp._LinuxProvider(proc_root=proc, cgroup_root=cgroup, clock=clock)
     return provider, clock, swap, proc, scope
@@ -220,6 +225,22 @@ def test_linux_without_psi_tiers_on_swapout_and_major_fault_rates(tmp_path, monk
     clock.now += 60
     (proc / "vmstat").write_text(f"pgmajfault {100 + 60 * 300}\n")  # 300/s
     assert provider.read().level == 2
+
+
+def test_linux_without_swap_counts_major_faults_as_damage(tmp_path, monkeypatch):
+    """No swap: swap-outs never move, so paging shows as major faults (the
+    mapped weights read back from disk)."""
+    provider, _, _, proc, _ = _linux(
+        tmp_path, monkeypatch, swap_total=0, vmstat="pgmajfault 1000\n"
+    )
+    assert provider.read().damage_total_bytes == 1000 * mmap.PAGESIZE
+    (proc / "vmstat").write_text("pgmajfault 1500\n")
+    assert provider.read().damage_total_bytes == 1500 * mmap.PAGESIZE
+
+
+def test_linux_with_swap_counts_swap_outs_as_damage(tmp_path, monkeypatch):
+    provider, *_ = _linux(tmp_path, monkeypatch, sout=7 * MIB, vmstat="pgmajfault 1000\n")
+    assert provider.read().damage_total_bytes == 7 * MIB
 
 
 def test_linux_nothing_readable_has_no_level(tmp_path, monkeypatch):
