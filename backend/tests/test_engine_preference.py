@@ -180,6 +180,10 @@ class _FakeCheckpointerCM:
         return False
 
 
+async def _no_pressure_task(cls):
+    return None
+
+
 def _stub_startup(monkeypatch):
     handle = SimpleNamespace(
         sqlalchemy_url="postgresql+psycopg://x/erudi",
@@ -209,6 +213,8 @@ async def test_lifespan_emits_the_engine_notice_after_the_catalog(monkeypatch):
     monkeypatch.setattr(config, "LLM_Engine", None, raising=False)
     monkeypatch.setattr(CUDA_Engine, "start_cleanup_task", classmethod(lambda cls: None))
     monkeypatch.setattr(CUDA_Engine, "stop_cleanup_task", classmethod(lambda cls: None))
+    monkeypatch.setattr(CUDA_Engine, "start_pressure_task", classmethod(lambda cls: None))
+    monkeypatch.setattr(CUDA_Engine, "stop_pressure_task", classmethod(_no_pressure_task))
     monkeypatch.setattr(CUDA_Engine, "cleanup", classmethod(lambda cls: None))
     monkeypatch.setattr(
         "src.domains.user_settings.repository.read_inference_backend", lambda: "auto"
@@ -241,6 +247,8 @@ async def test_lifespan_applies_the_cpu_preference_and_stays_quiet(monkeypatch):
     monkeypatch.setattr(config, "LLM_Engine", None, raising=False)
     monkeypatch.setattr(CPU_Engine, "start_cleanup_task", classmethod(lambda cls: None))
     monkeypatch.setattr(CPU_Engine, "stop_cleanup_task", classmethod(lambda cls: None))
+    monkeypatch.setattr(CPU_Engine, "start_pressure_task", classmethod(lambda cls: None))
+    monkeypatch.setattr(CPU_Engine, "stop_pressure_task", classmethod(_no_pressure_task))
     monkeypatch.setattr(CPU_Engine, "cleanup", classmethod(lambda cls: None))
     monkeypatch.setattr(
         "src.domains.user_settings.repository.read_inference_backend", lambda: "cpu"

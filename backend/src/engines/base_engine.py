@@ -46,6 +46,7 @@ from pathlib import Path
 
 from src.core.exceptions import EngineException
 from src.core.logging import logger
+from src.engines.memory_brake import BrakeOutcome
 
 
 class EngineMeta(ABCMeta):
@@ -68,12 +69,13 @@ _NO_NVIDIA_DRIVER_ERRORS = frozenset({"NVMLError_LibraryNotFound", "NVMLError_Dr
 
 
 def _log_monitor_death(task: "asyncio.Task") -> None:
-    """Done callback of the idle-cleanup task: a death nobody awaits is logged."""
+    """Done callback of a background monitor (the idle cleanup, the memory
+    pressure monitor): a death nobody awaits is logged, under the task's name."""
     if task.cancelled():
         return
     exc = task.exception()
     if exc is not None:
-        logger.error(f"Idle cleanup monitor died: {exc}", exc_info=exc)
+        logger.error(f"Background monitor {task.get_name()} died: {exc}", exc_info=exc)
 
 
 # ---------------------------------------------------------------------------
@@ -101,8 +103,9 @@ def _log_monitor_death(task: "asyncio.Task") -> None:
 #   (``src.agents.isolated_stream``), so the node finishes inside the guard.
 #   As defense in depth for any holder that leaves the guard anyway, the
 #   reset task is registered as ``BaseEngine._pending_reset``, and whoever
-#   acquires the lock next (a turn, a title, an llms endpoint, the idle tick)
-#   drains it before doing anything (``BaseEngine._acquire_generation_lock``).
+#   acquires the lock next (a turn, a title, an llms endpoint, an idle tick)
+#   drains it before doing anything (``BaseEngine._acquire_generation_lock``),
+#   and so does the shutdown, before it stops the child.
 #
 # The reset's outcome is logged once, by a done callback, and never re-raised
 # into a caller: a reset never fails a turn.
@@ -153,7 +156,9 @@ async def run_reset_shielded(fn: Any) -> Any:
     cancellation never returns early), then re-raises a cancellation that
     arrived meanwhile. Returns ``fn``'s result, or ``None`` when it raised
     (logged once by the done callback). Every prefix-cache reset path -- the
-    claim of a conversation and the compaction reset -- goes through here.
+    claim of a conversation, the compaction reset and the memory brake's
+    samples (``MLX_Engine.brake_point``, which may reset the cache or move
+    the child's bound) -- goes through here.
     """
     task = asyncio.get_running_loop().create_task(asyncio.to_thread(fn))
     task.add_done_callback(_log_reset_outcome)
@@ -168,11 +173,12 @@ async def run_reset_shielded(fn: Any) -> Any:
     return task.result()
 
 
-async def _drain_pending_reset() -> None:
+async def drain_pending_reset() -> None:
     """Wait for an in-flight reset an earlier lock holder left behind.
 
     Called right after acquiring the generation lock, before the new holder
-    does anything. The reset task's outcome is never re-raised into this
+    does anything, and by the shutdown before it stops the child
+    (``src.core.api.lifespan``). The reset task's outcome is never re-raised into this
     unrelated holder; a cancellation of the holder during the wait is
     re-raised once the reset thread has finished.
     """
@@ -391,6 +397,39 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     def end_memory_window(cls, token: Any, *, abandoned: bool = False) -> Any:
         """Close the window ``token`` opened and record what the turn used.
         No-op here."""
+        return None
+
+    # The memory brake (``src.engines.memory_brake``): only MLX gives memory
+    # back under pressure -- its cache grows with the conversation, while the
+    # llama.cpp engines allocate theirs in full at load. Every hook is a no-op
+    # here; ``brake_point`` is synchronous (it may do blocking HTTP and stop
+    # the child), so the agent layer runs it through ``run_reset_shielded``.
+
+    @classmethod
+    def brake_point(cls, point: str, *, llm_id: Any = None) -> BrakeOutcome:
+        """Take the brake's sample at a safe point (``turn_start`` for
+        ``llm_id``, ``turn_end``, ``idle``) and act on it. No-op here."""
+        return BrakeOutcome()
+
+    @classmethod
+    def consume_brake_notice(cls) -> Optional[str]:
+        """The brake's pending notice for the user, consumed. None here."""
+        return None
+
+    @classmethod
+    def brake_reload_pending(cls, llm_id: Any) -> bool:
+        """Whether the next turn for ``llm_id`` reloads a model the brake
+        unloaded. Never here."""
+        return False
+
+    @classmethod
+    def start_pressure_task(cls) -> None:
+        """Start the idle memory-pressure monitor. No-op here."""
+        return None
+
+    @classmethod
+    async def stop_pressure_task(cls) -> None:
+        """Stop the idle memory-pressure monitor and wait for it. No-op here."""
         return None
 
     # Stored model links that download fine but FAIL TO RUN on this engine
@@ -926,12 +965,12 @@ class BaseEngine(ABC, metaclass=EngineMeta):
 
         Used by ``generation_guard`` and by the idle tick alike. Right after
         acquiring, an in-flight prefix-cache reset left by an earlier holder
-        is drained (``_drain_pending_reset``) before the new holder gets
+        is drained (``drain_pending_reset``) before the new holder gets
         control -- so no prefill, title, model swap or reap can start while
         an orphan reset thread still talks to the child.
         """
         async with cls._generation_lock_for_running_loop():
-            await _drain_pending_reset()
+            await drain_pending_reset()
             yield
 
     @classmethod

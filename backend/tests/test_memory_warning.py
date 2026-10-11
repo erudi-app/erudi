@@ -151,7 +151,11 @@ async def test_the_warning_fires_when_memory_binds_and_the_projection_reaches_85
 
     event = await _warning(state, budget, window, _Engine(window))
 
-    assert event == {"t": "memory_warning", "footprint_bytes": budget.footprint_bytes(projected)}
+    assert event == {
+        "t": "memory_warning",
+        "reason": "bound",
+        "footprint_bytes": budget.footprint_bytes(projected),
+    }
 
 
 async def test_no_warning_under_85_percent_of_the_working_window():
@@ -195,7 +199,11 @@ async def test_a_trained_window_at_the_floor_with_a_tiny_ceiling_warns():
 
     event = await _warning(state, budget, window, _Engine(4096))
 
-    assert event == {"t": "memory_warning", "footprint_bytes": budget.footprint_bytes(projected)}
+    assert event == {
+        "t": "memory_warning",
+        "reason": "bound",
+        "footprint_bytes": budget.footprint_bytes(projected),
+    }
 
 
 async def test_a_llama_cpp_engine_never_warns():
@@ -227,7 +235,11 @@ async def test_the_threshold_is_inclusive_at_85_percent_of_the_window(
     event = await _warning([HumanMessage("hi", id="h")], budget, 1000, _Engine(1000))
 
     if fires:
-        assert event == {"t": "memory_warning", "footprint_bytes": budget.footprint_bytes(850)}
+        assert event == {
+            "t": "memory_warning",
+            "reason": "bound",
+            "footprint_bytes": budget.footprint_bytes(850),
+        }
     else:
         assert event is None
 
