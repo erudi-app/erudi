@@ -243,6 +243,27 @@ describe("ConversationPage memory warning", () => {
   });
 });
 
+describe("ConversationPage memory warning reasons", () => {
+  it.each(["constructor", "toString", "unknown"])(
+    "shows nothing for a reason it does not know (%s)",
+    async (reason) => {
+      const turn = makeControlledStream();
+      tracedFetchMock.mockImplementation(makeRoute([turn]));
+      await renderAndSettle();
+
+      fireEvent.click(screen.getByText("SEND"));
+      await runTurn(turn, [
+        '{"t":"answer","text":"Fine."}\n',
+        `{"t":"memory_warning","reason":"${reason}"}\n`,
+        '{"t":"done"}\n',
+      ]);
+
+      await waitFor(() => expect(screen.getByTestId("answer").textContent).toBe("Fine."));
+      expect(screen.queryByRole("alert")).toBeNull();
+    }
+  );
+});
+
 const RELOAD = "Memory was freed on your Mac; reloading the model to resume the conversation…";
 
 describe("ConversationPage reload state", () => {

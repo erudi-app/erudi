@@ -1177,7 +1177,7 @@ export default function ConversationPage() {
                 (`pressure`); or the pressure comes from other apps
                 (`pressure_external`). An unknown reason shows nothing. Same
                 amber vocabulary as the DragDropArea rejection toast. */}
-            {memoryWarning && MEMORY_WARNING_KEYS[memoryWarning.reason] && (
+            {memoryWarning && Object.hasOwn(MEMORY_WARNING_KEYS, memoryWarning.reason) && (
               <div
                 role="alert"
                 className="mb-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-200 text-xs"
