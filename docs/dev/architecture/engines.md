@@ -80,6 +80,29 @@ the conversation service carry to the chat stream's error event as `code` + `raw
 The backend's own HTTP server binds 27182-27199, below both pools, so the three local
 servers never contend for a port.
 
+## llama-server slots and prompt cache
+
+`BaseLlamaCppEngine._spawn_child` appends the same flags to every `llama-server` it spawns
+(CPU and CUDA alike), after the engine's own argv: `--api-key` (minted per spawn),
+`--no-slots`, `--no-webui`, `-np 1` and `--cache-ram 0`.
+
+`-np 1 --cache-ram 0` makes the child hold **one conversation's KV at a time**, like the MLX
+engine's single-conversation prefix cache (next sections). The upstream defaults are four
+slots and `--cache-ram 8192`, a host-RAM cache of past prompts' full KV state of up to 8 GiB
+that nothing in Erudi counts: each distinct long conversation added roughly its KV size to
+the child's memory (about 1.3 GiB for a 12.5k-token conversation on a small model) and could
+push the machine into swap. With one slot and no prompt cache:
+
+- the follow-up of the **current** conversation still reuses its prefix inside the slot (the
+  child logs the cache hit);
+- going back to an **older** conversation re-reads its history once (a longer first answer);
+- the child's memory no longer grows with each distinct conversation. Under unified KV the
+  window is shared by the slots, so `-np 1` does not change the KV allocated at load.
+
+The single slot is why the first message of a conversation requests its title *before* the
+chat turn (`ConversationPage.jsx`): a title run after the turn would overwrite the
+conversation's KV in the slot and the second message would re-read the whole conversation.
+
 ## Context windows
 
 Two numbers describe "the window", and they must never be confused:

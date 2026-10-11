@@ -89,6 +89,10 @@ non-functional behavior.
 - [ ] When I open an existing conversation, then its **full history** renders in order (my messages right, assistant left as markdown) and the model/settings populate.
 - [ ] When I send a follow-up, then a user bubble appears immediately and the assistant reply streams live; both are saved.
 - [ ] When I send the first message of a new conversation, then a short (2–4 word) **title** appears in the sidebar, free of any reasoning fragments, ideally in the conversation's language.
+- [ ] When I send the first message of a new conversation, then the **title appears in the sidebar before the first answer starts streaming** (the title request runs first, then the chat), and the answer still arrives if the title fails.
+- [ ] When I send a second message in a new conversation on a `llama-server` engine (Windows, Linux), then it reuses the first one's prefix: the answer starts fast and the child's output shows a prompt-cache hit for the conversation instead of a full re-read (the title is requested before the first answer, so it never evicts that prefix).
+- [ ] When I go back to an older conversation after working in another one, then its first answer is slower (the history is re-read once, expected), and the following ones are fast again.
+- [ ] *(Windows, Linux)* When I open and answer several distinct long conversations in turn, then the memory of the `llama-server` child stays flat instead of growing with each conversation (one slot, no prompt cache: `-np 1 --cache-ram 0` in the process arguments).
 - [ ] When I reload the page, then the full text history re-renders from the database.
 
 **Reasoning / thinking models**
