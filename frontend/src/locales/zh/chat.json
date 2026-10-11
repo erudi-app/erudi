@@ -71,6 +71,7 @@
   },
   "message": {
     "firstReplyHint": "首次回复可能会稍慢一些，因为模型正在加载到内存中...",
+    "memoryReload": "已在您的 Mac 上释放内存；正在重新加载模型以继续对话…",
     "imagePlaceholder": "🖼 图片附件",
     "attachmentAlt": "附件 {{index}}",
     "copy": "复制消息",
@@ -116,6 +117,8 @@
     "connectionInterrupted": "生成回复时连接中断。"
   },
   "memoryWarning": {
-    "text": "您机器的内存限制了此对话：模型和此对话合计占用约 {{size}}，几乎是内存允许的全部空间。请开始新对话、一次少发送一些内容，或改用更小的模型。"
+    "bound": "您的 Mac 内存限制了此对话：模型和此对话合计占用约 {{size}}，几乎是内存允许的全部空间。请开始新对话、一次少发送一些内容，或改用更小的模型。",
+    "pressure": "您的 Mac 内存紧张：此对话会更早进行摘要，以保持流畅。",
+    "pressureExternal": "您的 Mac 内存因其他应用而紧张；此对话占用很少。"
   }
 }

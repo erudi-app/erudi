@@ -39,6 +39,12 @@ const ERROR_SENTINEL = "[ERROR_MESSAGE_SYSTEM]";
 // Presentation-only tokens kept out of the JSX tree (they are class names and
 // CSS, not copy).
 const HIDE_SCROLLBAR_CSS = "::-webkit-scrollbar { display: none; }";
+// The amber memory warning's copy, by the `reason` the backend sends.
+const MEMORY_WARNING_KEYS = {
+  bound: "chat:memoryWarning.bound",
+  pressure: "chat:memoryWarning.pressure",
+  pressure_external: "chat:memoryWarning.pressureExternal",
+};
 const alignmentClassFor = (isUser) => (isUser ? "items-end" : "items-start");
 const bubbleClassFor = (isUser, isError) => {
   if (isUser) {
@@ -450,13 +456,19 @@ export default function ConversationPage() {
           let sawError = false;
           let sawDone = false;
           let sawMemoryWarning = false;
+          // The memory brake unloaded the model and this turn reloads it
+          // (`memory_reload`): shown in the pending bubble until the model
+          // speaks (its first answer, thinking or tool event), an error, or
+          // the end of the turn. Notices the backend streams as answer text
+          // come BEFORE it, so they never end it. Never persisted.
+          let reloading = false;
 
           // Push the current accumulators onto the streaming assistant message.
           const flushMessage = () => {
             setMessages((prev) =>
               prev.map((msg) =>
                 msg.id === assistantMessage.id
-                  ? { ...msg, content: answerText, trace: traceEvents.slice() }
+                  ? { ...msg, content: answerText, trace: traceEvents.slice(), reloading }
                   : msg
               )
             );
@@ -467,12 +479,17 @@ export default function ConversationPage() {
               return;
             }
             switch (evt.t) {
+              case "memory_reload":
+                reloading = true;
+                break;
               case "answer":
+                reloading = false;
                 answerText += evt.text || "";
                 break;
               case "thinking":
               case "tool_call":
               case "tool_result":
+                reloading = false;
                 traceEvents.push(evt);
                 break;
               case "error":
@@ -481,6 +498,7 @@ export default function ConversationPage() {
                 // (getDisplayContent / bubbleClass detect the sentinel substring).
                 // The backend error text is already sentinel-prefixed.
                 sawError = true;
+                reloading = false;
                 // The backend has the traceback; this side records that the
                 // turn failed, on which conversation, and the engine's reason.
                 log.error(`Generation failed for conversation ${id}`, {
@@ -500,14 +518,18 @@ export default function ConversationPage() {
                 // Statement about NOW (this machine, this load): page state
                 // only — never appended to the answer text or the trace, so
                 // it survives neither the copy path nor a reload.
+                // The copy follows `reason` (`bound` / `pressure` /
+                // `pressure_external`); `bound` alone quotes a size.
                 sawMemoryWarning = true;
                 setMemoryWarning({
-                  // Conversation + loaded model: what the copy quotes.
+                  reason: evt.reason,
+                  // Conversation + loaded model: what the `bound` copy quotes.
                   footprintBytes: evt.footprint_bytes,
                 });
                 break;
               case "done":
                 sawDone = true;
+                reloading = false;
                 break;
               default:
                 // Unknown event type: ignore for forward compatibility.
@@ -588,6 +610,7 @@ export default function ConversationPage() {
                       content: answerText,
                       trace: sawError ? null : traceEvents.slice(),
                       streaming: false,
+                      reloading: false,
                     }
                   : msg
               )
@@ -987,7 +1010,12 @@ export default function ConversationPage() {
 
               // Show TypingIndicator for assistant messages that are loading, but
               // not once the live trace strip has taken over the pre-answer wait.
-              const showTypingIndicator = !isUser && loading && !msg.content && !showTrace;
+              const showTypingIndicator =
+                !isUser && loading && !msg.content && !showTrace && !msg.reloading;
+              // The model is being reloaded after the memory brake unloaded
+              // it: its own state, independent of the content (a notice the
+              // backend streamed as answer text may already be there).
+              const showReload = !isUser && !!msg.reloading;
 
               // Attached images (this session) render in their OWN panel,
               // separate from the text bubble. `displayText` is the readable
@@ -1088,7 +1116,17 @@ export default function ConversationPage() {
                         </div>
                       ) : (
                         // Assistant normal messages: render markdown
-                        <MarkdownRenderer content={msg.content} />
+                        (msg.content || !showReload) && <MarkdownRenderer content={msg.content} />
+                      )}
+                      {showReload && (
+                        <div className="flex flex-col gap-2">
+                          <div className="flex items-start pt-1">
+                            <TypingIndicator size={8} className="-mt-1" />
+                          </div>
+                          <div className="text-xs text-gray-400 italic mt-1">
+                            {t("chat:message.memoryReload")}
+                          </div>
+                        </div>
                       )}
                     </div>
                   )}
@@ -1132,18 +1170,21 @@ export default function ConversationPage() {
         </div>
         <div className="sticky bottom-0 left-0 right-0 px-10 py-10 backdrop-blur-md flex justify-center w-full">
           <div className="w-full max-w-lg">
-            {/* Amber memory warning: the machine's memory bounds this
-                conversation, and even after auto-compaction had its chance
-                the next request nearly fills that bound. Same amber
-                vocabulary as the DragDropArea rejection toast. */}
-            {memoryWarning && (
+            {/* Amber memory warning, by reason: the Mac's memory bounds this
+                conversation and even after auto-compaction the next request
+                nearly fills that bound (`bound`); the Mac is under memory
+                pressure and the conversation is now summarized earlier
+                (`pressure`); or the pressure comes from other apps
+                (`pressure_external`). An unknown reason shows nothing. Same
+                amber vocabulary as the DragDropArea rejection toast. */}
+            {memoryWarning && MEMORY_WARNING_KEYS[memoryWarning.reason] && (
               <div
                 role="alert"
                 className="mb-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-200 text-xs"
               >
                 <AlertTriangle className="w-4 h-4 flex-shrink-0" />
                 <span>
-                  {t("chat:memoryWarning.text", {
+                  {t(MEMORY_WARNING_KEYS[memoryWarning.reason], {
                     size: formatBytes(memoryWarning.footprintBytes) ?? "?",
                   })}
                 </span>
