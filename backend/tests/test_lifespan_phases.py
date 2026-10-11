@@ -22,6 +22,12 @@ class _FakeEngine:
     def stop_cleanup_task(self):
         pass
 
+    def start_pressure_task(self):
+        pass
+
+    async def stop_pressure_task(self):
+        pass
+
     def cleanup(self):
         pass
 

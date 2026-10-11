@@ -213,6 +213,15 @@ class Decision:
         return tuple(out)
 
 
+@dataclass(frozen=True)
+class BrakeOutcome:
+    """What one safe point did, as the engine reports it: whether it acted,
+    and which action(s) (``"release+shrink"`` when a sample takes two)."""
+
+    acted: bool = False
+    action: Optional[str] = None
+
+
 def _positive(value: Any) -> Optional[int]:
     if isinstance(value, bool) or not isinstance(value, int):
         return None
