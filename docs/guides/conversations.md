@@ -388,6 +388,13 @@ code fences, backticks, wrapping quotes and list markers are stripped, only the 
 consecutive duplicate words are collapsed, and the length is capped. If nothing usable remains, the
 caller keeps the default name.
 
+The app requests the title on the first message of a conversation, **before** the chat request:
+the chat starts once the title stream has ended, whether it succeeded or failed (a failed title
+never delays the answer). The llama.cpp engines keep one conversation's KV in a single slot, and a
+title run after the first turn would overwrite it. The first message therefore waits for the title's own time (the prefill of the
+question, plus the model load when the model is cold) before the chat request starts its attachment
+and Knowledge Base preparation.
+
 ### Read messages
 
 ```bash
@@ -653,7 +660,9 @@ retried on the next turn. When a turn was stopped mid-generation, the next reset
 one-token request so the stopped request is fully settled before the cache is cleared. When the
 client goes away mid-turn, the model call and any reset in progress are finished before the next
 turn, title or idle unload starts. The llama.cpp
-engines (CPU, CUDA) manage their own cache and are untouched by this.
+engines (CPU, CUDA) keep the same shape in their own way: one slot and no prompt cache, so the
+current conversation's follow-up reuses its prefix and an older conversation is re-read once when
+you return to it.
 
 ## The system prompt and the KB budget
 

@@ -143,6 +143,10 @@ class CPU_Engine(BaseLlamaCppEngine):
         OpenAI-style function calling (the agent's calculator tool) —
         without it llama-server never emits ``tool_calls``.
 
+        ``-np 1 --cache-ram 0`` (one slot, no prompt cache) is not here: the
+        shared ``BaseLlamaCppEngine._spawn_child`` appends it, with the
+        authentication flags, to every llama-server it spawns.
+
         ``--reasoning-format`` is deliberately NOT passed (#554): the default
         (``auto``) is llama-server's per-family reasoning extraction into the
         dedicated ``delta.reasoning_content`` stream field -- it knows each
