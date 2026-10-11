@@ -13,7 +13,8 @@ BaseEngine
     ├── MLX_Engine               (mp.Process + mlx_vlm.server, ports 27300-27399)
     └── BaseLlamaCppEngine      ← shared CPU/CUDA: Popen, llama-server resolution,
         │                         GGUF picker, `repetition_penalty → repeat_penalty`
-        ├── CPU_Engine           (Popen + llama-server CPU, -ngl 0, ports 27200-27299)
+        ├── CPU_Engine           (Popen + llama-server CPU, -ngl 0, ports 27200-27299;
+        │                         sizes -c itself, binds the llama.cpp memory brake)
         └── CUDA_Engine          (Popen + llama-server CUDA, -ngl <computed>, 27200-27299)
 ```
 
@@ -126,14 +127,16 @@ mechanisms**, each kept inside its own engine:
 |  | llama-server (CPU / CUDA) | mlx_vlm.server (MLX) |
 |---|---|---|
 | KV allocation | **Fixed upfront**: the whole window's KV cache is allocated (and touched) at load — a ggml architectural fact (static graphs, fixed-shape tensors), linear in the window size | **Native lazy growth**: nothing allocated upfront, the cache grows with the conversation |
-| Window resolution | **Fit at load**: with no `-c`, the server itself resolves the window to the model's trained window and *continuously reduces* it against measured free memory, down to a 4096 floor, logging `context size reduced from X to Y` (`--fit`, ON by default in the pinned b10883) | **Preflight bound at spawn, lowered by memory after load**: the engine reads the trained window from the local artifact's `config.json` (`read_local_generation_hints`) and passes it as `--max-kv-size` — a validator, not a rotating cache. Once the child is up and its base footprint measured, a memory ceiling below the trained window lowers that bound live (see below), down to a 4096 floor; under memory pressure the memory brake moves it again |
-| `ERUDI_CTX` set | Passed verbatim as `-c`; llama-server honours an explicit `-c` unchanged ("no change") | Not read — the bound always comes from the artifact |
+| Window resolution | **CPU: sized by Erudi at spawn** — `-c = min(trained window, what 0.75 × RAM affords)`, folded with the memory brake's cap ([below](#the-window-on-the-cpu-engine)). **CUDA (and CPU when the GGUF header is unreadable): fit at load** — with no `-c`, the server itself resolves the window to the model's trained window and *continuously reduces* it against measured free memory, down to a 4096 floor, logging `context size reduced from X to Y` (`--fit`, ON by default in the pinned b10883) | **Preflight bound at spawn, lowered by memory after load**: the engine reads the trained window from the local artifact's `config.json` (`read_local_generation_hints`) and passes it as `--max-kv-size` — a validator, not a rotating cache. Once the child is up and its base footprint measured, a memory ceiling below the trained window lowers that bound live (see below), down to a 4096 floor; under memory pressure the memory brake moves it again |
+| `ERUDI_CTX` set | Passed verbatim as `-c`; llama-server honours an explicit `-c` unchanged ("no change"), and the CPU memory brake never resizes it | Not read — the bound always comes from the artifact |
 | Overflow behaviour | Honest 400 carrying `n_prompt_tokens` and `n_ctx` | Honest 400 naming the exact budget (`prompt + max generation` vs `MAX_KV_SIZE`); *without* the bound, an oversized prompt would return 200 with silently degenerate output |
 | How the allocated window is known | **Read back after boot**: `_read_server_properties` (called by `_start_server` right after the probe) does one bounded `GET /props` and stamps `default_generation_settings.n_ctx`, `chat_template_caps` and `chat_template` on the handle | **Known at spawn, rewritten when memory binds**: the bound just passed *is* the window; `_read_server_properties` measures the child's base footprint and, when memory binds, stamps the memory bound as the window |
 | No derivable window | Cannot happen — the server always resolves one | No `--max-kv-size` (today's unbounded behaviour, one WARNING); a number is never invented |
 
-Either way, a `/props` failure or a missing window degrades to `context_tokens = None`
-(one WARNING) and the model still loads; consumers treat `None` as "window unknown". A
+Either way, a `/props` failure or a missing window degrades (one WARNING) and the model
+still loads: a llama-server spawned with `-c` keeps the window it was given as
+`context_tokens`, any other child gets `context_tokens = None`, which consumers treat as
+"window unknown". A `/props` window other than the `-c` passed is one WARNING. A
 stopped child clears `context_tokens` on its handle: a dead child holds no KV memory,
 so its allocated window dies with it.
 
@@ -188,7 +191,8 @@ unreadable base is the base measurement's own WARNING when it raised, otherwise 
 line. A lost answer the read-back settles in the child's favour is one WARNING too, and
 the bound is recorded. A failure there never fails the load. A stopped MLX child clears
 the trained window and the memory bound with `context_tokens` (`MLX_Engine`'s own
-`_stop_server_if_running`; the llama.cpp handles never carry those keys).
+`_stop_server_if_running`; on the CPU engine a stopped child has no allocated window, and
+`memory_bound_tokens()` answers `None` with it).
 
 ### The memory brake (MLX)
 
@@ -269,6 +273,154 @@ degraded on its own (see [Logging](../../logging.md)). A reset or a barrier that
 its own WARNING (a release barrier's says the memory release is incomplete) and no brake
 line follows. A shrink or a grow the child did not apply is the applier's WARNING alone,
 and the brake forgets the decision (cap, episode count, notice) as if it never happened.
+
+### The window on the CPU engine
+
+`llama-server` allocates (and touches) the KV cache of its whole window at load, so the
+window it is given is what the child costs for its whole life. The CPU engine chooses it
+itself (`CPU_Engine._prepare_spawn_context`, `src/engines/gguf_memory.py`) rather than
+leaving it to `--fit`, which sizes against total RAM minus 1 GiB on macOS and Linux and
+against the free RAM of the moment on Windows:
+
+```
+budget = 0.75 × physical RAM − weights − 256 MiB
+window = min(trained window, budget / (KV bytes per token + 1 KiB))
+```
+
+rounded down to 256 tokens, never under the 4096 floor (a model whose floor does not fit
+still loads at the floor: the catalog is never gated on RAM), and folded with the memory
+brake's cap for the model (`min(window, cap)`, [below](#the-memory-brake-cpu)). It is
+passed as `-c`; `/props` reads it back.
+
+- **Physical RAM** is `psutil.virtual_memory().total` (`memory_pressure.effective_total_ram_bytes`),
+  bounded on Linux by our own cgroup's `memory.max` when it is finite (a container; a
+  desktop's `max` is ignored, and so are ancestor cgroups). The 0.75 does not subtract
+  the app's other processes (backend, embeddings, Postgres, Electron).
+- **Weights** are the GGUF on disk (every part of a split family) plus the `mmproj` file
+  when the engine loads one. One weights copy is the right term whether the build repacks
+  or not: the CPU build repacks the weights of Erudi's preferred quants into anonymous
+  memory (measured: 603.90 MiB for a 601 MiB Q8_0, 762.55 MiB for a 763 MiB Q4_K_M, with
+  `CPU_REPACK`), after which the mapped file pages go cold; an unrepacked model keeps its
+  mapped pages resident instead.
+- **KV bytes per token** come from the GGUF's KV header (the `gguf` package, imported
+  lazily: the macOS build does not ship it): `Σ over layers (key_length + value_length) ×
+  kv_heads[layer] × 2 B` (f16 cache). Measured on the pinned b10883 with one slot, the
+  `KV buffer size` llama-server prints is exactly `n_ctx ×` that number (Qwen3-0.6B
+  114,688 B/token: 896.00 MiB at 8192 tokens, 3584.00 MiB at 32768; Llama-3.2-1B
+  32,768 B/token: 256.00 / 2048.00 MiB at 8192 / 65536). A hybrid architecture's
+  recurrent layers declare 0 KV heads and count 0.
+- **1 KiB per token** is the Flash-Attention compute buffer: one f16 buffer of
+  `n_ctx × n_ubatch` (the default `n_ubatch` is 512), measured exactly on both bench
+  models (34.01 → 58.01 MiB over 24,576 tokens, 72.01 → 128.01 MiB over 57,344), and
+  independent of the thread count. Its intercept (26 MiB at embedding 1024, 64 MiB at
+  2048) is budgeted at 256 MiB for wider models. The argv keeps `flash_attn = auto`,
+  which resolves to the FA path on the pinned build; without FA the buffer costs about
+  34 KiB per token (290 → 1106 MiB over the same 24,576 tokens).
+- **Shapes the formula does not model.** MLA (DeepSeek lineage, `kv_lora_rank`) is
+  refused: no `-c`, llama-server's fit sizes it. A sliding window (Gemma lineage) keeps
+  the full-attention formula, an over-estimate — such a model gets a smaller window than
+  would fit (Gemma-3-4B on 16 GiB: about 66-71k tokens of its 131k) and its window is
+  never reported as memory-bound, even when memory does bind it. A GGUF whose header
+  cannot be read (or a missing `gguf` package) is one WARNING and no `-c`.
+
+When the budget, not the trained window, binds (and the shape is not a sliding window),
+the window is the child's memory bound: `memory_bound_tokens()` reports it, and the amber
+`bound` notice quotes the child's allocation at load — KV and compute for the window
+plus the weights (`memory_bound_footprint_bytes`). These constants are tied to the pinned
+llama.cpp (its `n_ubatch` default, the f16 KV, the FA graph, the repack set): a
+submodule bump re-measures them (`llama-server -lv 5 -np 1 --cache-ram 0` at two `-c`
+values: the `KV buffer size`, `compute buffer size`, `flash_attn` and `CPU_REPACK`
+lines), and the shipped Windows (OpenBLAS) and Linux builds confirm them in QA.
+
+**The post-load check.** Right after `/props`, the child's anonymous memory —
+`phys_footprint` on macOS, `Anonymous:` + `Swap:` of `/proc/<pid>/smaps_rollup` on Linux,
+the private commit on Windows; all exclude clean file-backed mappings — is compared with
+the prediction: `window × (KV bytes per token + 1 KiB) + 64 MiB` (the measured intercept)
+`+ one weights copy`, times 1.1 plus 256 MiB. Above it is one WARNING naming both numbers
+(`llama-server allocated more than the window budget predicted`), never an action. It
+catches a gross mis-prediction, and a fallback to non-FA attention whenever its cost
+(`window × ~33 KiB`) clears the headroom — reliably for a big window (a 131k window adds
+about 4.3 GiB) or small weights, not for a short window on a heavy model (the 25 % of RAM
+the budget leaves covers that case). It is skipped, with one DEBUG line, when a vision
+projector is loaded: the encoder's compute buffer is not modelled.
+
+### The memory brake (CPU)
+
+`llama-server` cannot give memory back while it runs: nothing frees without a restart
+with a smaller `-c`, and a smaller `-c` always frees. So the CPU engine's brake keeps the
+MLX brake's safe points, pacing, episodes, unload and notices, and replaces the release
+and the useful-shrink test with a **respawn in place**. The law is
+`memory_brake.llama_step`; `BaseLlamaCppEngine._llama_brake_point` executes it and
+`CPU_Engine` binds it (`brake_point`, `begin_memory_window`, `memory_bound_tokens`, the
+respawn-aware `brake_reload_pending`). The CUDA engine binds none of it and its idle
+monitor never starts: its KV sits partly or wholly in VRAM, which a RAM budget would
+mis-size.
+
+**Sensors** (`src/engines/memory_pressure.py`, one provider per OS; every Linux and
+Windows threshold is a starting value to calibrate on real machines):
+
+| | Pressure level (1/2/4) | Paging counter (the damage) | Footprint (unload share) |
+|---|---|---|---|
+| macOS | `kern.memorystatus_vm_pressure_level` | swap-outs × 16 KiB | `phys_footprint` |
+| Linux | PSI: the system's `/proc/pressure/memory` — our cgroup's `memory.pressure` only inside a real container (finite `memory.max`: a desktop's systemd scope counts only our own stalls, and an idle `llama-server` never stalls). Warning at 10 % of `some` stall, critical at 5 % of `full`, on the fraction since the previous sample when 5 s or more passed, else on `avg10`. Without PSI: swap-out ≥ 8 MiB/s or major faults ≥ 200/s warn, swap-out ≥ 64 MiB/s is critical | swap-out bytes (`psutil`) | USS + swap |
+| Windows | Commit charge `1 − ullAvailPageFile / ullTotalPageFile` (`GlobalMemoryStatusEx`): warning at 85 %, critical at 93 % | `\Memory\Pages Output/sec` read raw through PDH by its English name (× 4 KiB) | private commit |
+
+An unreadable level turns the brake off with one WARNING naming why; a missing paging
+counter (PDH denied) is one WARNING too, and the level then decides alone.
+`ERUDI_FORCE_MEMORY_PRESSURE=warning|critical` (QA only) forces the level and paging
+evidence on every sample of the CPU engine.
+
+**The rules**, per pressure episode:
+
+| Action | When | What it does |
+|---|---|---|
+| Shrink | One per episode under warning — with at least 8 MiB of paging since the previous sample, when the machine counts paging — one more once critical; never two without a turn between them; only when the window's KV is 10 % of RAM or more | The cap becomes `max(4096, 0.75 × min(window, cap))`; state only until a respawn applies it |
+| Respawn | The cap is below the allocated window, and: critical, at any safe point; or warning, at an idle sample once the user has been away 120 s (two ticks: a reader between messages pays no re-prefill). At most one per turn: a `turn_start` respawn is not repeated at the same turn's end; the next turn or an idle sample re-arms it | The same model restarts in place with `-c = min(budget window, cap)` |
+| Unload | Idle only: critical at two consecutive idle samples with no turn between them, at most once per episode, never within 600 s of a brake reload (a respawn sets no such grace), only for a child holding 5 % or more of RAM | The idle reap's path; the episode goes to `_brake_reload` |
+| Grow | Outside an episode, every 3 calm samples (the MLX rule) | State only: never a respawn. The larger window applies at the next spawn of the model |
+
+A window KV under 10 % of RAM means the pressure is not ours: the notice is `external`
+(never over `acted`, never on a child a brake reload seeded), and nothing shrinks. A
+shrink sets `acted`; a warning shrink held back for want of paging sets no notice at all.
+A cap the episode never applied (pressure ended before a respawn) is dropped when the
+episode ends; the window that hurt is kept. With `ERUDI_CTX` pinned nothing is resized and
+no `acted` notice is drawn; the unload still applies.
+
+**The respawn.** Under the generation lock (the sample runs shielded, like every brake
+sample), the engine stops the child, picks a port and starts the same GGUF; the spawn
+context reads the cap from the window memory, so the new `-c` is the reduced window.
+`_model_id`, the tokenizer and the idle clock are kept (the 300 s reap still sees an
+abandoned child); the brake state is carried whole — episode, cap, notice, the
+critical-unload clock — with no reload grace. One INFO line,
+`[CPU_Engine] Memory brake: point=..., level=..., action=shrink+respawn, window=A->B, footprint_mib=...`.
+A warm reload answers in 1-2 s, during which the transient peak is about two weights
+copies (the old file pages, reclaimable, and the new repacked copy); at `turn_end` the
+turn's last events wait for it. The respawn's readiness probe is bounded by 30 s
+(`LLAMA_RESPAWN_PROBE_TIMEOUT_S`, passed to `_start_server` → `_probe_ready` for this
+spawn only). **Degraded chain under critical pressure:** critical pressure usually evicts
+the page cache, a big model may reload from disk and miss the 30 s; the respawn then
+fails like an unload — the child is stopped, the engine state cleared, the episode
+recorded in `_brake_reload` — with one WARNING (`action=respawn-failed (...)`; the model
+reloads at the next message), which under critical pressure frees the most; the next
+message shows the reload state and spawns with the reduced window, and a second failure
+surfaces as the load error it is.
+
+**The reload state.** A respawn marks the new child (`brake_respawned`): a respawn at
+`turn_start` is said in that same turn (the runner yields `memory_reload` before it
+resolves the model, unless the turn already announced a reload); one at `turn_end` or
+idle is said by the next turn, through `brake_reload_pending`. The turn's
+`begin_memory_window` consumes the mark.
+
+**Three carries.** The live state crosses a respawn whole (`BrakeState.respawned`). An
+unload carries the episode to the next spawn of the same model (`_brake_reload`, 30
+minutes, forgotten by any successful spawn, a reap and the shutdown). And every change
+of the cap or of the window that hurt is written through to a per-model **window
+memory** (`_window_memory`, keyed by alias, 30 minutes from its last write, checked at
+every read; an entry whose cap and faulty window are both gone is deleted). Every spawn
+of the model — a brake reload, a swap back, a reap's reload, a crash respawn — reads it:
+the cap folds into `-c` and seeds the brake (an unload's record seeds first). A reap
+forgets the unload's record, never the window memory, so growth never returns to 90 % of
+the window that hurt while it is remembered, whatever reloads happen.
 
 `BaseLlamaCppEngine._find_llama_server` tries the configured flavour first and falls back
 to the other one: a CUDA-built artifact runs CPU inference fine, whereas the CPU artifact
@@ -352,9 +504,10 @@ it has been idle for longer than `_max_idle_time` (300 seconds, `base_engine.py`
 A generation in flight cannot be reaped because the idle tick (`_cleanup_tick`) takes the
 same lock as `generation_guard`, through the same `_acquire_generation_lock`: it waits until
 the generation releases the lock, by which point `_last_used` has been refreshed to the end
-of that generation. On Apple Silicon a second monitor, `start_pressure_task()`, takes the
-memory brake's idle samples every 60 seconds under the same lock (see
-[The memory brake](#the-memory-brake-mlx)); on the llama.cpp engines it is a no-op.
+of that generation. On Apple Silicon and on the CPU engine a second monitor, `start_pressure_task()`, takes
+the memory brake's idle samples every 60 seconds under the same lock (see
+[The memory brake (MLX)](#the-memory-brake-mlx) and [(CPU)](#the-memory-brake-cpu)); on
+CUDA it never starts (it starts only for an engine that overrides `brake_point`).
 
 ## Embeddings
 
