@@ -340,7 +340,12 @@ class _WindowsProvider(_NullProvider):
         return int(status.ullAvailPageFile), int(status.ullTotalPageFile)
 
     def _pdh_pages_output(self) -> int:
-        """The raw (cumulative) value of ``\\Memory\\Pages Output/sec``."""
+        """The raw (cumulative) value of ``\\Memory\\Pages Output/sec``: pages
+        written to the page file. Added by its English name, which resolves on
+        a localized Windows too (looking the name up by counter index with
+        ``PdhLookupPerfNameByIndexW`` is the alternative route). Not
+        ``Page Faults/sec``, which mixes in soft faults; not ``psutil``'s
+        ``sout``, always 0 on Windows."""
         import ctypes
         from ctypes import wintypes
 
