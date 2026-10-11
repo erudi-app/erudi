@@ -335,9 +335,7 @@ class TestSpawnSingleSlotNoPromptCache:
         return argv[argv.index(flag) + 1]
 
     @pytest.mark.parametrize("erudi_ctx", [None, "8192"])
-    def test_cpu_argv_pins_one_slot_and_no_prompt_cache(
-        self, tmp_path, monkeypatch, erudi_ctx
-    ):
+    def test_cpu_argv_pins_one_slot_and_no_prompt_cache(self, tmp_path, monkeypatch, erudi_ctx):
         if erudi_ctx is None:
             monkeypatch.delenv("ERUDI_CTX", raising=False)
         else:
