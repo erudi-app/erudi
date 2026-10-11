@@ -32,8 +32,9 @@ must not shrink the window to the floor nor release every minute):
   critical, never two without a turn between them, and only when it is useful
   -- the last turn's largest request reaches the compaction threshold of the
   shrunk window, so the next turn compacts and frees KV.
-* **Unload** (idle only): critical at two idle samples in a row with no turn
-  between them, at most once per episode (a brake reload carries the
+* **Unload** (idle only): critical at two consecutive idle samples with no
+  turn between them (a calm or warning idle sample in between starts over),
+  at most once per episode (a brake reload carries the
   episode), never within ``RELOAD_GRACE_S`` of a brake reload, and only when
   the child is worth it (``UNLOAD_MIN_SHARE`` of the memory total).
 * **Grow** (outside an episode): every ``CALM_SAMPLES_TO_GROW`` calm samples,
@@ -47,8 +48,9 @@ must not shrink the window to the floor nor release every minute):
   its episode ends. A release alone sets no notice: the user loses nothing
   visible. The notice waits for a stateful turn end to consume it.
 
-Idle samples are paced: one is skipped within ``BRAKE_IDLE_INTERVAL_S`` of the
-last sample or of the end of the last turn.
+Idle samples are paced: one is skipped within ``BRAKE_IDLE_INTERVAL_S`` (less a
+few seconds of tolerance, ``IDLE_PACING_TOLERANCE_S``) of the last sample or of
+the end of the last turn.
 """
 
 from __future__ import annotations
@@ -64,6 +66,10 @@ CALM_SAMPLES_TO_END = 2
 CALM_SAMPLES_TO_GROW = 3
 CALM_SAMPLES_TO_FORGET = 10
 BRAKE_IDLE_INTERVAL_S = 60
+# The idle monitor's period IS the pacing interval, so a tick that comes a
+# few seconds short of it (scheduling jitter, the lock) is still the next
+# sample, not one to skip.
+IDLE_PACING_TOLERANCE_S = 5
 # Below the 300 s idle reap, above a reading pause.
 WARNING_RELEASE_IDLE_S = 180
 RELOAD_GRACE_S = 600
@@ -256,7 +262,7 @@ def step(state: BrakeState, sample: Sample, context: Context) -> Decision:
     # 1. Idle pacing.
     if sample.point == POINT_IDLE:
         marks = [mark for mark in (state.last_sample_at, sample.last_used) if mark is not None]
-        if marks and sample.now - max(marks) < BRAKE_IDLE_INTERVAL_S:
+        if marks and sample.now - max(marks) < BRAKE_IDLE_INTERVAL_S - IDLE_PACING_TOLERANCE_S:
             return Decision(state=state, level=level, skipped=True)
     # 1b. The turn seen since the previous sample: no unload across it, and
     # the next shrink is allowed.
@@ -268,6 +274,10 @@ def step(state: BrakeState, sample: Sample, context: Context) -> Decision:
     # 2. An unreadable sensor: nothing.
     if level is None:
         return Decision(state=state)
+    # An unload needs two CONSECUTIVE idle criticals: any other idle sample
+    # forgets the previous one.
+    if sample.point == POINT_IDLE and level != LEVEL_CRITICAL:
+        state.critical_idle_at = None
     window = _positive(context.window) or _positive(context.ceiling)
     if window is None:
         # Neither a working window nor a memory ceiling: inert.

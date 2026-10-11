@@ -276,6 +276,17 @@ def test_a_turn_between_two_idle_criticals_prevents_the_unload(abandoned):
     assert child.sample(mb.POINT_IDLE, 210.0, CRITICAL).unload
 
 
+@pytest.mark.parametrize("between", [WARNING, CALM])
+def test_an_unload_needs_two_consecutive_idle_criticals(between):
+    child = _Child()
+    child.turn(0.0, 10.0, WARNING)
+    child.sample(mb.POINT_IDLE, 70.0, CRITICAL)
+    child.sample(mb.POINT_IDLE, 130.0, between)
+    assert child.state.critical_idle_at is None
+    assert not child.sample(mb.POINT_IDLE, 190.0, CRITICAL).unload
+    assert child.sample(mb.POINT_IDLE, 250.0, CRITICAL).unload
+
+
 def test_an_unload_happens_once_per_episode():
     state = BrakeState(in_episode=True, critical_idle_at=900.0, unloaded_this_episode=True)
     decision = _one(state, level=CRITICAL)
@@ -494,11 +505,21 @@ def test_an_unreadable_sensor_does_nothing():
 def test_an_idle_tick_right_after_a_turn_is_skipped():
     child = _Child()
     child.turn(0.0, 10.0, WARNING)
-    skipped = child.sample(mb.POINT_IDLE, 10.0 + BRAKE_IDLE_INTERVAL_S - 1, CRITICAL)
+    skipped = child.sample(mb.POINT_IDLE, 10.0 + 30.0, CRITICAL)
     assert skipped.skipped
     assert skipped.actions == ()
     taken = child.sample(mb.POINT_IDLE, 10.0 + BRAKE_IDLE_INTERVAL_S, CRITICAL)
     assert not taken.skipped
+
+
+def test_the_pacing_tolerates_a_tick_that_comes_a_little_early():
+    # The monitor's period IS the interval: a tick a few seconds short of it
+    # (scheduling jitter, the lock) is still the next sample, not a skip.
+    assert mb.IDLE_PACING_TOLERANCE_S == 5
+    state = BrakeState(last_sample_at=1000.0)
+    early = 1000.0 + BRAKE_IDLE_INTERVAL_S - mb.IDLE_PACING_TOLERANCE_S
+    assert not _one(state, now=early, last_used=0.0).skipped
+    assert _one(state, now=early - 0.5, last_used=0.0).skipped
 
 
 def test_idle_samples_are_paced_on_the_last_sample_too():
