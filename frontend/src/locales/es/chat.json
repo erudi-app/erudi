@@ -71,6 +71,7 @@
   },
   "message": {
     "firstReplyHint": "La primera respuesta puede tardar un poco más mientras el modelo se carga en memoria...",
+    "memoryReload": "Se liberó memoria en su Mac; recargando el modelo para retomar la conversación…",
     "imagePlaceholder": "🖼 imagen adjunta",
     "attachmentAlt": "adjunto {{index}}",
     "copy": "Copiar mensaje",
@@ -116,6 +117,8 @@
     "connectionInterrupted": "La conexión se interrumpió mientras se generaba la respuesta."
   },
   "memoryWarning": {
-    "text": "La memoria de su equipo limita esta conversación: el modelo y esta conversación ocupan juntos alrededor de {{size}}, casi todo el espacio que permite la memoria. Inicie una nueva conversación, envíe menos a la vez o cambie a un modelo más pequeño."
+    "bound": "La memoria de su Mac limita esta conversación: el modelo y esta conversación ocupan juntos alrededor de {{size}}, casi todo el espacio que permite la memoria. Inicie una nueva conversación, envíe menos a la vez o cambie a un modelo más pequeño.",
+    "pressure": "La memoria de su Mac está bajo presión: esta conversación se resume antes para mantener la fluidez.",
+    "pressureExternal": "La memoria de su Mac está bajo presión por otras aplicaciones; esta conversación usa poca."
   }
 }

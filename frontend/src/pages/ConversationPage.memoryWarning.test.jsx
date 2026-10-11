@@ -3,13 +3,19 @@ import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
 
-// The amber memory warning:
-//  - a `memory_warning` stream event renders an amber alert near the composer
-//    with the localized copy and the approximate memory the model and the
-//    conversation take together (`footprint_bytes`, the payload's one field);
+// The amber memory warning and the reload state:
+//  - a `memory_warning` stream event renders an amber alert near the composer,
+//    its copy chosen by `reason`: `bound` quotes the approximate memory the
+//    model and the conversation take together (`footprint_bytes`); `pressure`
+//    says the conversation is now summarized earlier; `pressure_external`
+//    says other apps cause the pressure;
 //  - the warning is transient state only: it never lands in the answer bubble
 //    (so it cannot be copied with the message) and a LATER turn that carries
-//    no warning clears it.
+//    no warning clears it;
+//  - a `memory_reload` event (the memory brake unloaded the model) shows a
+//    reload state in the pending assistant bubble -- even below a notice
+//    already streamed as answer text -- until the model's first thinking,
+//    answer or tool event, an error, or the end of the turn.
 
 const { tracedFetchMock, navigateMock, locationMock, paramsMock } = vi.hoisted(() => ({
   tracedFetchMock: vi.fn(),
@@ -147,13 +153,13 @@ describe("ConversationPage memory warning", () => {
     fireEvent.click(screen.getByText("SEND"));
     await runTurn(turn, [
       '{"t":"answer","text":"Fine."}\n',
-      '{"t":"memory_warning","footprint_bytes":4294967296}\n',
+      '{"t":"memory_warning","reason":"bound","footprint_bytes":4294967296}\n',
       '{"t":"done"}\n',
     ]);
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain(
-      "Your machine's memory limits this conversation: the model and this conversation " +
+      "Your Mac's memory limits this conversation: the model and this conversation " +
         "together take about 4.0 GB, nearly all the room memory allows."
     );
     // Never part of the message content (so never in the copy path).
@@ -172,7 +178,7 @@ describe("ConversationPage memory warning", () => {
     fireEvent.click(screen.getByText("SEND"));
     await runTurn(first, [
       '{"t":"answer","text":"Long."}\n',
-      '{"t":"memory_warning","footprint_bytes":1048576}\n',
+      '{"t":"memory_warning","reason":"bound","footprint_bytes":1048576}\n',
       '{"t":"done"}\n',
     ]);
     await screen.findByRole("alert");
@@ -198,7 +204,7 @@ describe("ConversationPage memory warning", () => {
     fireEvent.click(screen.getByText("SEND"));
     await runTurn(turn, [
       '{"t":"answer","text":"Long."}\n',
-      '{"t":"memory_warning","footprint_bytes":1048576}\n',
+      '{"t":"memory_warning","reason":"bound","footprint_bytes":1048576}\n',
       '{"t":"done"}\n',
     ]);
     await screen.findByRole("alert");
@@ -209,5 +215,130 @@ describe("ConversationPage memory warning", () => {
     await waitFor(() => {
       expect(screen.queryByRole("alert")).toBeNull();
     });
+  });
+
+  it.each([
+    [
+      "pressure",
+      "Your Mac's memory is under pressure: this conversation is summarized earlier to keep things fluid.",
+    ],
+    [
+      "pressure_external",
+      "Your Mac's memory is under pressure from other apps; this conversation uses little of it.",
+    ],
+  ])("renders the %s copy, with no size to quote", async (reason, copy) => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await runTurn(turn, [
+      '{"t":"answer","text":"Fine."}\n',
+      `{"t":"memory_warning","reason":"${reason}"}\n`,
+      '{"t":"done"}\n',
+    ]);
+
+    const alert = await screen.findByRole("alert");
+    expect(alert.textContent).toBe(copy);
+  });
+});
+
+describe("ConversationPage memory warning reasons", () => {
+  it.each(["constructor", "toString", "unknown"])(
+    "shows nothing for a reason it does not know (%s)",
+    async (reason) => {
+      const turn = makeControlledStream();
+      tracedFetchMock.mockImplementation(makeRoute([turn]));
+      await renderAndSettle();
+
+      fireEvent.click(screen.getByText("SEND"));
+      await runTurn(turn, [
+        '{"t":"answer","text":"Fine."}\n',
+        `{"t":"memory_warning","reason":"${reason}"}\n`,
+        '{"t":"done"}\n',
+      ]);
+
+      await waitFor(() => expect(screen.getByTestId("answer").textContent).toBe("Fine."));
+      expect(screen.queryByRole("alert")).toBeNull();
+    }
+  );
+});
+
+const RELOAD = "Memory was freed on your Mac; reloading the model to resume the conversation…";
+
+describe("ConversationPage reload state", () => {
+  const push = async (stream, line) => {
+    await act(async () => {
+      stream.push(line);
+    });
+  };
+
+  it("shows while the model reloads and ends at its first answer", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await push(turn, '{"t":"memory_reload"}\n');
+    expect(await screen.findByText(RELOAD)).toBeTruthy();
+
+    await push(turn, '{"t":"answer","text":"Back."}\n');
+    await waitFor(() => expect(screen.queryByText(RELOAD)).toBeNull());
+    await act(async () => {
+      turn.end();
+    });
+  });
+
+  it("stays below a notice already streamed as answer text", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await push(turn, '{"t":"answer","text":"An image was ignored."}\n');
+    await push(turn, '{"t":"memory_reload"}\n');
+    expect(await screen.findByText(RELOAD)).toBeTruthy();
+    expect(screen.getByTestId("answer").textContent).toBe("An image was ignored.");
+
+    await push(turn, '{"t":"thinking","text":"hm"}\n');
+    await waitFor(() => expect(screen.queryByText(RELOAD)).toBeNull());
+    await act(async () => {
+      turn.end();
+    });
+  });
+
+  it.each([
+    ["an error", '{"t":"error","text":"[ERROR_MESSAGE_SYSTEM] The model could not load."}\n'],
+    ["the end of the turn", '{"t":"done"}\n'],
+  ])("ends on %s", async (_label, line) => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await push(turn, '{"t":"memory_reload"}\n');
+    expect(await screen.findByText(RELOAD)).toBeTruthy();
+
+    await push(turn, line);
+    await waitFor(() => expect(screen.queryByText(RELOAD)).toBeNull());
+    await act(async () => {
+      turn.end();
+    });
+  });
+
+  it("never lands in the message content", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await runTurn(turn, [
+      '{"t":"memory_reload"}\n',
+      '{"t":"answer","text":"Back."}\n',
+      '{"t":"done"}\n',
+    ]);
+
+    await waitFor(() => expect(screen.getByTestId("answer").textContent).toBe("Back."));
+    expect(screen.queryByText(RELOAD)).toBeNull();
   });
 });

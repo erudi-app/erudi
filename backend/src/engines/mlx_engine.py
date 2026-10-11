@@ -32,6 +32,9 @@ Architecture:
     │      → wait_port_closed → super().cleanup()                   │
     └───────────────────────────────────────────────────────────────┘
 
+The memory brake (``brake_point``, see the section below) gives memory back
+under macOS memory pressure, at turn boundaries and from an idle monitor.
+
 Where the child's output goes:
     An `mp.Process` has no output pipe, so the child redirects its own stdout
     and stderr into `logs/mlx-child-<port>.log` (`mlx_child_log`, wired in
@@ -89,6 +92,8 @@ Warning:
 
 from __future__ import annotations
 
+import asyncio
+import functools
 import math
 import multiprocessing as mp
 import os
@@ -97,13 +102,17 @@ import re
 import secrets
 import subprocess
 import time  # used by hardware warm-up loop
+from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, ClassVar, Dict, Optional, Tuple, Union
 
 import requests
 
 from src.engines.base_chat_server_engine import BaseChatServerEngine
+from src.engines.base_engine import _log_monitor_death, run_reset_shielded
 from src.engines._mlx_vlm_server_runner import run_mlx_vlm_server
+from src.engines import memory_brake
+from src.engines.memory_brake import BrakeOutcome, BrakeState
 from src.engines import mlx_child_log as child_log
 from src.core.logging import logger
 from src.core.exceptions import (
@@ -370,9 +379,10 @@ class MLX_Engine(BaseChatServerEngine):
         # both in hand. No derivable window: no flag (today's unbounded
         # behaviour), never an invented number. The bound is a per-request
         # validator mlx_vlm re-reads at call time, so when the machine's memory
-        # binds below it, `_read_server_properties` lowers it ONCE per child
-        # through `PATCH /v1/settings`, right after the base footprint is
-        # measured (no respawn); when the model window binds, nothing runs.
+        # binds below it, `_read_server_properties` lowers it through
+        # `PATCH /v1/settings` right after the base footprint is measured (no
+        # respawn), and the memory brake moves it again under memory pressure;
+        # when the model window binds, nothing runs.
         context_tokens = cls._trained_window_of(model_path)
         # Automatic Prefix Caching pool + the aligned child token-queue timeout,
         # both derived from the window here (the one moment the artifact and the
@@ -597,7 +607,13 @@ class MLX_Engine(BaseChatServerEngine):
             handle["abandoned"] = True
 
     @classmethod
-    def _reset_prefix_cache(cls, handle: Dict[str, Any], *, reason: str) -> bool:
+    def _reset_prefix_cache(
+        cls,
+        handle: Dict[str, Any],
+        *,
+        reason: str,
+        barrier_timeout_s: Optional[float] = None,
+    ) -> bool:
         """Reset the child's prefix cache; True on success. Never raises.
 
         Acts on ``handle`` only (the caller read ``cls._model`` once). After
@@ -606,11 +622,14 @@ class MLX_Engine(BaseChatServerEngine):
         failure is ONE warning and the owner ``<dirty>``, so the next claim
         retries. A child without a prefix cache answers 200
         ``{"enabled": false}``: a success with nothing to clear.
+        ``barrier_timeout_s`` bounds that barrier below the first-chunk
+        ceiling (the memory brake's release: a shielded release must never
+        hold a shutdown that long).
         """
         api_key = handle.get("api_key")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
         if handle.get("abandoned"):
-            if not cls._send_barrier(handle, headers, reason=reason):
+            if not cls._send_barrier(handle, headers, reason=reason, timeout_s=barrier_timeout_s):
                 handle["prefix_owner"] = cls._PREFIX_OWNER_DIRTY
                 return False
             handle["abandoned"] = False
@@ -638,21 +657,45 @@ class MLX_Engine(BaseChatServerEngine):
         logger.info(f"Prefix cache reset: reason={reason}")
         return True
 
+    # What a failed barrier costs, by purpose: a claim's barrier defers the
+    # reset to the next claim; the memory brake's release barrier leaves
+    # MLX's buffer cache to a later release.
+    _BARRIER_FAILURE_OUTCOMES = {
+        "claim": "reset deferred to the next claim",
+        "release": "memory release incomplete, a later release returns it",
+    }
+
     @classmethod
     def _send_barrier(
-        cls, handle: Dict[str, Any], headers: Optional[Dict[str, str]], *, reason: str
+        cls,
+        handle: Dict[str, Any],
+        headers: Optional[Dict[str, str]],
+        *,
+        reason: str,
+        purpose: str = "claim",
+        timeout_s: Optional[float] = None,
     ) -> bool:
         """One 1-token request, the readiness ping's shape; True on success.
 
         It proves a cancelled request has settled only because the child runs
         one sequence at a time (``MLX_VLM_MAX_NUM_SEQS=1``, see the section
-        comment above). Bounded by the first-chunk ceiling for this child's
-        window: the barrier may queue behind the last step of a cancelled
-        prefill, and that step can legitimately last as long as a long
-        prefill does.
+        comment above). Bounded by default by the first-chunk ceiling for
+        this child's window: the barrier may queue behind the last step of a
+        cancelled prefill, and that step can legitimately last as long as a
+        long prefill does. ``timeout_s`` bounds it tighter (the memory brake).
+
+        It is NON-streamed on purpose: mlx_vlm's non-streamed chat handler
+        clears MLX's buffer cache after generation, which makes this request
+        the second half of the memory brake's release (``purpose="release"``).
         """
         from src.agents.chat_model import first_chunk_ceiling_s
 
+        outcome = cls._BARRIER_FAILURE_OUTCOMES[purpose]
+        timeout = (
+            timeout_s
+            if timeout_s is not None
+            else first_chunk_ceiling_s(handle.get("context_tokens"))
+        )
         try:
             resp = requests.post(
                 f"{handle.get('base_url')}/v1/chat/completions",
@@ -664,18 +707,18 @@ class MLX_Engine(BaseChatServerEngine):
                     "stream": False,
                 },
                 headers=headers,
-                timeout=first_chunk_ceiling_s(handle.get("context_tokens")),
+                timeout=timeout,
             )
         except requests.RequestException as exc:
             logger.warning(
                 f"[MLX_Engine] Prefix cache barrier failed ({type(exc).__name__}); "
-                f"reset deferred to the next claim: reason={reason}"
+                f"{outcome}: reason={reason}"
             )
             return False
         if resp.status_code >= 400:
             logger.warning(
                 f"[MLX_Engine] Prefix cache barrier failed (HTTP {resp.status_code}); "
-                f"reset deferred to the next claim: reason={reason}"
+                f"{outcome}: reason={reason}"
             )
             return False
         return True
@@ -704,10 +747,19 @@ class MLX_Engine(BaseChatServerEngine):
 
     @classmethod
     def _read_server_properties(cls, handle: Dict[str, Any]) -> None:
-        """The child is up: measure its base footprint, then bound its window
-        by memory when memory binds. Degrades, never raises."""
+        """The child is up: seed its memory brake, measure its base footprint,
+        then bound its window by memory when memory binds. Degrades, never
+        raises.
+
+        The brake is seeded FIRST and unconditionally (the steps after it can
+        stop early): a respawn of the model the brake unloaded carries its
+        episode and its cap, so it resumes with the reduced window. A
+        successful spawn always forgets the unload's record, whichever model
+        it loads."""
         from src.engines import process_footprint
 
+        handle["brake"] = cls._seed_brake(handle)
+        cls._brake_reload = None
         pid = handle.get("pid")
         base_failed = False
         try:
@@ -724,19 +776,23 @@ class MLX_Engine(BaseChatServerEngine):
     # The working window is min(model window, memory ceiling). When the
     # memory ceiling is the binding side, the child itself must enforce it:
     # mlx_vlm re-reads `max_kv_size` per request (a live knob, outside the
-    # reload fingerprint), so the bound is lowered once per child through
-    # `PATCH /v1/settings`, right after the base is measured -- before
-    # anything but the readiness ping reached the child. The bound then IS the
-    # allocated window (`context_tokens`), so every consumer of the allocated
-    # window (model info, first-chunk watchdog, preflight retry, compaction)
-    # is right without knowing about it, exactly as with a llama.cpp window
-    # its fit reduced at load. When the PATCH answer is lost or unreadable,
-    # one `GET /v1/settings` reads the child's live value back, so the handle
-    # never disagrees with what the child enforces. The ceiling is constant
-    # for the life of a child except in the degraded corners below, where the
-    # child stays at its spawn bound and no memory bound is recorded: a total
-    # that resolves only after load, a PATCH the child did not apply, an
-    # unreadable base, unreadable static facts.
+    # reload fingerprint), so the bound is set through `PATCH /v1/settings`,
+    # first right after the base is measured -- before anything but the
+    # readiness ping reached the child -- then again whenever the memory brake
+    # moves its cap (`_apply_memory_bound` takes min(ceiling, brake cap), and
+    # brings the trained window back once memory no longer binds). The bound
+    # IS the allocated window (`context_tokens`), so every consumer of the
+    # allocated window (model info, first-chunk watchdog, preflight retry,
+    # compaction) is right without knowing about it, exactly as with a
+    # llama.cpp window its fit reduced at load. When the PATCH answer is lost
+    # or unreadable, one `GET /v1/settings` reads the child's live value back,
+    # so the handle never disagrees with what the child enforces. The ceiling
+    # itself is constant for the life of a child (its inputs are the base and
+    # static facts measured at load); the bound moves only with the brake's
+    # cap. In the degraded corners the child keeps the window it runs with
+    # and no new bound is recorded: a total that resolves only after load, a
+    # PATCH the child did not apply, an unreadable base, unreadable static
+    # facts.
 
     _SETTINGS_TIMEOUT_S = 2.0
 
@@ -763,19 +819,21 @@ class MLX_Engine(BaseChatServerEngine):
 
     @classmethod
     def _bound_window_by_memory(cls, handle: Dict[str, Any], *, base_failed: bool) -> None:
-        """Lower the child's window to the memory bound when memory binds.
+        """At spawn: lower the child's window to the memory bound when memory
+        binds -- min(ceiling, brake cap), the cap a brake reload carried.
 
         One guard around the whole step (computing the budget reads the
         disk): any failure is one WARNING with the exception's class name,
         the handle unchanged, and the load goes on. Never logs the key, the
         request headers or a response body. ``base_failed``: the base
-        measurement raised and already wrote its WARNING.
+        measurement raised and already wrote its WARNING. Without a measured
+        base the ceiling is not used, but a carried brake cap still applies,
+        so the reload turn already runs with the reduced window.
         """
-        from src.engines.memory_budget import MemoryBudget
-        from src.engines.working_window import kv_bound
-
         try:
-            if handle.get("base_footprint_bytes") is None:
+            state = handle.get("brake")
+            carried_cap = state.cap if isinstance(state, BrakeState) else None
+            if handle.get("base_footprint_bytes") is None and carried_cap is None:
                 # The budget would price the weights on disk instead: not a
                 # number to bound a live child on. One record per failure: a
                 # measurement that raised has written its own.
@@ -784,27 +842,78 @@ class MLX_Engine(BaseChatServerEngine):
                         "[MLX_Engine] Base footprint unknown; the child keeps its spawn window"
                     )
                 return
-            trained = handle.get("trained_context_tokens")
-            ceiling = MemoryBudget.from_handle(cls, handle).tokens_at_ceiling()
-            bound = kv_bound(trained, ceiling)
-            if bound is None:
+            applied = cls._apply_memory_bound(handle)
+            if applied is None or not applied["ok"] or applied["bound"] is None:
                 return
-            if bound != trained and not cls._apply_max_kv_size(handle, bound):
-                return
-            # bound == trained (a trained window at or below the floor): the
-            # child already enforces it since its spawn -- no HTTP call, but
-            # memory binds, and the notice must be able to say so.
-            handle["context_tokens"] = bound
-            handle["memory_bound_tokens"] = bound
+            cap = applied["cap"]
             logger.info(
-                f"[MLX_Engine] Window bounded by memory: trained={trained}, "
-                f"ceiling={ceiling}, bound={bound}"
+                f"[MLX_Engine] Window bounded by memory: trained={applied['trained']}, "
+                f"ceiling={applied['ceiling']}, bound={applied['bound']}"
+                + (f", brake_cap={cap}" if cap is not None else "")
             )
         except Exception as exc:
             logger.warning(
                 f"[MLX_Engine] Memory bound of the window not applied "
                 f"({type(exc).__name__}); the child keeps its spawn window"
             )
+
+    @classmethod
+    def _memory_ceiling(cls, handle: Dict[str, Any]) -> Optional[int]:
+        """The memory ceiling of ``handle``'s child, in tokens -- only on a
+        MEASURED base (the weights-on-disk fallback is no number to bound a
+        live child on). Reads the disk once per child (static facts)."""
+        from src.engines.memory_budget import MemoryBudget
+
+        if handle.get("base_footprint_bytes") is None:
+            return None
+        return MemoryBudget.from_handle(cls, handle).tokens_at_ceiling()
+
+    @classmethod
+    def _apply_memory_bound(cls, handle: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+        """Make the child enforce min(memory ceiling, brake cap), or its
+        trained window once memory no longer binds.
+
+        Returns ``None`` when there is nothing to change, else what it
+        tried: ``bound`` (None: back to the model's window) and ``ok`` --
+        False when the child did not apply it (``_apply_max_kv_size`` wrote
+        the WARNING; the handle is unchanged). A bound equal to the window the
+        child already enforces needs no HTTP call (a trained window at or
+        below the floor: memory binds, and the notice must be able to say
+        so). An unbounded child (no trained window) cannot be given its
+        unbounded window back: it keeps its last bound, no longer recorded as
+        a memory bound. Without a measured base the ceiling is ignored and the
+        cap alone applies. May raise (the budget reads the disk): the callers
+        guard it.
+        """
+        from src.engines.working_window import kv_bound
+
+        trained = handle.get("trained_context_tokens")
+        ceiling = cls._memory_ceiling(handle)
+        state = handle.get("brake")
+        cap = state.cap if isinstance(state, BrakeState) else None
+        limits = [
+            value
+            for value in (ceiling, cap)
+            if isinstance(value, int) and not isinstance(value, bool)
+        ]
+        bound = kv_bound(trained, min(limits) if limits else None)
+        tried = {"trained": trained, "ceiling": ceiling, "cap": cap, "bound": bound}
+        if bound is None:
+            if handle.get("memory_bound_tokens") is None:
+                return None
+            if trained is not None:
+                if handle.get("context_tokens") != trained and not cls._apply_max_kv_size(
+                    handle, trained
+                ):
+                    return {**tried, "ok": False}
+                handle["context_tokens"] = trained
+            handle["memory_bound_tokens"] = None
+            return {**tried, "ok": True}
+        if bound != handle.get("context_tokens") and not cls._apply_max_kv_size(handle, bound):
+            return {**tried, "ok": False}
+        handle["context_tokens"] = bound
+        handle["memory_bound_tokens"] = bound
+        return {**tried, "ok": True}
 
     @classmethod
     def _apply_max_kv_size(cls, handle: Dict[str, Any], bound: int) -> bool:
@@ -845,7 +954,7 @@ class MLX_Engine(BaseChatServerEngine):
             return True
         logger.warning(
             f"[MLX_Engine] Memory bound of the window not applied ({failure}; "
-            f"read back: {read_back}); the child keeps its spawn window"
+            f"read back: {read_back}); the child keeps its current window"
         )
         return False
 
@@ -877,7 +986,7 @@ class MLX_Engine(BaseChatServerEngine):
             value = current.get("max_kv_size") if isinstance(current, dict) else None
         except Exception as exc:
             # Reported in the caller's single WARNING, by class name: a
-            # read-back that fails leaves the handle at its spawn window.
+            # read-back that fails leaves the handle at its current window.
             return None, type(exc).__name__
         if isinstance(value, int) and not isinstance(value, bool):
             return value, f"max_kv_size={value}"
@@ -895,6 +1004,12 @@ class MLX_Engine(BaseChatServerEngine):
         if not isinstance(handle, dict) or not handle.get("pid"):
             return None
         pid = handle["pid"]
+        # Every turn opens a window, abandoned ones included: the brake sees
+        # the turn (no unload across it). The previous turn's largest request
+        # stands until this one's window closes with a size of its own.
+        state = handle.get("brake")
+        if isinstance(state, BrakeState):
+            state.turn_happened = True
         previous = handle.get("memory_window") or {}
         base = handle.get("base_footprint_bytes")
         current = process_footprint.footprint(pid)
@@ -969,7 +1084,15 @@ class MLX_Engine(BaseChatServerEngine):
         an under-prediction. An ABANDONED turn whose call was cut before its
         usage arrived is recorded with ``n_est`` (the client's estimate of the
         call in flight) and no measured ``n``; an estimate never raises the
-        exceeded-prediction WARNING."""
+        exceeded-prediction WARNING.
+
+        Whatever is recorded, the turn's largest request is written to
+        ``handle["last_request_tokens"]`` first: the measured ``n``, else the
+        estimate of the call in flight (``n_est``: an abandoned turn, or one
+        that recovered from an error before any usage arrived, such as a
+        first-chunk timeout); a turn with neither keeps the previous value.
+        The memory brake shrinks the window only when the next turn would
+        compact under it, and a missing SPI or base must not hide that."""
         import time
         import uuid
 
@@ -990,21 +1113,12 @@ class MLX_Engine(BaseChatServerEngine):
             return None
         window["open"] = False
         calls = [call for call in window["calls"] if call["seq"] == window["seq"]]
-        base = handle.get("base_footprint_bytes")
-        if not window.get("spi_started") or base is None:
-            return None
         in_flight = window.get("in_flight")
         n_est = (
             in_flight.get("n_est")
             if isinstance(in_flight, dict) and in_flight.get("seq") == window["seq"]
             else None
         )
-        peak = process_footprint.peak_since(pid, True)
-        child_died = peak is None and not cls._proc_is_alive(handle.get("proc"))
-        measured = bool(calls) or child_died or (abandoned and n_est is not None)
-        if (peak is None and not child_died) or not measured:
-            return None
-        budget = MemoryBudget.from_handle(cls, handle)
         if calls:
             largest = max(calls, key=lambda call: call["n_in"] + call["n_out"])
         else:
@@ -1014,6 +1128,18 @@ class MLX_Engine(BaseChatServerEngine):
             if largest["n_in"] is not None and largest["n_out"] is not None
             else None
         )
+        largest_request = n if n is not None else n_est
+        if largest_request is not None:
+            handle["last_request_tokens"] = largest_request
+        base = handle.get("base_footprint_bytes")
+        if not window.get("spi_started") or base is None:
+            return None
+        peak = process_footprint.peak_since(pid, True)
+        child_died = peak is None and not cls._proc_is_alive(handle.get("proc"))
+        measured = bool(calls) or child_died or (abandoned and n_est is not None)
+        if (peak is None and not child_died) or not measured:
+            return None
+        budget = MemoryBudget.from_handle(cls, handle)
         scale = prior_scale()
         size = n if n is not None else n_est
         predicted = budget.predict(size) if size is not None else None
@@ -1085,6 +1211,409 @@ class MLX_Engine(BaseChatServerEngine):
                     f"residue_bytes={observation['residue_at_start_bytes']}"
                 )
         return observation
+
+    # ======================= THE MEMORY BRAKE =======================
+    #
+    # Under macOS memory pressure the child gives memory back, at SAFE POINTS
+    # only: the start of a turn (for the child that turn will use), its end
+    # (conversation and Arena turns alike), and idle (``_pressure_monitor``,
+    # under the generation lock). Never during a generation. The control law
+    # (``src.engines.memory_brake``) decides from the pressure level, the
+    # turn's swap-outs, the footprint above base and the last turn's largest
+    # request; this section executes it:
+    #
+    # * shrink / grow: the brake's cap moves, and ``_apply_memory_bound`` makes
+    #   the child enforce min(memory ceiling, cap) -- the next turn compacts
+    #   under the smaller window and frees its KV;
+    # * release: the prefix cache is reset, then a NON-streamed 1-token
+    #   request runs, after which mlx_vlm clears MLX's buffer cache (its
+    #   streamed path never does, and the reset alone frees nothing: measured
+    #   on Qwen2.5-0.5B, 1.833 GiB after a streamed 22.9k-token turn, 1.832
+    #   after the reset, 1.054 after the 1-token request, for a 0.727 base).
+    #   Both barriers it may send are bounded by ``RELEASE_BARRIER_TIMEOUT_S``
+    #   so a shielded release never holds a shutdown for long. The prefix
+    #   owner is kept;
+    # * unload (idle only): the reap path, under the lock the idle monitor
+    #   holds; the episode and the cap go to ``_brake_reload``, keyed by the
+    #   model's alias, and the next spawn of that model is seeded with them
+    #   (``_read_server_properties``) -- it resumes with the reduced window
+    #   and takes no second unload in the same episode.
+    #
+    # Every sample runs through ``run_reset_shielded`` (it may talk to the
+    # child): the next lock holder drains it. A sample never raises.
+
+    RELEASE_BARRIER_TIMEOUT_S = 30.0
+
+    # What an unload carries to the next spawn of the same model, or None.
+    # Cleared by any successful spawn, by an idle-timeout reap and at
+    # shutdown (``cleanup``); expires after ``memory_brake.BRAKE_RELOAD_TTL_S``.
+    _brake_reload: ClassVar[Optional[Dict[str, Any]]] = None
+    # The pressure sensor was found unreadable: the brake is off, said once.
+    _brake_sensor_warned: ClassVar[bool] = False
+    _pressure_task: ClassVar[Optional["asyncio.Task"]] = None
+    # Seconds between idle samples. A class attribute so tests run it at speed.
+    _pressure_interval_s: ClassVar[float] = float(memory_brake.BRAKE_IDLE_INTERVAL_S)
+
+    @classmethod
+    def loaded_child_for(cls, llm_id: Any) -> bool:
+        """Whether the loaded child serves ``llm_id`` and is alive. No side
+        effect (``_should_not_reload_model`` logs a dead child's output, and
+        the turn calls it again when it resolves its model)."""
+        handle = cls._model
+        return (
+            cls._model_id == llm_id
+            and isinstance(handle, dict)
+            and cls._proc_is_alive(handle.get("proc"))
+        )
+
+    @classmethod
+    def brake_reload_pending(cls, llm_id: Any) -> bool:
+        """Whether the next turn for ``llm_id`` reloads the model the brake
+        unloaded: a record for its alias, younger than the TTL, and no child
+        loaded."""
+        record = cls._brake_reload
+        if not isinstance(record, dict) or cls._model is not None:
+            return False
+        unloaded_at = record.get("unloaded_at")
+        return (
+            record.get("alias") == f"{cls._server_alias_prefix}{llm_id}"
+            and isinstance(unloaded_at, (int, float))
+            and time.time() - unloaded_at < memory_brake.BRAKE_RELOAD_TTL_S
+        )
+
+    @classmethod
+    def consume_brake_notice(cls) -> Optional[str]:
+        """The loaded child's pending brake notice, consumed (``"acted"`` or
+        ``"external"``); a stateful turn end shows it."""
+        handle = cls._model
+        state = handle.get("brake") if isinstance(handle, dict) else None
+        return state.take_notice() if isinstance(state, BrakeState) else None
+
+    @classmethod
+    def _seed_brake(cls, handle: Dict[str, Any]) -> BrakeState:
+        """The new child's brake: the episode an unload of the same model
+        carried (within the TTL), else a fresh state."""
+        record = cls._brake_reload
+        now = time.time()
+        unloaded_at = record.get("unloaded_at") if isinstance(record, dict) else None
+        if (
+            not isinstance(record, dict)
+            or record.get("alias") != handle.get("alias")
+            or not isinstance(unloaded_at, (int, float))
+            or now - unloaded_at >= memory_brake.BRAKE_RELOAD_TTL_S
+        ):
+            return BrakeState()
+        state = BrakeState.reloaded(record, now=now)
+        logger.info(
+            f"[MLX_Engine] Memory brake carried over the reload: cap={state.cap}, "
+            f"shrinks_this_episode={state.shrinks_this_episode}"
+        )
+        return state
+
+    @classmethod
+    def brake_point(cls, point: str, *, llm_id: Any = None) -> BrakeOutcome:
+        """Take the brake's sample at ``point`` and execute its decision.
+
+        ``turn_start`` samples only when the loaded child is the one the turn
+        for ``llm_id`` will use. Never raises: a failure is ONE WARNING with
+        the exception's class name, and the sample is lost.
+        """
+        try:
+            return cls._brake_point(point, llm_id)
+        except Exception as exc:
+            logger.warning(
+                f"[MLX_Engine] Memory brake sample failed ({type(exc).__name__}): point={point}"
+            )
+            return BrakeOutcome()
+
+    @classmethod
+    def _brake_point(cls, point: str, llm_id: Any) -> BrakeOutcome:
+        from src.engines import process_footprint
+        from src.engines.memory_budget import total_memory_bytes
+        from src.engines.working_window import canonical_working_window
+
+        if point == memory_brake.POINT_TURN_START and not cls.loaded_child_for(llm_id):
+            return BrakeOutcome()
+        handle = cls._model
+        if not isinstance(handle, dict) or not cls._proc_is_alive(handle.get("proc")):
+            return BrakeOutcome()
+        level = process_footprint.pressure_level()
+        if level is None:
+            if not MLX_Engine._brake_sensor_warned:
+                MLX_Engine._brake_sensor_warned = True
+                logger.warning(
+                    "[MLX_Engine] Memory pressure level unreadable "
+                    "(kern.memorystatus_vm_pressure_level); the memory brake is off"
+                )
+            return BrakeOutcome()
+        pid = handle.get("pid")
+        base = handle.get("base_footprint_bytes")
+        footprint = process_footprint.footprint(pid) if pid else None
+        excess = footprint - base if footprint is not None and base is not None else None
+        swapped = None
+        if point == memory_brake.POINT_TURN_END:
+            window = handle.get("memory_window") or {}
+            start, end = window.get("swapouts_start"), process_footprint.swapouts()
+            swapped = end - start if start is not None and end is not None else None
+        ceiling = cls._memory_ceiling(handle)
+        total = total_memory_bytes(cls)
+        state = handle.get("brake")
+        decision = memory_brake.step(
+            state if isinstance(state, BrakeState) else BrakeState(),
+            memory_brake.Sample(
+                point=point,
+                now=time.time(),
+                level=level,
+                swapped_pages=swapped,
+                excess_bytes=excess,
+                last_request_tokens=handle.get("last_request_tokens"),
+                last_used=(
+                    cls._last_used.timestamp() if isinstance(cls._last_used, datetime) else None
+                ),
+            ),
+            memory_brake.Context(
+                window=canonical_working_window(handle.get("context_tokens"), ceiling),
+                ceiling=ceiling,
+                static_window=canonical_working_window(
+                    handle.get("trained_context_tokens"), ceiling
+                ),
+                footprint_share=footprint / total if footprint is not None and total else None,
+            ),
+        )
+        previous = state if isinstance(state, BrakeState) else BrakeState()
+        handle["brake"] = decision.state
+        if not decision.actions:
+            return BrakeOutcome()
+        if decision.unload:
+            cls._brake_unload(handle, decision, point, excess)
+            return BrakeOutcome(acted=True, action="unload")
+        done = []
+        if decision.release:
+            # Settling the footprint takes up to RELEASE_SETTLE_S: only at
+            # idle. At turn_end the lock is held and the turn's last events
+            # wait, so the residual is one read.
+            after = cls._brake_release(handle, settle=point == memory_brake.POINT_IDLE)
+            # A release that failed (or whose residual is unreadable) leaves
+            # ``excess_after_release`` as it was: the next eligible sample
+            # retries, and no ``external`` notice is drawn from it. The
+            # reset's or the barrier's own WARNING is the one record.
+            if after is not None:
+                decision.state.excess_after_release = after
+                done.append("release")
+                cls._log_brake(
+                    logger.info,
+                    point,
+                    decision.level,
+                    "release",
+                    handle.get("context_tokens"),
+                    handle.get("context_tokens"),
+                    f"{cls._mib(excess)}->{cls._mib(after)}",
+                )
+        if decision.cap_change is not None:
+            before = handle.get("context_tokens")
+            if cls._brake_apply_cap(handle, decision, previous, point):
+                done.append(decision.cap_change)
+                cls._log_brake(
+                    logger.info,
+                    point,
+                    decision.level,
+                    decision.cap_change,
+                    before,
+                    handle.get("context_tokens"),
+                    cls._mib(excess),
+                )
+        if not done:
+            return BrakeOutcome()
+        return BrakeOutcome(acted=True, action="+".join(done))
+
+    @classmethod
+    def _brake_apply_cap(
+        cls,
+        handle: Dict[str, Any],
+        decision: "memory_brake.Decision",
+        previous: BrakeState,
+        point: str,
+    ) -> bool:
+        """Make the child enforce the decision's new cap; False when it did
+        not. Then the decision never happened for the brake: a shrink's cap,
+        window that hurt, episode count, turn guard and notice -- or a grow's
+        cap -- go back to what they were, and the applier's WARNING (or this
+        one, for an exception) is the one record."""
+        try:
+            applied = cls._apply_memory_bound(handle)
+        except Exception as exc:
+            logger.warning(
+                f"[MLX_Engine] Memory brake {decision.cap_change} not applied "
+                f"({type(exc).__name__}): point={point}"
+            )
+            applied = {"ok": False}
+        if applied is None or applied["ok"]:
+            return True
+        state = decision.state
+        state.cap = previous.cap
+        if decision.cap_change == "shrink":
+            state.faulty = previous.faulty
+            state.shrinks_this_episode = previous.shrinks_this_episode
+            state.shrunk_since_turn = previous.shrunk_since_turn
+            state.notice = previous.notice
+        return False
+
+    @classmethod
+    def _brake_release(cls, handle: Dict[str, Any], *, settle: bool) -> Optional[int]:
+        """Reset the prefix cache, then send the non-streamed barrier that
+        makes mlx_vlm clear MLX's buffer cache; returns what the child keeps
+        above base afterwards -- only when both succeeded and the footprint
+        is readable, else None. A failure is the reset's or the barrier's own
+        WARNING. ``settle``: read the residual over ``RELEASE_SETTLE_S`` (idle
+        only), else once."""
+        from src.engines import process_footprint
+
+        if not cls._reset_prefix_cache(
+            handle, reason="memory_pressure", barrier_timeout_s=cls.RELEASE_BARRIER_TIMEOUT_S
+        ):
+            return None
+        api_key = handle.get("api_key")
+        if not cls._send_barrier(
+            handle,
+            {"Authorization": f"Bearer {api_key}"} if api_key else None,
+            reason="memory_pressure",
+            purpose="release",
+            timeout_s=cls.RELEASE_BARRIER_TIMEOUT_S,
+        ):
+            return None
+        pid, base = handle.get("pid"), handle.get("base_footprint_bytes")
+        if not pid:
+            return None
+        after = cls._settled_footprint(pid) if settle else process_footprint.footprint(pid)
+        return max(0, after - base) if after is not None and base is not None else None
+
+    # mlx_vlm clears MLX's buffer cache synchronously, before the barrier's
+    # answer is sent (``server/openai.py``: ``mx.clear_cache()`` then
+    # ``gc.collect()`` ahead of building the response), but the process
+    # footprint the kernel reports catches up a moment later (measured:
+    # 656 MiB above base right after the answer, the ~0.33 GiB residual a few
+    # seconds on). So at idle the residual is the lowest footprint over a
+    # short, bounded window (under the lock, nobody waiting); at turn_end it
+    # is one read -- the turn's last events must not wait, and a residual
+    # read too early only makes the next release need a little more.
+    RELEASE_SETTLE_S = 2.0
+    _RELEASE_SETTLE_POLL_S = 0.25
+
+    @classmethod
+    def _settled_footprint(cls, pid: int) -> Optional[int]:
+        """The child's lowest footprint over ``RELEASE_SETTLE_S`` (None:
+        unreadable)."""
+        from src.engines import process_footprint
+
+        lowest = process_footprint.footprint(pid)
+        deadline = time.monotonic() + cls.RELEASE_SETTLE_S
+        while time.monotonic() < deadline:
+            time.sleep(cls._RELEASE_SETTLE_POLL_S)
+            current = process_footprint.footprint(pid)
+            if current is not None and (lowest is None or current < lowest):
+                lowest = current
+        return lowest
+
+    @classmethod
+    def _brake_unload(
+        cls,
+        handle: Dict[str, Any],
+        decision: "memory_brake.Decision",
+        point: str,
+        excess: Optional[int],
+    ) -> None:
+        """Reap the child (the caller holds the generation lock) and leave
+        the episode for the next spawn of the same model. ONE WARNING: the
+        app degraded on its own."""
+        record = {
+            "alias": handle.get("alias"),
+            **decision.state.carry(),
+            "unloaded_at": time.time(),
+        }
+        window = handle.get("context_tokens")
+        cls._log_brake(
+            logger.warning,
+            point,
+            decision.level,
+            "unload",
+            window,
+            window,
+            cls._mib(excess),
+            "; the model reloads at the next message",
+        )
+        cls.cleanup()
+        cls._brake_reload = record
+
+    @staticmethod
+    def _mib(value: Optional[int]) -> Any:
+        return value // (1024 * 1024) if isinstance(value, int) else None
+
+    @staticmethod
+    def _log_brake(record, point, level, action, before, after, excess, suffix="") -> None:
+        record(
+            f"[MLX_Engine] Memory brake: point={point}, level={level}, action={action}, "
+            f"window={before}->{after}, excess_mib={excess}{suffix}"
+        )
+
+    @classmethod
+    def cleanup(cls) -> None:
+        """Stop the child and reset the engine state; a pending brake reload
+        is forgotten with it (an idle-timeout reap, a shutdown -- the brake's
+        own unload records its reload after this call)."""
+        cls._brake_reload = None
+        super().cleanup()
+
+    @classmethod
+    async def _pressure_tick(cls) -> None:
+        """One idle sample, under the generation lock (never during a turn),
+        only with a loaded, live child; shielded like a reset."""
+        async with cls._acquire_generation_lock():
+            handle = cls._model
+            if not isinstance(handle, dict) or not cls._proc_is_alive(handle.get("proc")):
+                return
+            await run_reset_shielded(functools.partial(cls.brake_point, memory_brake.POINT_IDLE))
+
+    @classmethod
+    async def _pressure_monitor(cls) -> None:
+        """Every ``_pressure_interval_s``, one idle sample. A tick that raises
+        is logged at ERROR with its traceback and the loop goes on (nobody
+        awaits this task: an escaped exception would end the brake's idle
+        samples without a record)."""
+        while True:
+            await asyncio.sleep(cls._pressure_interval_s)
+            try:
+                await cls._pressure_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"Memory pressure tick failed: {exc}", exc_info=True)
+
+    @classmethod
+    def start_pressure_task(cls) -> None:
+        """Start the idle memory-pressure monitor (idempotent)."""
+        if cls._pressure_task is None:
+            cls._pressure_task = asyncio.create_task(
+                cls._pressure_monitor(), name="memory-pressure"
+            )
+            cls._pressure_task.add_done_callback(_log_monitor_death)
+            logger.info("Started memory pressure monitor")
+
+    @classmethod
+    async def stop_pressure_task(cls) -> None:
+        """Cancel the monitor and wait for it: a sample in flight finishes
+        first (it is shielded), so the shutdown never stops the child under
+        it."""
+        task, cls._pressure_task = cls._pressure_task, None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+        logger.info("Stopped memory pressure monitor")
 
     @classmethod
     def _trained_window_of(cls, model_path: Path) -> Optional[int]:

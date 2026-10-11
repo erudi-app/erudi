@@ -80,7 +80,7 @@ from src.core.exceptions import (
 )
 from src.core import config
 from src.core.request_context import new_request_id, request_id_var
-from src.engines.base_engine import BaseEngine
+from src.engines.base_engine import BaseEngine, drain_pending_reset
 from src.engines.cuda_compatibility import cuda_preflight_notice
 from src.launcher.events import emit_event
 from src.core.logging import logger
@@ -431,6 +431,8 @@ async def _start_services(app: FastAPI, _phase) -> None:
     # LIVE one rather than this now-possibly-stale local.
     app.state.checkpointer_cm = checkpointer_cm
     config.LLM_Engine.start_cleanup_task()
+    # The memory brake's idle samples (MLX only; a no-op elsewhere).
+    config.LLM_Engine.start_pressure_task()
     # DB watchdog: detect a dead embedded Postgres, resurrect it, expose db
     # state on /health (#162). Started AFTER init_database bound the live engine
     # (the disconnect hook attaches to it) and the checkpointer is on app.state.
@@ -503,9 +505,11 @@ async def lifespan(app: FastAPI):
         6. Apply the persisted inference-backend preference and run the CUDA
            pre-flight (apply_inference_backend_preference / emit_engine_notice)
         7. Open the LangGraph checkpointer (app.state.checkpointer)
-        8. Start cleanup background task (300s interval)
+        8. Start the cleanup background task (300s interval) and the memory
+           pressure monitor (MLX only, 60s interval)
         9. **[YIELD]** → Application handles requests
-        10. Shutdown (reverse order): cleanup task → engine → checkpointer
+        10. Shutdown (reverse order): cleanup task → pressure monitor (awaited)
+            → pending prefix-cache reset drained → engine → checkpointer
             → embedded PostgreSQL cluster last
     """
     # Before yield comes the startup code
@@ -538,6 +542,11 @@ async def lifespan(app: FastAPI):
         wire_backfill_task.cancel()
     await stop_watchdog()
     config.LLM_Engine.stop_cleanup_task()
+    # The monitor's sample in flight finishes first (it is shielded), and a
+    # reset a torn-down turn left behind is drained: the child is never
+    # stopped under a request still talking to it.
+    await config.LLM_Engine.stop_pressure_task()
+    await drain_pending_reset()
     config.LLM_Engine.cleanup()
     await app.state.checkpointer_cm.__aexit__(None, None, None)
     close_kb_store()

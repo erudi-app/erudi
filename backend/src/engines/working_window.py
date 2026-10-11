@@ -21,13 +21,14 @@ from the allocated window: the time/bound consumers keep the raw window, the
 memory consumers (output budget, compaction) take this one.
 
 It also owns the bound the MLX child ENFORCES (``kv_bound``): when the memory
-ceiling is the binding side of the min, the engine lowers the child's live
-``max_kv_size`` to it once the child's base footprint is measured, and that
-bound then IS the child's allocated window.
+ceiling (or the memory brake's cap, ``src.engines.memory_brake``) is the
+binding side of the min, the engine lowers the child's live ``max_kv_size`` to
+it once the child's base footprint is measured, and that bound then IS the
+child's allocated window.
 
-No import cycle: this module imports ``base_engine``/``memory_budget`` shapes
-only through ``MemoryBudget``; inside ``engines/`` only ``mlx_engine`` imports
-it, function-scoped.
+No import cycle: this module imports ``memory_budget`` only (``MemoryBudget``),
+which imports nothing of the engines; inside ``engines/`` the memory brake
+imports it at module level and ``mlx_engine`` function-scoped.
 """
 
 from __future__ import annotations
@@ -42,6 +43,13 @@ from src.engines.memory_budget import MemoryBudget
 # refuse nearly every request; on a machine that tight the amber notice speaks
 # for the model instead.
 MIN_KV_BOUND_TOKENS = 4096
+
+# Compaction fires at this fraction of the working window (the agent layer's
+# trigger, ``src.agents.runner.summarization_triggers``). It lives here, with
+# the window it is a fraction of, because the engine layer reads it too: the
+# memory brake shrinks the window only when the next turn would compact under
+# the shrunk one (``src.engines.memory_brake``).
+COMPACTION_WINDOW_FRACTION = 0.8
 
 
 def _positive_int(value: Any) -> Optional[int]:

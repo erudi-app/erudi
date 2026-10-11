@@ -2776,8 +2776,8 @@ def test_compaction_with_neither_signal_has_no_token_trigger():
 def test_compaction_fires_asap_when_the_fixed_part_fills_the_budget():
     # A non-positive ceiling means the model's fixed part alone already fills
     # the memory budget. The call site clamps it up to 1, so the working window is 1 and
-    # compaction fires as early as it can -- the historical safety net, kept
-    # until the reactive memory brake replaces it (PR3.4).
+    # compaction fires as early as it can. The clamp is on the compaction path
+    # only; the output budget keeps sizing from the allocated window there.
     assert _compaction_tokens(10000, -3) == 1
     assert _compaction_tokens(10000, 0) == 1
     assert _compaction_tokens(None, -3) == 1
@@ -2868,7 +2868,7 @@ async def test_memory_warning_emitted_once_after_the_answer(monkeypatch):
 
     warnings = [e for e in events if e["t"] == "memory_warning"]
     # The copy quotes conversation + model: KV bytes plus the weights.
-    assert warnings == [{"t": "memory_warning", "footprint_bytes": 1234 + 10000}]
+    assert warnings == [{"t": "memory_warning", "reason": "bound", "footprint_bytes": 1234 + 10000}]
     last_answer = max(i for i, e in enumerate(events) if e["t"] == "answer")
     assert events.index(warnings[0]) > last_answer
     assert len(stub.footprint_calls) == 1 and stub.footprint_calls[0] > 0

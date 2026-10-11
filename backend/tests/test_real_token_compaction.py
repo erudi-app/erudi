@@ -710,7 +710,11 @@ async def test_the_warning_payload_includes_the_overhead():
     assert cut > 0
     expected = overhead + counter(projected[cut:]) + summary_cap(window)
     assert expected >= 0.85 * window
-    assert event == {"t": "memory_warning", "footprint_bytes": expected + budget.weights_bytes}
+    assert event == {
+        "t": "memory_warning",
+        "reason": "bound",
+        "footprint_bytes": expected + budget.weights_bytes,
+    }
 
 
 async def test_the_runner_projects_without_the_kb_block_of_the_turn_just_answered(monkeypatch):

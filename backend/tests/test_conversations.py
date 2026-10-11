@@ -1092,7 +1092,7 @@ class TestConversationService:
             llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
         )
 
-        warning = {"t": "memory_warning", "footprint_bytes": 4096}
+        warning = {"t": "memory_warning", "reason": "bound", "footprint_bytes": 4096}
 
         async def fake_stream(**kwargs):
             yield {"t": "thinking", "text": "hm"}
@@ -1113,6 +1113,36 @@ class TestConversationService:
         # The trace persists the thinking event but NEVER the memory warning.
         assert messages[1].trace is not None
         assert not any(e.get("t") == "memory_warning" for e in messages[1].trace)
+
+    async def test_memory_reload_reaches_the_wire_but_never_the_trace(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        """The memory brake unloaded the model: the reload is announced on the
+        wire, before the answer, and never persisted -- it describes this
+        machine's memory at that moment, not the conversation."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+
+        async def fake_stream(**kwargs):
+            yield {"t": "memory_reload"}
+            yield {"t": "thinking", "text": "hm"}
+            yield {"t": "answer", "text": "Back."}
+
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        payload = ConversationQuery(question="Still there?")
+        result = [t async for t in service.query_and_respond_stream(conversation.id, payload)]
+
+        events = _parse_ndjson(result)
+        assert events[0] == {"t": "memory_reload"}
+        assert events[-1] == {"t": "done"}
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[1].content == "Back."
+        assert messages[1].trace is not None
+        assert not any(e.get("t") == "memory_reload" for e in messages[1].trace)
 
 
 class TestTraceHelpers:
