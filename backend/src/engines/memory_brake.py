@@ -1,4 +1,8 @@
-"""The reactive memory brake's control law (Apple Silicon, MLX) -- pure.
+"""The reactive memory brake's control laws -- pure.
+
+Two laws share this module's state, episodes and rules: :func:`step` for the
+MLX child (Apple Silicon), described here, and :func:`llama_step` for the
+llama.cpp CPU child, described above it at the end of the module.
 
 The MLX child's memory grows with the conversation (its KV cache and prefix
 cache fill lazily), so when the Mac comes under memory pressure the engine can
@@ -80,8 +84,24 @@ ATTRIBUTION_FLOOR_BYTES = 256 * 1024**2
 # Growth never goes back to this fraction of the window that hurt while the
 # brake remembers it.
 FAULTY_GROW_LIMIT = 0.9
-# How long the engine keeps what an unload carries to the next spawn.
+# How long the engine keeps what an unload carries to the next spawn (and, on
+# llama.cpp, the per-model cap and faulty window).
 BRAKE_RELOAD_TTL_S = 1800
+
+# llama.cpp (``llama_step``), INFERRED starting values calibrated in QA.
+# A shrink is ours to make only when the KV the window pre-allocates is at
+# least this share of RAM (a smaller -c returns exactly that).
+LLAMA_KV_SHARE_MIN = 0.10
+# Under warning, a shrink needs this much paging since the previous sample
+# (when the machine has a paging counter): PSI "some" and the commit charge
+# can sit at warning for benign reasons, paging is the harm.
+LLAMA_WARNING_DAMAGE_MIN_BYTES = 8 * 1024**2
+LLAMA_WARNING_NEEDS_DAMAGE = True
+# A warning respawn waits for the user to be away this long (two idle ticks):
+# a reader between messages must not pay a re-prefill.
+LLAMA_WARNING_RESPAWN_IDLE_S = 120
+# Paging during one turn that counts as a warning at its end.
+SWAP_BURST_BYTES = 64 * 1024**2
 
 POINT_TURN_START = "turn_start"
 POINT_TURN_END = "turn_end"
@@ -140,6 +160,9 @@ class BrakeState:
     # A shrink happened and no turn ran since.
     shrunk_since_turn: bool = False
     notice: Optional[str] = None
+    # llama.cpp: a respawn happened in the current turn (cleared by the next
+    # turn_start and by every idle sample).
+    respawned_this_turn: bool = False
 
     def carry(self) -> Dict[str, Any]:
         """What an unload hands to the next spawn of the same model."""
@@ -155,6 +178,14 @@ class BrakeState:
             reloaded_at=now,
             reload_quiet=True,
         )
+
+    @staticmethod
+    def respawned(live: "BrakeState") -> "BrakeState":
+        """The state of the child a brake RESPAWN started (llama.cpp): the
+        live state, whole -- episode, cap, notice, the critical-unload clock
+        -- with no reload grace and no reload quiet (a respawn is not an
+        unload)."""
+        return replace(live)
 
     def take_notice(self) -> Optional[str]:
         """The pending notice, consumed (a stateful turn end shows it)."""
@@ -178,6 +209,10 @@ class Sample:
     last_request_tokens: Optional[int] = None
     # When the last turn ended (the engine's idle clock).
     last_used: Optional[float] = None
+    # llama.cpp: paging since the previous sample, in bytes, and whether the
+    # machine has a paging counter at all (no counter is not a zero delta).
+    damage_bytes: Optional[int] = None
+    damage_available: bool = False
 
 
 @dataclass(frozen=True)
@@ -192,6 +227,10 @@ class Context:
     static_window: Optional[int]
     # The child's footprint over the memory total.
     footprint_share: Optional[float]
+    # llama.cpp: False when the user pinned the window (ERUDI_CTX).
+    resizable: bool = True
+    # llama.cpp: the KV the window pre-allocates, over the RAM.
+    kv_share: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -205,6 +244,8 @@ class Decision:
     # "shrink" or "grow" (``state.cap`` holds the new cap), or None.
     cap_change: Optional[str] = None
     unload: bool = False
+    # llama.cpp: respawn the child with the cap as its window.
+    respawn: bool = False
 
     @property
     def actions(self) -> tuple:
@@ -216,6 +257,8 @@ class Decision:
             out.append("release")
         if self.cap_change is not None:
             out.append(self.cap_change)
+        if self.respawn:
+            out.append("respawn")
         return tuple(out)
 
 
@@ -254,11 +297,10 @@ def _effective_level(sample: Sample) -> Optional[int]:
     return level
 
 
-def step(state: BrakeState, sample: Sample, context: Context) -> Decision:
-    """Apply one sample to ``state``; returns the decision and the new state
-    (``state`` itself is never modified)."""
-    state = replace(state)
-    level = _effective_level(sample)
+def _prelude(state: BrakeState, sample: Sample, level: Optional[int]) -> Optional[Decision]:
+    """The rules both laws share before the level is used: idle pacing, the
+    turn seen since the previous sample, an unreadable sensor. Returns the
+    decision when the sample stops here."""
     # 1. Idle pacing.
     if sample.point == POINT_IDLE:
         marks = [mark for mark in (state.last_sample_at, sample.last_used) if mark is not None]
@@ -278,6 +320,17 @@ def step(state: BrakeState, sample: Sample, context: Context) -> Decision:
     # forgets the previous one.
     if sample.point == POINT_IDLE and level != LEVEL_CRITICAL:
         state.critical_idle_at = None
+    return None
+
+
+def step(state: BrakeState, sample: Sample, context: Context) -> Decision:
+    """Apply one sample to ``state``; returns the decision and the new state
+    (``state`` itself is never modified)."""
+    state = replace(state)
+    level = _effective_level(sample)
+    stop = _prelude(state, sample, level)
+    if stop is not None:
+        return stop
     window = _positive(context.window) or _positive(context.ceiling)
     if window is None:
         # Neither a working window nor a memory ceiling: inert.
@@ -386,4 +439,155 @@ def _pressure(
         level=level,
         release=release,
         cap_change="shrink" if shrink else None,
+    )
+
+
+# ======================= the llama.cpp law =======================
+#
+# llama-server allocates its KV cache in full at load, for the window it was
+# given: nothing frees without a respawn with a smaller ``-c``, and a smaller
+# ``-c`` always frees. So the law keeps the episodes, the pacing, the turn
+# bookkeeping, the calm rules and the unload of ``step``, and replaces the
+# release and the useful-shrink test:
+#
+# * shrink: from the EFFECTIVE window ``min(window, cap)``, one per episode
+#   under warning (with paging evidence when the machine counts paging), one
+#   more once critical, never two without a turn between them; only when the
+#   KV the window pre-allocates is ``LLAMA_KV_SHARE_MIN`` of RAM or more --
+#   below it the pressure is not ours (``external``);
+# * respawn (the application): when the cap is below the allocated window --
+#   under critical at any safe point, under warning at an idle sample once
+#   the user has been away ``LLAMA_WARNING_RESPAWN_IDLE_S`` -- at most once
+#   per turn (a turn_start respawn is not repeated at the same turn's end);
+# * grow: state only; the engine persists the cap per model and the next
+#   spawn applies it. A cap the episode never applied is dropped when it ends.
+
+
+def _llama_effective_level(sample: Sample) -> Optional[int]:
+    """The level on the 1/2/4 scale; paging of ``SWAP_BURST_BYTES`` or more
+    during the turn counts as a warning at its end."""
+    level = _effective_level(sample)
+    if (
+        level is not None
+        and sample.point == POINT_TURN_END
+        and sample.damage_available
+        and sample.damage_bytes is not None
+        and sample.damage_bytes >= SWAP_BURST_BYTES
+    ):
+        level = max(level, LEVEL_WARNING)
+    return level
+
+
+def llama_step(state: BrakeState, sample: Sample, context: Context) -> Decision:
+    """Apply one sample to the brake of a llama.cpp child; returns the
+    decision and the new state (``state`` itself is never modified)."""
+    state = replace(state)
+    level = _llama_effective_level(sample)
+    stop = _prelude(state, sample, level)
+    if stop is not None:
+        return stop
+    if sample.point in (POINT_TURN_START, POINT_IDLE):
+        state.respawned_this_turn = False
+    window = _positive(context.window)
+    if window is None:
+        return Decision(state=state, level=level)
+    if level == LEVEL_CALM:
+        return _llama_calm(state, context, level, window)
+    return _llama_pressure(state, sample, context, level, window)
+
+
+def _llama_calm(state: BrakeState, context: Context, level: int, window: int) -> Decision:
+    cap = state.cap
+    was_in_episode = state.in_episode or state.reload_quiet
+    decision = _calm(state, context, level)
+    if not context.resizable:
+        # A pinned window: the cap means nothing, it never moves.
+        state.cap = cap
+        return Decision(state=state, level=level)
+    if was_in_episode and not state.in_episode and state.cap is not None and state.cap < window:
+        # Pressure ended before the brake had to pay a respawn for this cap.
+        state.cap = None
+    return decision
+
+
+def _llama_pressure(
+    state: BrakeState, sample: Sample, context: Context, level: int, window: int
+) -> Decision:
+    state.calm_count = 0
+    state.calm_since_grow = 0
+    state.calm_since_pressure = 0
+    state.in_episode = True
+    state.episode_level = max(state.episode_level or 0, level)
+    if sample.point == POINT_IDLE and level == LEVEL_CRITICAL:
+        # The unload, as on MLX (a respawn sets no grace: only an unload's
+        # reload does).
+        grace_over = state.reloaded_at is None or sample.now - state.reloaded_at >= RELOAD_GRACE_S
+        if (
+            state.critical_idle_at is not None
+            and not state.unloaded_this_episode
+            and grace_over
+            and context.footprint_share is not None
+            and context.footprint_share >= UNLOAD_MIN_SHARE
+        ):
+            state.unloaded_this_episode = True
+            state.critical_idle_at = None
+            return Decision(state=state, level=level, unload=True)
+        state.critical_idle_at = sample.now
+    if context.kv_share is None:
+        # The KV share is unknown (the window was not sized from the GGUF):
+        # no attribution, so no resize and no notice.
+        return Decision(state=state, level=level)
+    if context.kv_share < LLAMA_KV_SHARE_MIN:
+        if state.notice != NOTICE_ACTED and not state.reload_quiet:
+            state.notice = NOTICE_EXTERNAL
+        return Decision(state=state, level=level)
+    if not context.resizable:
+        return Decision(state=state, level=level)
+    effective = min(window, state.cap) if state.cap is not None else window
+    new_window = max(MIN_KV_BOUND_TOKENS, int(effective * SHRINK_FACTOR))
+    allowance = 2 if level == LEVEL_CRITICAL else 1
+    # Under warning a shrink needs paging since the previous sample -- when
+    # the machine counts it: a missing counter must not disable the brake.
+    evidence = (
+        level == LEVEL_CRITICAL
+        or not LLAMA_WARNING_NEEDS_DAMAGE
+        or not sample.damage_available
+        or (
+            sample.damage_bytes is not None
+            and sample.damage_bytes >= LLAMA_WARNING_DAMAGE_MIN_BYTES
+        )
+    )
+    shrink = (
+        state.shrinks_this_episode < allowance
+        and not state.shrunk_since_turn
+        and new_window < effective
+        and evidence
+    )
+    if shrink:
+        state.faulty = effective
+        state.cap = new_window
+        state.shrinks_this_episode += 1
+        state.shrunk_since_turn = True
+        state.notice = NOTICE_ACTED
+    idle_for = sample.now - sample.last_used if sample.last_used is not None else None
+    respawn = (
+        state.cap is not None
+        and state.cap < window
+        and not state.respawned_this_turn
+        and (
+            level == LEVEL_CRITICAL
+            or (
+                sample.point == POINT_IDLE
+                and idle_for is not None
+                and idle_for >= LLAMA_WARNING_RESPAWN_IDLE_S
+            )
+        )
+    )
+    if respawn:
+        state.respawned_this_turn = True
+    return Decision(
+        state=state,
+        level=level,
+        cap_change="shrink" if shrink else None,
+        respawn=respawn,
     )
