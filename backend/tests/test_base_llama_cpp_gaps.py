@@ -19,6 +19,7 @@ import pytest
 from src.core.exceptions import EngineException
 from src.engines import base_llama_cpp_engine as base_mod
 from src.engines.cpu_engine import CPU_Engine
+from src.engines.cuda_engine import CUDA_Engine
 
 
 def _touch(path, size=16):
@@ -180,13 +181,17 @@ class TestProcessHelpers:
 # =====================================================================
 
 
-def _spawn_cpu_child(tmp_path, monkeypatch, *, with_mmproj):
-    """Run `CPU_Engine._spawn_child` against a fake Popen, capturing the argv."""
+def _spawn_cpu_child(tmp_path, monkeypatch, *, with_mmproj, engine=CPU_Engine, **ctx):
+    """Run `_spawn_child` of a llama.cpp engine against a fake Popen, capturing the argv.
+
+    `ctx` overrides the engine's own `_prepare_spawn_context()` (the CUDA
+    context needs a GPU probe, so its tests pass the values explicitly).
+    """
     model = _touch(tmp_path / "model-q4_k_m.gguf")
     if with_mmproj:
         _touch(tmp_path / "mmproj-model.gguf")
     server = _touch(tmp_path / "bin" / "llama-server")
-    monkeypatch.setattr(CPU_Engine, "_find_llama_server", classmethod(lambda cls, d=None: server))
+    monkeypatch.setattr(engine, "_find_llama_server", classmethod(lambda cls, d=None: server))
     captured = {}
 
     def fake_popen(argv, **kwargs):
@@ -199,11 +204,11 @@ def _spawn_cpu_child(tmp_path, monkeypatch, *, with_mmproj):
         return SimpleNamespace(pid=4242, stdout=None)
 
     monkeypatch.setattr(base_mod.subprocess, "Popen", fake_popen)
-    handle = CPU_Engine._spawn_child(
+    handle = engine._spawn_child(
         model_path=model,
         alias="erudi-1",
         port=27201,
-        **CPU_Engine._prepare_spawn_context(),
+        **(ctx or engine._prepare_spawn_context()),
     )
     return handle, captured
 
@@ -311,3 +316,48 @@ class TestSpawnHardeningFlags:
         assert key
         for record in caplog.records:
             assert key not in record.getMessage()
+
+
+@pytest.mark.unit
+class TestSpawnSingleSlotNoPromptCache:
+    """llama-server holds one conversation's KV at a time, with no prompt cache.
+
+    Upstream defaults are four slots and an 8 GiB host-RAM cache of past
+    prompts' full KV state (`--cache-ram 8192`), counted nowhere: each distinct
+    long conversation added about 1.3 GiB to the child and pushed the machine
+    into swap. `-np 1 --cache-ram 0` keeps the current conversation's prefix in
+    its slot (the follow-up still reuses it) and nothing else.
+    """
+
+    @staticmethod
+    def _value(argv, flag):
+        assert flag in argv
+        return argv[argv.index(flag) + 1]
+
+    @pytest.mark.parametrize("erudi_ctx", [None, "8192"])
+    def test_cpu_argv_pins_one_slot_and_no_prompt_cache(
+        self, tmp_path, monkeypatch, erudi_ctx
+    ):
+        if erudi_ctx is None:
+            monkeypatch.delenv("ERUDI_CTX", raising=False)
+        else:
+            monkeypatch.setenv("ERUDI_CTX", erudi_ctx)
+        _handle, captured = _spawn_cpu_child(tmp_path, monkeypatch, with_mmproj=False)
+        argv = captured["argv"]
+        assert self._value(argv, "-np") == "1"
+        assert self._value(argv, "--cache-ram") == "0"
+
+    @pytest.mark.parametrize("ctx_size", [None, 8192])
+    def test_cuda_argv_pins_one_slot_and_no_prompt_cache(self, tmp_path, monkeypatch, ctx_size):
+        _handle, captured = _spawn_cpu_child(
+            tmp_path,
+            monkeypatch,
+            with_mmproj=False,
+            engine=CUDA_Engine,
+            ctx_size=ctx_size,
+            threads=4,
+            gpu_layers=32,
+        )
+        argv = captured["argv"]
+        assert self._value(argv, "-np") == "1"
+        assert self._value(argv, "--cache-ram") == "0"

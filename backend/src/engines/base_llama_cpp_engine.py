@@ -7,6 +7,9 @@ not:
 - Where the binary lives (`backend/artifacts/llama-cpp/<cpu|cuda>/bin/llama-server`)
 - How to find / pick the GGUF file in a model directory
 - The `subprocess.Popen` lifecycle (terminate, alive check, output draining)
+- The flags every spawn carries whatever the flavour: `--api-key`, `--no-slots`,
+  `--no-webui`, and `-np 1 --cache-ram 0` (one slot, no prompt cache: the child
+  keeps the current conversation's KV only)
 - Kwarg-name translation from Erudi's vocabulary (HF/transformers) to the
   llama.cpp wire names (`repetition_penalty` → `repeat_penalty`,
   `repetition_context_size` → `repeat_last_n`).
@@ -576,6 +579,17 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         # `/v1/chat/completions`).
         api_key = secrets.token_urlsafe(32)
         argv += ["--api-key", api_key, "--no-slots", "--no-webui"]
+        # One slot and no prompt cache: the child holds a single conversation's
+        # KV at a time, like the MLX engine's single-conversation prefix cache.
+        # Upstream defaults are four slots and `--cache-ram 8192`, a host-RAM
+        # cache of past prompts' full KV state of up to 8 GiB that nothing in
+        # Erudi counts (each distinct long conversation added about 1.3 GiB to
+        # the child and pushed the machine into swap). The current
+        # conversation's follow-up still reuses its prefix inside the slot; going
+        # back to an older conversation re-reads it once. Under unified KV the
+        # window is shared by the slots, so `-np 1` does not change the
+        # allocated KV.
+        argv += ["-np", "1", "--cache-ram", "0"]
         env = cls._build_spawn_env()
         try:
             proc = subprocess.Popen(
