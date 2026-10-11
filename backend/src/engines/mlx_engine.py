@@ -826,10 +826,14 @@ class MLX_Engine(BaseChatServerEngine):
         disk): any failure is one WARNING with the exception's class name,
         the handle unchanged, and the load goes on. Never logs the key, the
         request headers or a response body. ``base_failed``: the base
-        measurement raised and already wrote its WARNING.
+        measurement raised and already wrote its WARNING. Without a measured
+        base the ceiling is not used, but a carried brake cap still applies,
+        so the reload turn already runs with the reduced window.
         """
         try:
-            if handle.get("base_footprint_bytes") is None:
+            state = handle.get("brake")
+            carried_cap = state.cap if isinstance(state, BrakeState) else None
+            if handle.get("base_footprint_bytes") is None and carried_cap is None:
                 # The budget would price the weights on disk instead: not a
                 # number to bound a live child on. One record per failure: a
                 # measurement that raised has written its own.
@@ -839,7 +843,7 @@ class MLX_Engine(BaseChatServerEngine):
                     )
                 return
             applied = cls._apply_memory_bound(handle)
-            if applied is None or applied["bound"] is None:
+            if applied is None or not applied["ok"] or applied["bound"] is None:
                 return
             cap = applied["cap"]
             logger.info(
@@ -869,15 +873,17 @@ class MLX_Engine(BaseChatServerEngine):
         """Make the child enforce min(memory ceiling, brake cap), or its
         trained window once memory no longer binds.
 
-        Returns what was applied (``bound`` None: back to the model's
-        window), or ``None`` when nothing changed or the child did not apply
-        it (``_apply_max_kv_size`` wrote the WARNING). A bound equal to the
-        window the child already enforces needs no HTTP call (a trained
-        window at or below the floor: memory binds, and the notice must be
-        able to say so). An unbounded child (no trained window) cannot be
-        given its unbounded window back: it keeps its last bound, no longer
-        recorded as a memory bound. May raise (the budget reads the disk):
-        the callers guard it.
+        Returns ``None`` when there is nothing to change, else what it
+        tried: ``bound`` (None: back to the model's window) and ``ok`` --
+        False when the child did not apply it (``_apply_max_kv_size`` wrote
+        the WARNING; the handle is unchanged). A bound equal to the window the
+        child already enforces needs no HTTP call (a trained window at or
+        below the floor: memory binds, and the notice must be able to say
+        so). An unbounded child (no trained window) cannot be given its
+        unbounded window back: it keeps its last bound, no longer recorded as
+        a memory bound. Without a measured base the ceiling is ignored and the
+        cap alone applies. May raise (the budget reads the disk): the callers
+        guard it.
         """
         from src.engines.working_window import kv_bound
 
@@ -891,6 +897,7 @@ class MLX_Engine(BaseChatServerEngine):
             if isinstance(value, int) and not isinstance(value, bool)
         ]
         bound = kv_bound(trained, min(limits) if limits else None)
+        tried = {"trained": trained, "ceiling": ceiling, "cap": cap, "bound": bound}
         if bound is None:
             if handle.get("memory_bound_tokens") is None:
                 return None
@@ -898,15 +905,15 @@ class MLX_Engine(BaseChatServerEngine):
                 if handle.get("context_tokens") != trained and not cls._apply_max_kv_size(
                     handle, trained
                 ):
-                    return None
+                    return {**tried, "ok": False}
                 handle["context_tokens"] = trained
             handle["memory_bound_tokens"] = None
-            return {"trained": trained, "ceiling": ceiling, "cap": cap, "bound": None}
+            return {**tried, "ok": True}
         if bound != handle.get("context_tokens") and not cls._apply_max_kv_size(handle, bound):
-            return None
+            return {**tried, "ok": False}
         handle["context_tokens"] = bound
         handle["memory_bound_tokens"] = bound
-        return {"trained": trained, "ceiling": ceiling, "cap": cap, "bound": bound}
+        return {**tried, "ok": True}
 
     @classmethod
     def _apply_max_kv_size(cls, handle: Dict[str, Any], bound: int) -> bool:
@@ -998,9 +1005,8 @@ class MLX_Engine(BaseChatServerEngine):
             return None
         pid = handle["pid"]
         # Every turn opens a window, abandoned ones included: the brake sees
-        # the turn (no unload across it), and the turn's own largest request
-        # replaces the previous one when the window closes.
-        handle["last_request_tokens"] = None
+        # the turn (no unload across it). The previous turn's largest request
+        # stands until this one's window closes with a size of its own.
         state = handle.get("brake")
         if isinstance(state, BrakeState):
             state.turn_happened = True
@@ -1080,10 +1086,13 @@ class MLX_Engine(BaseChatServerEngine):
         call in flight) and no measured ``n``; an estimate never raises the
         exceeded-prediction WARNING.
 
-        Whatever is recorded, the turn's largest request (``n``, or ``n_est``
-        for an abandoned turn) is written to ``handle["last_request_tokens"]``
-        first: the memory brake shrinks the window only when the next turn
-        would compact under it, and a missing SPI or base must not hide that."""
+        Whatever is recorded, the turn's largest request is written to
+        ``handle["last_request_tokens"]`` first: the measured ``n``, else the
+        estimate of the call in flight (``n_est``: an abandoned turn, or one
+        that recovered from an error before any usage arrived, such as a
+        first-chunk timeout); a turn with neither keeps the previous value.
+        The memory brake shrinks the window only when the next turn would
+        compact under it, and a missing SPI or base must not hide that."""
         import time
         import uuid
 
@@ -1119,7 +1128,9 @@ class MLX_Engine(BaseChatServerEngine):
             if largest["n_in"] is not None and largest["n_out"] is not None
             else None
         )
-        handle["last_request_tokens"] = n if n is not None else (n_est if abandoned else None)
+        largest_request = n if n is not None else n_est
+        if largest_request is not None:
+            handle["last_request_tokens"] = largest_request
         base = handle.get("base_footprint_bytes")
         if not window.get("spi_started") or base is None:
             return None
@@ -1369,58 +1380,111 @@ class MLX_Engine(BaseChatServerEngine):
                 footprint_share=footprint / total if footprint is not None and total else None,
             ),
         )
+        previous = state if isinstance(state, BrakeState) else BrakeState()
         handle["brake"] = decision.state
         if not decision.actions:
             return BrakeOutcome()
         if decision.unload:
             cls._brake_unload(handle, decision, point, excess)
             return BrakeOutcome(acted=True, action="unload")
+        done = []
         if decision.release:
-            after = cls._brake_release(handle)
+            # Settling the footprint takes up to RELEASE_SETTLE_S: only at
+            # idle. At turn_end the lock is held and the turn's last events
+            # wait, so the residual is one read.
+            after = cls._brake_release(handle, settle=point == memory_brake.POINT_IDLE)
+            # A release that failed (or whose residual is unreadable) leaves
+            # ``excess_after_release`` as it was: the next eligible sample
+            # retries, and no ``external`` notice is drawn from it. The
+            # reset's or the barrier's own WARNING is the one record.
             if after is not None:
                 decision.state.excess_after_release = after
-            cls._log_brake(
-                logger.info,
-                point,
-                decision.level,
-                "release",
-                handle.get("context_tokens"),
-                handle.get("context_tokens"),
-                f"{cls._mib(excess)}->{cls._mib(after)}",
-            )
+                done.append("release")
+                cls._log_brake(
+                    logger.info,
+                    point,
+                    decision.level,
+                    "release",
+                    handle.get("context_tokens"),
+                    handle.get("context_tokens"),
+                    f"{cls._mib(excess)}->{cls._mib(after)}",
+                )
         if decision.cap_change is not None:
             before = handle.get("context_tokens")
-            cls._apply_memory_bound(handle)
-            cls._log_brake(
-                logger.info,
-                point,
-                decision.level,
-                decision.cap_change,
-                before,
-                handle.get("context_tokens"),
-                cls._mib(excess),
-            )
-        return BrakeOutcome(acted=True, action="+".join(decision.actions))
+            if cls._brake_apply_cap(handle, decision, previous, point):
+                done.append(decision.cap_change)
+                cls._log_brake(
+                    logger.info,
+                    point,
+                    decision.level,
+                    decision.cap_change,
+                    before,
+                    handle.get("context_tokens"),
+                    cls._mib(excess),
+                )
+        if not done:
+            return BrakeOutcome()
+        return BrakeOutcome(acted=True, action="+".join(done))
 
     @classmethod
-    def _brake_release(cls, handle: Dict[str, Any]) -> Optional[int]:
+    def _brake_apply_cap(
+        cls,
+        handle: Dict[str, Any],
+        decision: "memory_brake.Decision",
+        previous: BrakeState,
+        point: str,
+    ) -> bool:
+        """Make the child enforce the decision's new cap; False when it did
+        not. Then the decision never happened for the brake: a shrink's cap,
+        window that hurt, episode count, turn guard and notice -- or a grow's
+        cap -- go back to what they were, and the applier's WARNING (or this
+        one, for an exception) is the one record."""
+        try:
+            applied = cls._apply_memory_bound(handle)
+        except Exception as exc:
+            logger.warning(
+                f"[MLX_Engine] Memory brake {decision.cap_change} not applied "
+                f"({type(exc).__name__}): point={point}"
+            )
+            applied = {"ok": False}
+        if applied is None or applied["ok"]:
+            return True
+        state = decision.state
+        state.cap = previous.cap
+        if decision.cap_change == "shrink":
+            state.faulty = previous.faulty
+            state.shrinks_this_episode = previous.shrinks_this_episode
+            state.shrunk_since_turn = previous.shrunk_since_turn
+            state.notice = previous.notice
+        return False
+
+    @classmethod
+    def _brake_release(cls, handle: Dict[str, Any], *, settle: bool) -> Optional[int]:
         """Reset the prefix cache, then send the non-streamed barrier that
         makes mlx_vlm clear MLX's buffer cache; returns what the child keeps
-        above base afterwards (None: unreadable). A failure is the reset's or
-        the barrier's own WARNING."""
-        if cls._reset_prefix_cache(
+        above base afterwards -- only when both succeeded and the footprint
+        is readable, else None. A failure is the reset's or the barrier's own
+        WARNING. ``settle``: read the residual over ``RELEASE_SETTLE_S`` (idle
+        only), else once."""
+        from src.engines import process_footprint
+
+        if not cls._reset_prefix_cache(
             handle, reason="memory_pressure", barrier_timeout_s=cls.RELEASE_BARRIER_TIMEOUT_S
         ):
-            api_key = handle.get("api_key")
-            cls._send_barrier(
-                handle,
-                {"Authorization": f"Bearer {api_key}"} if api_key else None,
-                reason="memory_pressure",
-                purpose="release",
-                timeout_s=cls.RELEASE_BARRIER_TIMEOUT_S,
-            )
+            return None
+        api_key = handle.get("api_key")
+        if not cls._send_barrier(
+            handle,
+            {"Authorization": f"Bearer {api_key}"} if api_key else None,
+            reason="memory_pressure",
+            purpose="release",
+            timeout_s=cls.RELEASE_BARRIER_TIMEOUT_S,
+        ):
+            return None
         pid, base = handle.get("pid"), handle.get("base_footprint_bytes")
-        after = cls._settled_footprint(pid) if pid else None
+        if not pid:
+            return None
+        after = cls._settled_footprint(pid) if settle else process_footprint.footprint(pid)
         return max(0, after - base) if after is not None and base is not None else None
 
     # mlx_vlm clears MLX's buffer cache synchronously, before the barrier's
@@ -1428,8 +1492,10 @@ class MLX_Engine(BaseChatServerEngine):
     # ``gc.collect()`` ahead of building the response), but the process
     # footprint the kernel reports catches up a moment later (measured:
     # 656 MiB above base right after the answer, the ~0.33 GiB residual a few
-    # seconds on). So the residual is the lowest footprint over a short,
-    # bounded window -- at idle, under the lock, never in a turn.
+    # seconds on). So at idle the residual is the lowest footprint over a
+    # short, bounded window (under the lock, nobody waiting); at turn_end it
+    # is one read -- the turn's last events must not wait, and a residual
+    # read too early only makes the next release need a little more.
     RELEASE_SETTLE_S = 2.0
     _RELEASE_SETTLE_POLL_S = 0.25
 

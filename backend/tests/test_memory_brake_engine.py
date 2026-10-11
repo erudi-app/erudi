@@ -614,7 +614,8 @@ def test_the_window_records_the_last_request_even_without_the_spi(child, sensors
     monkeypatch.setattr(process_footprint, "begin_peak_window", lambda pid: False)
     child["brake"].turn_happened = False
     token = MLX_Engine.begin_memory_window()
-    assert child["last_request_tokens"] is None
+    # The previous turn's value stands until this turn produces one.
+    assert child["last_request_tokens"] == 19_000
     assert child["brake"].turn_happened is True
     MLX_Engine.note_call_usage(child, 9_000, 500)
     MLX_Engine.note_call_usage(child, 12_000, 300)
@@ -639,6 +640,155 @@ def test_a_base_without_measure_still_records_the_last_request(child, sensors):
     MLX_Engine.note_call_usage(child, 7_000, 100)
     MLX_Engine.end_memory_window(token)
     assert child["last_request_tokens"] == 7_100
+
+
+def test_a_recovered_error_turn_records_its_in_flight_estimate(child, sensors):
+    # A first-chunk timeout under swap: no usage ever arrived, the turn was
+    # NOT abandoned -- its estimate is still the size of what it sent.
+    token = MLX_Engine.begin_memory_window()
+    MLX_Engine.note_call_start(child, 21_000)
+
+    MLX_Engine.end_memory_window(token, abandoned=False)
+
+    assert child["last_request_tokens"] == 21_000
+
+
+def test_a_turn_with_nothing_measured_keeps_the_previous_value(child, sensors):
+    token = MLX_Engine.begin_memory_window()
+
+    MLX_Engine.end_memory_window(token)
+
+    assert child["last_request_tokens"] == 19_000
+
+
+# ===================== review fixes: failures are not successes =====================
+
+
+def _past_pacing(handle):
+    handle["brake"].last_sample_at -= mb.BRAKE_IDLE_INTERVAL_S
+
+
+@pytest.mark.parametrize("failing", ["/v1/chat/completions", "/v1/cache/reset"])
+def test_a_failed_release_is_retried_and_posts_no_external_notice(
+    child, http, sensors, caplog, failing
+):
+    # Warning, the user away: every idle sample is eligible for a release.
+    sensors.level = 2
+    child["last_request_tokens"] = 10  # no useful shrink
+    http.fail[failing] = [500]
+
+    with caplog.at_level(logging.INFO):
+        first = MLX_Engine.brake_point("idle")
+    assert first == BrakeOutcome()
+    assert child["brake"].excess_after_release == 0
+    assert child["brake"].notice is None
+    # The reset's or the barrier's own WARNING is the one record.
+    assert not [r for r in _brake_lines(caplog) if "action=release" in r.getMessage()]
+
+    _past_pacing(child)
+    second = MLX_Engine.brake_point("idle")
+
+    assert second.action == "release"
+    assert child["brake"].notice is None
+
+
+def test_a_shrink_the_child_did_not_apply_leaves_no_trace(child, http, caplog):
+    http.fail["/v1/settings"] = 500  # the PATCH and its read-back
+
+    with caplog.at_level(logging.INFO):
+        outcome = MLX_Engine.brake_point("turn_end")
+
+    assert outcome == BrakeOutcome()
+    state = child["brake"]
+    assert (state.cap, state.faulty, state.shrinks_this_episode) == (None, None, 0)
+    assert state.shrunk_since_turn is False
+    assert state.notice is None
+    assert child["context_tokens"] == 20_000
+    assert _brake_lines(caplog) == []
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "not applied" in warnings[0].getMessage()
+
+
+def test_a_shrink_whose_applier_raises_leaves_no_trace(child, monkeypatch, caplog):
+    def _boom(cls, handle):
+        raise OSError("disk gone")
+
+    monkeypatch.setattr(MLX_Engine, "_apply_memory_bound", classmethod(_boom))
+
+    with caplog.at_level(logging.INFO):
+        MLX_Engine.brake_point("turn_end")
+
+    state = child["brake"]
+    assert (state.cap, state.shrinks_this_episode, state.notice) == (None, 0, None)
+    assert [r.levelno for r in caplog.records if "MLX_Engine" in r.getMessage()] == [
+        logging.WARNING
+    ]
+    assert "OSError" in caplog.records[-1].getMessage()
+    assert "disk gone" not in caplog.records[-1].getMessage()
+
+
+def test_a_grow_the_child_did_not_apply_keeps_the_previous_cap(child, http, sensors, caplog):
+    child["context_tokens"] = 15_000
+    child["memory_bound_tokens"] = 15_000
+    child["brake"] = BrakeState(cap=15_000, calm_since_grow=2, calm_count=5)
+    sensors.level = 1
+    http.fail["/v1/settings"] = 500
+
+    with caplog.at_level(logging.INFO):
+        assert MLX_Engine.brake_point("idle") == BrakeOutcome()
+
+    assert child["brake"].cap == 15_000
+    assert child["context_tokens"] == 15_000
+    assert _brake_lines(caplog) == []
+
+
+def test_a_release_at_turn_end_reads_the_footprint_once_without_waiting(
+    child, http, sensors, monkeypatch
+):
+    sensors.level = 4
+    child["last_request_tokens"] = 10
+    monkeypatch.setattr(MLX_Engine, "RELEASE_SETTLE_S", 1.0)
+    reads = []
+
+    def _footprint(pid):
+        if ("POST", "/v1/cache/reset") in http.paths():
+            reads.append(pid)
+        return sensors.footprint
+
+    monkeypatch.setattr(process_footprint, "footprint", _footprint)
+    started = time.monotonic()
+
+    outcome = MLX_Engine.brake_point("turn_end")
+
+    assert outcome.action == "release"
+    assert time.monotonic() - started < 0.5
+    assert len(reads) == 1
+
+
+def test_a_reload_spawn_applies_the_carried_cap_without_a_measured_base(
+    sensors, http, ceiling, monkeypatch
+):
+    MLX_Engine._brake_reload = {
+        "alias": "erudi-7",
+        "cap": 12_000,
+        "faulty": None,
+        "in_episode": True,
+        "episode_level": 4,
+        "shrinks_this_episode": 1,
+        "unloaded_this_episode": True,
+        "unloaded_at": time.time(),
+    }
+    monkeypatch.setattr(process_footprint, "footprint", lambda pid: None)
+    handle = _spawned_handle()
+
+    MLX_Engine._read_server_properties(handle)
+
+    # The ceiling stays ignored without a measured base; the cap applies.
+    assert handle["base_footprint_bytes"] is None
+    assert http.live_max_kv_size == 12_000
+    assert handle["context_tokens"] == 12_000
+    assert handle["memory_bound_tokens"] == 12_000
 
 
 # ===================== the idle monitor =====================

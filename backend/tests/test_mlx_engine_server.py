@@ -2092,6 +2092,7 @@ class TestMemoryBrakeReal:
 
             outcome = MLX_Engine.brake_point("idle")
 
+            assert outcome.acted
             assert "release" in outcome.action
             # The engine read the residual once the footprint had settled
             # (bounded, ``RELEASE_SETTLE_S``): a read now is past that wait.

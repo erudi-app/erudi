@@ -182,14 +182,17 @@ monitor: every 60 s (`BRAKE_IDLE_INTERVAL_S`), under the generation lock, only w
 loaded live child. Every sample runs through `run_reset_shielded`, like a prefix-cache
 reset, so the next lock holder drains it; at shutdown the lifespan stops the monitor,
 awaits it, and drains any pending reset before it stops the child. An idle sample is
-skipped within 60 s of the previous sample or of the end of the last turn.
+skipped within 55 s of the previous sample or of the end of the last turn (the monitor's
+period is the 60 s interval itself, so a tick a few seconds early is not skipped).
 
 **Sensors.** The system pressure level (`kern.memorystatus_vm_pressure_level`: 1 calm,
 2 warning, 4 critical — never `kern.memorystatus_level`), the system's swap-outs during
 the turn (`turn_end` only; 64 MiB of them count as a warning), the child's footprint
 above its base, the size of the last turn's largest request (`last_request_tokens`,
-written when the memory window closes, abandoned turns and a missing footprint SPI
-included), and the child's share of the memory total. An unreadable pressure level turns
+written when the memory window closes: the measured size, else the estimate of the call
+in flight for a turn that was abandoned or recovered from an error before any usage
+arrived; a turn with neither keeps the previous value; a missing footprint SPI changes
+nothing), and the child's share of the memory total. An unreadable pressure level turns
 the brake off, with one WARNING per backend process.
 
 **Pressure episodes.** Every action is bounded per episode, not per sample: an episode
@@ -199,7 +202,7 @@ opens at the first non-calm sample and ends after 2 calm samples in a row.
 |---|---|---|
 | Shrink | One per episode under warning, one more once critical; never two without a turn between them; only when the last turn's largest request reaches 80 % of the shrunk window (the next turn compacts and frees its KV) | The brake's cap becomes `max(4096, 0.75 × working window)`, and the child enforces `min(ceiling, cap)` (`PATCH /v1/settings`) |
 | Release | Idle under critical pressure, idle under warning once the user has been away 180 s (`WARNING_RELEASE_IDLE_S`: a reader keeps the prefix cache), `turn_end` under critical pressure; never `turn_start`; only when it would give back 256 MiB or more beyond what the last release left | `POST /v1/cache/reset`, then a non-streamed 1-token request; both barriers it may send are bounded by 30 s. The prefix owner is kept |
-| Unload | Idle only: critical at two idle samples in a row with no turn between them, at most once per episode, never within 600 s of a brake reload, only for a child holding 5 % or more of the memory total | The idle reap's path, under the lock the monitor holds |
+| Unload | Idle only: critical at two consecutive idle samples with no turn between them (a calm or warning idle sample in between starts over), at most once per episode, never within 600 s of a brake reload, only for a child holding 5 % or more of the memory total | The idle reap's path, under the lock the monitor holds |
 | Grow | Outside an episode, every 3 calm samples | One step back up (`cap / 0.75`), never back to 90 % of the window that hurt while it is remembered (forgotten after 10 calm samples); the cap is dropped once growth reaches the window without brake |
 
 **Why a release is a reset and a request.** Measured on the streamed path every
@@ -210,8 +213,11 @@ cache, and its streamed path never clears it); a non-streamed 1-token request af
 brought it to about 1.05 GiB, because mlx_vlm's non-streamed chat handler calls
 `mx.clear_cache()` after every generation. That clear runs before the answer is sent,
 but the footprint the kernel reports follows a moment later, so the engine reads what
-the release left as the lowest footprint over a bounded 2 s window
-(`RELEASE_SETTLE_S`); about 0.33 GiB stays, and it never triggers another release.
+the release left, at idle, as the lowest footprint over a bounded 2 s window
+(`RELEASE_SETTLE_S`), and at `turn_end` as one read (the turn's last events must not
+wait); about 0.33 GiB stays, and it never triggers another release. A release whose reset
+or barrier failed records nothing: the next eligible sample tries again, and no
+`external` notice is drawn from it.
 
 **Notices.** A shrink sets the notice `acted` (the conversation is now summarized
 earlier); pressure the conversation does not cause — what a release would give back is
@@ -234,7 +240,9 @@ the reload (`memory_reload`) before it resolves the model.
 `[MLX_Engine] Memory brake: point=..., level=..., action=..., window=A->B, excess_mib=...`
 (a release quotes the excess before and after); an unload is one WARNING, the app having
 degraded on its own (see [Logging](../../logging.md)). A reset or a barrier that fails is
-its own WARNING; a release barrier's says the memory release is incomplete.
+its own WARNING (a release barrier's says the memory release is incomplete) and no brake
+line follows. A shrink or a grow the child did not apply is the applier's WARNING alone,
+and the brake forgets the decision (cap, episode count, notice) as if it never happened.
 
 `BaseLlamaCppEngine._find_llama_server` tries the configured flavour first and falls back
 to the other one: a CUDA-built artifact runs CPU inference fine, whereas the CPU artifact
