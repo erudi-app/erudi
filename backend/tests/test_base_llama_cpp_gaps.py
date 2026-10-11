@@ -344,6 +344,7 @@ class TestSpawnSingleSlotNoPromptCache:
         argv = captured["argv"]
         assert self._value(argv, "-np") == "1"
         assert self._value(argv, "--cache-ram") == "0"
+        assert "--no-cache-idle-slots" in argv
 
     @pytest.mark.parametrize("ctx_size", [None, 8192])
     def test_cuda_argv_pins_one_slot_and_no_prompt_cache(self, tmp_path, monkeypatch, ctx_size):
@@ -359,3 +360,4 @@ class TestSpawnSingleSlotNoPromptCache:
         argv = captured["argv"]
         assert self._value(argv, "-np") == "1"
         assert self._value(argv, "--cache-ram") == "0"
+        assert "--no-cache-idle-slots" in argv

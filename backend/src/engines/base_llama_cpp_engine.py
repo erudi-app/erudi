@@ -586,10 +586,15 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         # Erudi counts (each distinct long conversation added about 1.3 GiB to
         # the child and pushed the machine into swap). The current
         # conversation's follow-up still reuses its prefix inside the slot; going
-        # back to an older conversation re-reads it once. Under unified KV the
-        # window is shared by the slots, so `-np 1` does not change the
-        # allocated KV.
-        argv += ["-np", "1", "--cache-ram", "0"]
+        # back to an older conversation re-reads it once. `-np 1` turns unified
+        # KV off; with one sequence the slot's window is the whole `n_ctx`
+        # (`n_ctx_seq = n_ctx / 1`), so the window and `/props` `n_ctx` are
+        # unchanged; the sliding-window cache of models such as Gemma 2/3
+        # shrinks, since it no longer reserves room for four sequences.
+        # `--no-cache-idle-slots` states the intent outright: idle-slot caching
+        # needs the RAM cache, and llama-server otherwise warns at every spawn
+        # that it disables it.
+        argv += ["-np", "1", "--cache-ram", "0", "--no-cache-idle-slots"]
         env = cls._build_spawn_env()
         try:
             proc = subprocess.Popen(

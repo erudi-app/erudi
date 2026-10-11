@@ -381,8 +381,10 @@ export default function ConversationPage() {
         // llama.cpp runs one slot with no prompt cache, so a title that ran
         // after the first turn would overwrite the conversation's KV and the
         // second message would re-read the whole conversation. Both requests
-        // already serialize on the backend's generation lock, so awaiting costs
-        // nothing beyond the title's own ~1-2 s.
+        // already serialize on the backend's generation lock, so awaiting adds
+        // only the title's own time (the prefill of the question, plus the
+        // model load when the model is cold) before the chat request starts
+        // its attachment and Knowledge Base preparation.
         if (isFirstMessage) {
           await (async () => {
             try {

@@ -391,8 +391,9 @@ caller keeps the default name.
 The app requests the title on the first message of a conversation, **before** the chat request:
 the chat starts once the title stream has ended, whether it succeeded or failed (a failed title
 never delays the answer). The llama.cpp engines keep one conversation's KV in a single slot, and a
-title run after the first turn would overwrite it. The title costs its own 1-2 seconds before the
-answer starts streaming.
+title run after the first turn would overwrite it. The first message therefore waits for the title's own time (the prefill of the
+question, plus the model load when the model is cold) before the chat request starts its attachment
+and Knowledge Base preparation.
 
 ### Read messages
 
