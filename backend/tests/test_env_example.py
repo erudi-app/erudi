@@ -113,6 +113,14 @@ def test_every_env_read_is_documented():
 
 
 @pytest.mark.unit
+def test_the_qa_seams_are_documented():
+    # QA seams are read rarely and set by hand: each has its line saying what
+    # it forces and on which engine (ERUDI_FORCE_MEMORY_PRESSURE's behaviour
+    # is tested in test_memory_pressure.py).
+    assert {"ERUDI_MEMORY_PRIOR_SCALE", "ERUDI_FORCE_MEMORY_PRESSURE"} <= _documented_names()
+
+
+@pytest.mark.unit
 def test_scan_matches_the_supported_read_forms():
     tree = ast.parse(
         "import os\n"

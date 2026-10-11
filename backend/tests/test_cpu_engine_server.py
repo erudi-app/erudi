@@ -9,6 +9,7 @@ Shared subprocess + SSE lifecycle is covered by `test_base_chat_server_engine.py
 from __future__ import annotations
 
 import logging
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -47,19 +48,74 @@ class TestCpuEngineHierarchy:
 
 @pytest.mark.unit
 class TestSpawnContextAndArgv:
-    def test_prepare_spawn_context_forces_zero_gpu_layers(self, monkeypatch):
+    def test_an_unreadable_gguf_spawns_without_c_and_one_warning(self, monkeypatch, caplog):
+        """The window cannot be sized (no readable GGUF header): no ``-c``,
+        llama-server's own fit resolves the window at load."""
         monkeypatch.delenv("ERUDI_CTX", raising=False)
-        ctx = CPU_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-7")
+        CPU_Engine._window_memory = {}
+        with caplog.at_level(logging.WARNING, logger="erudi"):
+            ctx = CPU_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-7")
         assert ctx["gpu_layers"] == 0
         assert ctx["threads"] >= 1
-        # Deliberate inversion of the old `>= 1` assertion: without ERUDI_CTX
-        # the engine no longer chooses a number — llama-server's own fit
-        # resolves the window at load (trained window, reduced only when the
-        # machine's memory demands it).
         assert ctx["ctx_size"] is None
+        assert "spawn_memory_bound" not in ctx
+        assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+    def test_prepare_spawn_context_passes_the_computed_window(self, monkeypatch):
+        from src.engines import gguf_memory, memory_pressure
+
+        monkeypatch.delenv("ERUDI_CTX", raising=False)
+        monkeypatch.setattr(memory_pressure, "effective_total_ram_bytes", lambda: 16 * 1024**3)
+        CPU_Engine._window_memory = {"erudi-7": {"cap": 20_480, "faulty": None, "at": time.time()}}
+        seen = {}
+
+        def _spawn_window(path, *, total_ram_bytes, brake_cap=None, mmproj_path=None):
+            seen.update(path=path, total=total_ram_bytes, cap=brake_cap, mmproj=mmproj_path)
+            return gguf_memory.SpawnWindow(
+                window=20_480,
+                trained=40_960,
+                static_window=40_960,
+                memory_bound=False,
+                kv_token_bytes=114_688,
+                static_anonymous_bytes=123,
+                weights_bytes=456,
+            )
+
+        monkeypatch.setattr(gguf_memory, "spawn_window", _spawn_window)
+        try:
+            ctx = CPU_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-7")
+        finally:
+            CPU_Engine._window_memory = {}
+        assert seen == {
+            "path": Path("/m.gguf"),
+            "total": 16 * 1024**3,
+            "cap": 20_480,
+            "mmproj": None,
+        }
+        assert ctx["ctx_size"] == 20_480
+        assert ctx["trained_context_tokens"] == 40_960
+        assert ctx["static_window_tokens"] == 40_960
+        assert ctx["kv_token_bytes"] == 114_688
+        assert ctx["static_anonymous_bytes"] == 123
+        assert ctx["weights_bytes"] == 456
+        assert ctx["spawn_memory_bound"] is False
+        argv = [
+            str(a)
+            for a in CPU_Engine._build_spawn_argv(
+                llama_server=Path("/bin/llama-server"),
+                model_gguf=Path("/m.gguf"),
+                alias="erudi-7",
+                port=8123,
+                **ctx,
+            )
+        ]
+        assert argv[argv.index("-c") + 1] == "20480"
 
     def test_prepare_spawn_context_honours_erudi_ctx_env(self, monkeypatch):
+        from src.engines import gguf_memory
+
         monkeypatch.setenv("ERUDI_CTX", "8192")
+        monkeypatch.setattr(gguf_memory, "spawn_window", lambda *a, **k: pytest.fail("sized"))
         ctx = CPU_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-7")
         assert ctx["ctx_size"] == 8192
 

@@ -62,6 +62,18 @@ class TestSpawnContextAndArgv:
         # load (trained window, reduced only when memory demands it).
         assert ctx["ctx_size"] is None
 
+    def test_prepare_spawn_context_never_sizes_the_window(self, monkeypatch):
+        """With GPU layers the KV sits in VRAM: CUDA keeps llama-server's
+        own fit -- no window computed from RAM, no brake facts."""
+        from src.engines import gguf_memory
+
+        monkeypatch.delenv("ERUDI_CTX", raising=False)
+        monkeypatch.setattr(gguf_memory, "spawn_window", lambda *a, **k: pytest.fail("sized"))
+        with patch.object(CUDA_Engine, "_compute_gpu_layers", return_value=42):
+            ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert set(ctx) == {"ctx_size", "threads", "gpu_layers"}
+        assert ctx["ctx_size"] is None
+
     def test_prepare_spawn_context_honours_erudi_ctx_env(self, monkeypatch):
         monkeypatch.setenv("ERUDI_CTX", "8192")
         with patch.object(CUDA_Engine, "_compute_gpu_layers", return_value=10):

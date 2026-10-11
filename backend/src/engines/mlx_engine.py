@@ -516,8 +516,8 @@ class MLX_Engine(BaseChatServerEngine):
             "api_key": api_key,
             # The ALLOCATED window (`BaseEngine.effective_context_tokens`):
             # at spawn it equals the preflight bound passed above -- nothing
-            # to read back, unlike llama-server whose fit resolves the window
-            # at load. `_read_server_properties` measures the child's base
+            # to read back, unlike llama-server, which allocates its window at
+            # load. `_read_server_properties` measures the child's base
             # footprint and, when memory binds, lowers the child's bound and
             # rewrites this to it. None = unbounded child.
             "context_tokens": context_tokens,

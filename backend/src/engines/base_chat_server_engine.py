@@ -235,10 +235,10 @@ class BaseChatServerEngine(BaseEngine):
 
         Default: no-op. The two shipped families split here on purpose:
 
-        * llama-server resolves its window AT LOAD (its own fit, when no `-c`
-          pins one), so `BaseLlamaCppEngine` overrides this with one bounded
-          `GET /props` and stamps `context_tokens`, `chat_template_caps` and
-          `chat_template` on the handle.
+        * llama-server allocates its window AT LOAD (the `-c` it was given, or
+          its own fit without one), so `BaseLlamaCppEngine` overrides this
+          with one bounded `GET /props` and stamps `context_tokens`,
+          `chat_template_caps` and `chat_template` on the handle.
         * mlx_vlm.server has no fit and no fixed allocation: MLX stamps its
           preflight bound (`--max-kv-size`) on the handle AT SPAWN, so its
           implementation of this hook stays this no-op.

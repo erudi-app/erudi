@@ -431,7 +431,7 @@ async def _start_services(app: FastAPI, _phase) -> None:
     # LIVE one rather than this now-possibly-stale local.
     app.state.checkpointer_cm = checkpointer_cm
     config.LLM_Engine.start_cleanup_task()
-    # The memory brake's idle samples (MLX only; a no-op elsewhere).
+    # The memory brake's idle samples (MLX and CPU; a no-op on CUDA).
     config.LLM_Engine.start_pressure_task()
     # DB watchdog: detect a dead embedded Postgres, resurrect it, expose db
     # state on /health (#162). Started AFTER init_database bound the live engine

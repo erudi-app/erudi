@@ -43,10 +43,11 @@ warning quotes ``footprint_bytes``.
 
 The accounting is **MLX-only**. On both llama.cpp engines (CPU and CUDA) the KV
 cache is allocated in full at load: memory use does not grow with the
-conversation, and the engine's own fit already guaranteed the allocation fits,
-so there is nothing per-token to measure -- every fact is ``None`` there, and
-nothing is written on their handle (``total_memory_bytes`` also names the
-partial-offload reason on discrete cards).
+conversation, so there is nothing per-token to measure -- every fact is
+``None`` there, and nothing is written on their handle (``total_memory_bytes``
+also names the partial-offload reason on discrete cards). The CPU engine's
+accounting happens once, at spawn: ``src.engines.gguf_memory`` sizes the
+window it passes as ``-c`` against the RAM budget.
 
 Any fact that cannot be read answers ``None`` and the ceiling and the warning
 are simply OFF for that model -- notably a KV shape the formula cannot model
@@ -285,9 +286,10 @@ def total_memory_bytes(engine: Any) -> Optional[int]:
     On both llama.cpp engines (CPU and CUDA) the answer is ``None`` by
     policy, which keeps the memory signal OFF there. The real reason: their
     KV cache is allocated IN FULL at load -- memory use does not grow with
-    the conversation at all, and the engine's own fit already guaranteed the
-    allocation fits at load time, so a per-conversation-token accounting
-    would model a phenomenon that does not exist on those engines. (On a
+    the conversation at all, and the window was sized to fit at load time
+    (the CPU engine's RAM budget, ``gguf_memory``; llama-server's own fit on
+    CUDA), so a per-conversation-token accounting would model a phenomenon
+    that does not exist on those engines. (On a
     discrete card, partial layer offload would additionally split the weights
     between VRAM and system RAM in proportions this process cannot know,
     making any single-pool denominator dishonest.) Only MLX grows its cache

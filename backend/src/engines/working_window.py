@@ -37,7 +37,8 @@ from typing import Any, Optional
 
 from src.engines.memory_budget import MemoryBudget
 
-# The smallest window a memory bound may impose on the MLX child: the floor
+# The smallest window a memory bound may impose on the MLX child, and the
+# floor of the CPU engine's spawn window (``gguf_memory``): the floor
 # llama.cpp's ``--fit`` applies to its own memory-driven reduction
 # (``base_llama_cpp_engine.max_context_tokens``). Below it the model would
 # refuse nearly every request; on a machine that tight the amber notice speaks
