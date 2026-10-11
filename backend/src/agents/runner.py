@@ -2166,8 +2166,7 @@ class AgentRunner:
         # exactly what relieves such a machine. This clamp is DELIBERATELY only
         # on the compaction path: the output budget (working_context_tokens,
         # which does NOT clamp) keeps sizing from the allocated window in this
-        # corner, precisely what it did before PR3.1. Both views get unified
-        # when the reactive memory brake lands (PR3.4).
+        # corner.
         if memory_token_ceiling is not None:
             memory_token_ceiling = max(1, memory_token_ceiling)
         # Fold the allocated window and the memory ceiling into the ONE
