@@ -112,13 +112,16 @@ class CPU_Engine(BaseLlamaCppEngine):
     # ---------- CPU-specific spawn hooks ----------
 
     @classmethod
-    def _prepare_spawn_context(cls, model_path: Path, alias: str) -> Dict[str, Any]:
+    def _prepare_spawn_context(
+        cls, model_path: Path, alias: str, *, brake_cap: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Resolve the per-spawn CPU context: thread count, the fixed
         `gpu_layers=0` (CPU-only inference), and the window: `ERUDI_CTX`
         verbatim when the user pinned one, else the window Erudi sizes from
-        the GGUF and the machine's RAM, folded with the memory brake's cap
-        for ``alias`` (`ctx_size=None` -- llama-server's own fit -- when the
-        GGUF cannot be read)."""
+        the GGUF and the machine's RAM, folded with the memory brake's cap --
+        ``brake_cap`` for a brake respawn, else the one remembered for
+        ``alias`` (`ctx_size=None` -- llama-server's own fit -- when the GGUF
+        cannot be read)."""
         ctx: Dict[str, Any] = {
             "threads": max(1, os.cpu_count() or 1),
             "gpu_layers": 0,
@@ -127,7 +130,7 @@ class CPU_Engine(BaseLlamaCppEngine):
         if pinned is not None:
             ctx.update(ctx_size=pinned, window_pinned=True)
             return ctx
-        ctx.update(cls._llama_spawn_context(model_path, alias))
+        ctx.update(cls._llama_spawn_context(model_path, alias, brake_cap))
         return ctx
 
     # ---------- the memory brake (bodies on BaseLlamaCppEngine) ----------

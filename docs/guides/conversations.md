@@ -629,8 +629,9 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    engine a smaller window means restarting the model with it (about 1-2 s, then the
    conversation is read again): under critical pressure at the next turn boundary — a restart at
    the start of a turn sends `memory_reload` in that same turn —, under warning once the user has
-   been away two minutes, and the turn that re-reads the conversation shows the same reload
-   state.
+   been away two minutes (not when the idle unload is less than two minutes away: the next load
+   then carries the smaller window), and the turn that re-reads the conversation shows the same
+   reload state. The `pressure` notice is shown once the smaller window applies.
 
 Two more middlewares run alongside it: stale images and stale tool results are stripped from the
 replayed state before the model is called.

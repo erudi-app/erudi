@@ -102,6 +102,24 @@ LLAMA_WARNING_NEEDS_DAMAGE = True
 LLAMA_WARNING_RESPAWN_IDLE_S = 120
 # Paging during one turn that counts as a warning at its end.
 SWAP_BURST_BYTES = 64 * 1024**2
+# llama.cpp pads the window it allocates UP to a multiple of this
+# (``GGML_PAD(n_ctx, 256)``, ``llama-context.cpp``): every llama cap is a
+# multiple of it, and the allocated window is compared padded.
+LLAMA_CTX_PAD_TOKENS = 256
+# A warning respawn is not worth a reload when the idle reap will unload the
+# child within this many seconds anyway (the cap applies at the next spawn).
+LLAMA_REAP_MARGIN_S = 120
+
+
+def llama_padded(tokens: int) -> int:
+    """The window llama.cpp allocates for ``-c tokens``."""
+    return -(-tokens // LLAMA_CTX_PAD_TOKENS) * LLAMA_CTX_PAD_TOKENS
+
+
+def _llama_rounded(tokens: int) -> int:
+    """A llama cap: down to a multiple of the padding, never under the floor."""
+    return max(MIN_KV_BOUND_TOKENS, tokens // LLAMA_CTX_PAD_TOKENS * LLAMA_CTX_PAD_TOKENS)
+
 
 POINT_TURN_START = "turn_start"
 POINT_TURN_END = "turn_end"
@@ -163,6 +181,9 @@ class BrakeState:
     # llama.cpp: a respawn happened in the current turn (cleared by the next
     # turn_start and by every idle sample).
     respawned_this_turn: bool = False
+    # llama.cpp: a shrink waits for the respawn that applies it; its ``acted``
+    # notice is set then (never for a cap that calm drops unapplied).
+    acted_pending: bool = False
 
     def carry(self) -> Dict[str, Any]:
         """What an unload hands to the next spawn of the same model."""
@@ -231,6 +252,8 @@ class Context:
     resizable: bool = True
     # llama.cpp: the KV the window pre-allocates, over the RAM.
     kv_share: Optional[float] = None
+    # llama.cpp: the engine's idle reap, in seconds of user idle (None: none).
+    reap_idle_s: Optional[float] = None
 
 
 @dataclass(frozen=True)
@@ -461,6 +484,13 @@ def _pressure(
 #   per turn (a turn_start respawn is not repeated at the same turn's end);
 # * grow: state only; the engine persists the cap per model and the next
 #   spawn applies it. A cap the episode never applied is dropped when it ends.
+# * the ``acted`` notice is set when a respawn applies a shrink (a cap
+#   deferred to idle that calm drops says nothing);
+#
+# Every llama cap is a multiple of ``LLAMA_CTX_PAD_TOKENS`` (rounded down,
+# never under the 4096 floor): llama.cpp pads the window it allocates up to
+# it, so the allocated window is compared with the padded cap, and an
+# unpadded cap would never be reached by its own respawn.
 
 
 def _llama_effective_level(sample: Sample) -> Optional[int]:
@@ -504,9 +534,20 @@ def _llama_calm(state: BrakeState, context: Context, level: int, window: int) ->
         # A pinned window: the cap means nothing, it never moves.
         state.cap = cap
         return Decision(state=state, level=level)
-    if was_in_episode and not state.in_episode and state.cap is not None and state.cap < window:
-        # Pressure ended before the brake had to pay a respawn for this cap.
+    if (
+        was_in_episode
+        and not state.in_episode
+        and state.cap is not None
+        and llama_padded(state.cap) < window
+    ):
+        # Pressure ended before the brake had to pay a respawn for this cap:
+        # nothing was summarized earlier, nothing is said.
         state.cap = None
+        state.acted_pending = False
+    if decision.cap_change == "grow" and state.cap is not None:
+        state.cap = _llama_rounded(state.cap)
+        if state.cap == cap:
+            return Decision(state=state, level=level)
     return decision
 
 
@@ -538,13 +579,13 @@ def _llama_pressure(
         # no attribution, so no resize and no notice.
         return Decision(state=state, level=level)
     if context.kv_share < LLAMA_KV_SHARE_MIN:
-        if state.notice != NOTICE_ACTED and not state.reload_quiet:
+        if state.notice != NOTICE_ACTED and not state.acted_pending and not state.reload_quiet:
             state.notice = NOTICE_EXTERNAL
         return Decision(state=state, level=level)
     if not context.resizable:
         return Decision(state=state, level=level)
     effective = min(window, state.cap) if state.cap is not None else window
-    new_window = max(MIN_KV_BOUND_TOKENS, int(effective * SHRINK_FACTOR))
+    new_window = _llama_rounded(int(effective * SHRINK_FACTOR))
     allowance = 2 if level == LEVEL_CRITICAL else 1
     # Under warning a shrink needs paging since the previous sample -- when
     # the machine counts it: a missing counter must not disable the brake.
@@ -568,11 +609,18 @@ def _llama_pressure(
         state.cap = new_window
         state.shrinks_this_episode += 1
         state.shrunk_since_turn = True
-        state.notice = NOTICE_ACTED
+        state.acted_pending = True
     idle_for = sample.now - sample.last_used if sample.last_used is not None else None
+    # Under warning: once the user is away, and not when the idle reap is
+    # about to unload the child anyway (its next spawn applies the cap).
+    reap_near = (
+        context.reap_idle_s is not None
+        and idle_for is not None
+        and idle_for >= context.reap_idle_s - LLAMA_REAP_MARGIN_S
+    )
     respawn = (
         state.cap is not None
-        and state.cap < window
+        and llama_padded(state.cap) < window
         and not state.respawned_this_turn
         and (
             level == LEVEL_CRITICAL
@@ -580,11 +628,16 @@ def _llama_pressure(
                 sample.point == POINT_IDLE
                 and idle_for is not None
                 and idle_for >= LLAMA_WARNING_RESPAWN_IDLE_S
+                and not reap_near
             )
         )
     )
     if respawn:
         state.respawned_this_turn = True
+        if state.acted_pending:
+            # The cap applies now: the conversation is summarized earlier.
+            state.notice = NOTICE_ACTED
+            state.acted_pending = False
     return Decision(
         state=state,
         level=level,

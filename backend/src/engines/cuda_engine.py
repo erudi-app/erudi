@@ -147,14 +147,16 @@ class CUDA_Engine(BaseLlamaCppEngine):
     # ---------- CUDA-specific spawn hooks (BaseLlamaCppEngine contract) ----------
 
     @classmethod
-    def _prepare_spawn_context(cls, model_path: Path, alias: str) -> Dict[str, Any]:
+    def _prepare_spawn_context(
+        cls, model_path: Path, alias: str, *, brake_cap: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Resolve per-spawn CUDA context: the pinned context window (None
         unless ERUDI_CTX is set -- llama-server's own fit resolves it then),
         thread count, and GPU layers computed from current VRAM (NVML).
 
-        ``model_path`` and ``alias`` are not used: with GPU layers the KV sits
-        partly or wholly in VRAM, which a RAM budget would mis-size, so CUDA
-        keeps llama-server's own fit."""
+        ``model_path``, ``alias`` and ``brake_cap`` are not used: with GPU
+        layers the KV sits partly or wholly in VRAM, which a RAM budget would
+        mis-size, so CUDA keeps llama-server's own fit and has no brake."""
         return {
             "ctx_size": cls.max_context_tokens(),
             "threads": max(1, os.cpu_count() or 1),

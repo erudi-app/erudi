@@ -8,10 +8,12 @@ against the free RAM of the moment on Windows):
     budget = LLAMA_RAM_BUDGET_FRACTION x physical RAM - weights - LLAMA_COMPUTE_FIXED_BYTES
     window = min(trained window, budget / (KV bytes per token + LLAMA_COMPUTE_PER_TOKEN_BYTES))
 
-rounded down to ``LLAMA_WINDOW_ROUND_TOKENS``, never under the 4096 floor
+rounded down to ``memory_brake.LLAMA_CTX_PAD_TOKENS`` (256: llama.cpp pads the
+window it allocates up to a multiple of it), never under the 4096 floor
 (``working_window.MIN_KV_BOUND_TOKENS``) -- a model whose floor does not fit
 still loads at the floor: the catalog is never gated on RAM -- and folded with
-the memory brake's cap when one is carried (``min(window, cap)``).
+the memory brake's cap when one is carried (``min(window, cap)``, the cap
+rounded down the same way).
 
 The KV bytes per token come from the GGUF's own KV header, read with the
 ``gguf`` package -- imported lazily, inside :func:`read_shape` only: the macOS
@@ -44,6 +46,7 @@ from pathlib import Path
 from typing import Any, Mapping, Optional, Tuple, Union
 
 from src.core.logging import logger
+from src.engines.memory_brake import LLAMA_CTX_PAD_TOKENS
 from src.engines.memory_budget import _KV_BYTES_PER_VALUE, artifact_bytes
 from src.engines.working_window import MIN_KV_BOUND_TOKENS
 
@@ -67,8 +70,6 @@ LLAMA_COMPUTE_FIXED_BYTES = 256 * _MIB
 # What the post-load check predicts for the intercept: the larger MEASURED
 # one (the budget's 256 MiB over-provisions on purpose).
 LLAMA_COMPUTE_INTERCEPT_MEASURED_BYTES = 64 * _MIB
-# llama.cpp's own fit granularity.
-LLAMA_WINDOW_ROUND_TOKENS = 256
 # The post-load check: the child's anonymous memory above this margin over
 # the prediction, plus this slack, is one WARNING.
 LLAMA_PREDICTION_MARGIN = 1.1
@@ -247,9 +248,12 @@ def window_for(
         int(LLAMA_RAM_BUDGET_FRACTION * total_ram_bytes) - weights_bytes - LLAMA_COMPUTE_FIXED_BYTES
     )
     affordable = max(0, budget) // (kv + LLAMA_COMPUTE_PER_TOKEN_BYTES)
-    affordable = affordable // LLAMA_WINDOW_ROUND_TOKENS * LLAMA_WINDOW_ROUND_TOKENS
+    affordable = affordable // LLAMA_CTX_PAD_TOKENS * LLAMA_CTX_PAD_TOKENS
     static = min(trained, max(MIN_KV_BOUND_TOKENS, affordable))
-    window = min(static, brake_cap) if brake_cap is not None and brake_cap > 0 else static
+    window = static
+    if brake_cap is not None and brake_cap > 0:
+        cap = max(MIN_KV_BOUND_TOKENS, brake_cap // LLAMA_CTX_PAD_TOKENS * LLAMA_CTX_PAD_TOKENS)
+        window = min(static, cap)
     return SpawnWindow(
         window=window,
         trained=trained,
@@ -296,9 +300,10 @@ def spawn_window(
         shape, weights_bytes=weights, total_ram_bytes=total_ram_bytes, brake_cap=brake_cap
     )
     if window is None:
+        reason = "MLA" if shape.kv_lora_rank is not None else "no attention KV cache"
         logger.warning(
             f"KV cache of {gguf_path} not modelled (architecture {shape.architecture}, "
-            f"MLA); llama-server sizes the window itself"
+            f"{reason}); llama-server sizes the window itself"
         )
     return window
 

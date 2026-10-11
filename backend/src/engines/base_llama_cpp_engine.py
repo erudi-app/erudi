@@ -545,7 +545,13 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         braked = cls._brake_bound()
         if braked:
             cls._llama_seed(handle)
+        # llama.cpp pads the -c it is given up to a multiple of 256: that
+        # padded value is the window it allocates.
         passed = handle.get("ctx_size")
+        if isinstance(passed, int) and not isinstance(passed, bool) and passed > 0:
+            passed = memory_brake.llama_padded(passed)
+        else:
+            passed = None
         handle["context_tokens"] = None
         handle["chat_template_caps"] = {}
         handle["chat_template"] = None
@@ -571,23 +577,23 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
                 f"[{cls.__name__}] {cls._server_name} allocated context window: "
                 f"{n_ctx} tokens (port {handle.get('port')})"
             )
-            if isinstance(passed, int) and n_ctx != passed:
+            if passed is not None and n_ctx != passed:
                 logger.warning(
                     f"[{cls.__name__}] {cls._server_name} allocated {n_ctx} tokens "
-                    f"where -c {passed} was passed (port {handle.get('port')})"
+                    f"where -c {handle.get('ctx_size')} was passed (port {handle.get('port')})"
                 )
         except Exception as exc:
             # Degraded, not failed: the model is loaded and usable. With a -c
             # the window is the one we asked for; without one (llama-server's
             # fit) it is unknown, which downstream treats as unknown.
-            if isinstance(passed, int):
+            if passed is not None:
                 handle["context_tokens"] = passed
             logger.warning(
                 f"[{cls.__name__}] Could not read {cls._server_name} /props on "
                 f"port {handle.get('port')}; "
                 + (
                     f"using the window passed at spawn, {passed} tokens "
-                    if isinstance(passed, int)
+                    if passed is not None
                     else "allocated context window unknown "
                 )
                 + f"({type(exc).__name__}: {exc})"
@@ -764,17 +770,22 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         cls._window_memory[alias] = {"cap": state.cap, "faulty": state.faulty, "at": time.time()}
 
     @classmethod
-    def _llama_spawn_context(cls, model_path: Path, alias: str) -> Dict[str, Any]:
+    def _llama_spawn_context(
+        cls, model_path: Path, alias: str, brake_cap: Optional[int] = None
+    ) -> Dict[str, Any]:
         """The window items of the spawn context: `-c` (`ctx_size`) and the
         facts the brake and the post-load check read back; `ctx_size=None`
         (llama-server's own fit) when the window cannot be sized --
-        `gguf_memory.spawn_window` wrote the one WARNING."""
-        entry = cls._window_memory_entry(alias)
+        `gguf_memory.spawn_window` wrote the one WARNING. The cap folded in
+        is ``brake_cap`` (a brake respawn), else the alias's window memory."""
+        if brake_cap is None:
+            entry = cls._window_memory_entry(alias)
+            brake_cap = entry.get("cap") if entry else None
         mmproj = cls._find_mmproj(model_path)
         window = gguf_memory.spawn_window(
             model_path,
             total_ram_bytes=memory_pressure.effective_total_ram_bytes(),
-            brake_cap=entry.get("cap") if entry else None,
+            brake_cap=brake_cap,
             mmproj_path=mmproj,
         )
         if window is None:
@@ -782,7 +793,7 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         logger.info(
             f"[{cls.__name__}] Window sized at spawn: window={window.window}, "
             f"trained={window.trained}, memory_bound={window.memory_bound}"
-            + (f", brake_cap={entry.get('cap')}" if entry and entry.get("cap") else "")
+            + (f", brake_cap={brake_cap}" if brake_cap else "")
         )
         return {
             "ctx_size": window.window,
@@ -938,6 +949,7 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
                 static_window=handle.get("static_window_tokens"),
                 footprint_share=footprint / total if footprint is not None and total else None,
                 resizable=not handle.get("window_pinned"),
+                reap_idle_s=cls._max_idle_time,
                 kv_share=window * kv / total if window and kv and total else None,
             ),
         )
@@ -993,6 +1005,7 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
                 alias=handle["alias"],
                 port=port,
                 probe_timeout_s=LLAMA_RESPAWN_PROBE_TIMEOUT_S,
+                brake_cap=live.cap,
             )
         except Exception as exc:
             record = {"alias": handle.get("alias"), **live.carry(), "unloaded_at": time.time()}

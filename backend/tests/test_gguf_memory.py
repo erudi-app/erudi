@@ -25,12 +25,12 @@ from src.engines.gguf_memory import (
     LLAMA_PREDICTION_MARGIN,
     LLAMA_PREDICTION_SLACK_BYTES,
     LLAMA_RAM_BUDGET_FRACTION,
-    LLAMA_WINDOW_ROUND_TOKENS,
     kv_bytes_per_token,
     post_load_limit_bytes,
     shape_from_fields,
     window_for,
 )
+from src.engines.memory_brake import LLAMA_CTX_PAD_TOKENS
 from src.engines.working_window import MIN_KV_BOUND_TOKENS
 
 pytestmark = pytest.mark.unit
@@ -139,9 +139,9 @@ def test_the_budget_binds_and_is_rounded_down():
     window = window_for(shape, weights_bytes=weights, total_ram_bytes=total)
     budget = int(LLAMA_RAM_BUDGET_FRACTION * total) - weights - LLAMA_COMPUTE_FIXED_BYTES
     affordable = budget // (114_688 + LLAMA_COMPUTE_PER_TOKEN_BYTES)
-    expected = affordable // LLAMA_WINDOW_ROUND_TOKENS * LLAMA_WINDOW_ROUND_TOKENS
+    expected = affordable // LLAMA_CTX_PAD_TOKENS * LLAMA_CTX_PAD_TOKENS
     assert window.window == expected
-    assert window.window % LLAMA_WINDOW_ROUND_TOKENS == 0
+    assert window.window % LLAMA_CTX_PAD_TOKENS == 0
     assert MIN_KV_BOUND_TOKENS < window.window < 40_960
     assert window.memory_bound is True
     assert window.static_window == expected
@@ -163,13 +163,21 @@ def test_a_trained_window_under_the_floor_is_kept():
 
 def test_a_brake_cap_folds_in_without_making_the_window_memory_bound():
     shape = shape_from_fields(QWEN3)
-    window = window_for(shape, weights_bytes=601 * MIB, total_ram_bytes=16 * GIB, brake_cap=20_000)
-    assert window.window == 20_000
+    window = window_for(shape, weights_bytes=601 * MIB, total_ram_bytes=16 * GIB, brake_cap=20_480)
+    assert window.window == 20_480
     assert window.static_window == 40_960
     assert window.memory_bound is False
     # A cap above the window changes nothing.
     roomy = window_for(shape, weights_bytes=601 * MIB, total_ram_bytes=16 * GIB, brake_cap=90_000)
     assert roomy.window == 40_960
+
+
+@pytest.mark.parametrize("cap, expected", [(20_000, 19_968), (7_872, 7_680), (4_100, 4_096)])
+def test_a_brake_cap_is_rounded_down_to_the_padding(cap, expected):
+    """llama.cpp pads -c up to a multiple of 256: the window passed is one."""
+    shape = shape_from_fields(QWEN3)
+    window = window_for(shape, weights_bytes=601 * MIB, total_ram_bytes=16 * GIB, brake_cap=cap)
+    assert window.window == expected
 
 
 def test_a_sliding_window_model_is_never_memory_bound():
@@ -259,6 +267,15 @@ def test_spawn_window_adds_the_mmproj_to_the_weights(tmp_path):
     with_vision = gguf_memory.spawn_window(path, total_ram_bytes=16 * GIB, mmproj_path=mmproj)
     assert with_vision.weights_bytes == alone.weights_bytes + 4096
     assert alone.window == 4096
+
+
+def test_a_purely_recurrent_model_is_not_called_mla(tmp_path, caplog):
+    path = _write_gguf(tmp_path / "ssm.gguf", kv_heads=(0, 0))
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        assert gguf_memory.spawn_window(path, total_ram_bytes=16 * GIB) is None
+    (warning,) = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+    assert "MLA" not in warning
+    assert "no attention KV cache" in warning
 
 
 def test_an_unreadable_gguf_is_one_warning_and_no_window(tmp_path, caplog):

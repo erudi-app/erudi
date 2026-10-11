@@ -35,7 +35,7 @@ from src.engines.base_llama_cpp_engine import LLAMA_RESPAWN_PROBE_TIMEOUT_S
 from src.engines.cpu_engine import CPU_Engine
 from src.engines.cuda_engine import CUDA_Engine
 from src.engines.gguf_memory import shape_from_fields, window_for
-from src.engines.memory_brake import BrakeOutcome, BrakeState
+from src.engines.memory_brake import BrakeOutcome, BrakeState, llama_padded
 from src.engines.memory_pressure import PressureReading
 
 pytestmark = pytest.mark.unit
@@ -174,7 +174,10 @@ class _World:
             return _Resp(
                 200,
                 {
-                    "default_generation_settings": {"n_ctx": spawn.get("ctx_size") or W},
+                    # llama.cpp pads n_ctx up to a multiple of 256.
+                    "default_generation_settings": {
+                        "n_ctx": llama_padded(spawn.get("ctx_size") or W)
+                    },
                     "chat_template_caps": {},
                     "chat_template": "t",
                 },
@@ -691,3 +694,75 @@ async def test_the_idle_tick_respawns_under_the_lock(world):
     assert BaseEngine._pending_reset is None
     assert not CPU_Engine._generation_lock_for_running_loop().locked()
     await asyncio.sleep(0)
+
+
+# ===================== llama.cpp pads the window =====================
+
+
+def _no_mismatch(caplog):
+    return not [r for r in caplog.records if "where -c" in r.getMessage()]
+
+
+def test_respawns_settle_on_a_window_that_is_not_a_multiple_of_1024(world, caplog):
+    """10,496 x 0.75 = 7,872, which llama.cpp would allocate as 7,936: the
+    cap is 7,680, the respawn allocates exactly it, and the brake settles --
+    no respawn at every turn, no -c mismatch."""
+    CPU_Engine._window_memory["erudi-7"] = {"cap": 10_496, "faulty": None, "at": time.time()}
+    _load(world)
+    assert CPU_Engine._model["context_tokens"] == 10_496
+    world.level = 4
+    reloads = 0
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        for _ in range(4):
+            outcome = CPU_Engine.brake_point("turn_start", llm_id=7)
+            reloads += "respawn" in (outcome.action or "")
+            CPU_Engine.begin_memory_window()
+            CPU_Engine.brake_point("turn_end")
+    window = CPU_Engine._model["context_tokens"]
+    assert window % 256 == 0
+    assert CPU_Engine._model["brake"].cap == window
+    # Two shrinks per episode: at most two respawns, then none.
+    assert len(world.spawns) <= 3
+    assert reloads <= 2
+    assert _no_mismatch(caplog)
+
+
+def test_a_pinned_window_off_the_padding_raises_no_mismatch(world, monkeypatch, caplog):
+    monkeypatch.setenv("ERUDI_CTX", "8000")
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        handle = _load(world)
+    assert handle["ctx_size"] == 8000
+    assert handle["context_tokens"] == 8192
+    assert _no_mismatch(caplog)
+
+
+def test_a_failed_props_read_keeps_the_padded_window(world, monkeypatch):
+    monkeypatch.setenv("ERUDI_CTX", "8000")
+    world.props_fail = True
+    handle = _load(world)
+    assert handle["context_tokens"] == 8192
+
+
+def test_a_respawn_passes_its_cap_whatever_the_window_memory_says(world, monkeypatch):
+    """The cap a respawn applies goes to the spawn explicitly: a stale or
+    missing window-memory entry never respawns at the static window."""
+    _load(world)
+    monkeypatch.setattr(CPU_Engine, "_remember_window", classmethod(lambda cls, a, s: None))
+    world.level = 4
+    outcome = CPU_Engine.brake_point("turn_end")
+    assert outcome.action == "shrink+respawn"
+    assert world.spawns[-1]["ctx_size"] == int(W * mb.SHRINK_FACTOR)
+
+
+def test_no_warning_respawn_when_the_idle_reap_is_near(world):
+    _load(world)
+    world.level = 2
+    world.damage = 64 * MIB
+    CPU_Engine.brake_point("turn_end")
+    assert CPU_Engine._model["brake"].cap == int(W * mb.SHRINK_FACTOR)
+    CPU_Engine._model["brake"].last_sample_at -= mb.BRAKE_IDLE_INTERVAL_S
+    CPU_Engine._last_used = datetime.now() - timedelta(
+        seconds=CPU_Engine._max_idle_time - mb.LLAMA_REAP_MARGIN_S
+    )
+    assert CPU_Engine.brake_point("idle") == BrakeOutcome()
+    assert len(world.spawns) == 1

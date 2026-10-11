@@ -362,7 +362,7 @@ Windows threshold is a starting value to calibrate on real machines):
 | | Pressure level (1/2/4) | Paging counter (the damage) | Anonymous memory (unload share, post-load check) |
 |---|---|---|---|
 | macOS | `kern.memorystatus_vm_pressure_level` | swap-outs × 16 KiB | `phys_footprint` |
-| Linux | PSI: the system's `/proc/pressure/memory` — our cgroup's `memory.pressure` only inside a real container (finite `memory.max`: a desktop's systemd scope counts only our own stalls, and an idle `llama-server` never stalls). Warning at 10 % of `some` stall, critical at 5 % of `full`, on the fraction since the previous sample when 5 s or more passed, else on `avg10`. Without PSI: swap-out ≥ 8 MiB/s or major faults ≥ 200/s warn, swap-out ≥ 64 MiB/s is critical | swap-out bytes (`psutil`) | `Anonymous:` + `Swap:` of `/proc/<pid>/smaps_rollup` |
+| Linux | PSI: the system's `/proc/pressure/memory` — our cgroup's `memory.pressure` only inside a real container (finite `memory.max`: a desktop's systemd scope counts only our own stalls, and an idle `llama-server` never stalls). Warning at 10 % of `some` stall, critical at 5 % of `full`, on the fraction since the previous sample when 5 s or more passed, else on `avg10`. Without PSI: swap-out ≥ 8 MiB/s or major faults ≥ 200/s warn, swap-out ≥ 64 MiB/s is critical | swap-out bytes (`psutil`); without swap, major faults × the page size (file pages read back from disk) | `Anonymous:` + `Swap:` of `/proc/<pid>/smaps_rollup` |
 | Windows | Commit charge `1 − ullAvailPageFile / ullTotalPageFile` (`GlobalMemoryStatusEx`): warning at 85 %, critical at 93 % | `\Memory\Pages Output/sec` read raw through PDH by its English name (× 4 KiB) | private commit |
 
 An unreadable level turns the brake off with one WARNING naming why; a missing paging
@@ -374,21 +374,37 @@ evidence on every sample of the CPU engine.
 
 | Action | When | What it does |
 |---|---|---|
-| Shrink | One per episode under warning — with at least 8 MiB of paging since the previous sample, when the machine counts paging — one more once critical; never two without a turn between them; only when the window's KV is 10 % of RAM or more | The cap becomes `max(4096, 0.75 × min(window, cap))`; state only until a respawn applies it |
-| Respawn | The cap is below the allocated window, and: critical, at any safe point; or warning, at an idle sample once the user has been away 120 s (two ticks: a reader between messages pays no re-prefill). At most one per turn: a `turn_start` respawn is not repeated at the same turn's end; the next turn or an idle sample re-arms it | The same model restarts in place with `-c = min(budget window, cap)` |
+| Shrink | One per episode under warning — with at least 8 MiB of paging since the previous sample, when the machine counts paging — one more once critical; never two without a turn between them; only when the window's KV is 10 % of RAM or more | The cap becomes `0.75 × min(window, cap)`, rounded down to a multiple of 256, never under 4096; state only until a respawn applies it |
+| Respawn | The cap is below the allocated window, and: critical, at any safe point; or warning, at an idle sample once the user has been away 120 s (two ticks: a reader between messages pays no re-prefill) and less than 180 s — the idle reap (300 s) minus `LLAMA_REAP_MARGIN_S` (120 s): a child about to be reaped is not worth a reload, the window memory applies the cap at its next spawn. At most one per turn: a `turn_start` respawn is not repeated at the same turn's end; the next turn or an idle sample re-arms it | The same model restarts in place with `-c = min(budget window, cap)` |
 | Unload | Idle only: critical at two consecutive idle samples with no turn between them, at most once per episode, never within 600 s of a brake reload (a respawn sets no such grace), only for a child holding 5 % or more of RAM | The idle reap's path; the episode goes to `_brake_reload` |
 | Grow | Outside an episode, every 3 calm samples (the MLX rule) | State only: never a respawn. The larger window applies at the next spawn of the model |
 
 A window KV under 10 % of RAM means the pressure is not ours: the notice is `external`
 (never over `acted`, never on a child a brake reload seeded), and nothing shrinks. A
-shrink sets `acted`; a warning shrink held back for want of paging sets no notice at all.
+respawn that applies a shrink sets `acted` (a shrink deferred to an idle respawn is said
+only once applied); a warning shrink held back for want of paging sets no notice at all.
 A cap the episode never applied (pressure ended before a respawn) is dropped when the
-episode ends; the window that hurt is kept. With `ERUDI_CTX` pinned nothing is resized and
+episode ends, with nothing said; the window that hurt is kept.
+
+**Caps are multiples of 256.** llama.cpp pads the window it allocates up to a multiple of
+256 (`GGML_PAD(n_ctx, 256)` in `llama-context.cpp`; `/props` reports the padded
+value), so every cap the brake sets — a shrink, a grow, the cap folded into `-c` — is
+rounded down to a multiple of 256 (never under 4096), and the law compares the allocated
+window with the padded cap: an unpadded cap would stay below the window its own respawn
+allocates and respawn again at every turn. A `-c` the user pins off that grid
+(`ERUDI_CTX=8000`) is compared padded too (8192), so it draws no mismatch WARNING.
+
+**The emergency unload is intended.** Under lasting critical pressure while the user is
+away, a respawn is followed by an unload: a critical `turn_end` respawns the child
+smaller, the first idle tick arms the unload (no second shrink without a turn), and the
+second unloads it; an idle respawn is followed by the unload at the very next tick. The
+next message reloads the model with the reduced window. With `ERUDI_CTX` pinned nothing is resized and
 no `acted` notice is drawn; the unload still applies.
 
 **The respawn.** Under the generation lock (the sample runs shielded, like every brake
-sample), the engine stops the child, picks a port and starts the same GGUF; the spawn
-context reads the cap from the window memory, so the new `-c` is the reduced window.
+sample), the engine stops the child, picks a port and starts the same GGUF with the
+brake's cap handed to the spawn context (`_start_server(..., brake_cap=)`, never left to
+the window memory), so the new `-c` is the reduced window.
 `_model_id`, the tokenizer and the idle clock are kept (the 300 s reap still sees an
 abandoned child); the brake state is carried whole — episode, cap, notice, the
 critical-unload clock — with no reload grace. One INFO line,

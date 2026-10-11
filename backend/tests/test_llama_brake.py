@@ -23,7 +23,9 @@ from src.engines.memory_brake import (
     CALM_SAMPLES_TO_FORGET,
     CALM_SAMPLES_TO_GROW,
     FAULTY_GROW_LIMIT,
+    LLAMA_CTX_PAD_TOKENS,
     LLAMA_KV_SHARE_MIN,
+    LLAMA_REAP_MARGIN_S,
     LLAMA_WARNING_DAMAGE_MIN_BYTES,
     LLAMA_WARNING_RESPAWN_IDLE_S,
     SHRINK_FACTOR,
@@ -32,6 +34,7 @@ from src.engines.memory_brake import (
     BrakeState,
     Context,
     Sample,
+    llama_padded,
     llama_step,
 )
 from src.engines.working_window import MIN_KV_BOUND_TOKENS
@@ -42,16 +45,19 @@ MIB = 1024**2
 W = 32_768
 CALM, WARNING, CRITICAL = 1, 2, 4
 DAMAGE = LLAMA_WARNING_DAMAGE_MIN_BYTES
+# The idle reap of the engine (BaseEngine._max_idle_time).
+REAP_S = 300
 
 
 class _Child:
     """One llama child under the law, as the engine drives it: a respawn
-    makes the allocated window the cap; an unload ends it (the record
-    carries the episode to the next spawn)."""
+    makes the allocated window the cap -- padded up to a multiple of 256, as
+    llama.cpp allocates it; an unload ends it (the record carries the episode
+    to the next spawn)."""
 
     def __init__(self, *, window=W, static=W, kv_share=0.3, share=0.4, resizable=True, state=None):
         self.state = state or BrakeState()
-        self.window = window
+        self.window = llama_padded(window) if window else window
         self.static = static
         self.kv_share = kv_share
         self.share = share
@@ -79,12 +85,13 @@ class _Child:
                 footprint_share=self.share,
                 resizable=self.resizable,
                 kv_share=self.kv_share,
+                reap_idle_s=REAP_S,
             ),
         )
         self.state = decision.state
         if decision.respawn:
             self.respawns += 1
-            self.window = min(self.static, self.state.cap or self.static)
+            self.window = llama_padded(min(self.static, self.state.cap or self.static))
             self.state = BrakeState.respawned(self.state)
         if decision.unload:
             self.unloads += 1
@@ -163,15 +170,15 @@ def test_a_warning_shrink_at_turn_end_is_deferred_to_an_idle_respawn():
     child.last_used = 110
     assert decision.cap_change == "shrink"
     assert child.state.cap == int(W * SHRINK_FACTOR)
-    assert child.state.notice == "acted"
+    # Nothing is summarized earlier yet: the notice waits for the cap to apply.
+    assert child.state.notice is None
     assert not decision.respawn
     # The user reads: an idle tick at 60 s respawns nothing.
     assert not child.sample("idle", 110 + 60, WARNING, damage=0).respawn
-    # Two ticks' worth of user idle: the cap is applied.
+    # Two ticks' worth of user idle: the cap is applied, and said.
     decision = child.sample("idle", 110 + LLAMA_WARNING_RESPAWN_IDLE_S, WARNING, damage=0)
     assert decision.respawn
     assert child.window == int(W * SHRINK_FACTOR)
-    # The acted notice survives the respawn.
     assert child.state.notice == "acted"
 
 
@@ -206,9 +213,12 @@ def test_warning_with_a_small_paging_delta_does_nothing_and_says_nothing(point):
 @pytest.mark.parametrize("point", ["idle", "turn_start"])
 def test_warning_with_paging_shrinks(point):
     child = _Child()
+    child.last_used = 1000 - LLAMA_WARNING_RESPAWN_IDLE_S
     decision = child.sample(point, 1000, WARNING, damage=DAMAGE)
     assert decision.cap_change == "shrink"
-    assert child.state.notice == "acted"
+    # Applied at once only by an idle sample with the user away.
+    assert decision.respawn is (point == "idle")
+    assert child.state.notice == ("acted" if point == "idle" else None)
 
 
 def test_a_swap_burst_at_turn_end_counts_as_warning():
@@ -446,3 +456,88 @@ def test_a_persistent_external_consumer_is_bounded_by_the_remembered_window():
         t += 20 * BRAKE_IDLE_INTERVAL_S
         if child.state.faulty is not None and child.state.cap is not None:
             assert child.state.cap <= int(FAULTY_GROW_LIMIT * child.state.faulty)
+
+
+# ===================== llama.cpp pads the window =====================
+
+
+@pytest.mark.parametrize("window", [10_496, 9_000, 40_960, 131_072, 5_376, 4_352])
+def test_caps_are_multiples_of_the_padding_and_a_respawn_settles(window):
+    """llama.cpp pads n_ctx up to a multiple of 256: an unpadded cap would
+    stay below the allocated window after its respawn and respawn again."""
+    child = _Child(window=window, static=window)
+    t = 1000.0
+    for _ in range(6):
+        child.turn(t, t + 10, CRITICAL)
+        child.last_used = t + 10
+        t += 100
+        if child.state.cap is not None:
+            assert child.state.cap % LLAMA_CTX_PAD_TOKENS == 0
+            assert child.state.cap >= MIN_KV_BOUND_TOKENS or child.state.cap == child.window
+    # Two shrinks, at most two respawns, then a settled child.
+    assert child.respawns <= 2
+    assert child.window == llama_padded(child.state.cap or child.static)
+    later = [child.turn(t + 100 * i, t + 100 * i + 10, CRITICAL) for i in range(3)]
+    assert not any(d.respawn for d in later)
+
+
+def test_an_applied_unpadded_window_is_not_dropped_at_the_end_of_the_episode():
+    child = _Child(window=10_496, static=10_496)
+    child.sample("turn_end", 1000, CRITICAL)
+    assert child.respawns == 1
+    _idle_ticks(child, 2000, CALM_SAMPLES_TO_END, CALM)
+    assert child.state.cap == child.window
+
+
+def test_a_grown_cap_is_a_multiple_of_the_padding():
+    child = _Child(window=10_496, static=10_496)
+    child.sample("turn_end", 1000, CRITICAL)
+    decisions = _idle_ticks(child, 2000, CALM_SAMPLES_TO_END + CALM_SAMPLES_TO_GROW, CALM)
+    assert any(d.cap_change == "grow" for d in decisions)
+    assert child.state.cap is None or child.state.cap % LLAMA_CTX_PAD_TOKENS == 0
+
+
+def test_a_deferred_cap_dropped_by_calm_never_says_acted():
+    child = _Child()
+    child.sample("turn_start", 100, CALM, damage=0)
+    child.state.turn_happened = True
+    child.sample("turn_end", 110, WARNING, damage=DAMAGE)
+    child.last_used = 110
+    _idle_ticks(child, 170, CALM_SAMPLES_TO_END, CALM)
+    assert child.state.cap is None
+    assert child.state.notice is None
+    assert child.respawns == 0
+
+
+def test_no_warning_respawn_when_the_reap_is_near():
+    """The child will be reaped soon: a reload is not worth it, the window
+    memory applies the cap at the next spawn."""
+    child = _Child()
+    child.sample("turn_start", 100, CALM, damage=0)
+    child.state.turn_happened = True
+    child.sample("turn_end", 110, WARNING, damage=DAMAGE)
+    child.last_used = 110
+    late = 110 + REAP_S - LLAMA_REAP_MARGIN_S
+    decision = child.sample("idle", late, WARNING, damage=0)
+    assert not decision.respawn
+    assert child.state.notice is None
+    # Critical pressure does not wait for that.
+    assert child.sample("idle", late + BRAKE_IDLE_INTERVAL_S, CRITICAL).respawn
+
+
+def test_a_critical_respawn_then_an_unload_at_the_next_idle_tick_is_intended():
+    """The emergency: a critical turn end respawns the child smaller; still
+    critical while the user is away, the first idle tick arms the unload (no
+    second shrink without a turn) and the next one unloads the respawned
+    child. Likewise an idle respawn is followed by an unload at the next tick."""
+    child = _Child()
+    first = child.sample("turn_end", 1000, CRITICAL)
+    child.last_used = 1000
+    second = child.sample("idle", 1000 + BRAKE_IDLE_INTERVAL_S, CRITICAL)
+    third = child.sample("idle", 1000 + 2 * BRAKE_IDLE_INTERVAL_S, CRITICAL)
+    assert (first.respawn, second.actions, third.unload) == (True, (), True)
+    assert child.respawns == 1 and child.unloads == 1
+    child = _Child()
+    first = child.sample("idle", 1000, CRITICAL)
+    second = child.sample("idle", 1000 + BRAKE_IDLE_INTERVAL_S, CRITICAL)
+    assert (first.respawn, second.unload) == (True, True)

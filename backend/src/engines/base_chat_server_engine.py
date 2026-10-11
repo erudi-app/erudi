@@ -202,13 +202,16 @@ class BaseChatServerEngine(BaseEngine):
         return handle["alias"]
 
     @classmethod
-    def _prepare_spawn_context(cls, model_path: Path, alias: str) -> Dict[str, Any]:
+    def _prepare_spawn_context(
+        cls, model_path: Path, alias: str, *, brake_cap: Optional[int] = None
+    ) -> Dict[str, Any]:
         """Build per-spawn context passed to `_spawn_child` as `**ctx`, for the
         artifact ``model_path`` served under ``alias``.
 
         Default: empty. CUDA overrides to inject `{"gpu_layers": ...}` from
         NVML at spawn time; CPU sizes the window (`-c`) from the GGUF and the
-        machine's RAM, folding in the memory brake's cap for that alias.
+        machine's RAM, folding in the memory brake's cap -- ``brake_cap`` for
+        a brake respawn, else the cap remembered for that alias.
         """
         return {}
 
@@ -520,17 +523,19 @@ class BaseChatServerEngine(BaseEngine):
         alias: str,
         port: int,
         probe_timeout_s: Optional[float] = None,
+        brake_cap: Optional[int] = None,
     ) -> Dict[str, Any]:
         """Spawn the child, probe, and register a stable atexit handler.
 
         The atexit handler is stored on `cls._atexit_handler` so a subsequent
         `_stop_server_if_running` (during a model swap) can unregister it.
         `probe_timeout_s` bounds this spawn's readiness probe (`None`:
-        `_probe_timeout_s`).
+        `_probe_timeout_s`); `brake_cap` is the window a memory-brake respawn
+        applies (handed to `_prepare_spawn_context`).
         """
         cls._assert_required_attrs()
         cls._assert_requests()
-        ctx = cls._prepare_spawn_context(model_path, alias)
+        ctx = cls._prepare_spawn_context(model_path, alias, brake_cap=brake_cap)
         handle = cls._spawn_child(model_path=model_path, alias=alias, port=port, **ctx)
         try:
             cls._probe_ready(
