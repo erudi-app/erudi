@@ -106,7 +106,7 @@ class CPU_Engine(BaseLlamaCppEngine):
     # ---------- CPU-specific spawn hooks ----------
 
     @classmethod
-    def _prepare_spawn_context(cls) -> Dict[str, Any]:
+    def _prepare_spawn_context(cls, model_path: Path, alias: str) -> Dict[str, Any]:
         """Resolve the per-spawn CPU context: the pinned context window (None
         unless ERUDI_CTX is set -- llama-server's own fit resolves it then),
         thread count, and the fixed `gpu_layers=0` (CPU-only inference)."""

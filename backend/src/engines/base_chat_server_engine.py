@@ -28,7 +28,9 @@ asyncio lock, so the child is never terminated mid-generation.
 
 from __future__ import annotations
 
+import asyncio
 import atexit
+import functools
 import socket
 import time
 from abc import abstractmethod
@@ -41,7 +43,9 @@ import requests
 from src.core.exceptions import EngineException
 from src.engines.cuda_compatibility import classify_cuda_failure
 from src.core.logging import logger
-from src.engines.base_engine import BaseEngine
+from src.engines import memory_brake
+from src.engines.base_engine import BaseEngine, _log_monitor_death, run_reset_shielded
+from src.engines.memory_brake import BrakeState
 
 
 class BaseChatServerEngine(BaseEngine):
@@ -198,11 +202,13 @@ class BaseChatServerEngine(BaseEngine):
         return handle["alias"]
 
     @classmethod
-    def _prepare_spawn_context(cls) -> Dict[str, Any]:
-        """Build per-spawn context passed to `_spawn_child` as `**ctx`.
+    def _prepare_spawn_context(cls, model_path: Path, alias: str) -> Dict[str, Any]:
+        """Build per-spawn context passed to `_spawn_child` as `**ctx`, for the
+        artifact ``model_path`` served under ``alias``.
 
         Default: empty. CUDA overrides to inject `{"gpu_layers": ...}` from
-        NVML at spawn time.
+        NVML at spawn time; CPU sizes the window (`-c`) from the GGUF and the
+        machine's RAM, folding in the memory brake's cap for that alias.
         """
         return {}
 
@@ -316,6 +322,7 @@ class BaseChatServerEngine(BaseEngine):
         proc: Any = None,
         model_field: str = "default_model",
         api_key: Optional[str] = None,
+        probe_timeout_s: Optional[float] = None,
     ) -> None:
         """Two-stage readiness probe.
 
@@ -344,11 +351,16 @@ class BaseChatServerEngine(BaseEngine):
         mlx_vlm.server gates `/health` behind the key, so there it is required.
         Sending it uniformly keeps the two calls symmetric. Without a key
         (`None`) no header is sent at all.
+
+        `probe_timeout_s` bounds stage 1 for this call only (the memory
+        brake's respawn, under the generation lock); `None` is
+        `_probe_timeout_s`.
         """
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
         port = base_url.rsplit(":", 1)[-1]
+        timeout_s = cls._probe_timeout_s if probe_timeout_s is None else probe_timeout_s
         probe_start = time.monotonic()
-        deadline = probe_start + cls._probe_timeout_s
+        deadline = probe_start + timeout_s
         last_status: Optional[int] = None
         last_err: Optional[Exception] = None
         while time.monotonic() < deadline:
@@ -388,7 +400,7 @@ class BaseChatServerEngine(BaseEngine):
             raise EngineException(
                 message=(
                     f"{cls._server_name} did not become ready within "
-                    f"{cls._probe_timeout_s:.0f}s (last status: {last_status}, "
+                    f"{timeout_s:.0f}s (last status: {last_status}, "
                     f"last err: {last_err}; {cls._describe_child(proc, port)}, "
                     f"model {model_field}). If another process bound the port "
                     f"between pick and spawn, the request may be hitting the wrong "
@@ -459,11 +471,14 @@ class BaseChatServerEngine(BaseEngine):
 
     @classmethod
     def cleanup(cls) -> None:
-        """Terminate the child and reset cached engine state.
+        """Terminate the child and reset cached engine state; a pending brake
+        reload is forgotten with it (an idle-timeout reap, a shutdown -- the
+        brake's own unload records its reload after this call).
 
         Called by `BaseEngine._cleanup_monitor` after 300s of idle, or
         explicitly when switching models.
         """
+        cls._brake_reload = None
         cls._stop_server_if_running()
         return super().cleanup()
 
@@ -498,15 +513,24 @@ class BaseChatServerEngine(BaseEngine):
 
     # ====================== Template methods ======================
     @classmethod
-    def _start_server(cls, *, model_path: Path, alias: str, port: int) -> Dict[str, Any]:
+    def _start_server(
+        cls,
+        *,
+        model_path: Path,
+        alias: str,
+        port: int,
+        probe_timeout_s: Optional[float] = None,
+    ) -> Dict[str, Any]:
         """Spawn the child, probe, and register a stable atexit handler.
 
         The atexit handler is stored on `cls._atexit_handler` so a subsequent
         `_stop_server_if_running` (during a model swap) can unregister it.
+        `probe_timeout_s` bounds this spawn's readiness probe (`None`:
+        `_probe_timeout_s`).
         """
         cls._assert_required_attrs()
         cls._assert_requests()
-        ctx = cls._prepare_spawn_context()
+        ctx = cls._prepare_spawn_context(model_path, alias)
         handle = cls._spawn_child(model_path=model_path, alias=alias, port=port, **ctx)
         try:
             cls._probe_ready(
@@ -514,6 +538,7 @@ class BaseChatServerEngine(BaseEngine):
                 proc=handle.get("proc"),
                 model_field=cls._payload_model_value(handle),
                 api_key=handle.get("api_key"),
+                probe_timeout_s=probe_timeout_s,
             )
         except Exception:
             cls._terminate_process(handle.get("proc"))
@@ -567,3 +592,136 @@ class BaseChatServerEngine(BaseEngine):
         cls._last_used = datetime.now()
         logger.info(f"[{cls.__name__}] Model loaded on {handle['base_url']} alias={alias}")
         return cls._model, cls._tokenizer
+
+    # ======================= The memory brake's plumbing =======================
+    #
+    # Shared by the engines that bind a memory brake (MLX, and the CPU engine
+    # through ``BaseLlamaCppEngine``). An engine that does not override
+    # ``brake_point`` (CUDA) inherits it and stays inert: no monitor starts, no
+    # record is ever written, every answer is the base one.
+
+    # What an unload carries to the next spawn of the same model, or None.
+    # Cleared by any successful spawn, by an idle-timeout reap and at
+    # shutdown (``cleanup``); expires after ``memory_brake.BRAKE_RELOAD_TTL_S``.
+    _brake_reload: ClassVar[Optional[Dict[str, Any]]] = None
+    # The pressure sensor was found unreadable: the brake is off, said once.
+    _brake_sensor_warned: ClassVar[bool] = False
+    _pressure_task: ClassVar[Optional["asyncio.Task"]] = None
+    # Seconds between idle samples. A class attribute so tests run it at speed.
+    _pressure_interval_s: ClassVar[float] = float(memory_brake.BRAKE_IDLE_INTERVAL_S)
+
+    @classmethod
+    def _brake_bound(cls) -> bool:
+        """Whether this engine samples a memory brake: it overrides
+        ``brake_point`` (the test the runner applies to its hooks)."""
+        hook = getattr(cls.brake_point, "__func__", cls.brake_point)
+        return hook is not getattr(BaseEngine.brake_point, "__func__", BaseEngine.brake_point)
+
+    @classmethod
+    def loaded_child_for(cls, llm_id: Any) -> bool:
+        """Whether the loaded child serves ``llm_id`` and is alive. No side
+        effect (``_should_not_reload_model`` logs a dead child's output, and
+        the turn calls it again when it resolves its model)."""
+        handle = cls._model
+        return (
+            cls._model_id == llm_id
+            and isinstance(handle, dict)
+            and cls._proc_is_alive(handle.get("proc"))
+        )
+
+    @classmethod
+    def brake_reload_pending(cls, llm_id: Any) -> bool:
+        """Whether the next turn for ``llm_id`` reloads the model the brake
+        unloaded: a record for its alias, younger than the TTL, and no child
+        loaded."""
+        record = cls._brake_reload
+        if not isinstance(record, dict) or cls._model is not None:
+            return False
+        unloaded_at = record.get("unloaded_at")
+        return (
+            record.get("alias") == f"{cls._server_alias_prefix}{llm_id}"
+            and isinstance(unloaded_at, (int, float))
+            and time.time() - unloaded_at < memory_brake.BRAKE_RELOAD_TTL_S
+        )
+
+    @classmethod
+    def consume_brake_notice(cls) -> Optional[str]:
+        """The loaded child's pending brake notice, consumed (``"acted"`` or
+        ``"external"``); a stateful turn end shows it."""
+        handle = cls._model
+        state = handle.get("brake") if isinstance(handle, dict) else None
+        return state.take_notice() if isinstance(state, BrakeState) else None
+
+    @classmethod
+    def _carried_brake(cls, handle: Dict[str, Any]) -> Optional[BrakeState]:
+        """The episode an unload of the same model carried (within the TTL),
+        or None."""
+        record = cls._brake_reload
+        now = time.time()
+        unloaded_at = record.get("unloaded_at") if isinstance(record, dict) else None
+        if (
+            not isinstance(record, dict)
+            or record.get("alias") != handle.get("alias")
+            or not isinstance(unloaded_at, (int, float))
+            or now - unloaded_at >= memory_brake.BRAKE_RELOAD_TTL_S
+        ):
+            return None
+        state = BrakeState.reloaded(record, now=now)
+        logger.info(
+            f"[{cls.__name__}] Memory brake carried over the reload: cap={state.cap}, "
+            f"shrinks_this_episode={state.shrinks_this_episode}"
+        )
+        return state
+
+    @classmethod
+    async def _pressure_tick(cls) -> None:
+        """One idle sample, under the generation lock (never during a turn),
+        only with a loaded, live child; shielded like a reset."""
+        async with cls._acquire_generation_lock():
+            handle = cls._model
+            if not isinstance(handle, dict) or not cls._proc_is_alive(handle.get("proc")):
+                return
+            await run_reset_shielded(functools.partial(cls.brake_point, memory_brake.POINT_IDLE))
+
+    @classmethod
+    async def _pressure_monitor(cls) -> None:
+        """Every ``_pressure_interval_s``, one idle sample. A tick that raises
+        is logged at ERROR with its traceback and the loop goes on (nobody
+        awaits this task: an escaped exception would end the brake's idle
+        samples without a record)."""
+        while True:
+            await asyncio.sleep(cls._pressure_interval_s)
+            try:
+                await cls._pressure_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"Memory pressure tick failed: {exc}", exc_info=True)
+
+    @classmethod
+    def start_pressure_task(cls) -> None:
+        """Start the idle memory-pressure monitor (idempotent), for an engine
+        that binds a brake only."""
+        if cls._pressure_task is None and cls._brake_bound():
+            cls._pressure_task = asyncio.create_task(
+                cls._pressure_monitor(), name="memory-pressure"
+            )
+            cls._pressure_task.add_done_callback(_log_monitor_death)
+            logger.info("Started memory pressure monitor")
+
+    @classmethod
+    async def stop_pressure_task(cls) -> None:
+        """Cancel the monitor and wait for it: a sample in flight finishes
+        first (it is shielded), so the shutdown never stops the child under
+        it."""
+        task, cls._pressure_task = cls._pressure_task, None
+        if task is None:
+            return
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            current = asyncio.current_task()
+            if current is not None and current.cancelling():
+                raise
+        logger.info("Stopped memory pressure monitor")

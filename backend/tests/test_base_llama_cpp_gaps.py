@@ -208,7 +208,7 @@ def _spawn_cpu_child(tmp_path, monkeypatch, *, with_mmproj, engine=CPU_Engine, *
         model_path=model,
         alias="erudi-1",
         port=27201,
-        **(ctx or engine._prepare_spawn_context()),
+        **(ctx or engine._prepare_spawn_context(model, "erudi-1")),
     )
     return handle, captured
 

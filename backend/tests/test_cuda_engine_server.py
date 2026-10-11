@@ -54,7 +54,7 @@ class TestSpawnContextAndArgv:
     def test_prepare_spawn_context_invokes_compute_gpu_layers(self, monkeypatch):
         monkeypatch.delenv("ERUDI_CTX", raising=False)
         with patch.object(CUDA_Engine, "_compute_gpu_layers", return_value=42):
-            ctx = CUDA_Engine._prepare_spawn_context()
+            ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
         assert ctx["gpu_layers"] == 42
         assert ctx["threads"] >= 1
         # Deliberate inversion of the old `>= 1` assertion: without ERUDI_CTX
@@ -65,7 +65,7 @@ class TestSpawnContextAndArgv:
     def test_prepare_spawn_context_honours_erudi_ctx_env(self, monkeypatch):
         monkeypatch.setenv("ERUDI_CTX", "8192")
         with patch.object(CUDA_Engine, "_compute_gpu_layers", return_value=10):
-            ctx = CUDA_Engine._prepare_spawn_context()
+            ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
         assert ctx["ctx_size"] == 8192
 
     def test_build_spawn_argv_emits_required_flags(self):

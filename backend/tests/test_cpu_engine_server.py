@@ -49,7 +49,7 @@ class TestCpuEngineHierarchy:
 class TestSpawnContextAndArgv:
     def test_prepare_spawn_context_forces_zero_gpu_layers(self, monkeypatch):
         monkeypatch.delenv("ERUDI_CTX", raising=False)
-        ctx = CPU_Engine._prepare_spawn_context()
+        ctx = CPU_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-7")
         assert ctx["gpu_layers"] == 0
         assert ctx["threads"] >= 1
         # Deliberate inversion of the old `>= 1` assertion: without ERUDI_CTX
@@ -60,7 +60,7 @@ class TestSpawnContextAndArgv:
 
     def test_prepare_spawn_context_honours_erudi_ctx_env(self, monkeypatch):
         monkeypatch.setenv("ERUDI_CTX", "8192")
-        ctx = CPU_Engine._prepare_spawn_context()
+        ctx = CPU_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-7")
         assert ctx["ctx_size"] == 8192
 
     def test_build_spawn_argv_emits_required_flags(self):
