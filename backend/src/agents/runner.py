@@ -101,7 +101,7 @@ from src.core.exceptions import EngineException, GenerationTimeoutException
 from src.core.logging import logger
 from src.engines.base_engine import BaseEngine, run_reset_shielded, wait_shielded
 from src.engines.memory_budget import MemoryBudget
-from src.engines.working_window import canonical_working_window
+from src.engines.working_window import COMPACTION_WINDOW_FRACTION, canonical_working_window
 
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
@@ -141,7 +141,6 @@ SUMMARY_PROMPT = (
 
 SUMMARY_TRIGGER_MESSAGES = 20
 SUMMARY_KEEP_MESSAGES = 10
-COMPACTION_WINDOW_FRACTION = 0.8
 # The amber warning's threshold (Y of #612): it shows only when the machine's
 # memory bounds the loaded child's window (``memory_bound_tokens``) and, even
 # after compacting to the kept budget, the next request would fill 85 % of the

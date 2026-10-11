@@ -43,6 +43,13 @@ from src.engines.memory_budget import MemoryBudget
 # for the model instead.
 MIN_KV_BOUND_TOKENS = 4096
 
+# Compaction fires at this fraction of the working window (the agent layer's
+# trigger, ``src.agents.runner.summarization_triggers``). It lives here, with
+# the window it is a fraction of, because the engine layer reads it too: the
+# memory brake shrinks the window only when the next turn would compact under
+# the shrunk one (``src.engines.memory_brake``).
+COMPACTION_WINDOW_FRACTION = 0.8
+
 
 def _positive_int(value: Any) -> Optional[int]:
     """``value`` if it is a real positive int, else ``None`` (rejects bool)."""
