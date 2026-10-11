@@ -375,7 +375,9 @@ class TestProbeReady:
         """
         captured: dict = {}
 
-        def _capture_probe(base_url, proc=None, model_field="default_model", api_key=None):
+        def _capture_probe(
+            base_url, proc=None, model_field="default_model", api_key=None, probe_timeout_s=None
+        ):
             captured["api_key"] = api_key
 
         spawned = {

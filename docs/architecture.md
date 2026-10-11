@@ -196,10 +196,12 @@ Conversations and Arena share one streaming primitive, `AgentRunner`
   10 messages and at most a token budget of the working window, and its summary is
   capped (see the [Conversations guide](guides/conversations.md)). On Apple Silicon,
   when the memory ceiling is smaller than the model's trained window, the inference
-  child itself enforces it (see [Engines](dev/architecture/engines.md#context-windows)),
-  and the amber memory notice about that bound appears only then — when even the
-  projected next request fills 85 % of the working window. Under memory pressure the
-  memory brake (below) moves that bound, and its own notice takes precedence.
+  child itself enforces it (see [Engines](dev/architecture/engines.md#context-windows));
+  on the CPU engine, the window Erudi passes to `llama-server` is already the one the
+  machine's RAM affords. The amber memory notice about that bound appears only when
+  memory is what bounds the window — and even the projected next request fills 85 % of
+  it. Under memory pressure the memory brake (below) moves that bound, and its own
+  notice takes precedence.
 - **Token counts are real tokens without a tokenizer in the backend**
   (`agents/token_accounting.py`), costed message by message: every client streams the
   server's usage, and the chunk that carries it is stamped with the `chars / 4` estimate
@@ -525,15 +527,21 @@ longer than `_max_idle_time` (300 seconds). The monitor's tick takes the same lo
 refreshes `_last_used` on release — which is what keeps a model from being reaped
 mid-stream.
 
-### The memory brake (Apple Silicon)
+### The memory brake (Apple Silicon and CPU)
 
-Under macOS memory pressure the MLX child gives memory back, at the start and the end
+Under memory pressure the inference child gives memory back, at the start and the end
 of every turn and every minute while it is idle (a second lifespan monitor, under the
-same lock), never during an answer: it shrinks the working window so the next turn
-compacts earlier, releases the prefix cache and MLX's buffer cache, and, under critical
-pressure while the user is away, unloads the model, which the next message reloads with
-the reduced window (`memory_reload` on the wire). The actions are bounded per pressure
-episode; see [Engines](dev/architecture/engines.md#the-memory-brake-mlx).
+same lock), never during an answer. On Apple Silicon the MLX child shrinks the working
+window so the next turn compacts earlier, releases the prefix cache and MLX's buffer
+cache, and, under critical pressure while the user is away, unloads the model, which the
+next message reloads with the reduced window (`memory_reload` on the wire). On the CPU
+engine (`llama-server`, whose KV cache is allocated in full at load) the brake restarts
+the same model with a smaller window — at once under critical pressure, after two
+minutes of user idle under warning — or unloads it; the turn that re-reads the
+conversation shows the same reload state. The actions are bounded per pressure episode;
+see [Engines](dev/architecture/engines.md#the-memory-brake-mlx) and
+[the CPU brake](dev/architecture/engines.md#the-memory-brake-cpu). The CUDA engine has
+none.
 
 ### Streaming
 

@@ -301,6 +301,16 @@ python -c "import pynvml; pynvml.nvmlInit(); print(pynvml.nvmlDeviceGetCount())"
 
 The selected engine is logged at startup (`Engine chosen: ...`).
 
+### The model's context window is smaller than its trained window (CPU)
+
+The CPU engine sizes the window it gives `llama-server` from the machine's RAM: the
+model's trained window, reduced to what 0.75 × the RAM affords after the weights. Each load
+logs it, `[CPU_Engine] Window sized at spawn: window=..., trained=..., memory_bound=...`
+(with `brake_cap=...` when the memory brake reduced it under memory pressure in the last
+30 minutes). `ERUDI_CTX` pins the window instead, and the brake then never resizes it. A
+GGUF whose header cannot be read loads with `llama-server`'s own sizing, after one warning.
+See [Engines](dev/architecture/engines.md#the-window-on-the-cpu-engine).
+
 ### The GPU is detected but Erudi says it cannot use it
 
 The CUDA pre-flight compares the card's compute capability and the driver's CUDA version

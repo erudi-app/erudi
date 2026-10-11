@@ -118,7 +118,8 @@ if TYPE_CHECKING:
 # the child spawned, so both are fresh):
 #   1. the ALLOCATED context window (``BaseEngine.effective_context_tokens``;
 #      on Apple Silicon, already lowered to the memory bound the child
-#      enforces when memory binds -- ``BaseEngine.memory_bound_tokens``);
+#      enforces when memory binds -- ``BaseEngine.memory_bound_tokens``; on
+#      the CPU engine, the window it sized from the RAM budget at spawn);
 #   2. the MEMORY ceiling (Apple Silicon) -- the conversation token count at
 #      which the child's predicted footprint reaches the memory budget
 #      (``MemoryBudget.tokens_at_ceiling``, a measured prior; no margin is
@@ -282,6 +283,20 @@ def _brake_reload_pending(engine: Any, llm: Any) -> bool:
     return bool(probe(getattr(llm, "id", None))) if callable(probe) else False
 
 
+def _respawned(outcome: Any) -> bool:
+    """Whether a brake sample's outcome restarted the child (``respawn``,
+    ``shrink+respawn``, or a ``respawn-failed`` whose model reloads now)."""
+    action = getattr(outcome, "action", None)
+    return isinstance(action, str) and "respawn" in action
+
+
+def _bound_footprint_of(engine: Any) -> Optional[int]:
+    """What a memory-bound child holds whatever the conversation does
+    (``BaseEngine.memory_bound_footprint_bytes``), read defensively."""
+    probe = getattr(engine, "memory_bound_footprint_bytes", None)
+    return probe() if callable(probe) else None
+
+
 def _consume_brake_notice(engine: Any) -> Optional[str]:
     """The memory brake's pending notice, consumed (None without one)."""
     probe = getattr(engine, "consume_brake_notice", None)
@@ -327,9 +342,12 @@ def _engine_overrides(engine: Any, hook_name: str) -> bool:
     memory-brake hook ``hook_name`` itself, rather than inheriting
     ``BaseEngine``'s no-op.
 
-    Only MLX does. The llama.cpp engines (CPU, CUDA) must stay a strict
-    no-op: no reset thread, no ``BaseEngine._pending_reset`` -- so the runner
-    calls ``run_reset_shielded`` only for an engine that overrides the hook.
+    MLX implements all of them; the CPU engine implements the memory brake
+    and the turn's window (``brake_point``, ``begin_memory_window``); CUDA
+    implements none and must stay a strict no-op: no reset thread, no
+    ``BaseEngine._pending_reset`` -- so the runner calls ``run_reset_shielded``
+    only for an engine that overrides the hook. An override anywhere in the
+    engine's class hierarchy counts.
     """
     hook = getattr(engine, hook_name, None)
     if not callable(hook):
@@ -1071,9 +1089,10 @@ DECODE_TIMEOUT_MESSAGE = (
 # learns exactly why and what to do -- and the app never silently truncates
 # or shifts the conversation to make it fit. The turn names what limits the
 # conversation: the MEMORY wording when the limit the engine refused on is the
-# memory bound the MLX child enforces (``BaseEngine.memory_bound_tokens``),
-# the model-window wording otherwise (llama.cpp, a failed memory bound, an
-# inherited ``MAX_KV_SIZE``).
+# memory bound of the loaded child (``BaseEngine.memory_bound_tokens``: the
+# bound the MLX child enforces, or the window the CPU engine sized from the
+# RAM budget), the model-window wording otherwise (CUDA, a model whose own
+# window binds, a failed memory bound, an inherited ``MAX_KV_SIZE``).
 CONTEXT_OVERFLOW_MESSAGE_TEMPLATE = (
     f"{ERROR_SENTINEL} This conversation no longer fits the model's context window "
     "(the request needs about {prompt_tokens} tokens; the window holds {context_tokens}). "
@@ -1384,17 +1403,23 @@ class AgentRunner:
                 # tight: resolving it below reloads it, which takes a while.
                 # Said first (the conversation service's attachment notices
                 # are already out), before the model is resolved.
-                if _brake_reload_pending(engine, llm):
+                reload_announced = _brake_reload_pending(engine, llm)
+                if reload_announced:
                     yield {"t": "memory_reload"}
                 # The brake's turn_start sample, for the child this turn will
                 # use, BEFORE the model is resolved: a shrink here applies to
                 # this very turn. Shielded: it may talk to the child.
                 if _engine_overrides(engine, "brake_point"):
-                    await run_reset_shielded(
+                    outcome = await run_reset_shielded(
                         functools.partial(
                             engine.brake_point, POINT_TURN_START, llm_id=getattr(llm, "id", None)
                         )
                     )
+                    # llama.cpp: the sample respawned the child (or tried to,
+                    # and the model reloads now): this turn re-prefills the
+                    # conversation, so the reload state is said in this turn.
+                    if not reload_announced and _respawned(outcome):
+                        yield {"t": "memory_reload"}
                 sampling = resolve_sampling_defaults(llm)
                 # No implicit tools (#129): callers own the tool list (built by
                 # ``plan_turn``); ``tools=None`` means a zero-tool agent.
@@ -1566,10 +1591,11 @@ class AgentRunner:
                 if _engine_overrides(engine, "claim_prefix"):
                     owner = f"conv:{thread_id}" if stateful else "arena"
                     await run_reset_shielded(functools.partial(engine.claim_prefix, owner))
-                # What this turn really uses is measured on the child (MLX
-                # only): the window opens after the claim (its reset is not
-                # this turn's memory) and closes at the end of the turn,
-                # inside the guard.
+                # What this turn really uses is measured on the child (MLX):
+                # the window opens after the claim (its reset is not this
+                # turn's memory) and closes at the end of the turn, inside
+                # the guard. On the CPU engine opening it only tells the brake
+                # a turn ran (no token, nothing measured).
                 if _engine_overrides(engine, "begin_memory_window"):
                     memory_token = await run_in_threadpool(engine.begin_memory_window)
 
@@ -2290,8 +2316,12 @@ class AgentRunner:
             if projected_tokens < MEMORY_WARNING_FRACTION * working_window:
                 return None
             # What the warning copy quotes: the conversation AND its loaded
-            # model together (the two things the user can act on).
+            # model together (the two things the user can act on). On
+            # llama.cpp, where nothing is accounted per token, the child's
+            # whole allocation at load (KV for the window, compute, weights).
             footprint = budget.footprint_bytes(projected_tokens)
+            if footprint is None:
+                footprint = _bound_footprint_of(engine)
             if footprint is None:
                 return None
             logger.warning(

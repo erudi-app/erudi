@@ -92,8 +92,6 @@ Warning:
 
 from __future__ import annotations
 
-import asyncio
-import functools
 import math
 import multiprocessing as mp
 import os
@@ -104,12 +102,11 @@ import subprocess
 import time  # used by hardware warm-up loop
 from datetime import datetime
 from pathlib import Path
-from typing import Any, ClassVar, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Optional, Tuple, Union
 
 import requests
 
 from src.engines.base_chat_server_engine import BaseChatServerEngine
-from src.engines.base_engine import _log_monitor_death, run_reset_shielded
 from src.engines._mlx_vlm_server_runner import run_mlx_vlm_server
 from src.engines import memory_brake
 from src.engines.memory_brake import BrakeOutcome, BrakeState
@@ -365,8 +362,10 @@ class MLX_Engine(BaseChatServerEngine):
         # its own inference on the user's machine. The key is minted per spawn
         # so a disclosure dies with the child. mlx-vlm applies the key to every
         # route it registers, `/health` included, so `_probe_ready` sends it
-        # from the handle on both probe stages.
-        api_key = secrets.token_urlsafe(32)
+        # from the handle on both probe stages. Hex, never URL-safe base64:
+        # argparse reads a value starting with "-" as an option, and the child
+        # would exit with "argument --api-key: expected one argument".
+        api_key = secrets.token_hex(32)
         # The MLX window mechanism, deliberately different from llama-server's:
         # mlx_vlm.server allocates nothing upfront (its KV cache grows lazily,
         # RoPE positions are computed on the fly), so an unbounded child accepts
@@ -519,8 +518,8 @@ class MLX_Engine(BaseChatServerEngine):
             "api_key": api_key,
             # The ALLOCATED window (`BaseEngine.effective_context_tokens`):
             # at spawn it equals the preflight bound passed above -- nothing
-            # to read back, unlike llama-server whose fit resolves the window
-            # at load. `_read_server_properties` measures the child's base
+            # to read back, unlike llama-server, which allocates its window at
+            # load. `_read_server_properties` measures the child's base
             # footprint and, when memory binds, lowers the child's bound and
             # rewrites this to it. None = unbounded child.
             "context_tokens": context_tokens,
@@ -758,7 +757,7 @@ class MLX_Engine(BaseChatServerEngine):
         it loads."""
         from src.engines import process_footprint
 
-        handle["brake"] = cls._seed_brake(handle)
+        handle["brake"] = cls._carried_brake(handle) or BrakeState()
         cls._brake_reload = None
         pid = handle.get("pid")
         base_failed = False
@@ -1244,72 +1243,6 @@ class MLX_Engine(BaseChatServerEngine):
 
     RELEASE_BARRIER_TIMEOUT_S = 30.0
 
-    # What an unload carries to the next spawn of the same model, or None.
-    # Cleared by any successful spawn, by an idle-timeout reap and at
-    # shutdown (``cleanup``); expires after ``memory_brake.BRAKE_RELOAD_TTL_S``.
-    _brake_reload: ClassVar[Optional[Dict[str, Any]]] = None
-    # The pressure sensor was found unreadable: the brake is off, said once.
-    _brake_sensor_warned: ClassVar[bool] = False
-    _pressure_task: ClassVar[Optional["asyncio.Task"]] = None
-    # Seconds between idle samples. A class attribute so tests run it at speed.
-    _pressure_interval_s: ClassVar[float] = float(memory_brake.BRAKE_IDLE_INTERVAL_S)
-
-    @classmethod
-    def loaded_child_for(cls, llm_id: Any) -> bool:
-        """Whether the loaded child serves ``llm_id`` and is alive. No side
-        effect (``_should_not_reload_model`` logs a dead child's output, and
-        the turn calls it again when it resolves its model)."""
-        handle = cls._model
-        return (
-            cls._model_id == llm_id
-            and isinstance(handle, dict)
-            and cls._proc_is_alive(handle.get("proc"))
-        )
-
-    @classmethod
-    def brake_reload_pending(cls, llm_id: Any) -> bool:
-        """Whether the next turn for ``llm_id`` reloads the model the brake
-        unloaded: a record for its alias, younger than the TTL, and no child
-        loaded."""
-        record = cls._brake_reload
-        if not isinstance(record, dict) or cls._model is not None:
-            return False
-        unloaded_at = record.get("unloaded_at")
-        return (
-            record.get("alias") == f"{cls._server_alias_prefix}{llm_id}"
-            and isinstance(unloaded_at, (int, float))
-            and time.time() - unloaded_at < memory_brake.BRAKE_RELOAD_TTL_S
-        )
-
-    @classmethod
-    def consume_brake_notice(cls) -> Optional[str]:
-        """The loaded child's pending brake notice, consumed (``"acted"`` or
-        ``"external"``); a stateful turn end shows it."""
-        handle = cls._model
-        state = handle.get("brake") if isinstance(handle, dict) else None
-        return state.take_notice() if isinstance(state, BrakeState) else None
-
-    @classmethod
-    def _seed_brake(cls, handle: Dict[str, Any]) -> BrakeState:
-        """The new child's brake: the episode an unload of the same model
-        carried (within the TTL), else a fresh state."""
-        record = cls._brake_reload
-        now = time.time()
-        unloaded_at = record.get("unloaded_at") if isinstance(record, dict) else None
-        if (
-            not isinstance(record, dict)
-            or record.get("alias") != handle.get("alias")
-            or not isinstance(unloaded_at, (int, float))
-            or now - unloaded_at >= memory_brake.BRAKE_RELOAD_TTL_S
-        ):
-            return BrakeState()
-        state = BrakeState.reloaded(record, now=now)
-        logger.info(
-            f"[MLX_Engine] Memory brake carried over the reload: cap={state.cap}, "
-            f"shrinks_this_episode={state.shrinks_this_episode}"
-        )
-        return state
-
     @classmethod
     def brake_point(cls, point: str, *, llm_id: Any = None) -> BrakeOutcome:
         """Take the brake's sample at ``point`` and execute its decision.
@@ -1554,66 +1487,6 @@ class MLX_Engine(BaseChatServerEngine):
             f"[MLX_Engine] Memory brake: point={point}, level={level}, action={action}, "
             f"window={before}->{after}, excess_mib={excess}{suffix}"
         )
-
-    @classmethod
-    def cleanup(cls) -> None:
-        """Stop the child and reset the engine state; a pending brake reload
-        is forgotten with it (an idle-timeout reap, a shutdown -- the brake's
-        own unload records its reload after this call)."""
-        cls._brake_reload = None
-        super().cleanup()
-
-    @classmethod
-    async def _pressure_tick(cls) -> None:
-        """One idle sample, under the generation lock (never during a turn),
-        only with a loaded, live child; shielded like a reset."""
-        async with cls._acquire_generation_lock():
-            handle = cls._model
-            if not isinstance(handle, dict) or not cls._proc_is_alive(handle.get("proc")):
-                return
-            await run_reset_shielded(functools.partial(cls.brake_point, memory_brake.POINT_IDLE))
-
-    @classmethod
-    async def _pressure_monitor(cls) -> None:
-        """Every ``_pressure_interval_s``, one idle sample. A tick that raises
-        is logged at ERROR with its traceback and the loop goes on (nobody
-        awaits this task: an escaped exception would end the brake's idle
-        samples without a record)."""
-        while True:
-            await asyncio.sleep(cls._pressure_interval_s)
-            try:
-                await cls._pressure_tick()
-            except asyncio.CancelledError:
-                raise
-            except Exception as exc:
-                logger.error(f"Memory pressure tick failed: {exc}", exc_info=True)
-
-    @classmethod
-    def start_pressure_task(cls) -> None:
-        """Start the idle memory-pressure monitor (idempotent)."""
-        if cls._pressure_task is None:
-            cls._pressure_task = asyncio.create_task(
-                cls._pressure_monitor(), name="memory-pressure"
-            )
-            cls._pressure_task.add_done_callback(_log_monitor_death)
-            logger.info("Started memory pressure monitor")
-
-    @classmethod
-    async def stop_pressure_task(cls) -> None:
-        """Cancel the monitor and wait for it: a sample in flight finishes
-        first (it is shielded), so the shutdown never stops the child under
-        it."""
-        task, cls._pressure_task = cls._pressure_task, None
-        if task is None:
-            return
-        task.cancel()
-        try:
-            await task
-        except asyncio.CancelledError:
-            current = asyncio.current_task()
-            if current is not None and current.cancelling():
-                raise
-        logger.info("Stopped memory pressure monitor")
 
     @classmethod
     def _trained_window_of(cls, model_path: Path) -> Optional[int]:

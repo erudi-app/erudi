@@ -159,7 +159,7 @@ describe("ConversationPage memory warning", () => {
 
     const alert = await screen.findByRole("alert");
     expect(alert.textContent).toContain(
-      "Your Mac's memory limits this conversation: the model and this conversation " +
+      "Your computer's memory limits this conversation: the model and this conversation " +
         "together take about 4.0 GB, nearly all the room memory allows."
     );
     // Never part of the message content (so never in the copy path).
@@ -220,11 +220,11 @@ describe("ConversationPage memory warning", () => {
   it.each([
     [
       "pressure",
-      "Your Mac's memory is under pressure: this conversation is summarized earlier to keep things fluid.",
+      "Your computer's memory is under pressure: this conversation is summarized earlier to keep things fluid.",
     ],
     [
       "pressure_external",
-      "Your Mac's memory is under pressure from other apps; this conversation uses little of it.",
+      "Your computer's memory is under pressure from other apps; this conversation uses little of it.",
     ],
   ])("renders the %s copy, with no size to quote", async (reason, copy) => {
     const turn = makeControlledStream();
@@ -264,7 +264,7 @@ describe("ConversationPage memory warning reasons", () => {
   );
 });
 
-const RELOAD = "Memory was freed on your Mac; reloading the model to resume the conversation…";
+const RELOAD = "Memory was freed on your computer; reloading the model to resume the conversation…";
 
 describe("ConversationPage reload state", () => {
   const push = async (stream, line) => {

@@ -71,7 +71,7 @@
   },
   "message": {
     "firstReplyHint": "First response may take a bit longer while loading the model into memory...",
-    "memoryReload": "Memory was freed on your Mac; reloading the model to resume the conversation…",
+    "memoryReload": "Memory was freed on your computer; reloading the model to resume the conversation…",
     "imagePlaceholder": "🖼 image attachment",
     "attachmentAlt": "attachment {{index}}",
     "copy": "Copy message",
@@ -117,8 +117,8 @@
     "connectionInterrupted": "Connection interrupted while generating response."
   },
   "memoryWarning": {
-    "bound": "Your Mac's memory limits this conversation: the model and this conversation together take about {{size}}, nearly all the room memory allows. Start a new conversation, send less at once, or switch to a smaller model.",
-    "pressure": "Your Mac's memory is under pressure: this conversation is summarized earlier to keep things fluid.",
-    "pressureExternal": "Your Mac's memory is under pressure from other apps; this conversation uses little of it."
+    "bound": "Your computer's memory limits this conversation: the model and this conversation together take about {{size}}, nearly all the room memory allows. Start a new conversation, send less at once, or switch to a smaller model.",
+    "pressure": "Your computer's memory is under pressure: this conversation is summarized earlier to keep things fluid.",
+    "pressureExternal": "Your computer's memory is under pressure from other apps; this conversation uses little of it."
   }
 }

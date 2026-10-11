@@ -28,7 +28,9 @@ import platform
 import secrets
 import signal
 import subprocess
+import time
 from abc import abstractmethod
+from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, Union
 
@@ -37,9 +39,34 @@ import requests
 from src.core.config import ROOT_DIR
 from src.core.exceptions import EngineException
 from src.core.logging import logger
+from src.engines import gguf_memory, memory_brake, memory_pressure
 from src.engines.base_chat_server_engine import BaseChatServerEngine
 from src.engines.child_output import ChildOutputDrainer
+from src.engines.memory_brake import BrakeOutcome, BrakeState
 from src.core.subprocess_flags import hidden_console_creationflags
+
+# How long a memory-brake respawn may take to answer its readiness probe. It
+# runs under the generation lock (the turn's last events or the shutdown drain
+# wait for it): a warm reload answers in 1-2 s; past this bound the respawn
+# fails and degrades into an unload.
+LLAMA_RESPAWN_PROBE_TIMEOUT_S = 30.0
+
+# The spawn-context items `_spawn_child` keeps on the handle: observability
+# (threads, GPU layers, the window passed) and the window facts the memory
+# brake and the post-load check read back.
+PRESERVED_SPAWN_KEYS = (
+    "threads",
+    "gpu_layers",
+    "ctx_size",
+    "window_pinned",
+    "trained_context_tokens",
+    "static_window_tokens",
+    "kv_token_bytes",
+    "static_anonymous_bytes",
+    "weights_bytes",
+    "spawn_memory_bound",
+    "mmproj_loaded",
+)
 
 
 # Mirror of llama.cpp's SPECIALIZED tool-format dispatch, for LOGS ONLY (#298).
@@ -161,12 +188,14 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         pinned one (then passed verbatim as ``-c`` -- llama-server honours an
         explicit ``-c`` unchanged, "no change" contract), else ``None``.
 
-        ``None`` does NOT mean 4096 anymore: without ``-c`` the pinned
-        llama.cpp build resolves the window itself at load (``--fit``, ON by
-        default -- the model's trained window, continuously reduced against
-        measured free memory down to a 4096 floor when physics demands). The
-        window it actually allocated is read back through
-        ``effective_context_tokens()`` after boot, never guessed here.
+        ``None`` means no window is pinned: the CPU engine then sizes ``-c``
+        itself from the GGUF and the RAM budget (``gguf_memory``), and CUDA --
+        or the CPU engine when the GGUF cannot be read -- passes no ``-c``, so
+        the pinned llama.cpp build resolves the window at load (``--fit``, ON
+        by default -- the model's trained window, continuously reduced against
+        measured free memory down to a 4096 floor). The window the child
+        allocated is read back through ``effective_context_tokens()`` after
+        boot, never guessed here.
 
         Shared by the spawn context and the sampling resolver's
         ``max_tokens_cap`` (#388), both of which tolerate ``None``."""
@@ -485,25 +514,44 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
     def _read_server_properties(cls, handle: Dict[str, Any]) -> None:
         """One bounded `GET /props` after the probe: what llama-server ALLOCATED.
 
-        llama-server resolves its context window AT LOAD -- either the user's
-        explicit ``-c`` (kept unchanged), or, with no ``-c``, its own fit: the
-        model's trained window, continuously reduced against measured free
-        memory (pinned b10883, ``common/fit.cpp``). The resolved value is not
-        knowable in advance, so it is read back from the running child:
+        llama-server allocates its context window AT LOAD -- the ``-c`` the
+        engine passed (the CPU engine's computed window, or ``ERUDI_CTX``,
+        kept unchanged), or, with no ``-c``, its own fit: the model's trained
+        window, continuously reduced against measured free memory (pinned
+        b10883, ``common/fit.cpp``). The allocated value is read back from
+        the running child:
 
         * ``context_tokens`` = ``default_generation_settings.n_ctx`` -- the
           allocated window every percentage, compaction threshold and watchdog
-          budget downstream must use;
+          budget downstream must use (a value other than the ``-c`` passed is
+          one WARNING);
         * ``chat_template_caps`` -- notably ``supports_reasoning_effort``,
           read by the reasoning-effort mapping;
         * ``chat_template`` -- the template the server actually applies
           (per-spawn memory, possibly large; never persisted).
 
         ANY failure (timeout, non-200, unreadable body, missing keys) degrades:
-        one WARNING, ``context_tokens=None``, and the model finishes loading.
-        MLX does not override this hook -- its window is a preflight bound
-        stamped at spawn, there is nothing to read back (see `MLX_Engine`).
+        one WARNING, and the model finishes loading; ``context_tokens`` is
+        then the ``-c`` passed, or ``None`` when llama-server's fit chose it.
+
+        An engine with a memory brake (CPU) first seeds the child's brake --
+        the episode an unload of the same model carried, else the cap and
+        faulty window remembered for its alias, else a fresh state -- and
+        after the read stamps its memory bound and checks its anonymous
+        memory against the window budget (`_llama_check_footprint`).
+        MLX overrides this hook -- its window is a preflight bound stamped at
+        spawn, there is nothing to read back (see `MLX_Engine`).
         """
+        braked = cls._brake_bound()
+        if braked:
+            cls._llama_seed(handle)
+        # llama.cpp pads the -c it is given up to a multiple of 256: that
+        # padded value is the window it allocates.
+        passed = handle.get("ctx_size")
+        if isinstance(passed, int) and not isinstance(passed, bool) and passed > 0:
+            passed = memory_brake.llama_padded(passed)
+        else:
+            passed = None
         handle["context_tokens"] = None
         handle["chat_template_caps"] = {}
         handle["chat_template"] = None
@@ -529,14 +577,32 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
                 f"[{cls.__name__}] {cls._server_name} allocated context window: "
                 f"{n_ctx} tokens (port {handle.get('port')})"
             )
+            if passed is not None and n_ctx != passed:
+                logger.warning(
+                    f"[{cls.__name__}] {cls._server_name} allocated {n_ctx} tokens "
+                    f"where -c {handle.get('ctx_size')} was passed (port {handle.get('port')})"
+                )
         except Exception as exc:
-            # Degraded, not failed: the model is loaded and usable; only the
-            # window metadata is unknown (downstream treats None as unknown).
+            # Degraded, not failed: the model is loaded and usable. With a -c
+            # the window is the one we asked for; without one (llama-server's
+            # fit) it is unknown, which downstream treats as unknown.
+            if passed is not None:
+                handle["context_tokens"] = passed
             logger.warning(
                 f"[{cls.__name__}] Could not read {cls._server_name} /props on "
-                f"port {handle.get('port')}; allocated context window unknown "
-                f"({type(exc).__name__}: {exc})"
+                f"port {handle.get('port')}; "
+                + (
+                    f"using the window passed at spawn, {passed} tokens "
+                    if passed is not None
+                    else "allocated context window unknown "
+                )
+                + f"({type(exc).__name__}: {exc})"
             )
+        if braked:
+            handle["memory_bound_tokens"] = (
+                handle["context_tokens"] if handle.get("spawn_memory_bound") else None
+            )
+            cls._llama_check_footprint(handle)
 
     @classmethod
     def _spawn_child(
@@ -576,8 +642,9 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         # inference on the user's machine. The key is minted per spawn so a
         # disclosure dies with the child; `/slots` and the bundled web UI are
         # switched off outright because Erudi calls neither (only `/health` and
-        # `/v1/chat/completions`).
-        api_key = secrets.token_urlsafe(32)
+        # `/v1/chat/completions`). Hex, never URL-safe base64: a key that starts
+        # with "-" would be read as an option by the server's argument parser.
+        api_key = secrets.token_hex(32)
         argv += ["--api-key", api_key, "--no-slots", "--no-webui"]
         # One slot and no prompt cache: the child holds a single conversation's
         # KV at a time, like the MLX engine's single-conversation prefix cache.
@@ -642,12 +709,373 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
             # both read the key from here. Never log the handle wholesale.
             "api_key": api_key,
         }
-        # Preserve subclass-relevant context items in the handle so observability
-        # (logs, debug endpoints) shows e.g. how many threads / GPU layers were used.
-        for k in ("threads", "gpu_layers", "ctx_size"):
+        # Preserve subclass-relevant context items in the handle: observability
+        # (how many threads / GPU layers, which window) and the window facts the
+        # memory brake reads back (`PRESERVED_SPAWN_KEYS`).
+        for k in PRESERVED_SPAWN_KEYS:
             if k in ctx:
                 handle[k] = ctx[k]
         return handle
+
+    # ======================= THE WINDOW AND THE MEMORY BRAKE =======================
+    #
+    # Bound on CPU_Engine only (CUDA's KV sits partly or wholly in VRAM, which
+    # a RAM budget would mis-size): every hook the runner gates is a `_llama_*`
+    # body here and a binding on CPU_Engine, so CUDA inherits nothing the
+    # runner would call.
+    #
+    # * The window: at spawn, `_llama_spawn_context` asks `gguf_memory` for
+    #   min(trained window, what 0.75 x RAM affords) folded with the cap the
+    #   brake remembers for the alias, and passes it as `-c`.
+    # * The brake (`memory_brake.llama_step`) samples at the start of a turn,
+    #   its end and idle (the shared monitor), under the generation lock:
+    #   - respawn: the same model restarts in place with `-c = min(budget
+    #     window, cap)`, the live brake state carried whole; the respawn's
+    #     probe is bounded by `LLAMA_RESPAWN_PROBE_TIMEOUT_S`, and a respawn
+    #     that fails degrades into an unload (the record below);
+    #   - unload: the reap path, the episode carried to the next spawn of the
+    #     same model through `_brake_reload` (the MLX shape);
+    #   - the per-alias window memory: every change of the brake's cap or
+    #     faulty window is written through to `_window_memory`, read (TTL
+    #     checked) at every spawn of that alias -- a brake reload, a swap
+    #     back, a reap's reload, a crash respawn -- so a grow or a shrink the
+    #     brake decided applies at the next spawn. A reap forgets
+    #     `_brake_reload`, never the window memory.
+
+    # alias -> {"cap", "faulty", "at"}; written by CPU only.
+    _window_memory: ClassVar[Dict[str, Dict[str, Any]]] = {}
+
+    @classmethod
+    def _window_memory_entry(cls, alias: str) -> Optional[Dict[str, Any]]:
+        """The remembered cap and faulty window of ``alias``, younger than
+        ``BRAKE_RELOAD_TTL_S`` (an expired entry is deleted here)."""
+        entry = cls._window_memory.get(alias)
+        if not isinstance(entry, dict):
+            return None
+        at = entry.get("at")
+        if not isinstance(at, (int, float)) or time.time() - at >= memory_brake.BRAKE_RELOAD_TTL_S:
+            cls._window_memory.pop(alias, None)
+            return None
+        return entry
+
+    @classmethod
+    def _remember_window(cls, alias: Any, state: BrakeState) -> None:
+        """Write ``state``'s cap and faulty window through for ``alias``; an
+        entry with neither is deleted."""
+        if not isinstance(alias, str):
+            return
+        if state.cap is None and state.faulty is None:
+            cls._window_memory.pop(alias, None)
+            return
+        cls._window_memory[alias] = {"cap": state.cap, "faulty": state.faulty, "at": time.time()}
+
+    @classmethod
+    def _llama_spawn_context(
+        cls, model_path: Path, alias: str, brake_cap: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """The window items of the spawn context: `-c` (`ctx_size`) and the
+        facts the brake and the post-load check read back; `ctx_size=None`
+        (llama-server's own fit) when the window cannot be sized --
+        `gguf_memory.spawn_window` wrote the one WARNING. The cap folded in
+        is ``brake_cap`` (a brake respawn), else the alias's window memory."""
+        if brake_cap is None:
+            entry = cls._window_memory_entry(alias)
+            brake_cap = entry.get("cap") if entry else None
+        mmproj = cls._find_mmproj(model_path)
+        window = gguf_memory.spawn_window(
+            model_path,
+            total_ram_bytes=memory_pressure.effective_total_ram_bytes(),
+            brake_cap=brake_cap,
+            mmproj_path=mmproj,
+        )
+        if window is None:
+            return {"ctx_size": None}
+        logger.info(
+            f"[{cls.__name__}] Window sized at spawn: window={window.window}, "
+            f"trained={window.trained}, memory_bound={window.memory_bound}"
+            + (f", brake_cap={brake_cap}" if brake_cap else "")
+        )
+        return {
+            "ctx_size": window.window,
+            "trained_context_tokens": window.trained,
+            "static_window_tokens": window.static_window,
+            "kv_token_bytes": window.kv_token_bytes,
+            "static_anonymous_bytes": window.static_anonymous_bytes,
+            "weights_bytes": window.weights_bytes,
+            "spawn_memory_bound": window.memory_bound,
+            "mmproj_loaded": mmproj is not None,
+        }
+
+    @classmethod
+    def _llama_seed(cls, handle: Dict[str, Any]) -> None:
+        """The new child's brake -- the episode an unload of the same model
+        carried, else its remembered cap and faulty window, else a fresh
+        state -- and its first paging reading. A successful spawn forgets the
+        unload's record, whichever model it loads."""
+        state = cls._carried_brake(handle)
+        if state is None:
+            entry = cls._window_memory_entry(handle.get("alias"))
+            state = (
+                BrakeState(cap=entry.get("cap"), faulty=entry.get("faulty"))
+                if entry
+                else BrakeState()
+            )
+        handle["brake"] = state
+        cls._brake_reload = None
+        handle["damage_last"] = memory_pressure.read_pressure().damage_total_bytes
+
+    @classmethod
+    def _llama_check_footprint(cls, handle: Dict[str, Any]) -> None:
+        """Right after load: the child's anonymous memory against what the
+        window predicts (KV, the compute buffer, one weights copy for the
+        repack), ONE WARNING above it -- a Flash-Attention fallback or a
+        mis-sized model. Never an action; never raises."""
+        try:
+            if handle.get("mmproj_loaded"):
+                logger.debug(
+                    f"[{cls.__name__}] Post-load memory check skipped: a vision projector "
+                    f"is loaded (its compute buffer is not modelled)"
+                )
+                return
+            window = handle.get("context_tokens")
+            kv = handle.get("kv_token_bytes")
+            weights = handle.get("weights_bytes")
+            if not (window and kv and weights):
+                return
+            measured = memory_pressure.child_anonymous_bytes(handle.get("pid"))
+            if measured is None:
+                return
+            limit = gguf_memory.post_load_limit_bytes(
+                window=window, kv_token_bytes=kv, weights_bytes=weights
+            )
+            if measured > limit:
+                logger.warning(
+                    f"[{cls.__name__}] llama-server allocated more than the window budget "
+                    f"predicted: anonymous_bytes={measured}, predicted_limit_bytes={limit}, "
+                    f"window={window} (port {handle.get('port')})"
+                )
+        except Exception as exc:
+            # The check is advisory: the model is loaded and serves.
+            logger.warning(f"[{cls.__name__}] Post-load memory check failed ({type(exc).__name__})")
+
+    @classmethod
+    def _llama_memory_bound_tokens(cls) -> Optional[int]:
+        """The window the machine's memory limits the loaded child to (it is
+        its allocated window), or None."""
+        handle = cls._model
+        if not isinstance(handle, dict) or handle.get("context_tokens") is None:
+            return None
+        bound = handle.get("memory_bound_tokens")
+        if isinstance(bound, int) and not isinstance(bound, bool) and bound > 0:
+            return bound
+        return None
+
+    @classmethod
+    def _llama_memory_bound_footprint_bytes(cls) -> Optional[int]:
+        """What a memory-bound child holds: its window's KV and compute, and
+        its weights -- the number the ``bound`` warning quotes."""
+        if cls._llama_memory_bound_tokens() is None:
+            return None
+        handle = cls._model
+        anonymous, weights = handle.get("static_anonymous_bytes"), handle.get("weights_bytes")
+        if not isinstance(anonymous, int) or not isinstance(weights, int):
+            return None
+        return anonymous + weights
+
+    @classmethod
+    def _llama_begin_memory_window(cls) -> None:
+        """A turn starts on the loaded child: the brake sees it, and the flag
+        of a brake respawn is consumed (the turn that shows the reload state
+        for it has begun). Nothing is measured: no token."""
+        handle = cls._model
+        if not isinstance(handle, dict):
+            return None
+        state = handle.get("brake")
+        if isinstance(state, BrakeState):
+            state.turn_happened = True
+        handle.pop("brake_respawned", None)
+        return None
+
+    @classmethod
+    def _llama_respawn_pending(cls, llm_id: Any) -> bool:
+        """The loaded child for ``llm_id`` was respawned by the brake since
+        its last turn began: that turn's reload state is still owed."""
+        return cls.loaded_child_for(llm_id) and bool(cls._model.get("brake_respawned"))
+
+    @classmethod
+    def _llama_brake_point(cls, point: str, llm_id: Any) -> BrakeOutcome:
+        """Take the brake's sample at ``point`` and execute its decision
+        (the caller holds the generation lock). May raise: the binding
+        guards it."""
+        if point == memory_brake.POINT_TURN_START and not cls.loaded_child_for(llm_id):
+            return BrakeOutcome()
+        handle = cls._model
+        if not isinstance(handle, dict) or not cls._proc_is_alive(handle.get("proc")):
+            return BrakeOutcome()
+        reading = memory_pressure.read_pressure()
+        if reading.level is None:
+            if not cls._brake_sensor_warned:
+                cls._brake_sensor_warned = True
+                logger.warning(
+                    f"[{cls.__name__}] Memory pressure unreadable "
+                    f"({reading.unavailable}); the memory brake is off"
+                )
+            return BrakeOutcome()
+        total = memory_pressure.effective_total_ram_bytes()
+        # What the child holds, without the mapped weights' clean pages.
+        footprint = memory_pressure.child_anonymous_bytes(handle.get("pid"))
+        window = handle.get("context_tokens")
+        kv = handle.get("kv_token_bytes")
+        current, last = reading.damage_total_bytes, handle.get("damage_last")
+        state = handle.get("brake")
+        previous = state if isinstance(state, BrakeState) else BrakeState()
+        decision = memory_brake.llama_step(
+            previous,
+            memory_brake.Sample(
+                point=point,
+                now=time.time(),
+                level=reading.level,
+                last_used=(
+                    cls._last_used.timestamp() if isinstance(cls._last_used, datetime) else None
+                ),
+                damage_bytes=(
+                    max(0, current - last) if current is not None and last is not None else None
+                ),
+                damage_available=current is not None,
+            ),
+            memory_brake.Context(
+                window=window,
+                ceiling=None,
+                static_window=handle.get("static_window_tokens"),
+                footprint_share=footprint / total if footprint is not None and total else None,
+                resizable=not handle.get("window_pinned"),
+                reap_idle_s=cls._max_idle_time,
+                kv_share=window * kv / total if window and kv and total else None,
+            ),
+        )
+        handle["brake"] = decision.state
+        if not decision.skipped:
+            # A paced-out sample keeps the paging of its interval for the next.
+            handle["damage_last"] = current
+        if (decision.state.cap, decision.state.faulty) != (previous.cap, previous.faulty):
+            cls._remember_window(handle.get("alias"), decision.state)
+        if decision.unload:
+            cls._llama_brake_unload(handle, decision, point, footprint)
+            return BrakeOutcome(acted=True, action="unload")
+        if decision.respawn:
+            if not cls._llama_brake_respawn(handle, decision, point, footprint):
+                return BrakeOutcome(acted=True, action="respawn-failed")
+            return BrakeOutcome(acted=True, action="+".join(decision.actions))
+        if decision.cap_change is not None:
+            cls._log_llama_brake(
+                logger.info,
+                point,
+                decision.level,
+                decision.cap_change,
+                window,
+                window,
+                footprint,
+                f", cap={decision.state.cap}",
+            )
+            return BrakeOutcome(acted=True, action=decision.cap_change)
+        return BrakeOutcome()
+
+    @classmethod
+    def _llama_brake_respawn(
+        cls,
+        handle: Dict[str, Any],
+        decision: "memory_brake.Decision",
+        point: str,
+        footprint: Optional[int],
+    ) -> bool:
+        """Restart the same model in place with the cap as its window (the
+        window memory hands it to the spawn context). The live state is
+        carried whole; ``_model_id``, the tokenizer and the idle clock are
+        untouched (the reap must still see an abandoned child). False when
+        the respawn failed: the child is stopped, the engine state cleared
+        and the episode recorded for the next message, like an unload -- ONE
+        WARNING."""
+        live = decision.state
+        before = handle.get("context_tokens")
+        try:
+            cls._stop_server_if_running()
+            port = cls._pick_free_port()
+            new = cls._start_server(
+                model_path=Path(handle["model_path"]),
+                alias=handle["alias"],
+                port=port,
+                probe_timeout_s=LLAMA_RESPAWN_PROBE_TIMEOUT_S,
+                brake_cap=live.cap,
+            )
+        except Exception as exc:
+            record = {"alias": handle.get("alias"), **live.carry(), "unloaded_at": time.time()}
+            cls._log_llama_brake(
+                logger.warning,
+                point,
+                decision.level,
+                f"respawn-failed ({type(exc).__name__})",
+                before,
+                None,
+                footprint,
+                "; the model reloads at the next message",
+            )
+            cls.cleanup()
+            cls._brake_reload = record
+            return False
+        new["brake"] = BrakeState.respawned(live)
+        new["brake_respawned"] = True
+        cls._model = new
+        cls._log_llama_brake(
+            logger.info,
+            point,
+            decision.level,
+            "+".join(decision.actions),
+            before,
+            new.get("context_tokens"),
+            footprint,
+        )
+        return True
+
+    @classmethod
+    def _llama_brake_unload(
+        cls,
+        handle: Dict[str, Any],
+        decision: "memory_brake.Decision",
+        point: str,
+        footprint: Optional[int],
+    ) -> None:
+        """Reap the child (the caller holds the generation lock) and leave
+        the episode for the next spawn of the same model. ONE WARNING: the
+        app degraded on its own."""
+        record = {
+            "alias": handle.get("alias"),
+            **decision.state.carry(),
+            "unloaded_at": time.time(),
+        }
+        cls._remember_window(handle.get("alias"), decision.state)
+        window = handle.get("context_tokens")
+        cls._log_llama_brake(
+            logger.warning,
+            point,
+            decision.level,
+            "unload",
+            window,
+            window,
+            footprint,
+            "; the model reloads at the next message",
+        )
+        cls.cleanup()
+        cls._brake_reload = record
+
+    @classmethod
+    def _log_llama_brake(
+        cls, record, point, level, action, before, after, footprint, suffix=""
+    ) -> None:
+        mib = footprint // (1024 * 1024) if isinstance(footprint, int) else None
+        record(
+            f"[{cls.__name__}] Memory brake: point={point}, level={level}, action={action}, "
+            f"window={before}->{after}, footprint_mib={mib}{suffix}"
+        )
 
     # ====================== Abstract subclass hooks ======================
     @classmethod

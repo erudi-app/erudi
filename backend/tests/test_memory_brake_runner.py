@@ -55,13 +55,15 @@ class _BrakeEngine(BaseEngine):
     notice: ClassVar[Optional[str]] = None
     pending: ClassVar[set] = set()
     bound: ClassVar[Optional[int]] = None
+    bound_footprint: ClassVar[Optional[int]] = None
     window: ClassVar[Optional[int]] = None
+    turn_start_outcome: ClassVar[BrakeOutcome] = BrakeOutcome()
 
     @classmethod
     def brake_point(cls, point, *, llm_id=None):
         worker = threading.current_thread() is not threading.main_thread()
         cls.calls.append(("brake", point, llm_id, worker))
-        return BrakeOutcome()
+        return cls.turn_start_outcome if point == "turn_start" else BrakeOutcome()
 
     @classmethod
     def consume_brake_notice(cls):
@@ -88,6 +90,10 @@ class _BrakeEngine(BaseEngine):
         return cls.bound
 
     @classmethod
+    def memory_bound_footprint_bytes(cls):
+        return cls.bound_footprint
+
+    @classmethod
     def effective_context_tokens(cls):
         return cls.window
 
@@ -98,7 +104,9 @@ def _engine(monkeypatch):
     _BrakeEngine.notice = None
     _BrakeEngine.pending = set()
     _BrakeEngine.bound = None
+    _BrakeEngine.bound_footprint = None
     _BrakeEngine.window = None
+    _BrakeEngine.turn_start_outcome = BrakeOutcome()
     monkeypatch.setattr(config, "LLM_Engine", _BrakeEngine)
     yield
     _BrakeEngine._last_used = None
@@ -333,6 +341,73 @@ async def test_no_reload_no_announcement(monkeypatch):
 
     assert not any(e["t"] == "memory_reload" for e in events)
     assert ("pending", 7) in _BrakeEngine.calls
+
+
+@pytest.mark.parametrize("action", ["shrink+respawn", "respawn", "respawn-failed"])
+async def test_a_respawn_at_turn_start_is_announced_in_the_same_turn(monkeypatch, action):
+    """llama.cpp: a critical turn_start respawns the child, whose prompt is
+    re-prefilled by this very turn -- the reload state is said now, before
+    the model is resolved."""
+    _answer(monkeypatch)
+    _BrakeEngine.turn_start_outcome = BrakeOutcome(acted=True, action=action)
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    assert events[0] == {"t": "memory_reload"}
+    assert sum(1 for e in events if e["t"] == "memory_reload") == 1
+    names = [c[:2] if c[0] == "brake" else c[:1] for c in _BrakeEngine.calls]
+    assert names.index(("brake", "turn_start")) < names.index(("build",))
+
+
+async def test_a_respawn_after_an_announced_reload_is_not_announced_twice(monkeypatch):
+    _answer(monkeypatch)
+    _BrakeEngine.pending = {7}
+    _BrakeEngine.turn_start_outcome = BrakeOutcome(acted=True, action="shrink+respawn")
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    assert sum(1 for e in events if e["t"] == "memory_reload") == 1
+
+
+@pytest.mark.parametrize("action", ["shrink", "grow", None])
+async def test_a_turn_start_without_a_respawn_announces_nothing(monkeypatch, action):
+    _answer(monkeypatch)
+    _BrakeEngine.turn_start_outcome = BrakeOutcome(acted=action is not None, action=action)
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    assert not any(e["t"] == "memory_reload" for e in events)
+
+
+async def test_the_bound_warning_on_llama_quotes_the_child_allocation(monkeypatch):
+    """llama.cpp has no per-token accounting (the budget is unaccounted): the
+    bound criterion runs on the working window alone and quotes what the
+    memory-bound child allocated at load."""
+    from src.engines.memory_budget import MemoryBudget
+
+    _answer(monkeypatch)
+    _patch_budget(monkeypatch, MemoryBudget.unaccounted())
+    _BrakeEngine.window = 24
+    _BrakeEngine.bound = 24
+    _BrakeEngine.bound_footprint = 9_999
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    warnings = [e for e in events if e["t"] == "memory_warning"]
+    assert warnings == [{"t": "memory_warning", "reason": "bound", "footprint_bytes": 9_999}]
+
+
+async def test_no_bound_warning_on_llama_when_memory_does_not_bind(monkeypatch):
+    from src.engines.memory_budget import MemoryBudget
+
+    _answer(monkeypatch)
+    _patch_budget(monkeypatch, MemoryBudget.unaccounted())
+    _BrakeEngine.window = 24
+    _BrakeEngine.bound_footprint = 9_999
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    assert not any(e["t"] == "memory_warning" for e in events)
 
 
 async def test_the_arena_wire_never_carries_the_reload(monkeypatch):

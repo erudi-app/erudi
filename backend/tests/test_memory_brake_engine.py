@@ -27,7 +27,7 @@ from src.engines import memory_budget
 from src.engines import mlx_engine as mlx_engine_module
 from src.engines import process_footprint
 from src.engines.base_engine import BaseEngine
-from src.engines.cpu_engine import CPU_Engine
+from src.engines.cuda_engine import CUDA_Engine
 from src.engines.memory_brake import BrakeOutcome, BrakeState
 from src.engines.memory_budget import MemoryBudget
 from src.engines.mlx_engine import MLX_Engine
@@ -541,9 +541,9 @@ def test_shutdown_forgets_the_record():
 
 def test_the_base_engine_never_has_a_reload_pending():
     assert BaseEngine.brake_reload_pending(7) is False
-    assert CPU_Engine.brake_reload_pending(7) is False
-    assert CPU_Engine.brake_point("idle") == BrakeOutcome()
-    assert CPU_Engine.consume_brake_notice() is None
+    assert CUDA_Engine.brake_reload_pending(7) is False
+    assert CUDA_Engine.brake_point("idle") == BrakeOutcome()
+    assert CUDA_Engine.consume_brake_notice() is None
 
 
 # ===================== turn_start, robustness, sensors =====================
@@ -921,9 +921,9 @@ async def test_stopping_the_monitor_awaits_the_sample_in_flight(monkeypatch):
 
 
 async def test_the_base_engine_pressure_task_is_a_no_op():
-    CPU_Engine.start_pressure_task()
-    await CPU_Engine.stop_pressure_task()
-    assert getattr(CPU_Engine, "_pressure_task", None) is None
+    CUDA_Engine.start_pressure_task()
+    await CUDA_Engine.stop_pressure_task()
+    assert getattr(CUDA_Engine, "_pressure_task", None) is None
 
 
 # ===================== the lifespan =====================

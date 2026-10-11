@@ -157,8 +157,8 @@ async def run_reset_shielded(fn: Any) -> Any:
     arrived meanwhile. Returns ``fn``'s result, or ``None`` when it raised
     (logged once by the done callback). Every prefix-cache reset path -- the
     claim of a conversation, the compaction reset and the memory brake's
-    samples (``MLX_Engine.brake_point``, which may reset the cache or move
-    the child's bound) -- goes through here.
+    samples (``brake_point``: MLX may reset the cache or move the child's
+    bound, the CPU engine may restart its child) -- goes through here.
     """
     task = asyncio.get_running_loop().create_task(asyncio.to_thread(fn))
     task.add_done_callback(_log_reset_outcome)
@@ -284,9 +284,10 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         not be read.
 
         Read from the live engine handle (``_model``): llama.cpp engines stamp
-        it from the server's ``/props`` after boot (their fit resolves the
-        window at load and may shrink it below the model's trained window when
-        memory demands); MLX stamps the trained window it passed at spawn as
+        it from the server's ``/props`` after boot (the CPU engine's ``-c``,
+        sized from the RAM budget at spawn and reduced by its memory brake; on
+        CUDA, llama-server's own fit, which may shrink it below the model's
+        trained window when memory demands); MLX stamps the trained window it passed at spawn as
         the preflight bound, then lowers it to the memory bound once the
         child's base footprint is measured, when memory binds
         (``memory_bound_tokens``). Never persisted anywhere -- the same model
@@ -304,12 +305,23 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         """The window the machine's MEMORY imposed on the loaded child, or
         ``None`` when memory is not what bounds it.
 
-        Set only by an engine that lowers its child's window to the memory
-        ceiling after load (MLX); then it equals the allocated window. ``None``
-        means the model's own window binds (or the bound could not be applied):
-        no memory notice and no memory wording on an overflow apply. The
-        llama.cpp engines answer ``None``: their fit sizes the window at load,
-        and the memory accounting is off there."""
+        Set by an engine whose child's window memory limits: MLX, which lowers
+        its child's window to the memory ceiling after load, and the CPU
+        engine, which sizes ``-c`` from the RAM budget at spawn (never for a
+        sliding-window model, whose window the budget over-estimates); it
+        then equals the allocated window. ``None`` means the model's own
+        window binds (or the bound could not be applied): no memory notice and
+        no memory wording on an overflow apply. CUDA answers ``None``: its
+        window is llama-server's own fit."""
+        return None
+
+    @classmethod
+    def memory_bound_footprint_bytes(cls) -> Optional[int]:
+        """What a memory-bound child holds whatever the conversation does
+        (the CPU engine's whole allocation at load: KV, compute, weights), the
+        number the ``bound`` memory warning quotes when no per-token
+        accounting exists; ``None`` here and on MLX, whose footprint grows
+        with the conversation (``MemoryBudget.footprint_bytes``)."""
         return None
 
     @classmethod
@@ -364,9 +376,10 @@ class BaseEngine(ABC, metaclass=EngineMeta):
 
     # The MLX child's memory is MEASURED around every conversation and Arena
     # turn (``src.engines.memory_observations``); the llama.cpp engines
-    # allocate their KV cache in full at load and measure nothing. All three
-    # hooks are synchronous (they read process counters, and the last one
-    # writes a small file).
+    # allocate their KV cache in full at load and measure nothing (the CPU
+    # engine's ``begin_memory_window`` only tells its memory brake a turn
+    # ran). All three hooks are synchronous (they read process counters, and
+    # the last one writes a small file).
 
     @classmethod
     def begin_memory_window(cls) -> Any:
@@ -399,10 +412,11 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         No-op here."""
         return None
 
-    # The memory brake (``src.engines.memory_brake``): only MLX gives memory
-    # back under pressure -- its cache grows with the conversation, while the
-    # llama.cpp engines allocate theirs in full at load. Every hook is a no-op
-    # here; ``brake_point`` is synchronous (it may do blocking HTTP and stop
+    # The memory brake (``src.engines.memory_brake``): MLX gives memory back
+    # under pressure (its cache grows with the conversation); the CPU engine,
+    # whose llama-server allocates its KV in full at load, respawns its child
+    # with a smaller window. CUDA has none. Every hook is a no-op here;
+    # ``brake_point`` is synchronous (it may do blocking HTTP, stop or restart
     # the child), so the agent layer runs it through ``run_reset_shielded``.
 
     @classmethod
@@ -419,7 +433,8 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     @classmethod
     def brake_reload_pending(cls, llm_id: Any) -> bool:
         """Whether the next turn for ``llm_id`` reloads a model the brake
-        unloaded. Never here."""
+        unloaded (or, on the CPU engine, re-prefills a child it respawned).
+        Never here."""
         return False
 
     @classmethod

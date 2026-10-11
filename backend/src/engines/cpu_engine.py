@@ -13,7 +13,11 @@ Current Status:
 Features:
     - Load GGUF quantized models via llama-server subprocess
     - Multi-threaded inference with configurable thread count
-    - Context window resolved at load by llama-server's own fit (ERUDI_CTX pins it)
+    - Context window sized by Erudi at spawn (-c = min(trained window, what
+      0.75 x RAM affords), see gguf_memory); llama-server's own fit when the
+      GGUF header is unreadable; ERUDI_CTX pins it
+    - A memory brake: under memory pressure the child respawns with a smaller
+      window, or is unloaded (memory_brake.llama_step, memory_pressure)
     - Streaming generation via OpenAI-compatible /v1/chat/completions
     - Automatic port selection and server lifecycle management
     - Cross-platform (macOS, Linux, Windows) with Rosetta support
@@ -79,6 +83,7 @@ from typing import Any, Dict, List, Optional
 
 from src.engines.base_llama_cpp_engine import BaseLlamaCppEngine
 from src.engines.cpu_brand import get_cpu_brand
+from src.engines.memory_brake import BrakeOutcome
 from src.core.logging import logger
 
 
@@ -88,8 +93,9 @@ class CPU_Engine(BaseLlamaCppEngine):
 
     Inherits the subprocess + SSE lifecycle from BaseChatServerEngine and the
     llama-cpp specifics (Popen, GGUF picking, llama-server location) from
-    BaseLlamaCppEngine. Only `_build_spawn_argv` + `_prepare_spawn_context`
-    + class attrs are CPU-specific here.
+    BaseLlamaCppEngine. CPU-specific here: `_build_spawn_argv`, the window
+    it sizes itself (`_prepare_spawn_context`), the memory brake's bindings,
+    and class attrs.
 
     Notes:
       * "model" is a dict handle for the running server (pid, port, alias, base_url)
@@ -106,15 +112,60 @@ class CPU_Engine(BaseLlamaCppEngine):
     # ---------- CPU-specific spawn hooks ----------
 
     @classmethod
-    def _prepare_spawn_context(cls) -> Dict[str, Any]:
-        """Resolve the per-spawn CPU context: the pinned context window (None
-        unless ERUDI_CTX is set -- llama-server's own fit resolves it then),
-        thread count, and the fixed `gpu_layers=0` (CPU-only inference)."""
-        return {
-            "ctx_size": cls.max_context_tokens(),
+    def _prepare_spawn_context(
+        cls, model_path: Path, alias: str, *, brake_cap: Optional[int] = None
+    ) -> Dict[str, Any]:
+        """Resolve the per-spawn CPU context: thread count, the fixed
+        `gpu_layers=0` (CPU-only inference), and the window: `ERUDI_CTX`
+        verbatim when the user pinned one, else the window Erudi sizes from
+        the GGUF and the machine's RAM, folded with the memory brake's cap --
+        ``brake_cap`` for a brake respawn, else the one remembered for
+        ``alias`` (`ctx_size=None` -- llama-server's own fit -- when the GGUF
+        cannot be read)."""
+        ctx: Dict[str, Any] = {
             "threads": max(1, os.cpu_count() or 1),
             "gpu_layers": 0,
         }
+        pinned = cls.max_context_tokens()
+        if pinned is not None:
+            ctx.update(ctx_size=pinned, window_pinned=True)
+            return ctx
+        ctx.update(cls._llama_spawn_context(model_path, alias, brake_cap))
+        return ctx
+
+    # ---------- the memory brake (bodies on BaseLlamaCppEngine) ----------
+
+    @classmethod
+    def brake_point(cls, point: str, *, llm_id: Any = None) -> BrakeOutcome:
+        """Take the brake's sample at ``point`` and execute its decision.
+        Never raises: a failure is ONE WARNING with the exception's class
+        name, and the sample is lost."""
+        try:
+            return cls._llama_brake_point(point, llm_id)
+        except Exception as exc:
+            logger.warning(
+                f"[{cls.__name__}] Memory brake sample failed ({type(exc).__name__}): "
+                f"point={point}"
+            )
+            return BrakeOutcome()
+
+    @classmethod
+    def memory_bound_tokens(cls) -> Optional[int]:
+        return cls._llama_memory_bound_tokens()
+
+    @classmethod
+    def memory_bound_footprint_bytes(cls) -> Optional[int]:
+        return cls._llama_memory_bound_footprint_bytes()
+
+    @classmethod
+    def begin_memory_window(cls) -> Any:
+        return cls._llama_begin_memory_window()
+
+    @classmethod
+    def brake_reload_pending(cls, llm_id: Any) -> bool:
+        """An unload's record for ``llm_id`` (the shared answer), or a brake
+        respawn of its loaded child whose reload state is still owed."""
+        return super().brake_reload_pending(llm_id) or cls._llama_respawn_pending(llm_id)
 
     @classmethod
     def _build_spawn_argv(
@@ -131,13 +182,14 @@ class CPU_Engine(BaseLlamaCppEngine):
     ) -> List[Any]:
         """CPU CLI for llama-server: forces `-ngl 0`, native threads.
 
-        ``-c`` is passed ONLY when the user pinned a window (``ERUDI_CTX``):
-        an explicit ``-c`` is honoured unchanged by llama-server. With
-        ``ctx_size=None`` the flag is omitted entirely and the server's own
-        fit (ON by default in the pinned b10883) resolves the window at load:
-        the model's trained window, continuously reduced against measured free
-        memory down to a 4096 floor when it must. The resolved value is read
-        back via ``_read_server_properties`` after the probe.
+        ``-c`` is the window ``_prepare_spawn_context`` chose (the RAM budget's
+        window, the brake's cap, or ``ERUDI_CTX``); llama-server honours an
+        explicit ``-c`` unchanged. With ``ctx_size=None`` (the GGUF could not
+        be read) the flag is omitted entirely and the server's own fit (ON by
+        default in the pinned b10883) resolves the window at load: the model's
+        trained window, continuously reduced against measured free memory down
+        to a 4096 floor when it must. The allocated value is read back via
+        ``_read_server_properties`` after the probe.
 
         ``--jinja`` enables the model's own chat template and with it
         OpenAI-style function calling (the agent's calculator tool) —

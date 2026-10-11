@@ -193,8 +193,8 @@ their contents through history forever.
 | `thinking` | `text` | A chunk of the model's reasoning (see below) |
 | `tool_call` | `name`, `args` | The agent called a tool (`search_knowledge_base`, `web_search`, `calculator`) |
 | `tool_result` | `name`, `text` | What that tool returned |
-| `memory_reload` | — | Apple Silicon: the memory brake unloaded the model while the Mac's memory was under pressure, and this turn reloads it (see below). Sent before anything else the model produces; never persisted |
-| `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one. `reason: "pressure"`: the Mac's memory is under pressure and the memory brake shrank the window, so the conversation is summarized earlier. `reason: "pressure_external"`: the Mac's memory is under pressure from other apps and this conversation uses little of it. `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
+| `memory_reload` | — | Apple Silicon and the CPU engine: the memory brake unloaded the model (or, on the CPU engine, restarted it with a smaller window) while the computer's memory was under pressure, and this turn reloads it or re-reads the conversation (see below). Sent before anything else the model produces; never persisted |
+| `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one. `reason: "pressure"`: the computer's memory is under pressure and the memory brake shrank the window, so the conversation is summarized earlier. `reason: "pressure_external"`: the computer's memory is under pressure from other apps and this conversation uses little of it. `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
 | `error` | `text` | The turn failed; the text is the curated error message |
 | `done` | — | Terminal event, always sent, including after an `error` |
 
@@ -492,8 +492,9 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
      [Privacy](../privacy.md)). Requests that carry images are outside the prediction (a vision
      tower's activations do not scale with the conversation). The ceiling exists only on MLX because only
      MLX grows its KV cache lazily with usage; on both llama.cpp engines (CPU and CUDA) the cache is
-     allocated **in full at load** and the engine's own fit already guaranteed it fits — memory use
-     does not grow with the conversation, so there is nothing per-token to measure (and on a
+     allocated **in full at load**, for a window sized to fit at spawn (the CPU engine's own RAM
+     budget, llama-server's fit on CUDA) — memory use does not grow with the conversation, so there
+     is nothing per-token to measure (and on a
      discrete card, partial layer offload would make any single-pool accounting dishonest anyway).
      The accounting deliberately never reads the OS's "available" memory (macOS compression and swap
      make it non-deterministic); a model whose facts cannot be read simply runs without the memory
@@ -584,8 +585,11 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    **Warn only when memory limits the conversation and compaction cannot save it**: the memory
    notice concerns only a model whose window the machine's memory bounds — on Apple Silicon, when
    the memory ceiling is smaller than the model's trained window, the inference child is lowered to
-   that bound right after it loads (see [Engines](../dev/architecture/engines.md#the-memory-bound-mlx))
-   and `memory_bound_tokens()` reports it. When the model's own window is the smaller one, memory is
+   that bound right after it loads (see [Engines](../dev/architecture/engines.md#the-memory-bound-mlx));
+   on the CPU engine, when what 0.75 × the RAM affords is smaller than the model's trained window
+   (never for a sliding-window model such as Gemma 3, whose window the budget over-estimates; see
+   [Engines](../dev/architecture/engines.md#the-window-on-the-cpu-engine)) — and
+   `memory_bound_tokens()` reports it. When the model's own window is the smaller one, memory is
    not the limiting factor and no memory notice is shown, however close to the budget the model
    runs in bytes. For a memory-bound model, the middleware compacts in `before_model`, so
    this turn's growth is compacted on the *next* turn. At the end of each turn the runner therefore
@@ -601,7 +605,8 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    the first turn; any other memory-bound model gets it as soon as the projected next request
    reaches 85 % of the ceiling. The renderer then shows an amber notice above the
    composer with the approximate memory size of the model and the conversation together
-   (`footprint_bytes`); the projection's numbers go to `backend.log` in one
+   (`footprint_bytes`; on the CPU engine, what the child allocated at load for its window and
+   its weights, since that does not grow with the conversation); the projection's numbers go to `backend.log` in one
    `Memory-bound conversation over 85 % of the working window ...` warning. The warning is about
    the machine *now*, so it is never persisted and clears on the next turn that carries none;
    `backend.log` records one `Memory warning started` / `Memory warning ended` line per
@@ -609,17 +614,24 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    working set readable only after the load, a request the child did not apply, an unreadable
    base footprint or model facts) stays at its spawn window, and no `bound` notice can show for it.
 
-   **Under memory pressure, the memory brake acts first** (Apple Silicon; see
-   [Engines](../dev/architecture/engines.md#the-memory-brake-mlx)). It samples the Mac's memory
-   pressure at the start and the end of every turn and every minute while the model is idle,
-   never during an answer. When it shrinks the working window, the next turn compacts earlier,
-   and the end of the turn carries `memory_warning` with `reason: "pressure"`; when the pressure
-   comes from other apps (this conversation uses little), `reason: "pressure_external"`. Either
-   takes precedence over the `bound` projection above, which is then not evaluated. Only a
-   conversation turn consumes the brake's notice; an Arena turn never does. When the brake
-   unloaded the model while the user was away, the next turn first sends `memory_reload` and
-   the renderer shows a reload state in the pending answer until the model speaks, an error
-   arrives or the turn ends; the model reloads with the reduced window.
+   **Under memory pressure, the memory brake acts first** (Apple Silicon and the CPU engine; see
+   [Engines](../dev/architecture/engines.md#the-memory-brake-mlx) and
+   [the CPU brake](../dev/architecture/engines.md#the-memory-brake-cpu)). It samples the
+   computer's memory pressure at the start and the end of every turn and every minute while the
+   model is idle, never during an answer. When it shrinks the working window, the next turn
+   compacts earlier, and the end of the turn carries `memory_warning` with `reason: "pressure"`;
+   when the pressure comes from other apps (this conversation uses little), `reason:
+   "pressure_external"`. Either takes precedence over the `bound` projection above, which is then
+   not evaluated. Only a conversation turn consumes the brake's notice; an Arena turn never does.
+   When the brake unloaded the model while the user was away, the next turn first sends
+   `memory_reload` and the renderer shows a reload state in the pending answer until the model
+   speaks, an error arrives or the turn ends; the model reloads with the reduced window. On the CPU
+   engine a smaller window means restarting the model with it (about 1-2 s, then the
+   conversation is read again): under critical pressure at the next turn boundary — a restart at
+   the start of a turn sends `memory_reload` in that same turn —, under warning once the user has
+   been away two minutes (not when the idle unload is less than two minutes away: the next load
+   then carries the smaller window), and the turn that re-reads the conversation shows the same
+   reload state. The `pressure` notice is shown once the smaller window applies.
 
 Two more middlewares run alongside it: stale images and stale tool results are stripped from the
 replayed state before the model is called.

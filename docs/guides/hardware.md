@@ -239,7 +239,10 @@ Expected relative throughput for a similarly sized model:
   can hold a larger model than its GPU-only equivalent.
 - **NVIDIA** uses dedicated VRAM; the CUDA engine offloads as many layers as fit and
   leaves the rest on the CPU.
-- **CPU** uses system RAM only.
+- **CPU** uses system RAM only. The CPU engine gives the model the context window its RAM
+  affords — at most three quarters of it for the model and that window together — and
+  restarts it with a smaller window when other apps put the computer under memory pressure
+  (see [Engines](../dev/architecture/engines.md#the-window-on-the-cpu-engine)).
 
 ## Troubleshooting
 
