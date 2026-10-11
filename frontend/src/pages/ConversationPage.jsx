@@ -370,9 +370,15 @@ export default function ConversationPage() {
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
 
       try {
-        // Start title generation in parallel (don't await) so it doesn't block streaming
+        // The title runs BEFORE the chat, and the chat starts once the title
+        // stream has ended (success, HTTP error or network failure alike).
+        // llama.cpp runs one slot with no prompt cache, so a title that ran
+        // after the first turn would overwrite the conversation's KV and the
+        // second message would re-read the whole conversation. Both requests
+        // already serialize on the backend's generation lock, so awaiting costs
+        // nothing beyond the title's own ~1-2 s.
         if (isFirstMessage) {
-          (async () => {
+          await (async () => {
             try {
               const titleRes = await tracedFetch(
                 `${API_BASE_URL}/conversations/${id}/generate_title`,
