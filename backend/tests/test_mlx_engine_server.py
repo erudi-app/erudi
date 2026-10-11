@@ -1348,8 +1348,9 @@ def _current_response(max_kv_size, status=200):
 @pytest.mark.unit
 class TestMemoryBoundWindow:
     """After the base is measured, a binding memory ceiling lowers the child's
-    live `max_kv_size` through `PATCH /v1/settings` -- once per child, never
-    below the 4096 floor, never failing the load."""
+    live `max_kv_size` through `PATCH /v1/settings` at load (the memory brake
+    moves it later, `test_memory_brake_engine`), never below the 4096 floor,
+    never failing the load."""
 
     def _apply(self, handle, base, *, ceiling=None, patch_mock=None, get_mock=None):
         from src.engines.memory_budget import MemoryBudget

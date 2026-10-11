@@ -193,7 +193,8 @@ their contents through history forever.
 | `thinking` | `text` | A chunk of the model's reasoning (see below) |
 | `tool_call` | `name`, `args` | The agent called a tool (`search_knowledge_base`, `web_search`, `calculator`) |
 | `tool_result` | `name`, `text` | What that tool returned |
-| `memory_warning` | `footprint_bytes` | The machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
+| `memory_reload` | — | Apple Silicon: the memory brake unloaded the model while the Mac's memory was under pressure, and this turn reloads it (see below). Sent before anything else the model produces; never persisted |
+| `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one. `reason: "pressure"`: the Mac's memory is under pressure and the memory brake shrank the window, so the conversation is summarized earlier. `reason: "pressure_external"`: the Mac's memory is under pressure from other apps and this conversation uses little of it. `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
 | `error` | `text` | The turn failed; the text is the curated error message |
 | `done` | — | Terminal event, always sent, including after an `error` |
 
@@ -368,9 +369,9 @@ ends, the accumulated `answer` text becomes the assistant message's `content`, a
 events (`thinking`, `tool_call`, `tool_result`) are stored in order as that message's `trace`, so the
 reasoning and tool panel can be replayed on reload. The serialized trace is capped at 32 KB,
 drop-oldest, with a `{"t": "truncated"}` marker prepended when events were dropped. Error turns
-persist no trace. `memory_warning` is the one event that reaches the wire but is **never** persisted:
-it describes the machine's memory at that moment, and an old conversation reopened on a bigger
-machine must not replay it.
+persist no trace. `memory_warning` and `memory_reload` reach the wire but are **never** persisted:
+they describe the machine's memory at that moment, and an old conversation reopened on a bigger
+machine must not replay them.
 
 ## Other endpoints
 
@@ -599,7 +600,19 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    `backend.log` records one `Memory warning started` / `Memory warning ended` line per
    conversation at each transition. A child whose memory bound could not be applied (the GPU
    working set readable only after the load, a request the child did not apply, an unreadable
-   base footprint or model facts) stays at its spawn window, and no memory notice can show for it.
+   base footprint or model facts) stays at its spawn window, and no `bound` notice can show for it.
+
+   **Under memory pressure, the memory brake acts first** (Apple Silicon; see
+   [Engines](../dev/architecture/engines.md#the-memory-brake-mlx)). It samples the Mac's memory
+   pressure at the start and the end of every turn and every minute while the model is idle,
+   never during an answer. When it shrinks the working window, the next turn compacts earlier,
+   and the end of the turn carries `memory_warning` with `reason: "pressure"`; when the pressure
+   comes from other apps (this conversation uses little), `reason: "pressure_external"`. Either
+   takes precedence over the `bound` projection above, which is then not evaluated. Only a
+   conversation turn consumes the brake's notice; an Arena turn never does. When the brake
+   unloaded the model while the user was away, the next turn first sends `memory_reload` and
+   the renderer shows a reload state in the pending answer until the model speaks, an error
+   arrives or the turn ends; the model reloads with the reduced window.
 
 Two more middlewares run alongside it: stale images and stale tool results are stripped from the
 replayed state before the model is called.
