@@ -100,6 +100,12 @@ from src.core import config
 from src.core.exceptions import EngineException, GenerationTimeoutException
 from src.core.logging import logger
 from src.engines.base_engine import BaseEngine, run_reset_shielded, wait_shielded
+from src.engines.memory_brake import (
+    NOTICE_ACTED,
+    NOTICE_EXTERNAL,
+    POINT_TURN_END,
+    POINT_TURN_START,
+)
 from src.engines.memory_budget import MemoryBudget
 from src.engines.working_window import COMPACTION_WINDOW_FRACTION, canonical_working_window
 
@@ -260,6 +266,28 @@ def _memory_bound_of(engine: Any) -> Optional[int]:
     return probe() if callable(probe) else None
 
 
+# The ``memory_warning`` event a brake notice becomes (a stateful turn end
+# consumes the notice): a shrink means the conversation is now summarized
+# earlier; pressure the conversation does not cause changes nothing for it.
+_BRAKE_WARNINGS = {
+    NOTICE_ACTED: {"t": "memory_warning", "reason": "pressure"},
+    NOTICE_EXTERNAL: {"t": "memory_warning", "reason": "pressure_external"},
+}
+
+
+def _brake_reload_pending(engine: Any, llm: Any) -> bool:
+    """Whether this turn reloads a model the memory brake unloaded, read
+    defensively like the other engine probes."""
+    probe = getattr(engine, "brake_reload_pending", None)
+    return bool(probe(getattr(llm, "id", None))) if callable(probe) else False
+
+
+def _consume_brake_notice(engine: Any) -> Optional[str]:
+    """The memory brake's pending notice, consumed (None without one)."""
+    probe = getattr(engine, "consume_brake_notice", None)
+    return probe() if callable(probe) else None
+
+
 def _track_memory_warning(engine: Any, thread_id: Optional[str], active: bool) -> None:
     """Per-conversation warning state on the loaded child's handle, with ONE
     INFO line at each transition (start, end). Lost when the child is reaped
@@ -295,8 +323,9 @@ def _flag_abandoned(abandon_hook: Any) -> None:
 
 
 def _engine_overrides(engine: Any, hook_name: str) -> bool:
-    """Whether ``engine`` implements the prefix-cache hook ``hook_name``
-    itself, rather than inheriting ``BaseEngine``'s no-op.
+    """Whether ``engine`` implements the prefix-cache, memory-window or
+    memory-brake hook ``hook_name`` itself, rather than inheriting
+    ``BaseEngine``'s no-op.
 
     Only MLX does. The llama.cpp engines (CPU, CUDA) must stay a strict
     no-op: no reset thread, no ``BaseEngine._pending_reset`` -- so the runner
@@ -1351,6 +1380,21 @@ class AgentRunner:
 
         async with engine.generation_guard():
             try:
+                # The memory brake unloaded this model while memory was
+                # tight: resolving it below reloads it, which takes a while.
+                # Said first (the conversation service's attachment notices
+                # are already out), before the model is resolved.
+                if _brake_reload_pending(engine, llm):
+                    yield {"t": "memory_reload"}
+                # The brake's turn_start sample, for the child this turn will
+                # use, BEFORE the model is resolved: a shrink here applies to
+                # this very turn. Shielded: it may talk to the child.
+                if _engine_overrides(engine, "brake_point"):
+                    await run_reset_shielded(
+                        functools.partial(
+                            engine.brake_point, POINT_TURN_START, llm_id=getattr(llm, "id", None)
+                        )
+                    )
                 sampling = resolve_sampling_defaults(llm)
                 # No implicit tools (#129): callers own the tool list (built by
                 # ``plan_turn``); ``tools=None`` means a zero-tool agent.
@@ -1492,6 +1536,26 @@ class AgentRunner:
                 if event.get("t") == "answer":
                     streamed_answer.append(event.get("text") or "")
                 return event
+
+            turn_memory_finished = False
+
+            async def _finish_turn_memory() -> None:
+                """The end of the turn's memory: close the measurement window
+                (the turn ended normally), then the brake's turn_end sample,
+                shielded -- at most once per turn, from whichever of its two
+                sites comes first (the success path before the warning
+                check; the close after the stream for the turns that
+                recovered from an error)."""
+                nonlocal turn_memory_finished
+                if turn_memory_finished:
+                    return
+                turn_memory_finished = True
+                if memory_token is not None:
+                    await run_in_threadpool(
+                        _close_memory_window, engine, memory_token, abandoned=False
+                    )
+                if _engine_overrides(engine, "brake_point"):
+                    await run_reset_shielded(functools.partial(engine.brake_point, POINT_TURN_END))
 
             try:
                 # The prefix cache belongs to ONE conversation (MLX; a no-op
@@ -1726,32 +1790,49 @@ class AgentRunner:
                                 # and the next turn replays an empty assistant turn.
                                 await self._write_curated_empty_turn(agent, run_config, curated)
                             yield _record({"t": "answer", "text": curated})
+                        # The turn's memory ends here (Arena turns too): the
+                        # window closes and the memory brake takes its
+                        # turn_end sample, before the warning check below
+                        # reads what the brake decided.
+                        await _finish_turn_memory()
                         # Amber warning check, at end of turn on the POST-turn
-                        # thread state: one ``memory_warning`` event goes out ONLY
-                        # when memory bounds the child's window and even a
-                        # compaction down to the keep-tail would leave the next
-                        # request at 85 % of the working window or more (see
-                        # ``_memory_warning_event`` for the projection). The
-                        # conversation service forwards it to the
-                        # wire and never persists it (it is a statement about NOW,
-                        # on THIS machine). Its start and end per conversation are
-                        # one INFO line each (``_track_memory_warning``).
-                        if stateful and budget is not None:
-                            warning = await self._memory_warning_event(
-                                agent,
-                                run_config,
-                                budget,
-                                working_window,
-                                # The KB block of the turn just answered is not
-                                # in the next request: the fixed part only.
-                                overhead=RequestOverhead(
-                                    fixed_est=overhead.fixed_est,
-                                    fixed_text=overhead.fixed_text,
-                                ),
-                                allocated_window=allocated_window,
-                                engine=engine,
+                        # thread state, stateful turns only: at most one
+                        # ``memory_warning`` event. The memory brake's notice
+                        # comes first (consumed here, so an Arena turn never
+                        # takes it): a shrink is ``pressure`` -- the bound
+                        # criterion is not evaluated then, its window would be
+                        # the one before the shrink --, pressure from other
+                        # apps is ``pressure_external``. Otherwise the event
+                        # goes out ONLY when memory bounds the child's window
+                        # and even a compaction down to the keep-tail would
+                        # leave the next request at 85 % of the working window
+                        # or more (``bound``; see ``_memory_warning_event`` for
+                        # the projection). The conversation service forwards
+                        # it to the wire and never persists it (it is a
+                        # statement about NOW, on THIS machine). Its start and
+                        # end per conversation are one INFO line each
+                        # (``_track_memory_warning``).
+                        if stateful:
+                            notice = _consume_brake_notice(engine)
+                            warning = (
+                                dict(_BRAKE_WARNINGS[notice]) if notice in _BRAKE_WARNINGS else None
                             )
-                            if budget.used_fraction(0) is not None:
+                            if warning is None and budget is not None:
+                                warning = await self._memory_warning_event(
+                                    agent,
+                                    run_config,
+                                    budget,
+                                    working_window,
+                                    # The KB block of the turn just answered is not
+                                    # in the next request: the fixed part only.
+                                    overhead=RequestOverhead(
+                                        fixed_est=overhead.fixed_est,
+                                        fixed_text=overhead.fixed_text,
+                                    ),
+                                    allocated_window=allocated_window,
+                                    engine=engine,
+                                )
+                            if budget is not None and budget.used_fraction(0) is not None:
                                 _track_memory_warning(engine, thread_id, warning is not None)
                             if warning is not None:
                                 yield warning
@@ -1913,8 +1994,9 @@ class AgentRunner:
                     if absorbed and not isinstance(exit_in_flight, asyncio.CancelledError):
                         raise asyncio.CancelledError()
                 raise
-            if memory_token is not None:
-                await run_in_threadpool(_close_memory_window, engine, memory_token, abandoned=False)
+            # A turn that recovered from an error ends its memory here (a
+            # no-op when the success path already did).
+            await _finish_turn_memory()
 
     async def astream_oneshot(
         self,
@@ -2185,11 +2267,13 @@ class AgentRunner:
         ceiling is clamped to 1, so a model that alone fills the budget (a
         ceiling at or below zero: ``W`` is 1) warns from the first turn; any
         other memory-bound model warns once the projection reaches 85 % of
-        its ceiling. The payload is the one
-        number the copy quotes, ``footprint_bytes``: the loaded model and the
-        projected conversation together (``MemoryBudget.footprint_bytes``); no
-        number to quote, no event. The projection's numbers go to the log.
-        Advisory only: a failure here is logged and never sinks the turn.
+        its ceiling. The payload is ``reason: "bound"`` and the one number the
+        copy quotes, ``footprint_bytes``: the loaded model and the projected
+        conversation together (``MemoryBudget.footprint_bytes``); no number to
+        quote, no event. The projection's numbers go to the log. Evaluated
+        only when the memory brake has no notice for this turn (a brake
+        notice takes precedence, see the turn's end). Advisory only: a
+        failure here is logged and never sinks the turn.
         """
         try:
             if _memory_bound_of(engine) is None or not _known_window(working_window):
@@ -2217,7 +2301,7 @@ class AgentRunner:
                 f"working_window={working_window}, "
                 f"conversation_tokens={conversation_tokens}"
             )
-            return {"t": "memory_warning", "footprint_bytes": footprint}
+            return {"t": "memory_warning", "reason": "bound", "footprint_bytes": footprint}
         except Exception:
             # Advisory signal: losing it costs one warning, never the answer.
             logger.exception("Memory warning evaluation failed; skipping the warning")

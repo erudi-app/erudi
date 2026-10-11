@@ -2868,7 +2868,7 @@ async def test_memory_warning_emitted_once_after_the_answer(monkeypatch):
 
     warnings = [e for e in events if e["t"] == "memory_warning"]
     # The copy quotes conversation + model: KV bytes plus the weights.
-    assert warnings == [{"t": "memory_warning", "footprint_bytes": 1234 + 10000}]
+    assert warnings == [{"t": "memory_warning", "reason": "bound", "footprint_bytes": 1234 + 10000}]
     last_answer = max(i for i, e in enumerate(events) if e["t"] == "answer")
     assert events.index(warnings[0]) > last_answer
     assert len(stub.footprint_calls) == 1 and stub.footprint_calls[0] > 0

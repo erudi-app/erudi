@@ -481,6 +481,12 @@ class ConversationService:
                         # conversation reopened on a bigger machine must not
                         # replay it as if it still applied.
                         yield _ndjson(event)
+                    elif event["t"] == "memory_reload":
+                        # Wire only, never persisted, for the same reason: the
+                        # memory brake unloaded the model, and this turn
+                        # reloads it -- a fact about this machine's memory at
+                        # this moment, not part of the conversation.
+                        yield _ndjson(event)
                     else:
                         # thinking / tool_call / tool_result -> wire AND
                         # replay trace.
