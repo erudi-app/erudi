@@ -73,7 +73,9 @@ class _Popen:
         self.alive = False
         self.returncode = 0
 
-    terminate = send_signal
+    def terminate(self):
+        # Windows stops the child with terminate(), the others with SIGINT.
+        self.send_signal(None)
 
     def kill(self):
         self.alive = False
