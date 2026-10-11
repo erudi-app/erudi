@@ -197,7 +197,9 @@ def _handle(**extra):
 
 
 @pytest.fixture
-def child(sensors, http, ceiling):
+def child(sensors, http, ceiling, monkeypatch):
+    # The residual is read over a bounded settle window; tests run it at speed.
+    monkeypatch.setattr(MLX_Engine, "RELEASE_SETTLE_S", 0.0)
     handle = _handle()
     MLX_Engine._model = handle
     MLX_Engine._model_id = 7
@@ -342,6 +344,31 @@ def test_a_release_resets_then_sends_a_short_non_streamed_barrier(
     assert "action=release" in lines[0].getMessage()
     assert "excess_mib=1024->337" in lines[0].getMessage()
     _assert_clean(caplog)
+
+
+def test_the_residual_is_read_once_the_footprint_has_settled(child, http, sensors, monkeypatch):
+    # mlx_vlm clears its buffer cache before answering the barrier, but the
+    # footprint the kernel reports catches up a moment later: the residual is
+    # the lowest reading over the bounded settle window, not the first one.
+    sensors.level = 4
+    child["last_request_tokens"] = 10
+    monkeypatch.setattr(MLX_Engine, "RELEASE_SETTLE_S", 0.2)
+    monkeypatch.setattr(MLX_Engine, "_RELEASE_SETTLE_POLL_S", 0.01)
+    readings = iter([BASE + 656 * MIB, BASE + 500 * MIB, BASE + 340 * MIB])
+
+    def _footprint(pid):
+        if ("POST", "/v1/cache/reset") not in http.paths():
+            return sensors.footprint
+        return next(readings, BASE + 340 * MIB)
+
+    monkeypatch.setattr(process_footprint, "footprint", _footprint)
+    started = time.monotonic()
+
+    MLX_Engine.brake_point("idle")
+
+    assert child["brake"].excess_after_release == 340 * MIB
+    # Bounded: the window, plus one poll.
+    assert time.monotonic() - started < 1.0
 
 
 def test_a_failed_release_barrier_names_the_release_not_a_claim(child, http, sensors, caplog):

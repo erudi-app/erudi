@@ -1408,8 +1408,6 @@ class MLX_Engine(BaseChatServerEngine):
         makes mlx_vlm clear MLX's buffer cache; returns what the child keeps
         above base afterwards (None: unreadable). A failure is the reset's or
         the barrier's own WARNING."""
-        from src.engines import process_footprint
-
         if cls._reset_prefix_cache(
             handle, reason="memory_pressure", barrier_timeout_s=cls.RELEASE_BARRIER_TIMEOUT_S
         ):
@@ -1422,8 +1420,33 @@ class MLX_Engine(BaseChatServerEngine):
                 timeout_s=cls.RELEASE_BARRIER_TIMEOUT_S,
             )
         pid, base = handle.get("pid"), handle.get("base_footprint_bytes")
-        after = process_footprint.footprint(pid) if pid else None
+        after = cls._settled_footprint(pid) if pid else None
         return max(0, after - base) if after is not None and base is not None else None
+
+    # mlx_vlm clears MLX's buffer cache synchronously, before the barrier's
+    # answer is sent (``server/openai.py``: ``mx.clear_cache()`` then
+    # ``gc.collect()`` ahead of building the response), but the process
+    # footprint the kernel reports catches up a moment later (measured:
+    # 656 MiB above base right after the answer, the ~0.33 GiB residual a few
+    # seconds on). So the residual is the lowest footprint over a short,
+    # bounded window -- at idle, under the lock, never in a turn.
+    RELEASE_SETTLE_S = 2.0
+    _RELEASE_SETTLE_POLL_S = 0.25
+
+    @classmethod
+    def _settled_footprint(cls, pid: int) -> Optional[int]:
+        """The child's lowest footprint over ``RELEASE_SETTLE_S`` (None:
+        unreadable)."""
+        from src.engines import process_footprint
+
+        lowest = process_footprint.footprint(pid)
+        deadline = time.monotonic() + cls.RELEASE_SETTLE_S
+        while time.monotonic() < deadline:
+            time.sleep(cls._RELEASE_SETTLE_POLL_S)
+            current = process_footprint.footprint(pid)
+            if current is not None and (lowest is None or current < lowest):
+                lowest = current
+        return lowest
 
     @classmethod
     def _brake_unload(

@@ -2017,6 +2017,100 @@ class TestSubprocessReal:
             MLX_Engine.cleanup()
 
 
+@pytest.mark.mlx_only
+class TestMemoryBrakeReal:
+    """The memory brake on a real child, the pressure sensor faked.
+
+    What a release gives back was measured on the STREAMED path (the one
+    every conversation turn takes): the prefix-cache reset alone frees
+    nothing, the non-streamed 1-token request after it makes mlx_vlm clear
+    MLX's buffer cache (1.833 -> 1.054 GiB after a 22.9k-token turn, for a
+    0.727 GiB base on Qwen2.5-0.5B)."""
+
+    def test_an_idle_release_returns_a_streamed_turns_memory_and_shrinks_the_bound(
+        self, mlx_test_model_path, monkeypatch
+    ):
+        from datetime import datetime, timedelta
+
+        import requests
+
+        from src.engines import memory_brake, process_footprint
+        from src.engines.working_window import canonical_working_window
+
+        gib = 1024**3
+        try:
+            handle, _ = MLX_Engine.get_model_and_tokenizer(
+                llm_id="qwen-brake", llm_local_path=str(mlx_test_model_path)
+            )
+            pid = handle["pid"]
+            base = handle["base_footprint_bytes"]
+            assert base is not None
+            headers = {"Authorization": f"Bearer {handle['api_key']}"}
+            # One big STREAMED turn, measured like a conversation turn.
+            token = MLX_Engine.begin_memory_window()
+            big = " ".join(f"word{i} alpha beta gamma" for i in range(3000))
+            usage = None
+            with requests.post(
+                f"{handle['base_url']}/v1/chat/completions",
+                json={
+                    "model": handle["model_path"],
+                    "messages": [{"role": "user", "content": big}],
+                    "max_tokens": 64,
+                    "temperature": 0.0,
+                    "stream": True,
+                    "stream_options": {"include_usage": True},
+                },
+                headers=headers,
+                stream=True,
+                timeout=600,
+            ) as resp:
+                assert resp.status_code == 200
+                for line in resp.iter_lines():
+                    if line.startswith(b"data: ") and line != b"data: [DONE]":
+                        chunk = json.loads(line[6:])
+                        if chunk.get("usage"):
+                            usage = chunk["usage"]
+            assert usage is not None
+            MLX_Engine.note_call_usage(handle, usage["prompt_tokens"], usage["completion_tokens"])
+            MLX_Engine.end_memory_window(token)
+            time.sleep(3)
+            before = process_footprint.footprint(pid)
+            excess = before - base
+            assert excess > gib // 2, f"the big turn left only {excess} bytes above base"
+
+            window = canonical_working_window(
+                handle["context_tokens"], MLX_Engine._memory_ceiling(handle)
+            )
+            shrunk = max(4096, int(window * memory_brake.SHRINK_FACTOR))
+            useful = handle["last_request_tokens"] >= 0.8 * shrunk
+            # A warning, and the user away past the walk-away delay.
+            monkeypatch.setattr(process_footprint, "pressure_level", lambda: 2)
+            MLX_Engine._last_used = datetime.now() - timedelta(
+                seconds=memory_brake.WARNING_RELEASE_IDLE_S + 1
+            )
+
+            outcome = MLX_Engine.brake_point("idle")
+
+            assert "release" in outcome.action
+            # The engine read the residual once the footprint had settled
+            # (bounded, ``RELEASE_SETTLE_S``): a read now is past that wait.
+            residual = handle["brake"].excess_after_release
+            after = process_footprint.footprint(pid)
+            assert residual <= int(0.4 * gib), residual
+            assert before - after >= excess - int(0.4 * gib), (before, after, base)
+            # The same child, still serving.
+            assert MLX_Engine._model is handle and handle["proc"].is_alive()
+            assert handle["pid"] == pid
+            if useful:
+                assert "shrink" in outcome.action
+                live = requests.get(
+                    f"{handle['base_url']}/v1/settings", headers=headers, timeout=5
+                ).json()["current"]["max_kv_size"]
+                assert live == shrunk == handle["context_tokens"]
+        finally:
+            MLX_Engine.cleanup()
+
+
 def _build_real_mlx_chat_model(llm_id, model_path, *, max_tokens):
     """Spawn the real mlx_lm.server for `model_path` and wrap it as the live
     ChatOpenAI model (`build_chat_model`). Caller must `config.LLM_Engine.cleanup()`.
