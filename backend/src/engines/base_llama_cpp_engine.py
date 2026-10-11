@@ -636,8 +636,9 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         # inference on the user's machine. The key is minted per spawn so a
         # disclosure dies with the child; `/slots` and the bundled web UI are
         # switched off outright because Erudi calls neither (only `/health` and
-        # `/v1/chat/completions`).
-        api_key = secrets.token_urlsafe(32)
+        # `/v1/chat/completions`). Hex, never URL-safe base64: a key that starts
+        # with "-" would be read as an option by the server's argument parser.
+        api_key = secrets.token_hex(32)
         argv += ["--api-key", api_key, "--no-slots", "--no-webui"]
         # One slot and no prompt cache: the child holds a single conversation's
         # KV at a time, like the MLX engine's single-conversation prefix cache.

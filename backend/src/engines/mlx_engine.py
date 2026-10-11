@@ -362,8 +362,10 @@ class MLX_Engine(BaseChatServerEngine):
         # its own inference on the user's machine. The key is minted per spawn
         # so a disclosure dies with the child. mlx-vlm applies the key to every
         # route it registers, `/health` included, so `_probe_ready` sends it
-        # from the handle on both probe stages.
-        api_key = secrets.token_urlsafe(32)
+        # from the handle on both probe stages. Hex, never URL-safe base64:
+        # argparse reads a value starting with "-" as an option, and the child
+        # would exit with "argument --api-key: expected one argument".
+        api_key = secrets.token_hex(32)
         # The MLX window mechanism, deliberately different from llama-server's:
         # mlx_vlm.server allocates nothing upfront (its KV cache grows lazily,
         # RoPE positions are computed on the fly), so an unbounded child accepts

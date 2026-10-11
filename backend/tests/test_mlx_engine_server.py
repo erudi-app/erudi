@@ -1126,6 +1126,20 @@ class TestSpawnApiKey:
         key = argv[argv.index("--api-key") + 1]
         assert isinstance(key, str) and len(key) >= 32
 
+    def test_api_key_never_starts_with_a_dash(self, tmp_path, monkeypatch):
+        """mlx_vlm.server parses its command line with argparse, which reads a
+        value starting with "-" as an option: the child exits with "argument
+        --api-key: expected one argument" (about one spawn in 64 with a
+        URL-safe base64 key). Random bytes whose first one is 0xF8 begin with
+        "-" in that alphabet: the key must not."""
+        import secrets
+
+        monkeypatch.setattr(secrets, "token_bytes", lambda n=32: b"\xf8" * n)
+        _handle, argv = _spawn_mlx_child(tmp_path)
+        key = argv[argv.index("--api-key") + 1]
+        assert not key.startswith("-")
+        assert len(key) >= 32
+
     def test_each_spawn_gets_a_different_key(self, tmp_path):
         """Per-spawn generation bounds a disclosure to the life of one child:
         swapping models (or a crash-respawn) invalidates a scraped key."""

@@ -269,6 +269,19 @@ class TestSpawnHardeningFlags:
         assert "--no-slots" in argv
         assert "--no-webui" in argv
 
+    def test_api_key_never_starts_with_a_dash(self, tmp_path, monkeypatch):
+        """A key that starts with "-" is read as an option by the server's
+        argument parser, and the child fails to start. Random bytes whose
+        first one is 0xF8 begin with "-" in URL-safe base64: the key must not."""
+        import secrets
+
+        monkeypatch.setattr(secrets, "token_bytes", lambda n=32: b"\xf8" * n)
+        _handle, captured = _spawn_cpu_child(tmp_path, monkeypatch, with_mmproj=False)
+        argv = captured["argv"]
+        key = argv[argv.index("--api-key") + 1]
+        assert not key.startswith("-")
+        assert len(key) >= 32
+
     def test_api_key_flag_carries_a_non_empty_secret(self, tmp_path, monkeypatch):
         """`--api-key` is what turns on authentication at all in llama-server.
 
