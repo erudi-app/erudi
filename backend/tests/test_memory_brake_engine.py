@@ -23,6 +23,7 @@ import pytest
 
 from src.engines import base_engine as base_engine_module
 from src.engines import memory_brake as mb
+from src.engines import memory_budget
 from src.engines import mlx_engine as mlx_engine_module
 from src.engines import process_footprint
 from src.engines.base_engine import BaseEngine
@@ -123,6 +124,10 @@ class _Sensors:
         monkeypatch.setattr(process_footprint, "swapouts", lambda: self.swapouts)
         monkeypatch.setattr(process_footprint, "begin_peak_window", lambda pid: True)
         monkeypatch.setattr(process_footprint, "peak_since", lambda pid, started: self.footprint)
+        # The memory total comes from the GPU working set, which only a Mac
+        # reports: pinned, so the unload's share check does not depend on the
+        # host running the tests.
+        monkeypatch.setattr(memory_budget, "total_memory_bytes", lambda engine: TOTAL)
 
     def _level(self):
         self.level_reads += 1
