@@ -687,7 +687,7 @@ callback and never reaches the next holder.
 `BaseEngine` keeps `_model`, `_tokenizer`, `_model_id` and `_last_used` as class
 attributes shared across requests. A cleanup monitor started in the FastAPI lifespan
 (`core/api.py`, `start_cleanup_task()`) ticks every 30 seconds and unloads the model once
-it has been idle for longer than `_max_idle_time` (300 seconds, `base_engine.py`), so 300 to
+it has been idle for longer than `_max_idle_time` (300 seconds, `base_engine.py`), so about 300 to
 330 seconds after its last use. A tick that finds nothing to reap returns before the lock, so it
 never queues behind a generation; the idle check is repeated under the lock before any reap.
 A generation in flight cannot be reaped because the idle tick (`_cleanup_tick`) takes the

@@ -303,7 +303,7 @@ cause: the model never started on a prompt this size, or it started and went sil
    app lifetime and published on `app.state.checkpointer`.
 9. **Idle cleanup task** — `config.LLM_Engine.start_cleanup_task()`; the monitor ticks
    every 30 s and unloads the model once it has been idle longer than
-   `_max_idle_time` (300 s), so 300-330 s after its last use.
+   `_max_idle_time` (300 s), so about 300-330 s after its last use.
 10. **Database watchdog** — `start_watchdog(app)` detects a dead embedded cluster,
     resurrects it, and exposes the state on `/erudi/health/` as `db`.
 11. **Post-ready backfill** — a background task verifies the tool-call wire capability of
@@ -522,11 +522,11 @@ the budget to consume.
 
 `BaseEngine` keeps a single model in memory as class state. The cleanup monitor started
 in the lifespan ticks every 30 seconds and unloads the model once it has been idle
-longer than `_max_idle_time` (300 seconds), so 300 to 330 seconds after its last use. A tick
-with nothing to reap returns without touching the lock; one that finds an idle model takes the same lock as
-`generation_guard`, so it waits for a generation in flight to release it — and the guard
-refreshes `_last_used` on release — which is what keeps a model from being reaped
-mid-stream.
+longer than `_max_idle_time` (300 seconds), so about 300 to 330 seconds after its last use.
+A tick with nothing to reap returns without touching the lock; one that finds an idle model
+takes the same lock as `generation_guard`, so it waits for a generation in flight to release
+it — and the guard refreshes `_last_used` on release — which is what keeps a model from being
+reaped mid-stream.
 
 ### The memory brake (Apple Silicon and CPU)
 

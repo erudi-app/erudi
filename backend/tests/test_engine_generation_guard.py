@@ -182,3 +182,29 @@ async def test_idle_tick_reap_waits_for_a_running_generation():
         assert _GuardEngine._model is None
     finally:
         _reset()
+
+
+class _VanishingTimestamp:
+    """A ``_last_used`` that reads as a datetime once, then as None.
+
+    Stands for ``cleanup()`` running on another thread between two reads of the
+    attribute made by the tick's lock-free pre-check.
+    """
+
+    def __init__(self):
+        self._reads = 0
+
+    def __get__(self, obj, objtype=None):
+        self._reads += 1
+        return datetime.now() - timedelta(seconds=10_000) if self._reads == 1 else None
+
+
+def test_should_cleanup_reads_the_idle_clock_once(monkeypatch):
+    """A concurrent cleanup() cannot turn the idle clock into None mid-check."""
+    _GuardEngine._model = object()
+    try:
+        monkeypatch.setattr(_GuardEngine, "_last_used", _VanishingTimestamp())
+        assert _GuardEngine._should_cleanup() in (True, False)
+    finally:
+        monkeypatch.undo()
+        _reset()

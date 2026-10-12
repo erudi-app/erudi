@@ -18,7 +18,7 @@ Architecture:
     │  1. Select engine (MLX_Engine/CUDA_Engine/CPU_Engine)       │
     │  2. Create SQLAlchemy tables                                │
     │  3. Seed database with default models                       │
-    │  4. Start cleanup task (300s interval)                      │
+    │  4. Start cleanup task (30s interval)                        │
     └─────────────────────────────────────────────────────────────┘
                               ↓
     ┌─────────────────────────────────────────────────────────────┐
@@ -493,7 +493,7 @@ async def lifespan(app: FastAPI):
             # Cleanup runs automatically on shutdown
 
     Note:
-        The cleanup task runs every 300 seconds to free inactive model memory.
+        The cleanup task runs every 30 seconds to free a model idle for over 300 seconds.
         See BaseEngine.start_cleanup_task() for details.
 
     Lifecycle Flow:
@@ -505,7 +505,7 @@ async def lifespan(app: FastAPI):
         6. Apply the persisted inference-backend preference and run the CUDA
            pre-flight (apply_inference_backend_preference / emit_engine_notice)
         7. Open the LangGraph checkpointer (app.state.checkpointer)
-        8. Start the cleanup background task (300s interval) and the memory
+        8. Start the cleanup background task (30s interval) and the memory
            pressure monitor (60s interval)
         9. **[YIELD]** → Application handles requests
         10. Shutdown (reverse order): cleanup task → pressure monitor (awaited)
