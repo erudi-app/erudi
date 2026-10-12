@@ -197,7 +197,8 @@ export default function TraceStrip({ events, live }) {
 
 TraceStrip.propTypes = {
   // Ordered trace events: thinking / tool_call / tool_result (+ optional
-  // {"t":"truncated"} marker on persisted replay).
+  // {"t":"truncated"} marker on persisted replay). The trace's compaction
+  // markers are ignored here: CompactionMarker renders them.
   events: PropTypes.arrayOf(PropTypes.object),
   // True while the strip is the only content of a live turn (expanded default);
   // flips to false on the first answer event to auto-collapse.

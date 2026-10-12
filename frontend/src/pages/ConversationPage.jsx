@@ -368,7 +368,8 @@ export default function ConversationPage() {
         sender: "llm",
         content: "",
         // Live NDJSON trace (#90): thinking / tool_call / tool_result events
-        // collected as they stream, replayed by the TraceStrip above the bubble.
+        // collected as they stream, replayed by the TraceStrip above the bubble,
+        // and the compaction markers (#614) rendered above the strip.
         // `streaming` gates the strip's expanded-while-only-content behavior.
         trace: [],
         streaming: true,
@@ -453,14 +454,15 @@ export default function ConversationPage() {
           // (application/x-ndjson). We split on "\n" and carry the trailing
           // partial line across reads. Answer events stream into the bubble
           // exactly as raw text did before; thinking / tool_call / tool_result
-          // accrue into the message's live trace; error maps to the red bubble;
+          // and compaction `done` accrue into the message's live trace;
+          // compaction `start` is a transient state; error maps to the red bubble;
           // done is terminal. Unknown event types are ignored (forward compat).
           // NOTE: the title-gen reader above is a SEPARATE plain-text loop.
           const reader = responseRes.body.getReader();
           const decoder = new TextDecoder("utf-8");
           let buffer = ""; // partial-line carry across reads
           let answerText = ""; // accumulated answer bubble text
-          const traceEvents = []; // ordered thinking / tool_call / tool_result
+          const traceEvents = []; // ordered thinking / tool / compaction-done events
           let gotFirstEvent = false;
           let parseWarned = false;
           let sawError = false;

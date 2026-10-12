@@ -39,7 +39,8 @@ class Message(Base):
         timestamp: Message creation timestamp (server-stamped).
         starred: True if user starred for importance (used in memory injection).
         trace: Optional JSON list of the assistant turn's non-answer stream
-            events (thinking / tool_call / tool_result), for replay on reload.
+            events (thinking / tool_call / tool_result, and the compaction
+            ``done`` events), for replay on reload.
         conversation: Relationship to Conversation entity.
 
     Example:
