@@ -166,10 +166,10 @@ SUMMARY_KEEP_MESSAGES = 10
 MEMORY_WARNING_FRACTION = 0.85
 
 # What a compaction keeps (#611). With a known working window the kept tail
-# is bounded in tokens only: at most ``KEEP_FRACTION`` of the window. A message
-# bound would loop against the token trigger -- the last 10 messages can by
-# themselves exceed 80 % of the window -- and with token pressure the only
-# trigger, any number of short messages that fit the budget is safe to keep.
+# is bounded in tokens only: at most ``KEEP_FRACTION`` of the window. With
+# token pressure the only trigger, a count of kept messages cannot re-fire
+# anything, so a message cap on top would only discard recent context that
+# fits the budget and bring the next compaction sooner.
 # The budget leaves room for the summary and a margin under the trigger, so
 # with ordinary messages the post-compaction state stays under
 # ``0.8 W - 256`` for every window and the next turn does not re-fire it (the
@@ -500,9 +500,15 @@ def compaction_cutoff(
        the budget holds); only on the current question -- or when no
        assistant message lies between the cutoff and it -- does it move BACK
        to the answer before it.
-    4. Tool-pair safe (LangChain's ``_find_safe_cutoff_point``): an AI
-       message is never separated from its tool results -- moving back can
-       land in a tool round, and the cutoff then moves back to its call.
+    4. Tool-pair safe: an AI message is never separated from its tool
+       results. A token cut on a tool result of an EARLIER turn (before the
+       last user message) moves FORWARD past the round's results, so the
+       call and its results are summarized together and the budget holds --
+       mirroring step 3's forward move; landing on an older user message,
+       step 3 then applies. A cut on a tool result AFTER the current
+       question (mid-turn) has nothing to move forward to and moves back to
+       its call (LangChain's ``_find_safe_cutoff_point``), as does the
+       message cutoff without a window and any move back of step 3.
     5. If only the previous summary would be summarized (cutoff <= 1 after a
        summary), nothing is: re-summarizing a summary alone adds nothing and
        would reset the prefix cache for nothing.
@@ -528,23 +534,37 @@ def compaction_cutoff(
     exceeds it only by the answer before the current question when the cut
     falls ON that question (steps 2-3), by a last message larger than the
     budget on its own (kept whole, summarized on a later turn, never
-    truncated), and by a tool round kept with its call (step 4) -- accepted,
-    the alternatives break the conversation.
+    truncated), and by a tool round kept with its call when it lies after
+    the current question (mid-turn) or right before it with no answer in
+    between (step 3 moves back onto it) -- accepted: there the alternatives
+    drop the question or split the round, which breaks the conversation.
     """
     from langchain.agents.middleware import SummarizationMiddleware
     from langchain_core.messages import HumanMessage, ToolMessage
 
     safe_point = SummarizationMiddleware._find_safe_cutoff_point
+    last_human = last_human_index(messages)
     if _known_window(working_window):
         keep_budget = max(1, keep_token_budget(working_window) - overhead)
         cutoff = _token_cutoff(messages, keep_budget, counter)
+        if (
+            last_human is not None
+            and cutoff < last_human
+            and isinstance(messages[cutoff], ToolMessage)
+        ):
+            # A tool round of an EARLIER turn: move FORWARD past its results,
+            # so the call and its results are summarized together. Moving
+            # back to the call would keep the whole round, over the budget.
+            while isinstance(messages[cutoff], ToolMessage):
+                cutoff += 1
+        else:
+            cutoff = safe_point(messages, cutoff)
     elif len(messages) <= SUMMARY_KEEP_MESSAGES:
         cutoff = 0
     else:
         cutoff = safe_point(messages, len(messages) - SUMMARY_KEEP_MESSAGES)
     if cutoff <= 0:
         return 0
-    last_human = last_human_index(messages)
     if last_human is not None:
         cutoff = min(cutoff, last_human)
     if (
@@ -591,11 +611,10 @@ def compaction_cutoff(
 
 
 def _token_cutoff(messages: list, budget: int, counter: Any) -> int:
-    """LangChain's ``_find_token_based_cutoff``, for a given budget: the
+    """LangChain's ``_find_token_based_cutoff``, for a given budget, RAW: the
     earliest index whose suffix fits, the last message kept whole when it
-    alone exceeds the budget, then tool-pair safe."""
-    from langchain.agents.middleware import SummarizationMiddleware
-
+    alone exceeds the budget. Not tool-pair safe: ``compaction_cutoff``
+    decides which way a cut on a tool result moves (step 4)."""
     if not messages or counter(messages) <= budget:
         return 0
     low, high = 0, len(messages)
@@ -605,12 +624,9 @@ def _token_cutoff(messages: list, budget: int, counter: Any) -> int:
             high = mid
         else:
             low = mid + 1
-    cutoff = low
-    if cutoff >= len(messages):
-        if len(messages) == 1:
-            return 0
-        cutoff = len(messages) - 1
-    return SummarizationMiddleware._find_safe_cutoff_point(messages, cutoff)
+    if low >= len(messages):
+        return 0 if len(messages) == 1 else len(messages) - 1
+    return low
 
 
 def _is_previous_summary(message: Any) -> bool:
@@ -2232,7 +2248,12 @@ class AgentRunner:
         answered is not in the next request). When a compaction would happen
         (``compaction_cutoff`` > 0, futility guard included) the projection is
         ``O + count(kept) + summary_cap(W)``; otherwise ``O + count(all)`` --
-        no summary is added when nothing would be compacted.
+        no summary is added when nothing would be compacted. The projection
+        does not check whether the trigger fires: between the keep budget
+        (about ``0.4 W``) and ``0.8 W`` it projects a compaction the next
+        request will not run yet. That request is then under ``0.8 W``,
+        below the 85 % threshold, so the projection can warn up to one turn
+        early, never late.
         ``conversation_tokens`` is ``O + count(all)``, the request before any
         compaction.
         """

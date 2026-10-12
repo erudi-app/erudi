@@ -2783,7 +2783,7 @@ def test_compaction_fires_asap_when_the_fixed_part_fills_the_budget():
     assert _compaction_tokens(None, -3) == 1
 
 
-def test_build_middleware_composes_the_two_signal_trigger(monkeypatch):
+def test_build_middleware_triggers_on_80_percent_of_the_memory_folded_window(monkeypatch):
     from langchain.agents.middleware import SummarizationMiddleware
 
     monkeypatch.setattr(_FakeEngine, "effective_context_tokens", classmethod(lambda cls: 10000))

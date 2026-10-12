@@ -411,11 +411,134 @@ def test_many_parallel_tool_calls_are_kept_with_their_call_documented_over_keep(
         AIMessage("done", id="a2"),
     ]
     cut = compaction_cutoff(messages, 2000, approx_token_count)
-    # Never split the AI message from its tool results, never drop the
-    # turn's question: the tail starts with the answer before it and keeps
-    # more than 10 messages and more than the budget.
+    # The round follows the turn's question (mid-turn): never split the AI
+    # message from its tool results, never drop the question -- the tail
+    # starts with the answer before it and keeps the whole round, over the
+    # budget.
     assert messages[cut].id == "a0"
-    assert len(messages) - cut > runner_module.SUMMARY_KEEP_MESSAGES
+    kept_ids = {m.id for m in messages[cut:]}
+    assert {"a1", *(f"t{i}" for i in range(12))} <= kept_ids
+    assert _count(messages[cut:]) > keep_token_budget(2000)
+
+
+def _round_with_a_long_call_before_the_question() -> list:
+    """An earlier turn's tool round whose call carries a long text: the raw
+    token cut lands on its tool result."""
+    return _alternating(76, 10) + [
+        HumanMessage("use the tool", id="h76"),
+        AIMessage(_text(2600), tool_calls=[{"name": "t", "args": {}, "id": "c1"}], id="call"),
+        ToolMessage(_text(300), tool_call_id="c1", id="res"),
+        AIMessage(_text(100), id="ans"),
+        HumanMessage(_text(50), id="h"),
+        AIMessage(_text(50), id="a"),
+        HumanMessage(_text(50), id="q"),
+    ]
+
+
+def _parallel_round_before_the_question() -> list:
+    """An earlier turn's parallel tool round whose first result is huge: the
+    raw token cut lands on a later, small result of the same round."""
+    calls = [{"name": "t", "args": {}, "id": f"p{i}"} for i in range(4)]
+    return _alternating(76, 10) + [
+        HumanMessage("use the tools", id="h76"),
+        AIMessage("", tool_calls=calls, id="call"),
+        ToolMessage(_text(2600), tool_call_id="p0", id="r0"),
+        *[ToolMessage(_text(100), tool_call_id=f"p{i}", id=f"r{i}") for i in range(1, 4)],
+        AIMessage(_text(50), id="ans"),
+        HumanMessage(_text(50), id="h"),
+        AIMessage(_text(50), id="a"),
+        HumanMessage(_text(50), id="q"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "build", [_round_with_a_long_call_before_the_question, _parallel_round_before_the_question]
+)
+def test_a_tool_round_before_the_current_question_never_blows_the_keep_budget(build):
+    """A raw token cut on a tool result of an EARLIER turn moves FORWARD past
+    the round's results: the call and its results are summarized together.
+    Moving back to the call would keep the whole round -- here more than the
+    window itself, so the next request would overflow."""
+    window, overhead = 2000, 200
+    messages = build()
+    budget = keep_token_budget(window) - overhead
+    assert isinstance(
+        messages[runner_module._token_cutoff(messages, budget, approx_token_count)], ToolMessage
+    )
+
+    cut = compaction_cutoff(messages, window, approx_token_count, overhead=overhead)
+
+    assert messages[cut].id == "ans"
+    assert _count(messages[cut:]) <= budget
+    _assert_alternates(messages, cut)
+
+
+def test_a_tool_round_after_the_current_question_is_kept_with_its_call():
+    """Mid-turn, the round follows the question the turn answers: there is
+    nothing to move forward to, so the cut keeps the call with its results
+    (and the question, and the answer before it)."""
+    calls = [{"name": "t", "args": {}, "id": f"p{i}"} for i in range(2)]
+    messages = _conversation(6, 50) + [
+        AIMessage(_text(2000), tool_calls=calls, id="call"),
+        ToolMessage(_text(100), tool_call_id="p0", id="r0"),
+        ToolMessage(_text(100), tool_call_id="p1", id="r1"),
+    ]
+    question = 12
+    assert messages[question].id == "current-question"
+    raw = runner_module._token_cutoff(messages, keep_token_budget(2000), approx_token_count)
+    assert isinstance(messages[raw], ToolMessage) and raw > question
+
+    cut = compaction_cutoff(messages, 2000, approx_token_count)
+
+    assert cut == question - 1
+    assert [m.id for m in messages[cut + 2 :]] == ["call", "r0", "r1"]
+    _assert_alternates(messages, cut)
+
+
+async def test_a_state_holding_a_long_tool_round_is_not_stuck_over_the_trigger():
+    """A state whose kept tail starts with a long tool round (a call with a
+    long text, right after the summary) and sits over the trigger: the cut
+    moves past the round instead of back onto it -- where only the summary
+    would precede it and nothing would ever be compacted again."""
+    window = 2000
+    summary = _ScriptedSummaryModel(messages=iter([]))
+    mw = _middleware(summary, window=window)
+    state = [
+        _previous_summary_message(),
+        AIMessage(_text(2600), tool_calls=[{"name": "t", "args": {}, "id": "c1"}], id="call"),
+        ToolMessage(_text(300), tool_call_id="c1", id="res"),
+        AIMessage(_text(100), id="ans"),
+        HumanMessage(_text(50), id="h"),
+        AIMessage(_text(50), id="a"),
+        HumanMessage(_text(50), id="q"),
+    ]
+    mw._freeze(state)
+    assert mw.token_counter(state) >= int(0.8 * window)
+
+    after = _after(await mw.abefore_model({"messages": state}, None))
+
+    assert [m.id for m in after[1:]] == ["ans", "h", "a", "q"]
+    next_call = after + [AIMessage("ok", id="r1"), HumanMessage("next", id="q2")]
+    assert await mw.abefore_model({"messages": next_call}, None) is None
+
+
+async def test_the_long_tool_round_is_summarized_and_the_next_turn_does_not_compact():
+    """The worst case through the middleware: the first compaction keeps the
+    tail after the round, within the window, and the next turn neither
+    overflows nor compacts again."""
+    window = 2000
+    summary = _ScriptedSummaryModel(messages=iter([]))
+    mw = _middleware(summary, window=window)
+    state = _round_with_a_long_call_before_the_question()
+
+    after = _after(await mw.abefore_model({"messages": state}, None))
+
+    assert after[1].id == "ans"
+    mw._freeze(after)
+    assert mw.token_counter(after) <= int(0.8 * window) - 256
+    next_call = after + [AIMessage("ok", id="r1"), HumanMessage("next", id="q2")]
+    assert await mw.abefore_model({"messages": next_call}, None) is None
+    assert len(summary.prompts) == 1
 
 
 def _after_cut(messages, cut):
@@ -437,6 +560,21 @@ def _assert_alternates(messages, cut):
     humans = [m for m in messages if isinstance(m, HumanMessage)]
     if humans:
         assert any(m is humans[-1] for m in after), "the current question was summarized away"
+    _assert_paired(messages, cut)
+
+
+def _assert_paired(messages, cut):
+    """Every tool result lies on the same side of the cut as its call."""
+    for index, message in enumerate(messages):
+        if not isinstance(message, ToolMessage):
+            continue
+        call = next(
+            i
+            for i in range(index - 1, -1, -1)
+            if isinstance(messages[i], AIMessage)
+            and any(tc.get("id") == message.tool_call_id for tc in messages[i].tool_calls)
+        )
+        assert (call < cut) == (index < cut), f"tool pair split at cut={cut}"
 
 
 def _random_conversation(rng):
@@ -507,6 +645,8 @@ def _named_cases():
             ],
             10_000,
         ),
+        "long-call-round-before-question": (_round_with_a_long_call_before_the_question(), 2000),
+        "parallel-round-before-question": (_parallel_round_before_the_question(), 2000),
     }
 
 

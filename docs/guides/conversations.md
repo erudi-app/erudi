@@ -518,8 +518,9 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    **What a compaction keeps** (`compaction_cutoff` in `runner.py`) starts from a **token budget**
    of `max(1, min(0.4 × W, 0.8 × W − summary_cap(W) − 256) − O)` tokens, `W` being the working
    window: the longest recent part that fits it, however many messages that is. The bound is in
-   tokens only — a message bound would loop against the token trigger, since ten long messages can
-   by themselves exceed 80 % of the window. Three rules then adjust the cut:
+   tokens only — with token pressure the only trigger, the number of kept messages cannot re-fire
+   anything, so a message cap on top would only discard recent context that fits the budget and
+   bring the next compaction sooner. Three rules then adjust the cut:
 
    - the **current question** — the last user message — is never summarized away, even mid-turn
      when a large tool result follows it;
@@ -529,7 +530,10 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
      on an older user message moves **forward** to the answer after it (keeping less, so the budget
      holds); only a cut that lands on the current question itself moves **back** to the answer
      before it;
-   - an assistant message is never separated from its **tool results**.
+   - an assistant message is never separated from its **tool results**. A cut that lands inside a
+     tool round of an earlier turn moves **forward** past it, so the call and its results are
+     summarized together and the budget holds; only a round that follows the current question
+     (mid-turn) is kept whole with its call.
 
    When only the previous summary would be summarized, nothing is compacted. With a known window,
    a compaction that would gain less than **256 tokens**
@@ -541,7 +545,8 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    does not compact again. The documented exceptions keep more than the budget: the answer before
    the current question when the cut falls on that question, a current message or a previous
    answer larger than the budget on its own (kept whole, summarized on a later turn, never
-   truncated), and a tool round kept whole with its call — the next call can then compact again.
+   truncated), and a tool round kept whole with its call because it follows the current question,
+   or precedes it with no answer in between — the next call can then compact again.
    In the corner where the loaded model alone already exceeds the memory floor (`W = 1`), a model
    call compacts down to the current turn and the answer before it; once the state is
    `[summary, answer, current question, …]` only the summary would remain to summarize, so later
@@ -572,6 +577,11 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    knowledge-base and web results reach the summarizer as their markers, exactly as the model last
    saw them. The **previous summary is always part of what the summarizer reads**, prepended on top
    of that budget, so the facts it carries survive every compaction.
+
+   With a large window, compaction is **rare and reads a large pool**. On a 40,960-token window the
+   first compaction fires near 32,768 tokens, keeps up to 16,384, and the summarizer reads up to
+   19,200 tokens of history in one call, so that one turn waits for a long prefill before its
+   answer starts — slowest on the CPU engine.
 
    **A failed summary never erases memory.** A transient failure of the summary call (the child
    unreachable or dead, a client timeout, a timeout while the summary was being written, HTTP
