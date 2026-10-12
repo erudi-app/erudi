@@ -192,9 +192,10 @@ Conversations and Arena share one streaming primitive, `AgentRunner`
 
 - **Conversations** run with a `thread_id`, summarization enabled, and the LangGraph
   checkpointer, so history is restored from the checkpointer (only the new message is
-  sent) and older turns are summarized in the agent state. A compaction keeps at most
-  10 messages and at most a token budget of the working window, and its summary is
-  capped (see the [Conversations guide](guides/conversations.md)). On Apple Silicon,
+  sent) and older turns are summarized in the agent state. Compaction fires on token
+  pressure alone (80 % of the working window), keeps a token budget of that window, and
+  caps its summary; only when no window is known does a message count (20 messages,
+  keep the last 10) stand in (see the [Conversations guide](guides/conversations.md)). On Apple Silicon,
   when the memory ceiling is smaller than the model's trained window, the inference
   child itself enforces it (see [Engines](dev/architecture/engines.md#context-windows));
   on the CPU engine, the window Erudi passes to `llama-server` is already the one the

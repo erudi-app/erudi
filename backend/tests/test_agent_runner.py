@@ -272,7 +272,8 @@ def test_build_middleware_uses_the_facts_first_summary_prompt():
 async def test_summarization_compacts_checkpointer_state(monkeypatch):
     import itertools
 
-    # Lower the thresholds so summarization fires within a few turns.
+    # The fake engine reports no window, so the message pair is the trigger
+    # and the keep; lower both so summarization fires within a few turns.
     monkeypatch.setattr(runner_module, "SUMMARY_TRIGGER_MESSAGES", 6)
     monkeypatch.setattr(runner_module, "SUMMARY_KEEP_MESSAGES", 2)
 
@@ -2693,30 +2694,29 @@ def test_curated_empty_answer_messages_are_one_ascii_line_without_the_sentinel()
     assert runner_module.EMPTY_ANSWER_LENGTH_MESSAGE != runner_module.EMPTY_ANSWER_STOP_MESSAGE
 
 
-# ============ Two-signal compaction + memory warning (1.1.2 spec) ============
+# ============ Compaction trigger + memory warning ============
 
 
-def test_summarization_triggers_with_window():
-    """A known working window: the token signal is 80 % of it, OR'd with the
-    20-message floor."""
-    assert runner_module.summarization_triggers(10000) == [
-        ("tokens", 8000),
-        ("messages", runner_module.SUMMARY_TRIGGER_MESSAGES),
-    ]
+def test_summarization_triggers_with_window_is_token_pressure_only():
+    """A known working window: 80 % of it is the ONLY trigger. A message count
+    says nothing about the window -- tool rounds add two messages each, so an
+    agentic conversation would compact far under the window."""
+    assert runner_module.summarization_triggers(10000) == [("tokens", 8000)]
+    assert runner_module.summarization_triggers(40960) == [("tokens", 32768)]
 
 
-def test_summarization_triggers_without_window_is_messages_only():
-    assert runner_module.summarization_triggers(None) == [
-        ("messages", runner_module.SUMMARY_TRIGGER_MESSAGES)
-    ]
+@pytest.mark.parametrize("window", [None, 0, -5, True, False, 4096.0, "4096"])
+def test_summarization_triggers_without_a_window_fall_back_to_the_message_count(window):
+    """No known working window (``None``, non-positive, a bool, not an int):
+    the message clause is the only trigger left, without which the
+    conversation would grow until every turn overflows."""
+    assert runner_module.SUMMARY_TRIGGER_MESSAGES == 20
+    assert runner_module.summarization_triggers(window) == [("messages", 20)]
 
 
 def test_summarization_triggers_clamps_a_tiny_window_to_at_least_one():
     # int(0.8 * 1) == 0; the token signal must never be a non-positive count.
-    assert runner_module.summarization_triggers(1) == [
-        ("tokens", 1),
-        ("messages", 20),
-    ]
+    assert runner_module.summarization_triggers(1) == [("tokens", 1)]
 
 
 # The compaction trigger is now sized from the ONE canonical working window
@@ -2783,7 +2783,7 @@ def test_compaction_fires_asap_when_the_fixed_part_fills_the_budget():
     assert _compaction_tokens(None, -3) == 1
 
 
-def test_build_middleware_composes_the_two_signal_trigger(monkeypatch):
+def test_build_middleware_triggers_on_80_percent_of_the_memory_folded_window(monkeypatch):
     from langchain.agents.middleware import SummarizationMiddleware
 
     monkeypatch.setattr(_FakeEngine, "effective_context_tokens", classmethod(lambda cls: 10000))
@@ -2793,7 +2793,7 @@ def test_build_middleware_composes_the_two_signal_trigger(monkeypatch):
     budget = SimpleNamespace(tokens_at_ceiling=lambda: 5000)
     built = AgentRunner()._build_middleware(ToolableFakeChatModel(messages=iter([])), budget)
     mw = next(m for m in built if isinstance(m, SummarizationMiddleware))
-    assert mw.trigger == [("tokens", 4000), ("messages", 20)]
+    assert mw.trigger == [("tokens", 4000)]
 
 
 def test_build_middleware_keeps_the_compact_asap_net_on_weights_overflow(monkeypatch):
@@ -2806,15 +2806,16 @@ def test_build_middleware_keeps_the_compact_asap_net_on_weights_overflow(monkeyp
     budget = SimpleNamespace(tokens_at_ceiling=lambda: -3)
     built = AgentRunner()._build_middleware(ToolableFakeChatModel(messages=iter([])), budget)
     mw = next(m for m in built if isinstance(m, SummarizationMiddleware))
-    assert mw.trigger == [("tokens", 1), ("messages", 20)]
+    assert mw.trigger == [("tokens", 1)]
 
 
-def test_build_middleware_without_window_or_budget_keeps_the_messages_floor():
+def test_build_middleware_without_window_or_budget_falls_back_to_the_message_pair():
     from langchain.agents.middleware import SummarizationMiddleware
 
     built = AgentRunner()._build_middleware(ToolableFakeChatModel(messages=iter([])))
     mw = next(m for m in built if isinstance(m, SummarizationMiddleware))
     assert mw.trigger == [("messages", 20)]
+    assert mw.keep == ("messages", 10)
 
 
 class _StubBudget:
@@ -2900,9 +2901,8 @@ async def test_no_memory_warning_when_compaction_could_restore_the_margin(monkey
 
     monkeypatch.setattr(AgentRunner, "_project_next_request", _spy)
     checkpointer = InMemorySaver()
-    # 18 alternating messages ending with an answer (under the 20-message
-    # clause and under 80 % of the window, so this turn compacts nothing;
-    # the projection keeps the tail).
+    # 18 alternating messages ending with an answer (under 80 % of the
+    # window, so this turn compacts nothing; the projection keeps the tail).
     seed = [
         (HumanMessage if i % 2 == 0 else AIMessage)("x" * 2000, id=f"seed{i}") for i in range(18)
     ]
