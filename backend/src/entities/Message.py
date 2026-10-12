@@ -35,7 +35,7 @@ class Message(Base):
         id: Primary key (auto-increment) — also the insertion order.
         conversation_id: Foreign key to Conversation (server-side CASCADE).
         sender: Message sender - "user" or "llm" (validated).
-        content: Message text content (1-32768 chars, validated).
+        content: Message text content (non-empty, no length cap).
         timestamp: Message creation timestamp (server-stamped).
         starred: True if user starred for importance (used in memory injection).
         trace: Optional JSON list of the assistant turn's non-answer stream
@@ -85,7 +85,7 @@ class Message(Base):
 
     @validates("content")
     def validate_content(self, key: str, content: str) -> str:
-        """Validate content is non-empty and within size limit.
+        """Validate content is non-empty.
 
         Args:
             key: Column name ("content").
@@ -95,12 +95,10 @@ class Message(Base):
             Validated content value.
 
         Raises:
-            ValueError: If content empty or exceeds 32K chars.
+            ValueError: If content is empty or whitespace-only.
         """
         if not content or len(content.strip()) == 0:
             raise ValueError("Message content cannot be empty")
-        if len(content) > 32768:  # 32K chars limit
-            raise ValueError("Message content too long (max 32K chars)")
         return content
 
     def __repr__(self) -> str:
