@@ -122,6 +122,7 @@ describe("ChatPage send flow", () => {
       custom_prompt: "",
       web_search_enabled: false, // inherited from the global setting (#310)
       reasoning_effort: "medium", // inherited from the global setting (PR-D2)
+      compaction_threshold: 80, // inherited from the global setting (#607)
     });
 
     const [path, { state }] = navigateMock.mock.calls[0];
@@ -167,6 +168,7 @@ describe("ChatPage send flow", () => {
       custom_prompt: "Answer like a pirate",
       web_search_enabled: false,
       reasoning_effort: "medium",
+      compaction_threshold: 80,
     });
     expect(navigateMock.mock.calls[0][1].state.initialCustomPrompt).toBe("Answer like a pirate");
     expect(navigateMock.mock.calls[0][1].state.initialSettings).toEqual({

@@ -676,7 +676,7 @@ def _windowed_engine(events):
             return "token"
 
         @classmethod
-        def end_memory_window(cls, token, *, abandoned=False):
+        def end_memory_window(cls, token, *, abandoned=False, compaction_threshold=None):
             events.append(("end", token, abandoned))
 
     return _Engine
@@ -729,6 +729,7 @@ async def test_every_conversation_and_arena_turn_is_measured(monkeypatch, statef
             params=_params(),
             thread_id="t" if stateful else None,
             summarize=stateful,
+            compaction_threshold=80,
         )
     ]
 

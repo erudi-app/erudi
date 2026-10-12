@@ -383,6 +383,7 @@ async def test_thinking_tool_calls_and_answers_keep_their_order(monkeypatch):
             params=_PARAMS,
             thread_id="e3",
             summarize=True,
+            compaction_threshold=80,
             tools=[calculator],
             emit_events=True,
         )
@@ -436,6 +437,7 @@ async def test_an_arena_projection_carries_only_answer_text(monkeypatch):
             params=_PARAMS,
             thread_id="e5",
             summarize=True,
+            compaction_threshold=80,
         )
     ]
 

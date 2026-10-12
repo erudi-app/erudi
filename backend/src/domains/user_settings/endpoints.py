@@ -2,8 +2,9 @@
 
 GET/PUT ``/erudi/user_settings/``: the app-wide settings the frontend's
 Settings page binds to: the global web-search default (#310), the
-interface language (#385), the automatic-update preference and the inference
-backend. Follows the startup domain's layering (endpoints -> repository) — the resource is a
+interface language (#385), the automatic-update preference, the inference
+backend and the defaults new conversations copy (reasoning effort, compaction
+threshold). Follows the startup domain's layering (endpoints -> repository) — the resource is a
 one-row singleton with no business logic beyond get-or-create. The inference
 backend rides here too: it is read once per boot by the lifespan, so changing
 it needs a backend restart, which the frontend triggers explicitly.
@@ -38,7 +39,8 @@ async def get_user_settings(
     Example:
         GET /erudi/user_settings/
         -> {"web_search_enabled": false, "language": "en", "auto_update_enabled": true,
-            "inference_backend": "auto", "default_reasoning_effort": "medium"}
+            "inference_backend": "auto", "default_reasoning_effort": "medium",
+            "default_compaction_threshold": 80}
     """
     try:
         settings = settings_repo.get_or_create()
@@ -60,7 +62,8 @@ async def update_user_settings(
     Example:
         PUT /erudi/user_settings/ {"language": "fr"}
         -> {"web_search_enabled": false, "language": "fr", "auto_update_enabled": true,
-            "inference_backend": "auto", "default_reasoning_effort": "medium"}
+            "inference_backend": "auto", "default_reasoning_effort": "medium",
+            "default_compaction_threshold": 80}
     """
     try:
         settings = settings_repo.get_or_create()
@@ -74,13 +77,18 @@ async def update_user_settings(
             settings_repo.set_inference_backend(settings, payload.inference_backend)
         if payload.default_reasoning_effort is not None:
             settings_repo.set_default_reasoning_effort(settings, payload.default_reasoning_effort)
+        if payload.default_compaction_threshold is not None:
+            settings_repo.set_default_compaction_threshold(
+                settings, payload.default_compaction_threshold
+            )
         db.commit()
         logger.info(
             "User settings updated: "
             f"web_search_enabled={settings.web_search_enabled} language={settings.language} "
             f"auto_update_enabled={settings.auto_update_enabled} "
             f"inference_backend={settings.inference_backend} "
-            f"default_reasoning_effort={settings.default_reasoning_effort}"
+            f"default_reasoning_effort={settings.default_reasoning_effort} "
+            f"default_compaction_threshold={settings.default_compaction_threshold}"
         )
         return settings
     except Exception as e:

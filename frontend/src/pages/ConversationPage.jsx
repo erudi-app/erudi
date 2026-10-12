@@ -30,6 +30,7 @@ import {
 } from "../utils/messageContent";
 import { formatBytes } from "../utils/formatBytes";
 import { compactionMarkers, compactionsOnly, hasStripEvents } from "../utils/traceEvents";
+import { DEFAULT_COMPACTION_THRESHOLD } from "../utils/compactionThreshold";
 
 const log = createLogger("ConversationPage");
 
@@ -124,6 +125,9 @@ export default function ConversationPage() {
   // Per-conversation Reasoning effort control (PR-D2): same hydrate-then-PATCH
   // pattern as the web-search toggle above.
   const [reasoningEffort, setReasoningEffort] = useState("medium");
+  // Per-conversation Compaction threshold (#607): same hydrate-then-PATCH
+  // pattern; the backend compacts the NEXT turn at the new share.
+  const [compactionThreshold, setCompactionThreshold] = useState(DEFAULT_COMPACTION_THRESHOLD);
   const [collapsed, setCollapsed] = useState(false);
   const [firstReplyPending, setFirstReplyPending] = useState(false);
   // The amber memory warning (1.1.2): the LATEST turn's `memory_warning`
@@ -274,6 +278,21 @@ export default function ConversationPage() {
       });
     } catch (error) {
       log.error("Failed to save the reasoning effort", error);
+    }
+  };
+
+  // #607: persist a compaction-threshold change immediately (one-field PATCH,
+  // same pattern as the reasoning effort) with an optimistic local update.
+  const handleCompactionThresholdChange = async (next) => {
+    setCompactionThreshold(next);
+    try {
+      await tracedFetch(`${API_BASE_URL}/conversations/${id}`, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ compaction_threshold: next }),
+      });
+    } catch (error) {
+      log.error("Failed to save the compaction threshold", error);
     }
   };
 
@@ -778,6 +797,7 @@ export default function ConversationPage() {
           });
           setWebSearch(Boolean(conversation.web_search_enabled));
           setReasoningEffort(conversation.reasoning_effort || "medium");
+          setCompactionThreshold(conversation.compaction_threshold ?? DEFAULT_COMPACTION_THRESHOLD);
           setCustomPrompt(conversation.custom_prompt || "");
 
           // Record the conversation's assigned model; the header picker's
@@ -1029,6 +1049,9 @@ export default function ConversationPage() {
             showReasoningEffort
             initialReasoningEffort={reasoningEffort}
             onReasoningEffortChange={handleReasoningEffortChange}
+            showCompactionThreshold
+            initialCompactionThreshold={compactionThreshold}
+            onCompactionThresholdChange={handleCompactionThresholdChange}
           />
         </div>
 

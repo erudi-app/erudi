@@ -29,6 +29,7 @@
       "high": "Alto",
       "xhigh": "Muy alto"
     },
+    "compactionThreshold": "Umbral de compactación",
     "customizePrompt": "Personalizar instrucciones",
     "apply": "Aplicar",
     "pickerAttention": "Selecciona un modelo",
@@ -39,7 +40,8 @@
       "webSearch": "Permite que el modelo busque en la web información actual. Las consultas de búsqueda se envían a motores de búsqueda externos.",
       "webSearchUnavailable": "Este modelo no puede usar herramientas, por lo que la búsqueda web no está disponible para él.",
       "webSearchUnverified": "Este modelo aún no se ha verificado para ejecutar herramientas, por lo que la búsqueda web permanece desactivada para él.",
-      "reasoningEffort": "Indica cuánto puede deliberar el modelo antes de responder. Los niveles más altos razonan más pero tardan más; Ninguno le pide responder directamente."
+      "reasoningEffort": "Indica cuánto puede deliberar el modelo antes de responder. Los niveles más altos razonan más pero tardan más; Ninguno le pide responder directamente.",
+      "compactionThreshold": "Los mensajes más antiguos se resumen cuando la conversación llena esta parte de la ventana de contexto del modelo. Más bajo: resume antes y con más frecuencia, lo que mantiene la conversación más corta. Más alto: conserva más de ella palabra por palabra y resume con menos frecuencia."
     },
     "noPublisherRecommendation": "El editor de este modelo no recomienda ajustes de muestreo; se aplican valores neutros.",
     "weightsMissingHint": "Faltan los pesos — vuelve a vincular este asistente en la página Modelos"

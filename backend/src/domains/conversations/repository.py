@@ -9,6 +9,7 @@ from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
 from src.agents.reasoning_effort import DEFAULT_REASONING_EFFORT
+from src.engines.working_window import DEFAULT_COMPACTION_THRESHOLD
 from src.database.generation_hints import (
     FALLBACK_MAX_TOKENS,
     FALLBACK_TEMPERATURE,
@@ -121,6 +122,7 @@ class ConversationRepository:
         custom_prompt: str = "",
         web_search_enabled: bool = False,
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
+        compaction_threshold: int = DEFAULT_COMPACTION_THRESHOLD,
     ) -> Conversation:
         """
         Create a new conversation.
@@ -137,6 +139,8 @@ class ConversationRepository:
                 caller does not pass an explicit value
             reasoning_effort: Per-conversation reasoning effort (1.1.2), same
                 lifecycle as the web-search toggle
+            compaction_threshold: Per-conversation compaction threshold in
+                percent (#607), same lifecycle
 
         Returns:
             The created Conversation
@@ -154,6 +158,7 @@ class ConversationRepository:
                 custom_prompt=custom_prompt,
                 web_search_enabled=web_search_enabled,
                 reasoning_effort=reasoning_effort,
+                compaction_threshold=compaction_threshold,
             )
             self.db.add(conversation)
             self.db.flush()  # Flush to get ID, no commit
@@ -174,6 +179,7 @@ class ConversationRepository:
         custom_prompt: Optional[str] = None,
         web_search_enabled: Optional[bool] = None,
         reasoning_effort: Optional[str] = None,
+        compaction_threshold: Optional[int] = None,
     ) -> Conversation:
         """
         Update an existing conversation.
@@ -188,6 +194,8 @@ class ConversationRepository:
             custom_prompt: New custom prompt
             web_search_enabled: New per-conversation web-search toggle (#310)
             reasoning_effort: New per-conversation reasoning effort (1.1.2)
+            compaction_threshold: New per-conversation compaction threshold
+                in percent (#607)
 
         Returns:
             Updated Conversation object
@@ -234,6 +242,13 @@ class ConversationRepository:
 
             if reasoning_effort is not None and reasoning_effort != conversation.reasoning_effort:
                 conversation.reasoning_effort = reasoning_effort
+                updated = True
+
+            if (
+                compaction_threshold is not None
+                and compaction_threshold != conversation.compaction_threshold
+            ):
+                conversation.compaction_threshold = compaction_threshold
                 updated = True
 
             if updated:

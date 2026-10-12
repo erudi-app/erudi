@@ -5,8 +5,9 @@ Singleton table (one row) holding app-wide user preferences, mirroring the
 toggle (issue #310) — the DEFAULT for new conversations. Each conversation
 copies this value at creation and owns its flag afterwards; changing the
 global setting never retro-affects existing conversations. It also carries the
-interface language, the automatic-update preference and the inference
-backend the app runs models on.
+interface language, the automatic-update preference, the inference
+backend the app runs models on, and the other defaults new conversations copy
+(reasoning effort, compaction threshold).
 
 Example:
     from src.entities.UserSettings import UserSettings
@@ -14,11 +15,16 @@ Example:
     settings = UserSettings(web_search_enabled=False)
 """
 
-from sqlalchemy import Column, Integer, Boolean, String
+from sqlalchemy import Column, Integer, Boolean, SmallInteger, String
 from sqlalchemy.orm import validates
 from src.agents.reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
     REASONING_EFFORT_LEVELS,
+)
+from src.engines.working_window import (
+    COMPACTION_THRESHOLDS,
+    DEFAULT_COMPACTION_THRESHOLD,
+    is_compaction_threshold,
 )
 from src.database.core import Base
 
@@ -60,6 +66,11 @@ class UserSettings(Base):
             the level at which a model that reasons naturally behaves exactly
             as it did before the setting existed. Arena panels, which have no
             conversation row, read this value on every turn.
+        default_compaction_threshold: One of COMPACTION_THRESHOLDS (50-90,
+            step 5), the GLOBAL share of the working window, in percent, at
+            which new conversations compact; each copies it at creation. 80
+            by default, the value every row that predates the column holds.
+            Arena panels never compact, so nothing else reads it.
 
     Constraints:
         - web_search_enabled must be a Boolean (enforced by validator).
@@ -67,6 +78,7 @@ class UserSettings(Base):
         - language must be one of SUPPORTED_LANGUAGES (enforced by validator).
         - inference_backend must be one of INFERENCE_BACKENDS (validator).
         - default_reasoning_effort must be one of REASONING_EFFORT_LEVELS.
+        - default_compaction_threshold must be one of COMPACTION_THRESHOLDS.
     """
 
     __tablename__ = "user_settings"
@@ -77,6 +89,9 @@ class UserSettings(Base):
     auto_update_enabled = Column(Boolean, default=True, nullable=False)
     inference_backend = Column(String(8), default=DEFAULT_INFERENCE_BACKEND, nullable=False)
     default_reasoning_effort = Column(String(8), default=DEFAULT_REASONING_EFFORT, nullable=False)
+    default_compaction_threshold = Column(
+        SmallInteger, default=DEFAULT_COMPACTION_THRESHOLD, nullable=False
+    )
 
     @validates("language")
     def validate_language(self, key, value):
@@ -109,6 +124,18 @@ class UserSettings(Base):
         """
         if value not in REASONING_EFFORT_LEVELS:
             raise ValueError(f"{key} must be one of {REASONING_EFFORT_LEVELS}, got {value!r}")
+        return value
+
+    @validates("default_compaction_threshold")
+    def validate_default_compaction_threshold(self, key, value):
+        """Ensure the global compaction threshold is a whole percent on the scale.
+
+        Raises:
+            ValueError: If value is not an int in COMPACTION_THRESHOLDS (a
+                bool, a float or a string is rejected).
+        """
+        if not is_compaction_threshold(value):
+            raise ValueError(f"{key} must be one of {COMPACTION_THRESHOLDS}, got {value!r}")
         return value
 
     @validates("web_search_enabled", "auto_update_enabled")

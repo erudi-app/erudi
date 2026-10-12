@@ -2,13 +2,20 @@
 
 One singleton resource: the app-wide user settings. It carries the global
 web-search default (#310), the interface language (#385), the
-automatic-update preference, the inference backend and the default reasoning
-effort; new settings slot in as additional fields.
+automatic-update preference, the inference backend, the default reasoning
+effort and the default compaction threshold (#607); new settings slot in as
+additional fields.
 """
 
-from typing import Literal, Optional
+from typing import Annotated, Literal, Optional
 
 from pydantic import BaseModel, Field, model_validator
+
+from src.engines.working_window import (
+    COMPACTION_THRESHOLD_MAX,
+    COMPACTION_THRESHOLD_MIN,
+    COMPACTION_THRESHOLD_STEP,
+)
 
 LanguageCode = Literal["en", "fr", "es", "zh"]
 InferenceBackend = Literal["auto", "cpu"]
@@ -16,6 +23,19 @@ InferenceBackend = Literal["auto", "cpu"]
 # be built from a runtime tuple without losing the OpenAPI enum); the entity
 # validator enforces the same list on the way to the database.
 ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh"]
+# The share of the working window, in whole percent, at which a conversation
+# compacts (#607): 50 to 90 in steps of 5. Strict: a bool, a float or a
+# numeric string is refused, not coerced. The entity validators enforce the
+# same scale on the way to the database.
+CompactionThreshold = Annotated[
+    int,
+    Field(
+        strict=True,
+        ge=COMPACTION_THRESHOLD_MIN,
+        le=COMPACTION_THRESHOLD_MAX,
+        multiple_of=COMPACTION_THRESHOLD_STEP,
+    ),
+]
 
 
 class UserSettingsResponse(BaseModel):
@@ -33,6 +53,9 @@ class UserSettingsResponse(BaseModel):
         default_reasoning_effort: Global default for how much a model may
             deliberate before answering. New conversations copy it at
             creation; arena turns read it directly.
+        default_compaction_threshold: Global default for the share of the
+            working window, in percent, at which a conversation compacts. New
+            conversations copy it at creation.
     """
 
     web_search_enabled: bool = Field(
@@ -54,6 +77,10 @@ class UserSettingsResponse(BaseModel):
     default_reasoning_effort: ReasoningEffort = Field(
         ...,
         description="Default reasoning effort new conversations inherit (none, low, medium, high, xhigh)",
+    )
+    default_compaction_threshold: CompactionThreshold = Field(
+        ...,
+        description="Default compaction threshold new conversations inherit, in percent (50-90, step 5)",
     )
 
     class Config:
@@ -87,6 +114,10 @@ class UserSettingsUpdate(BaseModel):
         None,
         description="Default reasoning effort for new conversations (none, low, medium, high, xhigh)",
     )
+    default_compaction_threshold: Optional[CompactionThreshold] = Field(
+        None,
+        description="Default compaction threshold for new conversations, in percent (50-90, step 5)",
+    )
 
     @model_validator(mode="after")
     def require_at_least_one_field(self):
@@ -96,6 +127,7 @@ class UserSettingsUpdate(BaseModel):
             and self.auto_update_enabled is None
             and self.inference_backend is None
             and self.default_reasoning_effort is None
+            and self.default_compaction_threshold is None
         ):
             raise ValueError("At least one setting must be provided")
         return self

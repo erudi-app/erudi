@@ -54,8 +54,9 @@ Routers are mounted under the `/erudi` prefix in `register_routers`
 - **Entities**: `Conversation`, `Message`
 - **Conversation state**: held by the LangGraph checkpointer, not rebuilt from the
   message table; older turns are compacted by a summarization middleware when the
-  conversation reaches 80 % of the working context window (the smaller of the
-  allocated window and the Apple-Silicon memory ceiling; see the
+  conversation reaches its compaction threshold (a share of the working context
+  window, 50-90 %, 80 % by default; the window is the smaller of the allocated
+  window and the Apple-Silicon memory ceiling; see the
   [Conversations guide](guides/conversations.md)); the thread shows each compaction
   while it runs and marks where it took over (`compaction` events)
 - [Reference](reference/conversations.md)
@@ -104,8 +105,8 @@ Routers are mounted under the `/erudi` prefix in `register_routers`
 
 - `GET /erudi/startup/welcome-popup` drives first-run UI state (`StartupVariables`).
 - `GET|PUT /erudi/user_settings/` reads and writes the UI language, the global
-  web-search default, the automatic-update preference and the default reasoning
-  effort (`UserSettings`).
+  web-search default, the automatic-update preference, the default reasoning
+  effort and the default compaction threshold (`UserSettings`).
   See [Internationalization](i18n.md).
 - Connectivity for the status pill is read in the renderer from `navigator.onLine`
   and the `online` / `offline` events, corrected by requests that fail on the wire
@@ -194,7 +195,8 @@ Conversations and Arena share one streaming primitive, `AgentRunner`
 - **Conversations** run with a `thread_id`, summarization enabled, and the LangGraph
   checkpointer, so history is restored from the checkpointer (only the new message is
   sent) and older turns are summarized in the agent state. Compaction fires on token
-  pressure alone (80 % of the working window), keeps a token budget of that window, and
+  pressure alone (the conversation's compaction threshold, 80 % of the working window by
+  default), keeps a token budget of that window, and
   caps its summary; only when no window is known does a message count (20 messages,
   keep the last 10) stand in (see the [Conversations guide](guides/conversations.md)). On Apple Silicon,
   when the memory ceiling is smaller than the model's trained window, the inference

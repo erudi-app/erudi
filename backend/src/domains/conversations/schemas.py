@@ -52,7 +52,7 @@ from pydantic import BaseModel, Field, validator
 from datetime import datetime
 from typing import List, Optional
 
-from src.domains.user_settings.schemas import ReasoningEffort
+from src.domains.user_settings.schemas import CompactionThreshold, ReasoningEffort
 
 
 class MessageBase(BaseModel):
@@ -193,6 +193,14 @@ class ConversationCreate(ConversationBase):
             "an explicit value wins."
         ),
     )
+    compaction_threshold: Optional[CompactionThreshold] = Field(
+        default=None,
+        description=(
+            "Share of the working window, in percent (50-90, step 5), at which "
+            "the conversation compacts (#607). None (default) copies the global "
+            "user-settings default at creation; an explicit value wins."
+        ),
+    )
 
 
 class ConversationUpdate(ConversationBase):
@@ -229,6 +237,7 @@ class ConversationUpdate(ConversationBase):
     custom_prompt: Optional[str] = None
     web_search_enabled: Optional[bool] = None
     reasoning_effort: Optional[ReasoningEffort] = None
+    compaction_threshold: Optional[CompactionThreshold] = None
 
 
 class ConversationResponse(ConversationBase):
@@ -259,6 +268,7 @@ class ConversationResponse(ConversationBase):
     custom_prompt: str
     web_search_enabled: bool
     reasoning_effort: ReasoningEffort
+    compaction_threshold: CompactionThreshold
 
     class Config:
         from_attributes = True

@@ -2050,7 +2050,7 @@ class TestMemoryBrakeReal:
         import requests
 
         from src.engines import memory_brake, process_footprint
-        from src.engines.working_window import canonical_working_window
+        from src.engines.working_window import canonical_working_window, trigger_tokens
 
         gib = 1024**3
         try:
@@ -2097,7 +2097,7 @@ class TestMemoryBrakeReal:
                 handle["context_tokens"], MLX_Engine._memory_ceiling(handle)
             )
             shrunk = max(4096, int(window * memory_brake.SHRINK_FACTOR))
-            useful = handle["last_request_tokens"] >= 0.8 * shrunk
+            useful = handle["last_request_tokens"] >= trigger_tokens(shrunk, 80)
             # A warning, and the user away past the walk-away delay.
             monkeypatch.setattr(process_footprint, "pressure_level", lambda: 2)
             MLX_Engine._last_used = datetime.now() - timedelta(

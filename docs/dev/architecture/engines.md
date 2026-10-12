@@ -223,7 +223,10 @@ above its base, the size of the last turn's largest request (`last_request_token
 written when the memory window closes: the measured size, else the estimate of the call
 in flight for a turn that was abandoned or recovered from an error before any usage
 arrived; a turn with neither keeps the previous value; a missing footprint SPI changes
-nothing), and the child's share of the memory total. An unreadable pressure level turns
+nothing) with the compaction threshold of the conversation that sent it
+(`last_request_threshold`, written with it: none for an Arena turn or a child no turn has
+measured yet, which means the default 80 %; an idle sample judges the last measured pair),
+and the child's share of the memory total. An unreadable pressure level turns
 the brake off, with one WARNING per backend process.
 
 **Pressure episodes.** Every action is bounded per episode, not per sample: an episode
@@ -231,7 +234,7 @@ opens at the first non-calm sample and ends after 2 calm samples in a row.
 
 | Action | When | What it does |
 |---|---|---|
-| Shrink | One per episode under warning, one more once critical; never two without a turn between them; only when the last turn's largest request reaches 80 % of the shrunk window (the next turn compacts and frees its KV) | The brake's cap becomes `max(4096, 0.75 × working window)`, and the child enforces `min(ceiling, cap)` (`PATCH /v1/settings`) |
+| Shrink | One per episode under warning, one more once critical; never two without a turn between them; only when the last turn's largest request reaches the compaction trigger of the shrunk window, at the threshold of the conversation that sent it (80 % for an Arena turn; the next turn compacts and frees its KV) | The brake's cap becomes `max(4096, 0.75 × working window)`, and the child enforces `min(ceiling, cap)` (`PATCH /v1/settings`) |
 | Release | Idle under critical pressure, idle under warning once the user has been away 180 s (`WARNING_RELEASE_IDLE_S`: a reader keeps the prefix cache), `turn_end` under critical pressure; never `turn_start`; only when it would give back 256 MiB or more beyond what the last release left | `POST /v1/cache/reset`, then a non-streamed 1-token request; both barriers it may send are bounded by 30 s. The prefix owner is kept |
 | Unload | Idle only: critical at two consecutive idle samples with no turn between them (a calm or warning idle sample in between starts over), at most once per episode, never within 600 s of a brake reload, only for a child holding 5 % or more of the memory total | The idle reap's path, under the lock the monitor holds |
 | Grow | Outside an episode, every 3 calm samples | One step back up (`cap / 0.75`), never back to 90 % of the window that hurt while it is remembered (forgotten after 10 calm samples); the cap is dropped once growth reaches the window without brake |
