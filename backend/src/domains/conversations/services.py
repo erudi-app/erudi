@@ -53,6 +53,10 @@ from src.utils.prompt_utils import get_prompting_strategy
 # prepend a ``{"t":"truncated"}`` marker so the UI can show reasoning was elided.
 TRACE_MAX_BYTES = 32 * 1024
 
+# A title needs the head of the message, not its whole body; the prefill cost
+# otherwise doubles on a long first message.
+TITLE_QUESTION_MAX_CHARS = 2000
+
 
 def _ndjson(event: dict) -> str:
     """Serialize one stream event as a single NDJSON line.
@@ -673,6 +677,7 @@ class ConversationService:
 
     def _build_title_prompt_text(self, question: str, model_type: str) -> str:
         """Single merged user-message prompt for title generation (2–4 words)."""
+        question = question[:TITLE_QUESTION_MAX_CHARS]
         if model_type == "mistral":
             return (
                 "You are a TITLE generator. Produce ONLY a very short title "

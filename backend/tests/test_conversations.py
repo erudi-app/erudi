@@ -1195,6 +1195,21 @@ class TestConversationService:
         assert messages[1].content == "Noted."
         assert not [r for r in caplog.records if r.levelname == "ERROR"]
 
+    @pytest.mark.parametrize("model_type", ["mistral", "qwen"])
+    def test_title_prompt_embeds_only_the_head_of_a_long_question(
+        self, test_db_session, model_type
+    ):
+        """A 10k-char first message contributes only its first 2000 chars."""
+        service = ConversationService(test_db_session, InMemorySaver())
+        question = "a" * 2000 + "TAIL_MARKER" + "b" * 7989
+
+        prompt = service._build_title_prompt_text(question, model_type)
+
+        assert "a" * 2000 in prompt
+        assert "a" * 2001 not in prompt
+        assert "TAIL_MARKER" not in prompt
+        assert "b" * 10 not in prompt
+
 
 class TestTraceHelpers:
     """Unit tests for the NDJSON framing + trace-cap helpers (#90)."""

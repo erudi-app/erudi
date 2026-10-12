@@ -85,7 +85,7 @@ class Message(Base):
 
     @validates("content")
     def validate_content(self, key: str, content: str) -> str:
-        """Validate content is non-empty and within size limit.
+        """Validate content is non-empty.
 
         Args:
             key: Column name ("content").
