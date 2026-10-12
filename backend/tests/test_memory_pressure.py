@@ -655,6 +655,26 @@ def test_a_refused_counter_closes_its_query_and_is_never_reopened(monkeypatch, c
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
 
+def test_a_refused_paging_counter_closes_its_query_and_is_never_reopened(monkeypatch, caplog):
+    """The RAM damage counter (``\\Memory\\Pages Output/sec``): a refused
+    counter does not leak a query per sample; the tiers stand, one warning."""
+
+    class _CommitOnly(mp._WindowsProvider):
+        def _page_file(self):
+            return 16 * GIB, 32 * GIB
+
+    pdh = _FakePdh(add_status=0xC0000BB8)
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(pdh=pdh), raising=False)
+    provider = _CommitOnly()
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        first = provider.read()
+        second = provider.read()
+    assert first.level == second.level == 1
+    assert first.damage_total_bytes is None and second.damage_total_bytes is None
+    assert pdh.calls == ["open", "add", "close"]
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
 # ===================== the VRAM QA seam =====================
 
 

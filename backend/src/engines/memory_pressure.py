@@ -487,8 +487,8 @@ class _WindowsProvider(_NullProvider):
         a localized Windows too (looking the name up by counter index with
         ``PdhLookupPerfNameByIndexW`` is the alternative route). Not
         ``Page Faults/sec``, which mixes in soft faults; not ``psutil``'s
-        ``sout``, always 0 on Windows."""
-        import ctypes
+        ``sout``, always 0 on Windows. A query whose counter PDH refused is
+        closed and never reopened (the refusal is remembered)."""
         from ctypes import wintypes
 
         class _RawCounter(ctypes.Structure):
@@ -501,6 +501,8 @@ class _WindowsProvider(_NullProvider):
             ]
 
         pdh = ctypes.windll.pdh
+        if self._pdh is False:
+            raise OSError("Pages Output counter refused earlier")
         if self._pdh is None:
             query, counter = ctypes.c_void_p(), ctypes.c_void_p()
             status = pdh.PdhOpenQueryW(None, None, ctypes.byref(query))
@@ -510,6 +512,8 @@ class _WindowsProvider(_NullProvider):
                 query, self._PAGES_OUTPUT, None, ctypes.byref(counter)
             )
             if status != 0:
+                pdh.PdhCloseQuery(query)
+                self._pdh = False
                 raise OSError(f"PdhAddEnglishCounterW status {status & 0xFFFFFFFF:#x}")
             self._pdh = (query, counter)
         query, counter = self._pdh
