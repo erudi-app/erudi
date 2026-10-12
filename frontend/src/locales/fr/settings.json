@@ -21,6 +21,12 @@
       "xhigh": "Très élevé"
     }
   },
+  "compactionThreshold": {
+    "title": "Seuil de compaction par défaut",
+    "description": "Définit le seuil de compaction de départ pour les nouvelles conversations : les messages les plus anciens sont résumés quand une conversation remplit cette part de la fenêtre de contexte du modèle. Chaque conversation conserve ensuite son propre réglage de seuil de compaction dans son en-tête de discussion, donc modifier ce réglage n'affecte jamais une conversation déjà existante.",
+    "note": "80 % par défaut. Plus bas : résume plus tôt et plus souvent, utilise moins de mémoire. Plus haut : garde davantage de la conversation mot pour mot, résume moins souvent.",
+    "selectLabel": "Seuil de compaction par défaut"
+  },
   "autoUpdate": {
     "title": "Mises à jour automatiques",
     "description": "Cherche une nouvelle version d'Erudi en arrière-plan, la télécharge et l'installe à la prochaine fermeture. La requête part vers les releases GitHub de ce projet et ne transporte que votre version et votre plateforme.",

@@ -21,6 +21,12 @@
       "xhigh": "Extra high"
     }
   },
+  "compactionThreshold": {
+    "title": "Default compaction threshold",
+    "description": "Sets the starting compaction threshold for new conversations: older messages are summarized when a conversation fills this share of the model's context window. Each conversation keeps its own compaction threshold control in its chat header afterwards, so changing this setting never affects a conversation that already exists.",
+    "note": "80% by default. Lower: summarizes sooner and more often, uses less memory. Higher: keeps more of the conversation word for word, summarizes less often.",
+    "selectLabel": "Default compaction threshold"
+  },
   "autoUpdate": {
     "title": "Automatic updates",
     "description": "Check for a new version of Erudi in the background, download it and install it the next time you quit. The request goes to this project's GitHub releases and carries nothing but your version and platform.",

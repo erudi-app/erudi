@@ -22,6 +22,11 @@ import { hasMissingWeights } from "../utils/modelWeights";
 import { defaultsFor, hasNoPublisherRecommendation } from "../utils/samplingDefaults";
 import { formatNumber } from "../i18n/format";
 import { REASONING_EFFORT_LEVELS } from "../utils/reasoningEffort";
+import {
+  COMPACTION_THRESHOLDS,
+  DEFAULT_COMPACTION_THRESHOLD,
+  formatCompactionThreshold,
+} from "../utils/compactionThreshold";
 
 const log = createLogger("ChatPage");
 
@@ -61,6 +66,9 @@ export default function ChatPage() {
   // above, seeded from the global default and sent explicitly once known so
   // the FIRST turn already honors it.
   const [reasoningEffort, setReasoningEffort] = useState(null);
+  // Compaction threshold (#607): same null-until-fetched pattern, seeded
+  // from the global default and sent explicitly once known.
+  const [compactionThreshold, setCompactionThreshold] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,10 +81,16 @@ export default function ChatPage() {
           // fetch resolved keeps their choice -- the global default only fills
           // the blank.
           setReasoningEffort((cur) => cur ?? (data?.default_reasoning_effort || "medium"));
+          setCompactionThreshold(
+            (cur) => cur ?? data?.default_compaction_threshold ?? DEFAULT_COMPACTION_THRESHOLD
+          );
         }
       } catch (error) {
         // The backend applies its own default: degraded, not failed.
-        log.warn("Failed to fetch the global chat defaults (web search, reasoning effort)", error);
+        log.warn(
+          "Failed to fetch the global chat defaults (web search, reasoning effort, compaction threshold)",
+          error
+        );
       }
     })();
     return () => {
@@ -222,6 +236,7 @@ export default function ChatPage() {
             // copies the global setting at creation (#310).
             ...(webSearch === null ? {} : { web_search_enabled: webSearch }),
             ...(reasoningEffort === null ? {} : { reasoning_effort: reasoningEffort }),
+            ...(compactionThreshold === null ? {} : { compaction_threshold: compactionThreshold }),
           }),
         });
         if (!res.ok) {
@@ -247,7 +262,17 @@ export default function ChatPage() {
         );
       }
     },
-    [models, selectedModel, navigate, settings, customPrompt, webSearch, reasoningEffort, t]
+    [
+      models,
+      selectedModel,
+      navigate,
+      settings,
+      customPrompt,
+      webSearch,
+      reasoningEffort,
+      compactionThreshold,
+      t,
+    ]
   );
 
   const handleRename = (id, newName) => {
@@ -286,7 +311,9 @@ export default function ChatPage() {
               ? t("chat:header.tooltips.webSearch")
               : id === "reasoning-effort"
                 ? t("chat:header.tooltips.reasoningEffort")
-                : "";
+                : id === "compaction-threshold"
+                  ? t("chat:header.tooltips.compactionThreshold")
+                  : "";
     return (
       <Tooltip content={text} side={side} width="w-64">
         <HelpCircle className="w-4 h-4 text-gray-400 hover:text-emerald-400 transition-colors cursor-help" />
@@ -625,6 +652,28 @@ export default function ChatPage() {
                               {REASONING_EFFORT_LEVELS.map((level) => (
                                 <option key={level} value={level}>
                                   {t(`chat:header.reasoningEffortLevels.${level}`)}
+                                </option>
+                              ))}
+                            </select>
+                          </div>
+
+                          <div className="flex items-center gap-3">
+                            <span className="text-[0.72rem] uppercase tracking-wide font-semibold text-gray-300/80">
+                              {t("chat:header.compactionThreshold")}
+                            </span>
+                            <TooltipIcon id="compaction-threshold" side="right" />
+                            <select
+                              aria-label={t("chat:header.compactionThreshold")}
+                              // Disabled and blank until the global default is
+                              // known, like the reasoning effort above.
+                              disabled={compactionThreshold === null}
+                              value={compactionThreshold ?? ""}
+                              onChange={(e) => setCompactionThreshold(Number(e.target.value))}
+                              className="ml-auto text-[11px] font-semibold rounded-md border border-emerald-400/25 bg-emerald-500/10 text-emerald-200/90 px-2 py-1 focus:outline-none focus:border-emerald-400/50 transition-colors cursor-pointer"
+                            >
+                              {COMPACTION_THRESHOLDS.map((value) => (
+                                <option key={value} value={value}>
+                                  {formatCompactionThreshold(value)}
                                 </option>
                               ))}
                             </select>
