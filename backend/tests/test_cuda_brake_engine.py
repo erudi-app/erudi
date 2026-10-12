@@ -6,11 +6,11 @@ HTTP, NVML, PDH and RAM sensors all faked).
 load it classifies the placement fit chose -- ``offloaded N/M`` when the line
 reaches the drainer, the per-pid device bytes otherwise -- and a partial child
 runs brake-off. ``brake_point`` fuses the WDDM spill gauge with the RAM sensors
-into ``memory_brake.llama_step`` (unchanged) and executes it: a respawn reuses
-the live handle's window facts folded with the cap and re-reads no VRAM; on
-Windows it pins every layer (``-ngl -2``), on Linux it first waits for the
-killed child's VRAM to come back. The real NVML and the host's GPU are never
-touched: ``CUDA_Engine._read_vram_info`` and ``memory_pressure.read_vram`` are
+into ``memory_brake.llama_step`` (unchanged) and executes it: a respawn -- on
+Windows, the only OS that spills -- reuses the live handle's window facts
+folded with the cap, re-reads no VRAM and pins every layer (``-ngl -2``); on
+Linux the brake never reads the VRAM and can only unload under RAM pressure.
+The real NVML and the host's GPU are never touched: ``CUDA_Engine._read_vram_info`` and ``memory_pressure.read_vram`` are
 faked in every test, and the fake child implements both ``terminate()`` and
 ``send_signal()`` (the stop path branches on the OS).
 """
@@ -22,13 +22,11 @@ import platform
 import time
 from datetime import datetime, timedelta
 from pathlib import Path
-from types import SimpleNamespace
 
 import pytest
 
 from src.core.exceptions import EngineException
 from src.engines import base_llama_cpp_engine as base_mod
-from src.engines import cuda_engine as cuda_mod
 from src.engines import cuda_memory, gguf_memory, memory_pressure
 from src.engines import memory_brake as mb
 from src.engines.base_engine import BaseEngine
@@ -38,6 +36,8 @@ from src.engines.gguf_memory import TensorBytes, shape_from_fields
 from src.engines.memory_brake import BrakeOutcome, BrakeState, llama_padded
 from src.engines.memory_pressure import PressureReading, VramReading
 from src.engines.working_window import MIN_KV_BOUND_TOKENS
+
+REAL_READ_VRAM = memory_pressure.read_vram
 
 pytestmark = pytest.mark.unit
 
@@ -130,8 +130,6 @@ class _World:
         self.device_override = None
         self.vram_total = 16 * GIB
         self.free = int(13.8 * GIB)
-        self.processes_readable = True
-        self.linger_reads = 0
         self.tail = ""
         self.inputs = (QWEN3, WEIGHTS)
         self.tensors = TensorBytes(tok_embd_bytes=TOK_EMBD, exps_bytes=0)
@@ -142,7 +140,6 @@ class _World:
         self.vram_reads = []
         self.nvml_reads = 0
         self.sized = 0
-        self.now = 0.0
         self._ports = iter(range(27201, 27299))
         self._pids = iter(range(5000, 5100))
         world = self
@@ -172,24 +169,16 @@ class _World:
 
         def _read_vram_info(cls):
             world.nvml_reads += 1
-            for pid in list(world.children):
-                child = world.children[pid]
-                if not child["proc"].alive:
-                    if child["linger"] <= 0:
-                        del world.children[pid]
-                    else:
-                        child["linger"] -= 1
-            processes = (
-                tuple((pid, world.device_bytes(pid)) for pid in world.children)
-                if world.processes_readable
-                else None
-            )
             return cuda_memory.DeviceMemory(
                 index=0,
                 uuid=UUID,
                 total_bytes=world.vram_total,
                 free_bytes=world.free,
-                processes=processes,
+                processes=tuple(
+                    (pid, world.device_bytes(pid))
+                    for pid, child in world.children.items()
+                    if child["proc"].alive
+                ),
             )
 
         monkeypatch.setattr(CUDA_Engine, "_read_vram_info", classmethod(_read_vram_info))
@@ -212,7 +201,7 @@ class _World:
             proc = _Popen(pid)
             setattr(proc, CUDA_Engine._DRAINER_ATTR, _Drainer(world))
             world.spawns.append({"port": port, "alias": alias, "pid": pid, **ctx})
-            world.children[pid] = {"proc": proc, "ctx": ctx, "linger": world.linger_reads}
+            world.children[pid] = {"proc": proc, "ctx": ctx}
             handle = {
                 "pid": pid,
                 "proc": proc,
@@ -258,14 +247,6 @@ class _World:
             )
 
         monkeypatch.setattr(base_mod.requests, "get", _get)
-        monkeypatch.setattr(
-            cuda_mod,
-            "time",
-            SimpleNamespace(time=time.time, monotonic=lambda: world.now, sleep=world._sleep),
-        )
-
-    def _sleep(self, seconds):
-        self.now += seconds
 
     def device_bytes(self, pid):
         """What child ``pid`` really holds on the device under a full
@@ -599,94 +580,89 @@ def test_the_forced_pressure_seam_drives_nothing_on_a_fallback_child(windows, mo
     assert CUDA_Engine._model is handle
 
 
-# ===================== the Linux respawn =====================
+# ===================== the QA seam on the VRAM (Windows) =====================
 
 
-def test_a_linux_respawn_waits_for_the_pid_to_leave_and_keeps_auto_layers(linux, caplog):
-    handle = _load(linux)
-    linux.linger_reads = 0
-    linux.children[handle["pid"]]["linger"] = 2
-    # Linux has no spill counter by design; the engine reacts to whatever
-    # read_vram answers, so the test feeds one.
-    linux.spill = 2 * GIB
-    with caplog.at_level(logging.DEBUG, logger="erudi"):
-        outcome = CUDA_Engine.brake_point("turn_start", llm_id=7)
-    assert outcome.action == "shrink+respawn"
-    assert handle["proc"].stopped_by == "send_signal"
-    spawn = linux.spawns[-1]
-    assert spawn["gpu_layers"] == -1
-    assert spawn["ctx_size"] == int(W * mb.SHRINK_FACTOR)
-    assert _records(caplog, "VRAM wait after the stop: released")
-    assert linux.now == pytest.approx(2 * cuda_memory.CUDA_RESPAWN_VRAM_POLL_S)
+class _CalmGpu:
+    """The sensor provider of a calm Windows machine: no spill."""
+
+    name = "calm-gpu"
+
+    def __init__(self, world):
+        self.world = world
+
+    def vram(self, pid):
+        return VramReading(0, self.world.device_bytes(pid))
 
 
-def test_a_linux_respawn_wait_ends_on_the_free_vram(linux, caplog):
-    handle = _load(linux)
-    linux.children[handle["pid"]]["linger"] = 100
-    linux.spill = 2 * GIB
-    linux.free = int(13.8 * GIB)
-    # The free VRAM recovers the killed child's bytes at once.
-    original = CUDA_Engine._read_vram_info.__func__
-
-    def _freed(cls):
-        info = original(cls)
-        if not handle["proc"].alive:
-            return cuda_memory.DeviceMemory(
-                index=0,
-                uuid=UUID,
-                total_bytes=info.total_bytes,
-                free_bytes=info.free_bytes + linux.device_bytes(handle["pid"]),
-                processes=info.processes,
-            )
-        return info
-
-    with pytest.MonkeyPatch.context() as patch:
-        patch.setattr(CUDA_Engine, "_read_vram_info", classmethod(_freed))
-        with caplog.at_level(logging.DEBUG, logger="erudi"):
-            CUDA_Engine.brake_point("turn_start", llm_id=7)
-    assert _records(caplog, "VRAM wait after the stop: freed")
-    assert linux.now == 0
+@pytest.fixture
+def vram_seam(windows, monkeypatch):
+    """The real ``read_vram`` over a calm provider: only the seam spills."""
+    monkeypatch.setattr(memory_pressure, "read_vram", REAL_READ_VRAM)
+    monkeypatch.setattr(memory_pressure, "_PROVIDER", _CalmGpu(windows))
+    return windows
 
 
-def test_a_linux_respawn_wait_times_out_and_still_passes_a_window(linux, caplog):
-    handle = _load(linux)
-    linux.children[handle["pid"]]["linger"] = 1000
-    linux.spill = 2 * GIB
-    with caplog.at_level(logging.DEBUG, logger="erudi"):
-        CUDA_Engine.brake_point("turn_start", llm_id=7)
-    assert _records(caplog, "VRAM wait after the stop: timeout")
-    assert linux.now == pytest.approx(cuda_memory.CUDA_RESPAWN_VRAM_WAIT_S)
-    assert linux.spawns[-1]["ctx_size"] == int(W * mb.SHRINK_FACTOR)
-
-
-def test_a_linux_respawn_that_goes_partial_still_delivers_its_notice(linux, caplog):
-    """M-4: fit re-measured a crowded GPU and dropped layers; the brake goes
-    off, the window memory keeps the cap, the acted notice and the owed
-    reload state are still delivered."""
-    _load(linux)
-    linux.spill = 2 * GIB
-    linux.device_override = 3 * GIB
+def test_the_vram_warning_seam_shrinks_then_respawns_once_away(vram_seam, monkeypatch, caplog):
+    monkeypatch.setenv("ERUDI_FORCE_MEMORY_PRESSURE", "vram-warning")
+    handle = _load(vram_seam)
+    assert handle["spill_baseline"] == cuda_memory.CUDA_SPILL_BASELINE_BYTES
     with caplog.at_level(logging.INFO, logger="erudi"):
-        outcome = CUDA_Engine.brake_point("turn_start", llm_id=7)
-    assert outcome.action == "shrink+respawn"
-    new = CUDA_Engine._model
-    assert new["window_sized"] is False
-    assert _records(caplog, "partly on the GPU", logging.INFO)
-    assert CUDA_Engine._window_memory["erudi-7"]["cap"] == int(W * mb.SHRINK_FACTOR)
+        assert CUDA_Engine.brake_point("turn_end") == BrakeOutcome(acted=True, action="shrink")
+        _away(150)
+        assert CUDA_Engine.brake_point("idle") == BrakeOutcome(acted=True, action="respawn")
+    spawn = vram_seam.spawns[-1]
+    assert spawn["ctx_size"] == int(W * mb.SHRINK_FACTOR)
+    assert spawn["gpu_layers"] == -2
+    assert CUDA_Engine._model["brake"].notice == "acted"
     assert CUDA_Engine.brake_reload_pending(7)
-    assert CUDA_Engine.consume_brake_notice() == "acted"
-    reads = linux.reads
-    assert CUDA_Engine.brake_point("turn_end") == BrakeOutcome()
-    assert linux.reads == reads
 
 
-def test_a_respawn_never_falls_to_the_fallback_shape(linux):
+def test_the_vram_critical_seam_respawns_at_the_turn_boundary(vram_seam, monkeypatch):
+    monkeypatch.setenv("ERUDI_FORCE_MEMORY_PRESSURE", "vram-critical")
+    _load(vram_seam)
+    outcome = CUDA_Engine.brake_point("turn_start", llm_id=7)
+    assert outcome == BrakeOutcome(acted=True, action="shrink+respawn")
+    assert vram_seam.spawns[-1]["gpu_layers"] == -2
+    assert CUDA_Engine.brake_reload_pending(7)
+
+
+# ===================== Linux: sized at spawn, no respawn =====================
+
+
+def test_linux_never_reads_the_spill_and_never_respawns(linux):
+    """Linux has no spill: a VRAM reading never reaches the brake, so
+    nothing shrinks the window -- not even a reader that reports one."""
     _load(linux)
     linux.spill = 2 * GIB
-    linux.free = 0  # the card looks full: a fresh sizing would not fit the floor
+    reads = len(linux.vram_reads)
+    assert CUDA_Engine.brake_point("turn_start", llm_id=7) == BrakeOutcome()
+    CUDA_Engine.begin_memory_window()
+    assert CUDA_Engine.brake_point("turn_end") == BrakeOutcome()
+    assert len(linux.vram_reads) == reads
+    assert len(linux.spawns) == 1
+
+
+def test_linux_ram_pressure_is_external_then_may_unload(linux, caplog):
+    _load(linux)
+    linux.level = mb.LEVEL_CRITICAL
+    CUDA_Engine._last_used = datetime.now() - timedelta(seconds=600)
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        assert CUDA_Engine.brake_point("idle") == BrakeOutcome()
+        assert CUDA_Engine._model["brake"].notice == "external"
+        CUDA_Engine._model["brake"].last_sample_at -= mb.BRAKE_IDLE_INTERVAL_S
+        assert CUDA_Engine.brake_point("idle") == BrakeOutcome(acted=True, action="unload")
+    assert len(linux.spawns) == 1
+    assert CUDA_Engine.brake_reload_pending(7)
+
+
+def test_a_respawn_never_falls_to_the_fallback_shape(windows):
+    _load(windows)
+    windows.spill = 2 * GIB
+    windows.free = 0  # the card looks full: a fresh sizing would not fit the floor
     CUDA_Engine.brake_point("turn_start", llm_id=7)
-    assert linux.spawns[-1]["ctx_size"] is not None
-    assert linux.spawns[-1]["ctx_size"] >= MIN_KV_BOUND_TOKENS
+    assert windows.spawns[-1]["ctx_size"] is not None
+    assert windows.spawns[-1]["ctx_size"] >= MIN_KV_BOUND_TOKENS
 
 
 def test_a_respawn_context_for_another_alias_is_a_fresh_load(windows):

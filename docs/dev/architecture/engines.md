@@ -368,8 +368,9 @@ Windows threshold is a starting value to calibrate on real machines):
 An unreadable level turns the brake off with one WARNING naming why; a missing paging
 counter (PDH denied) is one WARNING too, and the level then decides alone.
 `ERUDI_FORCE_MEMORY_PRESSURE=warning|critical` (QA only) forces the level and paging
-evidence on every RAM sample of both llama.cpp engines (on CUDA it forces RAM pressure,
-which a full-offload child reads as `external`: see [below](#the-memory-brake-cuda)).
+evidence on every RAM sample of both llama.cpp engines (on CUDA a full-offload child
+reads RAM pressure as `external`; the seam's `vram-warning|vram-critical` values force
+the spill instead: see [below](#the-memory-brake-cuda)).
 
 **The rules**, per pressure episode:
 
@@ -494,8 +495,7 @@ optimistic estimate yields a partial offload instead of a dead child.
 | Case | Arguments | Brake |
 |---|---|---|
 | Sized load | `-c W -ngl -1 -fitt 1024` | On (`window_sized`), pending the placement below |
-| Brake respawn, Windows | `-c max(4096, min(static window, cap)) -ngl -2 -fitt 1024`: nothing re-read; fit cannot change an explicit `-ngl` and keeps every layer on the device, where WDDM spills instead of failing | On, its state carried |
-| Brake respawn, Linux | The same `-c` with `-ngl -1`, once the stopped child's VRAM is back with the driver (its pid gone from NVML's compute processes, or the free memory back by its bytes, at most 5 s); a partial outcome is accepted | On; off if the placement reads partial |
+| Brake respawn (Windows only: a spill is what drives it) | `-c max(4096, min(static window, cap)) -ngl -2 -fitt 1024`: nothing re-read; fit cannot change an explicit `-ngl` and keeps every layer on the device, where WDDM spills instead of failing | On, its state carried |
 | `ERUDI_CTX` pinned | `-c ERUDI_CTX -ngl -1 -fitt 1024` | Sampled, never resized |
 | Floor unfit, MLA, GGUF or NVML unreadable | No `-c`, `-ngl -1 -fitt 1024`: fit sizes the window and places the layers (one WARNING) | Off (`window_sized=False`): never sampled |
 | NVML sees no GPU | No `-c`, `-ngl 0` (one WARNING) | Off |
@@ -503,7 +503,10 @@ optimistic estimate yields a partial offload instead of a dead child.
 A brake respawn reuses the live handle's static window folded with the cap, so a series
 of respawns is deterministic and never reads the free VRAM a game left; it never falls
 to the fallback shape. A fresh sizing — and a fresh free reading — happens only at a
-load: a reap's reload, a swap back, the reload after an unload.
+load: a reap's reload, a swap back, the reload after an unload. On Linux the window is
+sized at spawn and never resized while the child runs: there is no spill to react to,
+and RAM pressure on a full-offload child is not the window's (below), so the brake there
+informs or unloads.
 
 **One GPU.** The child sees one GPU, pinned by its NVML UUID
 (`CUDA_VISIBLE_DEVICES=GPU-<uuid>`), immune to ordering differences between NVML and the
@@ -529,7 +532,9 @@ when it does not). Partial means more than one layer's worth (net of 64 MiB) is 
 compute, the CUDA context and the pool are not counted, so a thin missing layer can hide
 behind them. An MoE whose experts fit moved to system memory keeps every layer and its
 KV on the device: it is a full offload, the brake stays on and its weights are partly in
-RAM. A partial child runs brake-off (one INFO naming the signal); the window memory keeps
+RAM. Models whose later layers share the KV of earlier ones (Gemma 3n,
+`attention.shared_kv_layers`) are not modelled: the KV is over-counted, in the safe
+direction — such a child may be classified partial and run brake-off. A partial child runs brake-off (one INFO naming the signal); the window memory keeps
 its cap, so the brake re-arms at the next load. No signal at all (Windows without PDH)
 is assumed full.
 
@@ -558,7 +563,8 @@ inputs (`cuda_memory.fuse_signals`):
   one WARNING at a load and an INFO after a brake respawn). Warning at 256 MiB of spill,
   critical at 1 GiB. PDH denied is one WARNING: spill detection is off, the RAM brake and
   the window sized at spawn stand. On Linux there is no spill: an allocation that does
-  not fit fails, so the window is sized to fit and there is nothing to react to.
+  not fit fails, so the window is sized to fit, the engine never reads a spill there, and
+  the brake sees the RAM half alone.
 
 The level is the higher of the two; the resource at that level decides the attribution
 (VRAM on a tie: its lever, the window, is ours):
@@ -572,24 +578,32 @@ A calm spill is never damage (a stable small spill would otherwise count as a pa
 burst at every turn end). An unreadable RAM level does not turn the brake off while the
 spill reads. Under RAM pressure a full-offload child can still be unloaded after two idle
 criticals when its host share passes the 5 % gate: the unload frees its host commit (the
-CUDA runtime, cuBLAS workspaces, pinned buffers). `ERUDI_FORCE_MEMORY_PRESSURE` forces
-the RAM half only, so on a full-offload child it draws the `external` notice and can
-drive the unload, never a shrink; the spill path needs a real spill.
+CUDA runtime, cuBLAS workspaces, pinned buffers).
+
+**The QA seam** (`ERUDI_FORCE_MEMORY_PRESSURE`, never set in normal use): `warning` and
+`critical` force the RAM half, so on a full-offload child they draw the `external` notice
+and, under `critical` while the user is away, can drive the unload — never a shrink.
+`vram-warning` and `vram-critical` force the spill reading of `read_vram` to the healthy
+baseline plus the tier's threshold (256 MiB or 1 GiB above it; the dedicated VRAM stays
+the real one), so on Windows the spill path runs deterministically on a calm machine:
+a shrink at the turn end and a `-ngl -2` respawn once the user is away (warning), or a
+shrink and a respawn at the next turn boundary (critical), with the `acted` notice and
+the reload state. The forced spill is also seen at load (the spill-at-load WARNING, and
+possibly the device check's). On Linux the engine never reads the spill, so the VRAM
+values do nothing there.
 
 A child whose window Erudi did not size (the fallback shape) or that loaded partly on the
 GPU is never sampled: `brake_point` returns before any sensor is read, so nothing — not
-even the unload — acts on it. A respawn that went partial still delivers its `acted`
-notice and the owed reload state, then runs brake-off until the next load.
+even the unload — acts on it.
 
 **Driver policy.** With the NVIDIA Control Panel's "Prefer No Sysmem Fallback", Windows
-behaves like Linux: a `-ngl -2` respawn under a VRAM hog fails instead of spilling, the
+fails an allocation like Linux: a `-ngl -2` respawn under a VRAM hog fails instead of spilling, the
 respawn degrades into the unload-shaped record (one WARNING), the next message reloads
 with `-ngl -1`, fit likely places the model partly on the GPU, and the brake stays off
 until a later load.
 
 **fit's probe pass** (a no-alloc model and context build) runs on every spawn, brake
-respawns included; with the Linux VRAM wait it counts against the respawn's 30 s probe
-bound.
+respawns included; it counts against the respawn's 30 s probe bound.
 
 `BaseLlamaCppEngine._find_llama_server` tries the configured flavour first and falls back
 to the other one: a CUDA-built artifact runs CPU inference fine, whereas the CPU artifact

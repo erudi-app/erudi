@@ -80,7 +80,7 @@ Note:
 """
 
 import os
-import time  # hardware timestamps, the respawn's VRAM wait
+import time  # used by hardware methods
 import platform
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from pathlib import Path
@@ -89,7 +89,7 @@ from src.engines import cuda_memory, gguf_memory, memory_pressure
 from src.engines.base_llama_cpp_engine import BaseLlamaCppEngine, LlamaSignals
 from src.engines.cpu_brand import get_cpu_brand
 from src.engines.cuda_compatibility import format_cuda_version
-from src.engines.memory_brake import LEVEL_WARNING, BrakeOutcome
+from src.engines.memory_brake import BrakeOutcome
 from src.engines.working_window import MIN_KV_BOUND_TOKENS
 from src.core.logging import logger
 from src.core.exceptions import EngineException, HardwareException
@@ -180,9 +180,9 @@ class CUDA_Engine(BaseLlamaCppEngine):
 
         * a brake respawn (``respawn_from``, the live handle of the same
           alias): ``-c = max(floor, min(its static window, cap))``, nothing
-          re-read from NVML; Windows pins every layer (``-ngl -2``: fit then
-          keeps the placement and WDDM spills instead of failing), Linux
-          keeps ``-ngl -1`` after waiting for the stopped child's VRAM;
+          re-read from NVML, every layer pinned (``-ngl -2``: fit then keeps
+          the placement and WDDM spills instead of failing) -- Windows only,
+          the spill being the one thing that drives a respawn;
         * ``ERUDI_CTX`` pinned: ``-c`` verbatim, ``-ngl -1``, never resized;
         * a load: ``-c`` sized for a full offload against the GPU's memory
           now (``cuda_memory.window_for_vram``), folded with ``brake_cap`` or
@@ -351,9 +351,13 @@ class CUDA_Engine(BaseLlamaCppEngine):
         with the cap -- no NVML sizing, so a series of respawns is
         deterministic and never reads the free VRAM a hog left -- and its
         other facts carried over (the GGUF header is re-read for the
-        window-dependent ones: deterministic). Never the fallback shape: at
-        worst the floor. Raises when the GGUF cannot be read (the respawn
-        then fails like an unload)."""
+        window-dependent ones: deterministic). Every layer is pinned on the
+        GPU (``-ngl -2``): fit cannot change an explicit ``-ngl`` and keeps
+        the placement, and WDDM spills instead of failing. Only a spill
+        drives a respawn, so it happens on Windows only; Linux, where an
+        allocation that does not fit fails, never respawns. Never the
+        fallback shape: at worst the floor. Raises when the GGUF cannot be
+        read (the respawn then fails like an unload)."""
         shape = gguf_memory.read_shape(model_path)
         window = cuda_memory.respawn_window(
             shape,
@@ -366,11 +370,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
         )
         if window is None:
             raise EngineException(message=f"KV cache of {model_path} not modelled at respawn")
-        if cls._host_is_windows():
-            gpu_layers = -2
-        else:
-            cls._wait_for_vram(live)
-            gpu_layers = -1
+        gpu_layers = -2
         logger.info(
             f"[{cls.__name__}] Window sized at respawn: window={window.window}, "
             f"static_window={window.static_window}, brake_cap={cap}, gpu_layers={gpu_layers}"
@@ -384,26 +384,6 @@ class CUDA_Engine(BaseLlamaCppEngine):
             gpu_uuid=live.get("gpu_uuid"),
         )
         return ctx
-
-    @classmethod
-    def _wait_for_vram(cls, live: Dict[str, Any]) -> None:
-        """Linux: the stopped child's VRAM must be back with the driver
-        before the respawn allocates the same window again (no spill there:
-        a failed allocation kills the child). Bounded by
-        ``CUDA_RESPAWN_VRAM_WAIT_S``; ONE INFO line says how it ended."""
-        start = time.monotonic()
-        reason = cuda_memory.respawn_wait(
-            cls._read_vram_info,
-            pid=live.get("pid"),
-            free_before_bytes=live.get("vram_free_sampled"),
-            device_bytes=live.get("device_bytes_sampled") or live.get("device_bytes"),
-            clock=time.monotonic,
-            sleep=time.sleep,
-        )
-        logger.info(
-            f"[{cls.__name__}] VRAM wait after the stop: {reason} in "
-            f"{time.monotonic() - start:.2f}s (pid {live.get('pid')})"
-        )
 
     @classmethod
     def _start_server(
@@ -675,7 +655,6 @@ class CUDA_Engine(BaseLlamaCppEngine):
         if handle.get("window_sized"):
             try:
                 device_bytes, spill_bytes = cls._measure_device(handle)
-                handle["device_bytes"] = device_bytes
                 cls._classify_placement(handle, tail, device_bytes)
             except Exception as exc:
                 # The model is loaded and serves: an unreadable placement is
@@ -704,19 +683,17 @@ class CUDA_Engine(BaseLlamaCppEngine):
         """The child's device bytes and its raw spill reading: Windows
         counts its dedicated VRAM plus its spill above the healthy baseline
         (PDH; NVML has no per-process memory under WDDM), Linux reads NVML's
-        process list."""
+        process list (and has no spill)."""
         pid = handle.get("pid")
+        if not cls._host_is_windows():
+            return memory_pressure.child_vram_bytes(pid, cls._read_vram_info().processes), None
         vram = memory_pressure.read_vram(pid)
-        if cls._host_is_windows():
-            if vram.dedicated_bytes is None or vram.spill_bytes is None:
-                return None, vram.spill_bytes
-            device = cuda_memory.windows_device_bytes(
-                dedicated_bytes=vram.dedicated_bytes, shared_bytes=vram.spill_bytes
-            )
-            return device, vram.spill_bytes
-        return memory_pressure.child_vram_bytes(
-            pid, cls._read_vram_info().processes
-        ), vram.spill_bytes
+        if vram.dedicated_bytes is None or vram.spill_bytes is None:
+            return None, vram.spill_bytes
+        device = cuda_memory.windows_device_bytes(
+            dedicated_bytes=vram.dedicated_bytes, shared_bytes=vram.spill_bytes
+        )
+        return device, vram.spill_bytes
 
     @classmethod
     def _classify_placement(
@@ -840,15 +817,20 @@ class CUDA_Engine(BaseLlamaCppEngine):
     def _llama_read_signals(cls, handle: Dict[str, Any]) -> Optional[LlamaSignals]:
         """The RAM sensors fused with the VRAM spill gauge
         (``cuda_memory.fuse_signals``): no early return on the RAM level --
-        a readable spill keeps the brake on. On Linux, a sample at warning
-        or worse also notes the free VRAM and the child's device bytes, the
-        reference the respawn's VRAM wait compares against."""
+        a readable spill keeps the brake on. The spill is read on Windows
+        only: on Linux an allocation that does not fit fails instead of
+        spilling, so the brake there sees the RAM alone -- it informs
+        (``external``) or unloads, and never shrinks the window."""
         reading = memory_pressure.read_pressure()
         total_ram = memory_pressure.effective_total_ram_bytes()
         pid = handle.get("pid")
         host = memory_pressure.child_anonymous_bytes(pid)
         current, last = reading.damage_total_bytes, handle.get("damage_last")
-        vram = memory_pressure.read_vram(pid)
+        vram = (
+            memory_pressure.read_vram(pid)
+            if cls._host_is_windows()
+            else memory_pressure.VramReading(None, None, unavailable="no spill on this OS")
+        )
         baseline = handle.get("spill_baseline") or 0
         spill = max(0, vram.spill_bytes - baseline) if vram.spill_bytes is not None else None
         device = (
@@ -873,10 +855,6 @@ class CUDA_Engine(BaseLlamaCppEngine):
         if fused.level is None:
             cls._llama_warn_sensor_off(reading.unavailable)
             return None
-        if fused.level >= LEVEL_WARNING and not cls._host_is_windows():
-            info = cls._read_vram_info()
-            handle["vram_free_sampled"] = info.free_bytes if info.present else None
-            handle["device_bytes_sampled"] = memory_pressure.child_vram_bytes(pid, info.processes)
         return LlamaSignals(
             level=fused.level,
             damage_bytes=fused.damage_bytes,

@@ -49,7 +49,7 @@ from __future__ import annotations
 
 import re
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 from src.engines.gguf_memory import GgufShape, kv_bytes_per_token
 from src.engines.memory_brake import (
@@ -95,15 +95,12 @@ CUDA_SPILL_BASELINE_BYTES = 128 * _MIB
 # Spill tiers over the baseline (INFERRED).
 CUDA_SPILL_WARNING_BYTES = 256 * _MIB
 CUDA_SPILL_CRITICAL_BYTES = 1024 * _MIB
-# The placement classification's tolerance, and the Linux respawn wait's.
+# The placement classification's tolerance.
 CUDA_CLASSIFY_TOLERANCE_BYTES = 64 * _MIB
 # The post-load device check: above this margin over the prediction, plus the
 # slack, is one WARNING.
 CUDA_PREDICTION_MARGIN = 1.1
 CUDA_PREDICTION_SLACK_BYTES = 256 * _MIB
-# The Linux respawn waits at most this long for the killed child's VRAM.
-CUDA_RESPAWN_VRAM_WAIT_S = 5
-CUDA_RESPAWN_VRAM_POLL_S = 0.25
 
 DOMINANT_RAM = "ram"
 DOMINANT_VRAM = "vram"
@@ -530,38 +527,3 @@ def fuse_signals(
         footprint_share=ram_child_share,
         dominant=DOMINANT_RAM,
     )
-
-
-# ===================== the Linux respawn wait =====================
-
-
-def respawn_wait(
-    read: Callable[[], DeviceMemory],
-    *,
-    pid: int,
-    free_before_bytes: Optional[int],
-    device_bytes: Optional[int],
-    clock: Callable[[], float],
-    sleep: Callable[[float], None],
-    timeout_s: float = CUDA_RESPAWN_VRAM_WAIT_S,
-    poll_s: float = CUDA_RESPAWN_VRAM_POLL_S,
-) -> str:
-    """Wait, after the killed child ``pid``, until its VRAM is back with the
-    driver: ``"released"`` once the pid has left NVML's compute processes,
-    ``"freed"`` once the free memory recovered the child's bytes (less the
-    tolerance) -- both observe the release itself -- or ``"timeout"``."""
-    deadline = clock() + timeout_s
-    while True:
-        info = read()
-        if info.processes is not None and all(entry[0] != pid for entry in info.processes):
-            return "released"
-        if (
-            info.unavailable is None
-            and free_before_bytes is not None
-            and device_bytes is not None
-            and info.free_bytes >= free_before_bytes + device_bytes - CUDA_CLASSIFY_TOLERANCE_BYTES
-        ):
-            return "freed"
-        if clock() >= deadline:
-            return "timeout"
-        sleep(poll_s)
