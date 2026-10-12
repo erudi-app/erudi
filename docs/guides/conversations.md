@@ -371,7 +371,8 @@ events (`thinking`, `tool_call`, `tool_result`, and `compaction` with `phase: "d
 order as that message's `trace`, so the reasoning and tool panel and the compaction markers can be
 replayed on reload. The serialized trace is capped at 32 KB, drop-oldest, with a
 `{"t": "truncated"}` marker prepended when events were dropped; compaction events are never dropped
-(they lead the capped trace, ahead of the marker). Error turns persist their compaction events only —
+(they lead the capped trace, ahead of the marker, which follows them only when a reasoning or tool
+step was dropped). Error turns persist their compaction events only —
 a compaction is checkpointed even when the model call after it fails — and no trace when they have
 none. `compaction` with `phase: "start"`, `memory_warning` and `memory_reload` reach the wire but
 are **never** persisted: the first describes the turn in flight, and the memory events describe the
@@ -683,16 +684,18 @@ answer text from the `model` node only.
 - **While it runs.** `phase: "start"` goes out right before the summary call. The pending answer
   shows a typing indicator and "Summarizing earlier messages to make room…" in the slot the reload
   state uses (a compaction start replaces a reload state), until the model's first answer, thinking
-  or tool event, an error, or the end of the turn. The compaction's `done` does not end it: the
-  model still reads the shortened conversation again before it answers.
+  or tool event, an error, or the end of the turn. The compaction's `done` drops the text but
+  keeps the typing indicator: the model still reads the shortened conversation again before it
+  answers, and the separator already says what was summarized.
 - **Once it is done.** `phase: "done"` goes out after the history is rewritten (and the prefix
   cache reset). It renders as a thin separator above the turn's reasoning strip and answer: "N
   earlier messages were summarized to keep the conversation within the model's context", or "…to
   fit this computer's memory" when `reason` is `memory` — the engine reports the window as bound by
-  memory (`memory_bound_tokens()`, the criterion of the amber notice), or the memory ceiling made
-  the working window smaller than the allocated one. N counts the user messages and the answers
+  memory (`memory_bound_tokens()`, the criterion of the amber notice), the memory ceiling made
+  the working window smaller than the allocated one, or the allocated window is unknown and the
+  working window comes from the memory ceiling alone. N counts the user messages and the answers
   summarized; with N at 0 the line names no number. "Show summary" reveals the summary as plain
-  text. A lost summary says "Earlier messages could not be summarized and were dropped from what
+  text, its inline `<think>` blocks removed when the model wrote any. A lost summary says "Earlier messages could not be summarized and were dropped from what
   the model sees." and offers the previous summary the model keeps, when there is one. A turn
   that compacts several times shows one separator per compaction, in order.
 - **After a reload.** The `done` events are part of the persisted trace, error turns included, so
