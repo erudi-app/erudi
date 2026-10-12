@@ -8,6 +8,7 @@ endpoint layer relies on for structured error responses.
 
 from __future__ import annotations
 
+from datetime import datetime
 from unittest.mock import patch
 
 import pytest
@@ -185,6 +186,22 @@ class TestMessageRepository:
         msg_repo.create_message(conversation.id, "hi there", "llm")
         messages = msg_repo.get_messages_by_conversation(conversation.id)
         assert [m.content for m in messages] == ["hello", "hi there"]
+        assert [m.sender for m in messages] == ["user", "llm"]
+
+    def test_list_follows_insertion_order_not_timestamps(
+        self, msg_repo, conversation, test_db_session
+    ):
+        """``now()`` is frozen per transaction, so timestamps tie (or, set by
+        hand, disagree with the order of writes): the list follows the
+        primary key, the insertion order."""
+        first = msg_repo.create_message(conversation.id, "question", "user")
+        second = msg_repo.create_message(conversation.id, "answer", "llm")
+        first.timestamp = datetime(2030, 1, 1)
+        second.timestamp = datetime(2020, 1, 1)
+        test_db_session.flush()
+
+        messages = msg_repo.get_messages_by_conversation(conversation.id)
+
         assert [m.sender for m in messages] == ["user", "llm"]
 
     def test_create_message_persists_trace(self, msg_repo, conversation):

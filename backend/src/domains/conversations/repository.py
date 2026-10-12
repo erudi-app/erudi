@@ -295,7 +295,10 @@ class MessageRepository:
 
     def get_messages_by_conversation(self, conversation_id: int) -> List[Message]:
         """
-        Retrieve all messages for a specific conversation.
+        Retrieve all messages for a specific conversation, in insertion order.
+
+        Ordered by primary key: ``timestamp`` is PostgreSQL's ``now()``, frozen
+        per transaction, so two rows written in one transaction tie on it.
 
         Args:
             conversation_id: ID of the conversation
@@ -307,7 +310,7 @@ class MessageRepository:
             messages = (
                 self.db.query(Message)
                 .filter(Message.conversation_id == conversation_id)
-                .order_by(Message.timestamp)
+                .order_by(Message.id)
                 .all()
             )
             logger.debug(f"Retrieved {len(messages)} messages for conversation {conversation_id}")
