@@ -113,7 +113,7 @@ def extra_check_values(f: Flavour, cmdline: str) -> dict[str, str]:
     out: dict[str, str] = {}
     if not f.extra_checks:  # MLX spawns a multiprocessing child: no llama-server flags to read
         return out
-    for key, pattern in (("threads", r"--threads[= ]+(\d+)"), ("ngl", r"(?:-ngl|--n-gpu-layers)[= ]+(\d+)")):
+    for key, pattern in (("threads", r"--threads[= ]+(\d+)"), ("ngl", r"(?:-ngl|--n-gpu-layers)[= ]+(-?\d+)")):
         m = re.search(pattern, cmdline)
         if m:
             out[key] = m.group(1)
