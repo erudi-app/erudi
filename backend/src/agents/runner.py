@@ -124,10 +124,11 @@ if TYPE_CHECKING:
 #      which the child's predicted footprint reaches the memory budget
 #      (``MemoryBudget.tokens_at_ceiling``, a measured prior; no margin is
 #      stacked on top of it).
-# The 20-message floor stays as the trigger when no window is readable
-# (``W_eff=None``), and always rides along with OR semantics. Once triggered,
-# older turns are summarized by the same local model and replaced in the
-# checkpointer state; the Message table keeps the full history for display.
+# Token pressure is the only trigger while a working window is known: a
+# message count says nothing about the window (a tool round adds two messages).
+# Once triggered, older turns are summarized by the same local model and
+# replaced in the checkpointer state; the Message table keeps the full history
+# for display.
 # The summary prompt handed to the compaction middleware. The library default
 # is a generic extraction prompt, and the release recette proved it LOSSY on
 # small local models: summarizing 11 messages of a 4B conversation, it kept
@@ -146,6 +147,12 @@ SUMMARY_PROMPT = (
     "remember.\n\nConversation:\n{messages}"
 )
 
+# The window-less fallback pair. When no working window is known (a llama
+# ``/props`` read that failed, an MLX artefact without a context length, and
+# no memory ceiling), there is no token threshold to test: compaction fires at
+# ``SUMMARY_TRIGGER_MESSAGES`` messages and keeps the last
+# ``SUMMARY_KEEP_MESSAGES``. Without it the conversation would grow until
+# every turn overflows. Neither applies while a window is known.
 SUMMARY_TRIGGER_MESSAGES = 20
 SUMMARY_KEEP_MESSAGES = 10
 # The amber warning's threshold (Y of #612): it shows only when the machine's
@@ -158,19 +165,18 @@ SUMMARY_KEEP_MESSAGES = 10
 # ``memory_budget``).
 MEMORY_WARNING_FRACTION = 0.85
 
-# What a compaction keeps (#611). The kept tail is bounded TWICE: at most
-# ``SUMMARY_KEEP_MESSAGES`` messages AND at most ``KEEP_FRACTION`` of the
-# working window, in tokens -- whichever keeps less. One bound alone loops:
-# the last 10 messages can by themselves exceed the 80 % token trigger (a
-# message keep would re-fire compaction on every turn), and a token keep of
-# many short messages can leave >= 20 messages, which re-fires the message
-# floor (OR'd into the trigger). The token bound also leaves room for the
-# summary and a margin under the trigger, so with ordinary messages the
-# post-compaction state stays under ``0.8 W - 256`` for every window (the
-# exceptions ``compaction_cutoff`` documents keep more): ``max(1, min(0.4 W, 0.8 W -
-# summary_cap(W) - 256))`` (non-positive below ~480 tokens, hence the floor of
-# one token). 0.4 is a design value, not a measurement: it trades kept detail
-# for room to grow before the next compaction.
+# What a compaction keeps (#611). With a known working window the kept tail
+# is bounded in tokens only: at most ``KEEP_FRACTION`` of the window. A message
+# bound would loop against the token trigger -- the last 10 messages can by
+# themselves exceed 80 % of the window -- and with token pressure the only
+# trigger, any number of short messages that fit the budget is safe to keep.
+# The budget leaves room for the summary and a margin under the trigger, so
+# with ordinary messages the post-compaction state stays under
+# ``0.8 W - 256`` for every window and the next turn does not re-fire it (the
+# exceptions ``compaction_cutoff`` documents keep more): ``max(1, min(0.4 W,
+# 0.8 W - summary_cap(W) - 256))`` (non-positive below ~480 tokens, hence the
+# floor of one token). 0.4 is a design value, not a measurement: it trades
+# kept detail for room to grow before the next compaction.
 KEEP_FRACTION = 0.4
 POST_COMPACTION_MARGIN_TOKENS = 256
 
@@ -222,30 +228,25 @@ SUMMARY_EARLIER_LOST = "Earlier messages of this conversation could not be summa
 
 
 def summarization_triggers(working_window: Optional[int]) -> list:
-    """The OR-semantics trigger list for ``SummarizationMiddleware``.
+    """The one-clause trigger list for ``SummarizationMiddleware``.
 
     ``working_window`` is the ONE canonical working context window
     (``src.engines.working_window.canonical_working_window`` -- the minimum of
     the allocated window and the memory ceiling, over whichever candidates are
-    known). Its 80 % (``COMPACTION_WINDOW_FRACTION``) becomes the token
-    threshold, OR'd with the ``SUMMARY_TRIGGER_MESSAGES`` message floor. The
-    memory fold happens at the call site, so this function sees a single value:
-    ``None`` (no window and no memory ceiling) leaves the message floor alone.
+    known). With a known window its 80 % (``COMPACTION_WINDOW_FRACTION``) is
+    the only trigger: token pressure. The memory fold happens at the call
+    site, so this function sees a single value: ``None`` (no window and no
+    memory ceiling), like any non-positive or non-int value, leaves the
+    ``SUMMARY_TRIGGER_MESSAGES`` message fallback alone.
 
     Deliberately never ``("fraction", ...)``: that form needs a
     ``model.profile`` our local chat clients do not carry (the middleware's
     ``__init__`` would raise). The middleware tests the token clause against
     ``count + O`` in real tokens (``_should_summarize``).
     """
-    triggers: list = []
-    if (
-        isinstance(working_window, int)
-        and not isinstance(working_window, bool)
-        and working_window > 0
-    ):
-        triggers.append(("tokens", max(1, int(COMPACTION_WINDOW_FRACTION * working_window))))
-    triggers.append(("messages", SUMMARY_TRIGGER_MESSAGES))
-    return triggers
+    if _known_window(working_window):
+        return [("tokens", max(1, int(COMPACTION_WINDOW_FRACTION * working_window)))]
+    return [("messages", SUMMARY_TRIGGER_MESSAGES)]
 
 
 def _close_memory_window(engine: Any, token: Any, *, abandoned: bool) -> None:
@@ -422,7 +423,8 @@ def real_token_count(
 
 
 def _known_window(window: Any) -> bool:
-    """A real positive int (``bool`` rejected), like the trigger's own test."""
+    """A real positive int (``bool`` rejected): a working window the trigger
+    and the keep can be sized from."""
     return isinstance(window, int) and not isinstance(window, bool) and window > 0
 
 
@@ -480,10 +482,12 @@ def compaction_cutoff(
     request carries beyond the state (system prompt, KB block, tool schemas),
     already scaled.
 
-    1. With a known window, the later of two cutoffs -- the earliest suffix
-       that fits ``max(1, keep_token_budget(W) - O)`` tokens and the one
-       keeping ``SUMMARY_KEEP_MESSAGES`` messages -- so the kept tail
-       respects BOTH bounds. Without a window, the message cutoff alone.
+    1. With a known window, the token cutoff alone: the earliest suffix that
+       fits ``max(1, keep_token_budget(W) - O)`` tokens, however many
+       messages that is (token pressure is the only trigger there, so a
+       count bound is not needed). Without a window, the message cutoff
+       alone: the last ``SUMMARY_KEEP_MESSAGES`` messages, the fallback
+       paired with the ``SUMMARY_TRIGGER_MESSAGES`` trigger.
     2. Never past the LAST user message: the question the current turn
        answers is never summarized away mid-turn (a tool round after it can
        be large on its own).
@@ -502,9 +506,9 @@ def compaction_cutoff(
     5. If only the previous summary would be summarized (cutoff <= 1 after a
        summary), nothing is: re-summarizing a summary alone adds nothing and
        would reset the prefix cache for nothing.
-    6. Futility guard -- only with a known window and only when the TOKEN
-       trigger fired (``count + O >= 0.8 W``; the 20-message clause alone
-       keeps the rules above): a compaction whose gain
+    6. Futility guard -- only with a known window, where the token trigger is
+       the only trigger, and only when it fired (``count + O >= 0.8 W``; the
+       amber-warning projection also asks below it): a compaction whose gain
        ``count(all) - count(kept) - summary_cap(W)`` is below
        ``POST_COMPACTION_MARGIN_TOKENS`` (256) -- nothing at all included --
        is skipped unless the request would overflow without it: against the
@@ -531,14 +535,13 @@ def compaction_cutoff(
     from langchain_core.messages import HumanMessage, ToolMessage
 
     safe_point = SummarizationMiddleware._find_safe_cutoff_point
-    if len(messages) <= SUMMARY_KEEP_MESSAGES:
+    if _known_window(working_window):
+        keep_budget = max(1, keep_token_budget(working_window) - overhead)
+        cutoff = _token_cutoff(messages, keep_budget, counter)
+    elif len(messages) <= SUMMARY_KEEP_MESSAGES:
         cutoff = 0
     else:
         cutoff = safe_point(messages, len(messages) - SUMMARY_KEEP_MESSAGES)
-    if _known_window(working_window):
-        keep_budget = max(1, keep_token_budget(working_window) - overhead)
-        token_cut = _token_cutoff(messages, keep_budget, counter)
-        cutoff = max(token_cut, cutoff)
     if cutoff <= 0:
         return 0
     last_human = last_human_index(messages)
@@ -746,7 +749,8 @@ def _summarization_middleware_class():
           keep and futility guard (``compaction_cutoff``), never the counter
           itself (an O larger than the summarizer's trim budget would empty
           the trim);
-        * the cutoff is ``compaction_cutoff`` (token AND message bound);
+        * the cutoff is ``compaction_cutoff`` (a token bound with a known
+          window, the message fallback without one);
         * a performed compaction resets the engine's prefix cache, shielded
           (``run_reset_shielded``): the old prefix is garbage once the
           history is rewritten;
@@ -2121,7 +2125,7 @@ class AgentRunner:
     def _build_middleware(
         self, model, memory_budget=None, *, overhead: Optional[RequestOverhead] = None
     ):
-        """Auto-summarization using the SAME local model, on the two-signal trigger.
+        """Auto-summarization using the SAME local model, on token pressure.
 
         Runs per turn, after the child spawned, so the allocated window
         (``effective_context_tokens``) and the memory accounting are fresh for
@@ -2135,10 +2139,12 @@ class AgentRunner:
         the summary is written rather than deliberated about, and capped at
         ``summary_cap(W)`` tokens.
 
-        With a known working window the middleware keeps a TOKEN budget
-        (``compaction_cutoff``) and reads up to ``summarize_trim_budget``
-        tokens of history; without one it keeps the last
-        ``SUMMARY_KEEP_MESSAGES`` messages and LangChain's 4000-token trim.
+        With a known working window the middleware triggers on token pressure
+        alone (80 % of the window), keeps a TOKEN budget (``compaction_cutoff``)
+        and reads up to ``summarize_trim_budget`` tokens of history; without one it
+        falls back to the message pair -- it triggers at
+        ``SUMMARY_TRIGGER_MESSAGES`` messages and keeps the last
+        ``SUMMARY_KEEP_MESSAGES`` -- with LangChain's 4000-token trim.
         Every count -- trigger, cutoff, trim, truncation -- goes through ONE
         counter in real tokens (``real_token_count``), and ``overhead`` (the
         request's system prompt, tool schemas and KB additions) enters the

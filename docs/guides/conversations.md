@@ -466,9 +466,11 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    (`backend/src/agents/runner.py`, `_build_middleware`) runs on the **same local model**. It fires
    when the request reaches **80 % of the working context window** — the conversation plus the
    request overhead *O* (system prompt, knowledge-base block, tool schemas: what every request
-   carries beyond the stored history) — or on a **20-message floor** — OR semantics, whichever
-   comes first — recomputed on every turn (the middleware is built after the inference child
-   spawned, so the window is fresh for this model on this machine).
+   carries beyond the stored history) — recomputed on every turn (the middleware is built after
+   the inference child spawned, so the window is fresh for this model on this machine). Token
+   pressure is the **only** trigger while a window is known: the number of messages says nothing
+   about the window — every tool round adds two messages, so an agentic conversation holds many
+   of them long before it fills the window.
 
    The **working context window** is the single canonical window the memory-aware parts of a turn
    share (`backend/src/engines/working_window.py`, `working_context_tokens`): the **smaller** of
@@ -504,18 +506,20 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
 
    over whichever of the two is known. When only the allocated window is known — the common case,
    and every llama.cpp engine — the working window is the allocated window; when the model's
-   fixed part alone already fills the memory budget, compaction fires as early as it can. When neither window is
-   readable, the trigger falls back to the 20-message floor — which always rides along with OR
-   semantics anyway. Compaction rewrites the checkpointer state: old turns are dropped and replaced
-   by a summary, so the agent's context stays bounded. The `messages` table is untouched — the UI
-   still shows the whole conversation.
+   fixed part alone already fills the memory budget, compaction fires as early as it can. When
+   neither window is readable (a llama.cpp `/props` read that failed, an MLX artifact without a
+   context length, and no memory ceiling), there is no threshold to count tokens against, so a
+   **message-count fallback** takes over: compaction fires at **20 messages** and keeps the last
+   **10** — without it, the conversation would grow until every turn overflows. Compaction
+   rewrites the checkpointer state: old turns are dropped and replaced by a summary, so the
+   agent's context stays bounded. The `messages` table is untouched — the UI still shows the whole
+   conversation.
 
-   **What a compaction keeps** (`compaction_cutoff` in `runner.py`) starts from two bounds: at most
-   the last **10 messages** *and* at most a **token budget** of
-   `max(1, min(0.4 × W, 0.8 × W − summary_cap(W) − 256) − O)` tokens, `W` being the working window —
-   whichever keeps less. One bound alone would loop: ten long messages can by themselves exceed
-   the 80 % trigger, and a token budget made of many short messages can leave 20 messages, which
-   re-fires the message floor. Three rules then adjust the cut:
+   **What a compaction keeps** (`compaction_cutoff` in `runner.py`) starts from a **token budget**
+   of `max(1, min(0.4 × W, 0.8 × W − summary_cap(W) − 256) − O)` tokens, `W` being the working
+   window: the longest recent part that fits it, however many messages that is. The bound is in
+   tokens only — a message bound would loop against the token trigger, since ten long messages can
+   by themselves exceed 80 % of the window. Three rules then adjust the cut:
 
    - the **current question** — the last user message — is never summarized away, even mid-turn
      when a large tool result follows it;
@@ -527,12 +531,12 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
      before it;
    - an assistant message is never separated from its **tool results**.
 
-   When only the previous summary would be summarized, nothing is compacted. When the token
-   trigger fired, a compaction that would gain less than **256 tokens**
+   When only the previous summary would be summarized, nothing is compacted. With a known window,
+   a compaction that would gain less than **256 tokens**
    (`count(all) − count(kept) − summary_cap(W)`) is skipped — a small gain is not worth a summary
    call and a prefix-cache reset — unless the request would overflow without it (`O + count + 512`
-   above the allocated window, or `O + count` above the working window); the 20-message floor alone
-   compacts as it always did. What is guaranteed:
+   above the allocated window, or `O + count` above the working window); the message-count
+   fallback has no such guard. What is guaranteed:
    with ordinary messages, the state left behind sits under `0.8 × W − 256` and the next model call
    does not compact again. The documented exceptions keep more than the budget: the answer before
    the current question when the cut falls on that question, a current message or a previous

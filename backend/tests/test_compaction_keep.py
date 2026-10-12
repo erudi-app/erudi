@@ -1,9 +1,11 @@
 """Compaction keeps a TOKEN budget, a bounded summary, and never loses memory.
 
-What a compaction keeps (#611): at most ``SUMMARY_KEEP_MESSAGES`` messages AND
-at most ``KEEP_FRACTION`` of the working window, so the state left behind can
-re-fire neither the token trigger nor the 20-message floor on the next model
-call. The summary client is capped at ``summary_cap(W)`` tokens; the
+What a compaction keeps (#611): with a known working window, at most
+``KEEP_FRACTION`` of it in tokens -- token pressure is the only trigger there
+(#606), and the state left behind cannot re-fire it on the next model call.
+Without a window, the message pair is the fallback: 20 messages trigger, the
+last ``SUMMARY_KEEP_MESSAGES`` are kept. The summary client is capped at
+``summary_cap(W)`` tokens; the
 summarizer input always carries the previous summary; a failed summary call
 either fails the turn with the history intact (transient) or degrades to a
 smaller retry and then to a placeholder that carries the previous summary
@@ -122,6 +124,24 @@ def _conversation(pairs: int, tokens_each: int) -> list:
     return _alternating(2 * pairs, tokens_each) + [
         HumanMessage(_text(tokens_each, "q"), id="current-question")
     ]
+
+
+def _agentic_turns(turns: int, *, question: int = 50, result: int = 300, answer: int = 200):
+    """``turns`` agentic exchanges of four messages each -- the question, a
+    tool call, its result, the answer -- ending with an answer."""
+    out: list = []
+    for t in range(turns):
+        out.append(HumanMessage(_text(question, "u"), id=f"u{t}"))
+        out.append(
+            AIMessage(
+                content="",
+                tool_calls=[{"name": "lookup", "args": {"query": f"q{t}"}, "id": f"call{t}"}],
+                id=f"c{t}",
+            )
+        )
+        out.append(ToolMessage(_text(result, "r"), tool_call_id=f"call{t}", id=f"r{t}"))
+        out.append(AIMessage(_text(answer, "a"), id=f"a{t}"))
+    return out
 
 
 class _Llm:
@@ -274,13 +294,23 @@ def test_without_a_window_the_cutoff_keeps_the_last_ten_messages():
     assert compaction_cutoff(messages, None, approx_token_count) == 21
 
 
-def test_with_a_window_the_cutoff_is_the_later_of_the_token_and_message_cutoffs():
+def test_with_a_window_the_cutoff_is_the_token_cutoff_alone():
     window = 10_000
     budget = keep_token_budget(window)
-    # Short messages: the token budget alone would keep far more than 10.
+    # Short messages under the budget: nothing to cut, however many there are.
     short = _conversation(15, 50)
-    assert _count(short[-10:]) < budget
-    assert compaction_cutoff(short, window, approx_token_count) == 21
+    assert len(short) > runner_module.SUMMARY_TRIGGER_MESSAGES
+    assert _count(short) < budget
+    assert compaction_cutoff(short, window, approx_token_count) == 0
+    # Many short messages over the budget: the kept tail is the earliest
+    # suffix that fits the budget -- far more than ten messages.
+    many = _conversation(40, 100)
+    assert _count(many) >= int(0.8 * window)
+    cut = compaction_cutoff(many, window, approx_token_count)
+    assert cut == runner_module._token_cutoff(many, budget, approx_token_count)
+    assert isinstance(many[cut], AIMessage)
+    assert _count(many[cut:]) <= budget < _count(many[cut - 1 :])
+    assert len(many) - cut > runner_module.SUMMARY_KEEP_MESSAGES
     # Long messages and a short question: the token cutoff lands on an OLDER
     # user message (index 26), so it moves FORWARD to the answer after it --
     # the kept tail stays inside the budget.
@@ -466,6 +496,17 @@ def _named_cases():
             ],
             2000,
         ),
+        "short-messages-over-budget": (_conversation(40, 100), 10_000),
+        "agentic-turns-over-budget": (_agentic_turns(30) + [HumanMessage("next")], 10_000),
+        "agentic-mid-turn-over-budget": (
+            _agentic_turns(30)
+            + [
+                HumanMessage("next"),
+                AIMessage(content="", tool_calls=[{"name": "t", "args": {}, "id": "n1"}]),
+                ToolMessage(_text(300), tool_call_id="n1"),
+            ],
+            10_000,
+        ),
     }
 
 
@@ -569,25 +610,53 @@ async def test_the_611_loop_compacts_once_and_not_on_the_next_turn():
     assert len(summary.prompts) == 1
 
 
-async def test_thirty_short_messages_compact_once_and_not_on_the_next_turn():
-    """Between 0.4 W and 0.8 W of short messages, the 20-message floor fires;
-    a pure token keep would leave >= 20 messages and re-fire it every turn."""
+async def test_many_short_messages_keep_the_token_budget_and_compact_once():
+    """With a known window the token trigger is the only trigger, so the keep
+    is bounded by tokens alone: many short messages over 0.8 W keep far more
+    than ten of them, the state left behind sits under the trigger, and the
+    next turn does not compact again however many messages it holds."""
     window = 10_000
     summary = _ScriptedSummaryModel(messages=iter([]))
     mw = _middleware(summary, window=window)
-    state = _alternating(28, 200) + [HumanMessage(_text(200), id="q1")]
-    total = _count(state)
-    assert int(0.4 * window) < total < int(0.8 * window)
+    state = _alternating(70, 100) + [HumanMessage(_text(100), id="q1")]
+    mw._freeze(state)
+    assert int(0.8 * window) <= mw.token_counter(state) < window
 
     after = _after(await mw.abefore_model({"messages": state}, None))
-    # At most 10 kept messages, plus the answer before them when the cutoff
-    # would otherwise start the tail on a user message.
-    assert len(after) <= runner_module.SUMMARY_KEEP_MESSAGES + 2
-    assert isinstance(after[1], AIMessage)
-    next_call = after + [AIMessage("answer", id="r1"), HumanMessage("again", id="q2")]
+    kept = after[1:]
+    assert len(kept) > runner_module.SUMMARY_KEEP_MESSAGES
+    assert [m.id for m in kept] == [m.id for m in state[-len(kept) :]]
+    assert isinstance(kept[0], AIMessage)
+    mw._freeze(after)
+    assert mw.token_counter(after) <= int(0.8 * window) - 256
 
+    next_call = after + [AIMessage("answer", id="r1"), HumanMessage("again", id="q2")]
+    assert len(next_call) >= runner_module.SUMMARY_TRIGGER_MESSAGES
     assert await mw.abefore_model({"messages": next_call}, None) is None
     assert len(summary.prompts) == 1
+
+
+@pytest.mark.parametrize("mid_turn", [False, True], ids=["question", "after-a-tool-round"])
+async def test_an_agentic_conversation_far_under_the_window_is_never_compacted(mid_turn):
+    """The field case of #606: an agentic conversation with a 40,960-token
+    window, at its 10th user turn, under a quarter of the window. Tool rounds
+    add two messages each, so the state holds well over 20 messages -- a
+    count that says nothing about the window. Nothing is compacted."""
+    window = 40_960
+    summary = _ScriptedSummaryModel(messages=iter([]))
+    mw = _middleware(summary, window=window)
+    state = _agentic_turns(9) + [HumanMessage(_text(50, "u"), id="u9")]
+    if mid_turn:
+        state += [
+            AIMessage(content="", tool_calls=[{"name": "lookup", "args": {}, "id": "n9"}], id="c9"),
+            ToolMessage(_text(300, "r"), tool_call_id="n9", id="r9"),
+        ]
+    assert len(state) >= 25
+    mw._freeze(state)
+    assert mw.token_counter(state) < window // 4
+
+    assert await mw.abefore_model({"messages": state}, None) is None
+    assert summary.prompts == []
 
 
 @pytest.mark.parametrize("window", [2000, 4000])
@@ -603,6 +672,24 @@ async def test_small_windows_do_not_retrigger_on_the_next_call(window):
     next_call = after + [AIMessage("ok", id="r1"), HumanMessage("next", id="q2")]
 
     assert await mw.abefore_model({"messages": next_call}, None) is None
+
+
+async def test_without_a_window_twenty_messages_trigger_and_the_last_ten_are_kept():
+    """No working window known (an unreadable ``/props``, an MLX artefact
+    without a context length, no memory ceiling): the message pair is the
+    fallback, so the conversation is still compacted."""
+    summary = _ScriptedSummaryModel(messages=iter([]))
+    mw = _middleware(summary, window=None)
+    assert mw.trigger == [("messages", runner_module.SUMMARY_TRIGGER_MESSAGES)]
+
+    nineteen = _conversation(9, 10)
+    assert len(nineteen) == 19
+    assert await mw.abefore_model({"messages": nineteen}, None) is None
+
+    twenty_one = _conversation(10, 10)
+    after = _after(await mw.abefore_model({"messages": twenty_one}, None))
+    assert [m.id for m in after[1:]] == [m.id for m in twenty_one[-10:]]
+    assert len(summary.prompts) == 1
 
 
 async def test_the_degenerate_window_compacts_down_to_the_current_turn_and_the_answer_before():
@@ -945,6 +1032,47 @@ async def test_a_compaction_resets_the_prefix_exactly_once(monkeypatch):
     # No compaction on the next turn -> no reset.
     await _turn(runner, "r1")
     assert _WindowEngine.rewrites == ["rewrite"]
+
+
+async def test_an_agentic_thread_far_under_its_window_keeps_its_whole_history(monkeypatch):
+    """#606 through the runner and the real graph: nine agentic turns (37
+    messages with the new question) on a 40,960-token window are neither
+    summarized nor rewritten."""
+    _WindowEngine.window = 40_960
+    summary = _ScriptedSummaryModel(messages=iter([]))
+    _models(monkeypatch, ["the answer"], summary)
+    cp = InMemorySaver()
+    seed = _agentic_turns(9)
+    await _seed(cp, "f1", seed)
+
+    await _turn(AgentRunner(checkpointer=cp), "f1")
+
+    assert summary.prompts == []
+    assert _WindowEngine.rewrites == []
+    state = await _state(cp, "f1")
+    assert [m.id for m in state[: len(seed)]] == [m.id for m in seed]
+    assert len(state) == len(seed) + 2
+
+
+async def test_without_a_window_a_thread_compacts_on_the_message_count(monkeypatch):
+    """No window: the 20-message trigger fires on the turn's new question and
+    the last ten messages are kept, end to end."""
+    summary = _ScriptedSummaryModel(messages=iter([]))
+    _models(monkeypatch, ["the answer"], summary)
+    cp = InMemorySaver()
+    seed = _alternating(20, 10)
+    await _seed(cp, "n1", seed)
+
+    await _turn(AgentRunner(checkpointer=cp), "n1", "the new question")
+
+    assert len(summary.prompts) == 1
+    assert _WindowEngine.rewrites == ["rewrite"]
+    state = await _state(cp, "n1")
+    # [summary, m11 .. m19, the new question, the answer]
+    assert len(state) == 1 + runner_module.SUMMARY_KEEP_MESSAGES + 1
+    assert [m.id for m in state[1:10]] == [f"m{i}" for i in range(11, 20)]
+    assert state[10].content == "the new question"
+    assert state[11].content == "the answer"
 
 
 async def test_a_transient_summary_failure_fails_the_turn_and_keeps_the_history(monkeypatch):

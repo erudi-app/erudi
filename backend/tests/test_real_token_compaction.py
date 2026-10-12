@@ -475,13 +475,20 @@ def test_a_compaction_with_no_gain_is_skipped_when_nothing_overflows():
     assert compaction_cutoff(state, 10_000, _counter_r1, allocated_window=10_000) == 0
 
 
-def test_the_20_message_clause_alone_keeps_3_2a_behaviour():
+def test_the_message_count_bounds_the_keep_only_without_a_window():
+    """31 short messages: with a known window they fit the keep budget and
+    nothing is cut, however many they are; without one, the message
+    fallback keeps the last ten."""
     window = 100_000
     state = [
         (HumanMessage if i % 2 == 0 else AIMessage)(_text(20), id=f"m{i}") for i in range(30)
     ] + [HumanMessage("q", id="q")]
-    assert _counter_r1(state) < int(0.8 * window)
-    assert compaction_cutoff(state, window, _counter_r1) > 0
+    assert len(state) > runner_module.SUMMARY_TRIGGER_MESSAGES
+    assert _counter_r1(state) < keep_token_budget(window)
+    assert compaction_cutoff(state, window, _counter_r1) == 0
+    assert compaction_cutoff(state, None, _counter_r1) == (
+        len(state) - runner_module.SUMMARY_KEEP_MESSAGES
+    )
 
 
 async def test_the_8192_example_compacts_and_does_not_loop():
