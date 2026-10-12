@@ -297,9 +297,9 @@ There is no unload route, and no training route.
 
 Only **one model is resident at a time**. `BaseEngine` keeps `_model`, `_tokenizer`, `_model_id` and
 `_last_used` as class attributes shared across requests, guarded by a lock, and a background monitor
-started in the FastAPI lifespan (`start_cleanup_task`) ticks every 300 seconds and calls `cleanup()`
-when the model has been idle longer than `_max_idle_time`, also 300 seconds
-(`backend/src/engines/base_engine.py`).
+started in the FastAPI lifespan (`start_cleanup_task`) ticks every 30 seconds and calls `cleanup()`
+when the model has been idle longer than `_max_idle_time`, 300 seconds, so an idle model is released
+300 to 330 seconds after its last use (`backend/src/engines/base_engine.py`).
 
 In practice: after about five minutes without a request, the model is unloaded and its memory freed.
 The next request reloads it, which costs the usual load time. Switching to another model swaps the

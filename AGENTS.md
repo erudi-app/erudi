@@ -100,7 +100,7 @@ backend/src/
 
 Routers mounted under `/erudi` (in `core/api.py:register_routers`): `llms`, `hardware`, `arena`, `knowledge_base`, `conversations`, `startup`, `user_settings`, `diagnostics` (from `domains/`) plus `health` (from `core/health.py`, not a domain). The frontend hits `http://127.0.0.1:27182/erudi/...` (see `frontend/src/config/api.js`).
 
-**Engine singleton.** `BaseEngine` keeps `_model`, `_tokenizer`, `_model_id`, `_last_used` as class attributes shared across requests, guarded by `_lock`. A 300s idle cleanup task (`start_cleanup_task`) is registered in `lifespan`. Don't instantiate engines — call class methods on the result of `BaseEngine.get_engine()`. Selected engine lives in `src.core.config.LLM_Engine`.
+**Engine singleton.** `BaseEngine` keeps `_model`, `_tokenizer`, `_model_id`, `_last_used` as class attributes shared across requests, guarded by `_lock`. An idle cleanup task (`start_cleanup_task`, 30 s tick, 300 s idle threshold) is registered in `lifespan`. Don't instantiate engines — call class methods on the result of `BaseEngine.get_engine()`. Selected engine lives in `src.core.config.LLM_Engine`.
 
 **Adding an engine.** Subclass `BaseEngine`, implement every `@abstractmethod` (`get_model_and_tokenizer`, `generate_stream`, `get_hardware_info`, `warm_up_accelerator`, `get_performance_evaluation`, `get_flat_hardware_data`), set `FORMAT_TAG` to the HF library tag of the pre-built artefacts it loads (`mlx` / `gguf` — the catalog, the HF search and the by-link download gate are all filtered on it), then wire it into `BaseEngine.get_engine()`. There is no local HF→engine-format conversion: the app only downloads pre-built quants. Keep OS/hardware branching out of services — it belongs in engines.
 

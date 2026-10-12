@@ -709,7 +709,7 @@ the tool's explicit failure text instead of a silently missing tool.
 
 Only one model is resident at a time, and it is unloaded after about five minutes without a request:
 `BaseEngine._max_idle_time` is 300 seconds and the cleanup monitor started by the FastAPI lifespan
-ticks every 300 seconds. The next question reloads it, which costs the usual load time. See
+ticks every 30 seconds, so the unload lands 300 to 330 seconds after the last request. The next question reloads it, which costs the usual load time. See
 [LLMs](llms.md#memory-and-the-idle-unload).
 
 ## Related pages

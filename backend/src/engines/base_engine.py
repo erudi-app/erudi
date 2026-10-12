@@ -1064,13 +1064,19 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         blocking ``cleanup()`` — which kills the child subprocess — off the
         event loop via ``asyncio.to_thread``.
         """
+        # Cheap check first: with a 30 s tick, an idle check must not queue
+        # behind a running generation every 30 s. The re-check under the lock
+        # is what guarantees no reap happens during a generation.
+        if not cls._should_cleanup():
+            return
         async with cls._acquire_generation_lock():
             if cls._should_cleanup():
                 await asyncio.to_thread(cls.cleanup)
 
-    # Seconds between idle-cleanup ticks. A class attribute so tests can run
-    # the monitor loop at speed.
-    _cleanup_interval_s: ClassVar[float] = 300.0
+    # Seconds between idle-cleanup ticks. The idle threshold stays 300 s; a
+    # 30 s tick releases an idle model 300-330 s after its last use instead of
+    # up to 600 s. A class attribute so tests can run the monitor loop at speed.
+    _cleanup_interval_s: ClassVar[float] = 30.0
 
     @classmethod
     async def _cleanup_monitor(cls):
