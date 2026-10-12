@@ -1064,8 +1064,8 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         asyncio lock as ``generation_guard``, taken through the same draining
         helper (so a reap can never run during a generation, nor reap a child
         an orphan prefix-cache reset still talks to), and the idle check is
-        repeated under it. Runs the blocking ``cleanup()`` — which kills the child subprocess — off the
-        event loop via ``asyncio.to_thread``.
+        repeated under it. Runs the blocking ``cleanup()`` — which kills the
+        child subprocess — off the event loop via ``asyncio.to_thread``.
         """
         # Cheap check first: with a 30 s tick, an idle check must not queue
         # behind a running generation every 30 s. The re-check under the lock
@@ -1079,7 +1079,8 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     # Seconds between idle-cleanup ticks. The idle threshold stays 300 s; a
     # 30 s tick releases an idle model about 300-330 s after its last use
     # instead of up to 600 s (the monitor sleeps after each tick, and a reap
-    # can queue behind a generation or a pressure tick). A class attribute so tests can run the monitor loop at speed.
+    # can queue behind a generation or a pressure tick). A class attribute so
+    # tests can run the monitor loop at speed.
     _cleanup_interval_s: ClassVar[float] = 30.0
 
     @classmethod
