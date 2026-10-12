@@ -179,7 +179,7 @@ BaseEngine
     ├── MLX_Engine        (mp.Process + mlx_vlm.server)
     └── BaseLlamaCppEngine
         ├── CPU_Engine    (Popen + llama-server, -ngl 0)
-        └── CUDA_Engine   (Popen + llama-server cuda, -ngl <computed>)
+        └── CUDA_Engine   (Popen + llama-server cuda, -c sized on the VRAM, -ngl -1 with fit)
 ```
 
 Adding a new chat-server engine: subclass `BaseChatServerEngine` (or

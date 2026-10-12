@@ -8,8 +8,8 @@ remembers for that model. ``brake_point`` reads the sensors
 respawn restarts the same model in place with the reduced window (under the
 generation lock, its probe bounded by ``LLAMA_RESPAWN_PROBE_TIMEOUT_S``); an
 unload reaps the child and leaves the episode for the next spawn. The CUDA
-engine inherits the plumbing and stays inert. Nothing here starts a real
-llama-server.
+engine binds the same hooks over its own window and sensors
+(``test_cuda_brake_engine.py``). Nothing here starts a real llama-server.
 """
 
 from __future__ import annotations
@@ -620,46 +620,50 @@ def test_consume_brake_notice_reads_the_loaded_child(world):
     assert CPU_Engine.consume_brake_notice() is None
 
 
-# ===================== CUDA stays inert =====================
-
-
-@pytest.mark.parametrize(
-    "hook",
-    [
-        "brake_point",
-        "begin_memory_window",
-        "claim_prefix",
-        "on_history_rewritten",
-        "note_stream_abandoned",
-        "memory_bound_tokens",
-    ],
-)
-def test_cuda_overrides_none_of_the_runner_gated_hooks(hook):
-    assert not _engine_overrides(CUDA_Engine, hook)
+# ===================== CUDA binds the brake too =====================
 
 
 @pytest.mark.parametrize("hook", ["brake_point", "begin_memory_window", "memory_bound_tokens"])
-def test_cpu_binds_the_brake_hooks(hook):
-    assert _engine_overrides(CPU_Engine, hook)
+@pytest.mark.parametrize("engine", [CPU_Engine, CUDA_Engine])
+def test_both_llama_engines_bind_the_brake_hooks(engine, hook):
+    assert _engine_overrides(engine, hook)
 
 
-def test_cuda_answers_the_base_values():
+@pytest.mark.parametrize("hook", ["claim_prefix", "on_history_rewritten", "note_stream_abandoned"])
+@pytest.mark.parametrize("engine", [CPU_Engine, CUDA_Engine])
+def test_no_llama_engine_binds_the_prefix_cache_hooks(engine, hook):
+    assert not _engine_overrides(engine, hook)
+
+
+def test_cuda_with_nothing_loaded_answers_the_base_values():
     assert CUDA_Engine.brake_reload_pending(7) is False
     assert CUDA_Engine.consume_brake_notice() is None
     assert CUDA_Engine.brake_point("idle") == BrakeOutcome()
     assert CUDA_Engine.memory_bound_tokens() is None
 
 
-async def test_the_monitor_starts_on_cpu_and_not_on_cuda(monkeypatch):
-    monkeypatch.setattr(CPU_Engine, "_pressure_interval_s", 3600.0)
-    CUDA_Engine.start_pressure_task()
-    assert CUDA_Engine._pressure_task is None
-    CPU_Engine.start_pressure_task()
-    try:
-        assert CPU_Engine._pressure_task is not None
-    finally:
-        await CPU_Engine.stop_pressure_task()
-    assert CPU_Engine._pressure_task is None
+def test_a_cuda_child_whose_window_was_not_sized_is_inert(monkeypatch):
+    """The fallback shape (fit chose the window) and a partial offload run
+    brake-off: no sample, no notice, no unload, whatever the pressure."""
+    monkeypatch.setattr(memory_pressure, "read_pressure", lambda: pytest.fail("sampled"))
+    CUDA_Engine._model = {"proc": SimpleNamespace(poll=lambda: None), "window_sized": False}
+    CUDA_Engine._model_id = 7
+    for point in ("turn_start", "turn_end", "idle"):
+        assert CUDA_Engine.brake_point(point, llm_id=7) == BrakeOutcome()
+    assert CUDA_Engine.memory_bound_tokens() is None
+    assert CUDA_Engine.consume_brake_notice() is None
+    CUDA_Engine._model = None
+
+
+async def test_the_monitor_starts_on_both_llama_engines(monkeypatch):
+    for engine in (CPU_Engine, CUDA_Engine):
+        monkeypatch.setattr(engine, "_pressure_interval_s", 3600.0)
+        engine.start_pressure_task()
+        try:
+            assert engine._pressure_task is not None
+        finally:
+            await engine.stop_pressure_task()
+        assert engine._pressure_task is None
 
 
 def test_the_spawn_falls_back_to_the_fit_without_gguf(tmp_path, monkeypatch, caplog):

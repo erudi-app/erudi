@@ -493,7 +493,7 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
      tower's activations do not scale with the conversation). The ceiling exists only on MLX because only
      MLX grows its KV cache lazily with usage; on both llama.cpp engines (CPU and CUDA) the cache is
      allocated **in full at load**, for a window sized to fit at spawn (the CPU engine's own RAM
-     budget, llama-server's fit on CUDA) — memory use does not grow with the conversation, so there
+     budget, the CUDA engine's VRAM budget) — memory use does not grow with the conversation, so there
      is nothing per-token to measure (and on a
      discrete card, partial layer offload would make any single-pool accounting dishonest anyway).
      The accounting deliberately never reads the OS's "available" memory (macOS compression and swap

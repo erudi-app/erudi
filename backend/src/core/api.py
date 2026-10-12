@@ -431,7 +431,7 @@ async def _start_services(app: FastAPI, _phase) -> None:
     # LIVE one rather than this now-possibly-stale local.
     app.state.checkpointer_cm = checkpointer_cm
     config.LLM_Engine.start_cleanup_task()
-    # The memory brake's idle samples (MLX and CPU; a no-op on CUDA).
+    # The memory brake's idle samples (every engine binds one).
     config.LLM_Engine.start_pressure_task()
     # DB watchdog: detect a dead embedded Postgres, resurrect it, expose db
     # state on /health (#162). Started AFTER init_database bound the live engine
@@ -506,7 +506,7 @@ async def lifespan(app: FastAPI):
            pre-flight (apply_inference_backend_preference / emit_engine_notice)
         7. Open the LangGraph checkpointer (app.state.checkpointer)
         8. Start the cleanup background task (300s interval) and the memory
-           pressure monitor (MLX only, 60s interval)
+           pressure monitor (60s interval)
         9. **[YIELD]** → Application handles requests
         10. Shutdown (reverse order): cleanup task → pressure monitor (awaited)
             → pending prefix-cache reset drained → engine → checkpointer

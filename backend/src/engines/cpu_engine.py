@@ -113,7 +113,12 @@ class CPU_Engine(BaseLlamaCppEngine):
 
     @classmethod
     def _prepare_spawn_context(
-        cls, model_path: Path, alias: str, *, brake_cap: Optional[int] = None
+        cls,
+        model_path: Path,
+        alias: str,
+        *,
+        brake_cap: Optional[int] = None,
+        respawn_from: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Resolve the per-spawn CPU context: thread count, the fixed
         `gpu_layers=0` (CPU-only inference), and the window: `ERUDI_CTX`
@@ -121,7 +126,8 @@ class CPU_Engine(BaseLlamaCppEngine):
         the GGUF and the machine's RAM, folded with the memory brake's cap --
         ``brake_cap`` for a brake respawn, else the one remembered for
         ``alias`` (`ctx_size=None` -- llama-server's own fit -- when the GGUF
-        cannot be read)."""
+        cannot be read). A respawn re-sizes like a load (the RAM budget is
+        deterministic): ``respawn_from`` is not read."""
         ctx: Dict[str, Any] = {
             "threads": max(1, os.cpu_count() or 1),
             "gpu_layers": 0,

@@ -16,8 +16,10 @@ not:
 
 Subclasses choose:
 - `_use_cuda_build` (False for CPU, True for CUDA — selects artifact dir)
-- `_build_spawn_argv` (CPU forces `-ngl 0`; CUDA injects computed `-ngl`)
-- `_build_spawn_env` (CUDA prepends the CUDA toolkit to `PATH`)
+- `_build_spawn_argv` (CPU forces `-ngl 0`; CUDA passes the `-ngl` and the
+  fit margin its spawn context chose)
+- `_build_spawn_env` (CUDA prepends the CUDA toolkit to `PATH` and pins the
+  selected GPU)
 - `_tokenizer_provider` (just for the placeholder dict)
 """
 
@@ -30,6 +32,7 @@ import signal
 import subprocess
 import time
 from abc import abstractmethod
+from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
 from typing import Any, ClassVar, Dict, List, Optional, Union
@@ -53,7 +56,9 @@ LLAMA_RESPAWN_PROBE_TIMEOUT_S = 30.0
 
 # The spawn-context items `_spawn_child` keeps on the handle: observability
 # (threads, GPU layers, the window passed) and the window facts the memory
-# brake and the post-load check read back.
+# brake and the post-load checks read back (the CUDA ones: the device budget,
+# the placement classification's terms, the pinned GPU, and whether a brake
+# respawn spawned the child).
 PRESERVED_SPAWN_KEYS = (
     "threads",
     "gpu_layers",
@@ -66,7 +71,35 @@ PRESERVED_SPAWN_KEYS = (
     "weights_bytes",
     "spawn_memory_bound",
     "mmproj_loaded",
+    "window_sized",
+    "vram_total_bytes",
+    "device_budget_bytes",
+    "static_device_bytes",
+    "tok_embd_bytes",
+    "exps_bytes",
+    "kv_classify_bytes",
+    "block_count",
+    "fa_proven",
+    "gpu_uuid",
+    "brake_respawn",
 )
+
+
+@dataclass(frozen=True)
+class LlamaSignals:
+    """What the sensors say of the loaded child at one sample, in the terms
+    of ``memory_brake.llama_step``."""
+
+    level: int
+    damage_bytes: Optional[int]
+    damage_available: bool
+    kv_share: Optional[float]
+    footprint_share: Optional[float]
+    # What the brake's log line quotes (the child's bytes in the dominant
+    # resource).
+    footprint_bytes: Optional[int]
+    # The RAM's cumulative paging counter (``damage_last`` tracks it).
+    ram_damage_total: Optional[int]
 
 
 # Mirror of llama.cpp's SPECIALIZED tool-format dispatch, for LOGS ONLY (#298).
@@ -539,12 +572,26 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         faulty window remembered for its alias, else a fresh state -- and
         after the read stamps its memory bound and checks its anonymous
         memory against the window budget (`_llama_check_footprint`).
-        MLX overrides this hook -- its window is a preflight bound stamped at
-        spawn, there is nothing to read back (see `MLX_Engine`).
+        CUDA overrides this hook to classify the placement first (see
+        `CUDA_Engine`); MLX overrides it too -- its window is a preflight
+        bound stamped at spawn, there is nothing to read back (see
+        `MLX_Engine`).
         """
         braked = cls._brake_bound()
         if braked:
             cls._llama_seed(handle)
+        cls._read_props(handle)
+        if braked:
+            handle["memory_bound_tokens"] = (
+                handle["context_tokens"] if handle.get("spawn_memory_bound") else None
+            )
+            cls._llama_check_footprint(handle)
+
+    @classmethod
+    def _read_props(cls, handle: Dict[str, Any]) -> None:
+        """The bounded ``GET /props`` itself (see `_read_server_properties`):
+        stamps ``context_tokens``, ``chat_template_caps`` and
+        ``chat_template``; degrades, never raises."""
         # llama.cpp pads the -c it is given up to a multiple of 256: that
         # padded value is the window it allocates.
         passed = handle.get("ctx_size")
@@ -598,11 +645,6 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
                 )
                 + f"({type(exc).__name__}: {exc})"
             )
-        if braked:
-            handle["memory_bound_tokens"] = (
-                handle["context_tokens"] if handle.get("spawn_memory_bound") else None
-            )
-            cls._llama_check_footprint(handle)
 
     @classmethod
     def _spawn_child(
@@ -617,7 +659,7 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
 
         Hooks called by this method:
         - `_build_spawn_argv(*, llama_server, model_gguf, alias, port, **ctx)`
-        - `_build_spawn_env()`
+        - `_build_spawn_env(**ctx)`
         """
         install_dir = cls._default_install_dir()
         llama_server = cls._find_llama_server(install_dir)
@@ -662,7 +704,7 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         # needs the RAM cache, and llama-server otherwise warns at every spawn
         # that it disables it.
         argv += ["-np", "1", "--cache-ram", "0", "--no-cache-idle-slots"]
-        env = cls._build_spawn_env()
+        env = cls._build_spawn_env(**ctx)
         try:
             proc = subprocess.Popen(
                 [str(a) for a in argv],
@@ -719,14 +761,15 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
 
     # ======================= THE WINDOW AND THE MEMORY BRAKE =======================
     #
-    # Bound on CPU_Engine only (CUDA's KV sits partly or wholly in VRAM, which
-    # a RAM budget would mis-size): every hook the runner gates is a `_llama_*`
-    # body here and a binding on CPU_Engine, so CUDA inherits nothing the
-    # runner would call.
+    # Every hook the runner gates is a `_llama_*` body here and a binding on
+    # each concrete engine (CPU_Engine, CUDA_Engine), never on this class.
     #
-    # * The window: at spawn, `_llama_spawn_context` asks `gguf_memory` for
-    #   min(trained window, what 0.75 x RAM affords) folded with the cap the
-    #   brake remembers for the alias, and passes it as `-c`.
+    # * The window: at spawn, the CPU engine's `_llama_spawn_context` asks
+    #   `gguf_memory` for min(trained window, what 0.75 x RAM affords) folded
+    #   with the cap the brake remembers for the alias, and passes it as `-c`;
+    #   the CUDA engine sizes it against the GPU's memory (`cuda_memory`).
+    # * The sensors: `_llama_read_signals` reads them into the law's terms --
+    #   the RAM's on CPU; on CUDA the RAM's fused with the VRAM spill.
     # * The brake (`memory_brake.llama_step`) samples at the start of a turn,
     #   its end and idle (the shared monitor), under the generation lock:
     #   - respawn: the same model restarts in place with `-c = min(budget
@@ -742,7 +785,7 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
     #     brake decided applies at the next spawn. A reap forgets
     #     `_brake_reload`, never the window memory.
 
-    # alias -> {"cap", "faulty", "at"}; written by CPU only.
+    # alias -> {"cap", "faulty", "at"}; written by the brake only.
     _window_memory: ClassVar[Dict[str, Dict[str, Any]]] = {}
 
     @classmethod
@@ -829,8 +872,16 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         """Right after load: the child's anonymous memory against what the
         window predicts (KV, the compute buffer, one weights copy for the
         repack), ONE WARNING above it -- a Flash-Attention fallback or a
-        mis-sized model. Never an action; never raises."""
+        mis-sized model. Never an action; never raises. A child with GPU
+        layers is skipped: its KV is on the device and nothing is repacked,
+        so the prediction does not apply (CUDA checks its device bytes)."""
         try:
+            if handle.get("gpu_layers", 0) != 0:
+                logger.debug(
+                    f"[{cls.__name__}] Post-load host memory check skipped: the KV and the "
+                    f"weights are on the GPU (port {handle.get('port')})"
+                )
+                return
             if handle.get("mmproj_loaded"):
                 logger.debug(
                     f"[{cls.__name__}] Post-load memory check skipped: a vision projector "
@@ -872,15 +923,17 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
 
     @classmethod
     def _llama_memory_bound_footprint_bytes(cls) -> Optional[int]:
-        """What a memory-bound child holds: its window's KV and compute, and
-        its weights -- the number the ``bound`` warning quotes."""
+        """What a memory-bound child holds: its window's KV and compute (and,
+        on the GPU, the CUDA context), and its weights -- the number the
+        ``bound`` warning quotes."""
         if cls._llama_memory_bound_tokens() is None:
             return None
         handle = cls._model
-        anonymous, weights = handle.get("static_anonymous_bytes"), handle.get("weights_bytes")
-        if not isinstance(anonymous, int) or not isinstance(weights, int):
+        static = handle.get("static_device_bytes", handle.get("static_anonymous_bytes"))
+        weights = handle.get("weights_bytes")
+        if not isinstance(static, int) or not isinstance(weights, int):
             return None
-        return anonymous + weights
+        return static + weights
 
     @classmethod
     def _llama_begin_memory_window(cls) -> None:
@@ -903,6 +956,45 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         return cls.loaded_child_for(llm_id) and bool(cls._model.get("brake_respawned"))
 
     @classmethod
+    def _llama_warn_sensor_off(cls, unavailable: Optional[str]) -> None:
+        """The pressure is unreadable: the brake is off, said once."""
+        if not cls._brake_sensor_warned:
+            cls._brake_sensor_warned = True
+            logger.warning(
+                f"[{cls.__name__}] Memory pressure unreadable "
+                f"({unavailable}); the memory brake is off"
+            )
+
+    @classmethod
+    def _llama_read_signals(cls, handle: Dict[str, Any]) -> Optional[LlamaSignals]:
+        """The RAM sensors in the law's terms: the pressure level, the paging
+        since the previous sample, the window's KV and the child's anonymous
+        memory over the RAM. None -- the brake off for this sample, ONE
+        WARNING per process -- when the level is unreadable. CUDA overrides
+        it to fuse the VRAM spill in."""
+        reading = memory_pressure.read_pressure()
+        if reading.level is None:
+            cls._llama_warn_sensor_off(reading.unavailable)
+            return None
+        total = memory_pressure.effective_total_ram_bytes()
+        # What the child holds, without the mapped weights' clean pages.
+        footprint = memory_pressure.child_anonymous_bytes(handle.get("pid"))
+        window = handle.get("context_tokens")
+        kv = handle.get("kv_token_bytes")
+        current, last = reading.damage_total_bytes, handle.get("damage_last")
+        return LlamaSignals(
+            level=reading.level,
+            damage_bytes=(
+                max(0, current - last) if current is not None and last is not None else None
+            ),
+            damage_available=current is not None,
+            kv_share=window * kv / total if window and kv and total else None,
+            footprint_share=footprint / total if footprint is not None and total else None,
+            footprint_bytes=footprint,
+            ram_damage_total=current,
+        )
+
+    @classmethod
     def _llama_brake_point(cls, point: str, llm_id: Any) -> BrakeOutcome:
         """Take the brake's sample at ``point`` and execute its decision
         (the caller holds the generation lock). May raise: the binding
@@ -912,21 +1004,11 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         handle = cls._model
         if not isinstance(handle, dict) or not cls._proc_is_alive(handle.get("proc")):
             return BrakeOutcome()
-        reading = memory_pressure.read_pressure()
-        if reading.level is None:
-            if not cls._brake_sensor_warned:
-                cls._brake_sensor_warned = True
-                logger.warning(
-                    f"[{cls.__name__}] Memory pressure unreadable "
-                    f"({reading.unavailable}); the memory brake is off"
-                )
+        signals = cls._llama_read_signals(handle)
+        if signals is None:
             return BrakeOutcome()
-        total = memory_pressure.effective_total_ram_bytes()
-        # What the child holds, without the mapped weights' clean pages.
-        footprint = memory_pressure.child_anonymous_bytes(handle.get("pid"))
         window = handle.get("context_tokens")
-        kv = handle.get("kv_token_bytes")
-        current, last = reading.damage_total_bytes, handle.get("damage_last")
+        footprint = signals.footprint_bytes
         state = handle.get("brake")
         previous = state if isinstance(state, BrakeState) else BrakeState()
         decision = memory_brake.llama_step(
@@ -934,29 +1016,27 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
             memory_brake.Sample(
                 point=point,
                 now=time.time(),
-                level=reading.level,
+                level=signals.level,
                 last_used=(
                     cls._last_used.timestamp() if isinstance(cls._last_used, datetime) else None
                 ),
-                damage_bytes=(
-                    max(0, current - last) if current is not None and last is not None else None
-                ),
-                damage_available=current is not None,
+                damage_bytes=signals.damage_bytes,
+                damage_available=signals.damage_available,
             ),
             memory_brake.Context(
                 window=window,
                 ceiling=None,
                 static_window=handle.get("static_window_tokens"),
-                footprint_share=footprint / total if footprint is not None and total else None,
+                footprint_share=signals.footprint_share,
                 resizable=not handle.get("window_pinned"),
                 reap_idle_s=cls._max_idle_time,
-                kv_share=window * kv / total if window and kv and total else None,
+                kv_share=signals.kv_share,
             ),
         )
         handle["brake"] = decision.state
         if not decision.skipped:
             # A paced-out sample keeps the paging of its interval for the next.
-            handle["damage_last"] = current
+            handle["damage_last"] = signals.ram_damage_total
         if (decision.state.cap, decision.state.faulty) != (previous.cap, previous.faulty):
             cls._remember_window(handle.get("alias"), decision.state)
         if decision.unload:
@@ -989,12 +1069,12 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         footprint: Optional[int],
     ) -> bool:
         """Restart the same model in place with the cap as its window (the
-        window memory hands it to the spawn context). The live state is
-        carried whole; ``_model_id``, the tokenizer and the idle clock are
-        untouched (the reap must still see an abandoned child). False when
-        the respawn failed: the child is stopped, the engine state cleared
-        and the episode recorded for the next message, like an unload -- ONE
-        WARNING."""
+        cap and the live handle go to the spawn context explicitly). The live
+        state is carried whole; ``_model_id``, the tokenizer and the idle
+        clock are untouched (the reap must still see an abandoned child).
+        False when the respawn failed: the child is stopped, the engine state
+        cleared and the episode recorded for the next message, like an unload
+        -- ONE WARNING."""
         live = decision.state
         before = handle.get("context_tokens")
         try:
@@ -1006,6 +1086,7 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
                 port=port,
                 probe_timeout_s=LLAMA_RESPAWN_PROBE_TIMEOUT_S,
                 brake_cap=live.cap,
+                respawn_from=handle,
             )
         except Exception as exc:
             record = {"alias": handle.get("alias"), **live.carry(), "unloaded_at": time.time()}
@@ -1089,13 +1170,14 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         port: int,
         **ctx: Any,
     ) -> List[Any]:
-        """Build the CLI for `llama-server`. CPU forces `-ngl 0`, CUDA injects
+        """Build the CLI for `llama-server`. CPU forces `-ngl 0`, CUDA passes
         `-ngl <gpu_layers>` from `_prepare_spawn_context`."""
 
     @classmethod
-    def _build_spawn_env(cls) -> Dict[str, str]:
-        """Per-spawn environment. Default: inherit the parent env unchanged.
-        CUDA overrides to prepend the CUDA toolkit bin to `PATH` so the
-        runtime DLLs resolve.
+    def _build_spawn_env(cls, **_ctx: Any) -> Dict[str, str]:
+        """Per-spawn environment, given the spawn context. Default: inherit
+        the parent env unchanged. CUDA overrides to prepend the CUDA toolkit
+        bin to `PATH` so the runtime DLLs resolve, and to pin the GPU it
+        selected.
         """
         return os.environ.copy()

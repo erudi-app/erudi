@@ -82,7 +82,7 @@ class BaseChatServerEngine(BaseEngine):
 
         Implementations may receive subclass-specific context via `**ctx`
         (populated by `_prepare_spawn_context`). For example, CUDA injects
-        `gpu_layers` here.
+        `gpu_layers` and the window it sized here.
         """
 
     @classmethod
@@ -203,15 +203,23 @@ class BaseChatServerEngine(BaseEngine):
 
     @classmethod
     def _prepare_spawn_context(
-        cls, model_path: Path, alias: str, *, brake_cap: Optional[int] = None
+        cls,
+        model_path: Path,
+        alias: str,
+        *,
+        brake_cap: Optional[int] = None,
+        respawn_from: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Build per-spawn context passed to `_spawn_child` as `**ctx`, for the
         artifact ``model_path`` served under ``alias``.
 
-        Default: empty. CUDA overrides to inject `{"gpu_layers": ...}` from
-        NVML at spawn time; CPU sizes the window (`-c`) from the GGUF and the
-        machine's RAM, folding in the memory brake's cap -- ``brake_cap`` for
-        a brake respawn, else the cap remembered for that alias.
+        Default: empty. CPU sizes the window (`-c`) from the GGUF and the
+        machine's RAM, CUDA from the GGUF and the GPU's memory (NVML), both
+        folding in the memory brake's cap -- ``brake_cap`` (a brake respawn,
+        or CUDA's out-of-memory retry), else the cap remembered for that
+        alias. ``respawn_from`` is the live handle a brake respawn replaces,
+        passed explicitly (never inferred from ``cls._model``, which during
+        a load still holds the PREVIOUS model): CUDA reuses its window facts.
         """
         return {}
 
@@ -524,6 +532,7 @@ class BaseChatServerEngine(BaseEngine):
         port: int,
         probe_timeout_s: Optional[float] = None,
         brake_cap: Optional[int] = None,
+        respawn_from: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
         """Spawn the child, probe, and register a stable atexit handler.
 
@@ -531,11 +540,14 @@ class BaseChatServerEngine(BaseEngine):
         `_stop_server_if_running` (during a model swap) can unregister it.
         `probe_timeout_s` bounds this spawn's readiness probe (`None`:
         `_probe_timeout_s`); `brake_cap` is the window a memory-brake respawn
-        applies (handed to `_prepare_spawn_context`).
+        applies and `respawn_from` the live handle it replaces (both handed
+        to `_prepare_spawn_context`).
         """
         cls._assert_required_attrs()
         cls._assert_requests()
-        ctx = cls._prepare_spawn_context(model_path, alias, brake_cap=brake_cap)
+        ctx = cls._prepare_spawn_context(
+            model_path, alias, brake_cap=brake_cap, respawn_from=respawn_from
+        )
         handle = cls._spawn_child(model_path=model_path, alias=alias, port=port, **ctx)
         try:
             cls._probe_ready(
@@ -600,10 +612,10 @@ class BaseChatServerEngine(BaseEngine):
 
     # ======================= The memory brake's plumbing =======================
     #
-    # Shared by the engines that bind a memory brake (MLX, and the CPU engine
-    # through ``BaseLlamaCppEngine``). An engine that does not override
-    # ``brake_point`` (CUDA) inherits it and stays inert: no monitor starts, no
-    # record is ever written, every answer is the base one.
+    # Shared by the engines that bind a memory brake (MLX, and the CPU and
+    # CUDA engines through ``BaseLlamaCppEngine``). An engine that does not
+    # override ``brake_point`` inherits it and stays inert: no monitor starts,
+    # no record is ever written, every answer is the base one.
 
     # What an unload carries to the next spawn of the same model, or None.
     # Cleared by any successful spawn, by an idle-timeout reap and at
