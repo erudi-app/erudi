@@ -666,6 +666,51 @@ def test_a_turn_with_nothing_measured_keeps_the_previous_value(child, sensors):
     assert child["last_request_tokens"] == 19_000
 
 
+def test_the_window_stamps_the_threshold_beside_the_last_request(child, sensors):
+    child["base_footprint_bytes"] = None  # the stamp does not wait for a measure
+    token = MLX_Engine.begin_memory_window()
+    MLX_Engine.note_call_usage(child, 7_000, 100)
+
+    MLX_Engine.end_memory_window(token, compaction_threshold=50)
+
+    assert child["last_request_tokens"] == 7_100
+    assert child["last_request_threshold"] == 50
+
+
+def test_a_turn_without_a_threshold_stamps_none(child, sensors):
+    # An arena turn: its request is judged at the default threshold.
+    child["base_footprint_bytes"] = None
+    child["last_request_threshold"] = 60
+    token = MLX_Engine.begin_memory_window()
+    MLX_Engine.note_call_usage(child, 7_000, 100)
+
+    MLX_Engine.end_memory_window(token)
+
+    assert child["last_request_tokens"] == 7_100
+    assert child["last_request_threshold"] is None
+
+
+def test_a_turn_with_nothing_measured_keeps_the_previous_pair(child, sensors):
+    child["last_request_threshold"] = 60
+    token = MLX_Engine.begin_memory_window()
+
+    MLX_Engine.end_memory_window(token, compaction_threshold=90)
+
+    assert child["last_request_tokens"] == 19_000
+    assert child["last_request_threshold"] == 60
+
+
+def test_the_brake_judges_the_last_request_at_its_stamped_threshold(child, http):
+    # The window shrinks 20 000 -> 15 000: 10 000 tokens is under 80 % of the
+    # shrunk window (12 000), over 50 % of it (7500).
+    child["last_request_tokens"] = 10_000
+    assert MLX_Engine.brake_point("turn_end").action != "shrink"
+
+    child["brake"] = BrakeState()
+    child["last_request_threshold"] = 50
+    assert MLX_Engine.brake_point("turn_end") == BrakeOutcome(acted=True, action="shrink")
+
+
 # ===================== review fixes: failures are not successes =====================
 
 

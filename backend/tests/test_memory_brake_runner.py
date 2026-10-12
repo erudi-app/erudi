@@ -52,6 +52,8 @@ class _BrakeEngine(BaseEngine):
     """An engine whose brake hooks record what the runner calls, in order."""
 
     calls: ClassVar[list] = []
+    # The compaction threshold each closed measurement window was stamped with.
+    thresholds: ClassVar[list] = []
     notice: ClassVar[Optional[str]] = None
     pending: ClassVar[set] = set()
     bound: ClassVar[Optional[int]] = None
@@ -82,8 +84,9 @@ class _BrakeEngine(BaseEngine):
         return ("token",)
 
     @classmethod
-    def end_memory_window(cls, token, *, abandoned=False):
+    def end_memory_window(cls, token, *, abandoned=False, compaction_threshold=None):
         cls.calls.append(("end", abandoned))
+        cls.thresholds.append(compaction_threshold)
 
     @classmethod
     def memory_bound_tokens(cls):
@@ -101,6 +104,7 @@ class _BrakeEngine(BaseEngine):
 @pytest.fixture(autouse=True)
 def _engine(monkeypatch):
     _BrakeEngine.calls = []
+    _BrakeEngine.thresholds = []
     _BrakeEngine.notice = None
     _BrakeEngine.pending = set()
     _BrakeEngine.bound = None
@@ -125,6 +129,8 @@ def _answer(monkeypatch, text="hello"):
 
 
 async def _events(runner, *, thread_id="b1", summarize=True, emit_events=True, **kwargs):
+    # A conversation turn carries its compaction threshold (#607); an arena turn none.
+    kwargs.setdefault("compaction_threshold", 80 if summarize else None)
     return [
         e
         async for e in runner.astream_text(
@@ -217,6 +223,7 @@ async def test_an_abandoned_turn_takes_no_turn_end_sample(monkeypatch):
         thread_id="ab",
         summarize=True,
         emit_events=True,
+        compaction_threshold=80,
     )
     async for event in stream:
         if event["t"] == "answer":
@@ -225,6 +232,45 @@ async def test_an_abandoned_turn_takes_no_turn_end_sample(monkeypatch):
 
     assert _brakes("turn_end") == []
     assert [c for c in _BrakeEngine.calls if c[0] == "end"] == [("end", True)]
+
+
+async def test_the_window_closes_with_the_conversations_threshold(monkeypatch):
+    # The brake judges the turn's largest request against the trigger of the
+    # conversation that sent it (#607).
+    _answer(monkeypatch)
+
+    await _events(AgentRunner(checkpointer=InMemorySaver()), compaction_threshold=55)
+
+    assert _BrakeEngine.thresholds == [55]
+
+
+async def test_an_abandoned_turn_closes_with_its_threshold(monkeypatch):
+    _answer(monkeypatch, "one two three")
+    stream = AgentRunner(checkpointer=InMemorySaver()).astream_text(
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="ab",
+        summarize=True,
+        compaction_threshold=65,
+        emit_events=True,
+    )
+    async for event in stream:
+        if event["t"] == "answer":
+            break
+    await stream.aclose()
+
+    assert [c for c in _BrakeEngine.calls if c[0] == "end"] == [("end", True)]
+    assert _BrakeEngine.thresholds == [65]
+
+
+async def test_an_arena_turn_closes_the_window_without_a_threshold(monkeypatch):
+    _answer(monkeypatch, "duel")
+
+    await _events(AgentRunner(checkpointer=None), thread_id=None, summarize=False)
+
+    assert _BrakeEngine.thresholds == [None]
 
 
 async def test_an_arena_turn_takes_its_samples_and_never_consumes_the_notice(monkeypatch):

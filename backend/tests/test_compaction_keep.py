@@ -205,11 +205,13 @@ class _ScriptedSummaryModel(ToolableFakeChatModel):
         yield ChatGenerationChunk(message=AIMessageChunk(content=text, chunk_position="last"))
 
 
-def _middleware(summary_model, window=None, budget=None):
+def _middleware(summary_model, window=None, budget=None, compaction_threshold=80):
     from langchain.agents.middleware import SummarizationMiddleware
 
     _WindowEngine.window = window
-    built = AgentRunner()._build_middleware(summary_model, budget)
+    built = AgentRunner()._build_middleware(
+        summary_model, budget, compaction_threshold=compaction_threshold
+    )
     return next(m for m in built if isinstance(m, SummarizationMiddleware))
 
 
@@ -232,12 +234,12 @@ def test_summary_cap_scales_with_the_window_and_is_clamped():
 
 @pytest.mark.parametrize("window", [1, 300, 480, 481])
 def test_the_keep_budget_is_at_least_one_token_for_tiny_windows(window):
-    assert keep_token_budget(window) == 1
+    assert keep_token_budget(window, 80) == 1
 
 
 @pytest.mark.parametrize("window", [1000, 2000, 4000, 10_000, 32_768])
 def test_the_keep_budget_leaves_room_for_the_summary_under_the_trigger(window):
-    keep = keep_token_budget(window)
+    keep = keep_token_budget(window, 80)
     assert keep <= int(KEEP_FRACTION * window)
     # kept suffix + the longest summary stays 256 under the 80 % trigger.
     assert keep + summary_cap(window) <= int(0.8 * window) - 256
@@ -245,19 +247,21 @@ def test_the_keep_budget_leaves_room_for_the_summary_under_the_trigger(window):
 
 def test_the_keep_budget_values():
     assert KEEP_FRACTION == 0.4
-    assert keep_token_budget(10_000) == 4000
-    assert keep_token_budget(2000) == 800
-    assert keep_token_budget(600) == 96
+    assert keep_token_budget(10_000, 80) == 4000
+    # Below 3840 tokens the trigger leaves the answer its 768 tokens (#607):
+    # 2000 -> trigger 1232, keep 1232 - 250 - 256; 600 -> trigger 1, keep 1.
+    assert keep_token_budget(2000, 80) == 726
+    assert keep_token_budget(600, 80) == 1
 
 
 def test_the_trim_budget_without_a_window_is_langchains_default():
-    assert summarize_trim_budget(None, None) == 4000
+    assert summarize_trim_budget(None, None, 80) == 4000
 
 
 def test_the_trim_budget_is_bounded_by_the_allocated_window():
     window = allocated = 10_000
     cap = summary_cap(window)
-    trim = summarize_trim_budget(window, allocated)
+    trim = summarize_trim_budget(window, allocated, 80)
     assert trim == (allocated - 2 * cap - 512) // 2
 
 
@@ -266,18 +270,18 @@ def test_the_trim_budget_is_bounded_by_a_small_memory_window():
     # prompt must still fit the MEMORY window, the 4000 floor notwithstanding.
     window, allocated = 1500, 32_768
     cap = summary_cap(window)
-    assert summarize_trim_budget(window, allocated) == window - 2 * cap - 256
+    assert summarize_trim_budget(window, allocated, 80) == window - 2 * cap - 256
 
 
 def test_the_trim_budget_never_drops_under_256():
-    assert summarize_trim_budget(1, 1) == 256
-    assert summarize_trim_budget(1, None) == 256
+    assert summarize_trim_budget(1, 1, 80) == 256
+    assert summarize_trim_budget(1, None, 80) == 256
 
 
 def test_the_trim_budget_grows_with_a_big_window():
     window = allocated = 131_072
     cap = summary_cap(window)
-    assert summarize_trim_budget(window, allocated) == min(
+    assert summarize_trim_budget(window, allocated, 80) == min(
         max(4000, int(0.8 * window) - cap),
         window - 2 * cap - 256,
         (allocated - 2 * cap - 512) // 2,
@@ -291,22 +295,22 @@ def test_without_a_window_the_cutoff_keeps_the_last_ten_messages():
     # 31 alternating messages ending with the current question: the
     # 10-message cutoff lands on an answer.
     messages = _conversation(15, 10)
-    assert compaction_cutoff(messages, None, approx_token_count) == 21
+    assert compaction_cutoff(messages, None, approx_token_count, pct=80) == 21
 
 
 def test_with_a_window_the_cutoff_is_the_token_cutoff_alone():
     window = 10_000
-    budget = keep_token_budget(window)
+    budget = keep_token_budget(window, 80)
     # Short messages under the budget: nothing to cut, however many there are.
     short = _conversation(15, 50)
     assert len(short) > runner_module.SUMMARY_TRIGGER_MESSAGES
     assert _count(short) < budget
-    assert compaction_cutoff(short, window, approx_token_count) == 0
+    assert compaction_cutoff(short, window, approx_token_count, pct=80) == 0
     # Many short messages over the budget: the kept tail is the earliest
     # suffix that fits the budget -- far more than ten messages.
     many = _conversation(40, 100)
     assert _count(many) >= int(0.8 * window)
-    cut = compaction_cutoff(many, window, approx_token_count)
+    cut = compaction_cutoff(many, window, approx_token_count, pct=80)
     assert cut == runner_module._token_cutoff(many, budget, approx_token_count)
     assert isinstance(many[cut], AIMessage)
     assert _count(many[cut:]) <= budget < _count(many[cut - 1 :])
@@ -315,7 +319,7 @@ def test_with_a_window_the_cutoff_is_the_token_cutoff_alone():
     # user message (index 26), so it moves FORWARD to the answer after it --
     # the kept tail stays inside the budget.
     long = _alternating(30, 900) + [HumanMessage("short question")]
-    cut = compaction_cutoff(long, window, approx_token_count)
+    cut = compaction_cutoff(long, window, approx_token_count, pct=80)
     assert cut == 27
     assert isinstance(long[cut], AIMessage)
     assert _count(long[cut:]) <= budget
@@ -340,10 +344,12 @@ async def test_a_long_answer_at_the_boundary_stays_out_and_the_state_stays_under
         _measured(_text(600), "a7"),
         HumanMessage(_text(50), id="q8"),
     ]
-    token_cut = runner_module._token_cutoff(messages, keep_token_budget(window), approx_token_count)
+    token_cut = runner_module._token_cutoff(
+        messages, keep_token_budget(window, 80), approx_token_count
+    )
     assert messages[token_cut].id == "h4"  # an older user message, not the last
 
-    assert compaction_cutoff(messages, window, approx_token_count) == 5
+    assert compaction_cutoff(messages, window, approx_token_count, pct=80) == 5
 
     summary = _ScriptedSummaryModel(messages=iter([]), script=[_text(cap, "s")])
     mw = _middleware(summary, window=window)
@@ -359,30 +365,30 @@ def test_an_oversized_last_message_is_kept_whole_with_the_answer_before_it():
         AIMessage(_text(3000), id="b"),
         HumanMessage(_text(9000)),
     ]
-    assert compaction_cutoff(messages, 10_000, approx_token_count) == 1
+    assert compaction_cutoff(messages, 10_000, approx_token_count, pct=80) == 1
 
 
 def test_a_futile_compaction_of_a_tiny_head_is_skipped_unless_it_overflows():
     # Summarizing "hi" alone gains nothing (the summary costs more): the
     # futility guard skips it while the request still fits...
     messages = [HumanMessage("hi", id="a"), AIMessage("yo", id="b"), HumanMessage(_text(9000))]
-    assert compaction_cutoff(messages, 10_000, approx_token_count) == 0
+    assert compaction_cutoff(messages, 10_000, approx_token_count, pct=80) == 0
     # ...and takes it once the request would overflow the window.
-    assert compaction_cutoff(messages, 10_000, approx_token_count, overhead=1500) == 1
+    assert compaction_cutoff(messages, 10_000, approx_token_count, overhead=1500, pct=80) == 1
 
 
 def test_the_degenerate_window_of_one_keeps_the_current_turn_and_the_answer_before_it():
     # Every request overflows a window of one: the futility guard never
     # stands in the way of the compact-ASAP net.
     messages = _conversation(2, 10)
-    assert compaction_cutoff(messages, 1, approx_token_count) == 3
+    assert compaction_cutoff(messages, 1, approx_token_count, pct=80) == 3
 
 
 def test_nothing_is_compacted_when_only_the_previous_summary_would_go():
     # [summary, answer, question]: summarizing the summary alone is pointless
     # (and would reset the prefix cache for nothing).
     messages = [_previous_summary_message(), AIMessage(_text(900), id="a"), HumanMessage("q")]
-    assert compaction_cutoff(messages, 1, approx_token_count) == 0
+    assert compaction_cutoff(messages, 1, approx_token_count, pct=80) == 0
 
 
 def test_a_mid_turn_tool_round_never_summarizes_the_current_question_away():
@@ -395,7 +401,7 @@ def test_a_mid_turn_tool_round_never_summarizes_the_current_question_away():
     ]
     question = messages[12]
     assert question.id == "current-question"
-    cut = compaction_cutoff(messages, 10_000, approx_token_count)
+    cut = compaction_cutoff(messages, 10_000, approx_token_count, pct=80)
     assert cut == 11
     assert isinstance(messages[cut], AIMessage)
 
@@ -410,7 +416,7 @@ def test_many_parallel_tool_calls_are_kept_with_their_call_documented_over_keep(
         *[ToolMessage(_text(70), tool_call_id=f"c{i}", id=f"t{i}") for i in range(12)],
         AIMessage("done", id="a2"),
     ]
-    cut = compaction_cutoff(messages, 2000, approx_token_count)
+    cut = compaction_cutoff(messages, 2000, approx_token_count, pct=80)
     # The round follows the turn's question (mid-turn): never split the AI
     # message from its tool results, never drop the question -- the tail
     # starts with the answer before it and keeps the whole round, over the
@@ -418,7 +424,7 @@ def test_many_parallel_tool_calls_are_kept_with_their_call_documented_over_keep(
     assert messages[cut].id == "a0"
     kept_ids = {m.id for m in messages[cut:]}
     assert {"a1", *(f"t{i}" for i in range(12))} <= kept_ids
-    assert _count(messages[cut:]) > keep_token_budget(2000)
+    assert _count(messages[cut:]) > keep_token_budget(2000, 80)
 
 
 def _round_with_a_long_call_before_the_question() -> list:
@@ -459,14 +465,16 @@ def test_a_tool_round_before_the_current_question_never_blows_the_keep_budget(bu
     the round's results: the call and its results are summarized together.
     Moving back to the call would keep the whole round -- here more than the
     window itself, so the next request would overflow."""
-    window, overhead = 2000, 200
+    # The overhead leaves a keep budget (626) the round's results and the
+    # turns after it fit, and its call does not: the raw cut lands on a result.
+    window, overhead = 2000, 100
     messages = build()
-    budget = keep_token_budget(window) - overhead
+    budget = keep_token_budget(window, 80) - overhead
     assert isinstance(
         messages[runner_module._token_cutoff(messages, budget, approx_token_count)], ToolMessage
     )
 
-    cut = compaction_cutoff(messages, window, approx_token_count, overhead=overhead)
+    cut = compaction_cutoff(messages, window, approx_token_count, overhead=overhead, pct=80)
 
     assert messages[cut].id == "ans"
     assert _count(messages[cut:]) <= budget
@@ -485,10 +493,10 @@ def test_a_tool_round_after_the_current_question_is_kept_with_its_call():
     ]
     question = 12
     assert messages[question].id == "current-question"
-    raw = runner_module._token_cutoff(messages, keep_token_budget(2000), approx_token_count)
+    raw = runner_module._token_cutoff(messages, keep_token_budget(2000, 80), approx_token_count)
     assert isinstance(messages[raw], ToolMessage) and raw > question
 
-    cut = compaction_cutoff(messages, 2000, approx_token_count)
+    cut = compaction_cutoff(messages, 2000, approx_token_count, pct=80)
 
     assert cut == question - 1
     assert [m.id for m in messages[cut + 2 :]] == ["call", "r0", "r1"]
@@ -653,7 +661,7 @@ def _named_cases():
 @pytest.mark.parametrize("case", list(_named_cases()))
 def test_a_compaction_always_leaves_alternating_roles(case):
     messages, window = _named_cases()[case]
-    _assert_alternates(messages, compaction_cutoff(messages, window, approx_token_count))
+    _assert_alternates(messages, compaction_cutoff(messages, window, approx_token_count, pct=80))
 
 
 def test_a_compaction_leaves_alternating_roles_on_random_conversations():
@@ -663,7 +671,9 @@ def test_a_compaction_leaves_alternating_roles_on_random_conversations():
     for _ in range(400):
         messages = _random_conversation(rng)
         window = rng.choice([None, 1, 300, 2000, 4000, 10_000, 32_768])
-        _assert_alternates(messages, compaction_cutoff(messages, window, approx_token_count))
+        _assert_alternates(
+            messages, compaction_cutoff(messages, window, approx_token_count, pct=80)
+        )
 
 
 # ===================== the middleware wiring =====================
@@ -671,7 +681,7 @@ def test_a_compaction_leaves_alternating_roles_on_random_conversations():
 
 def test_the_middleware_keeps_tokens_with_a_window_and_messages_without():
     with_window = _middleware(_ScriptedSummaryModel(messages=iter([])), window=10_000)
-    assert with_window.keep == ("tokens", keep_token_budget(10_000))
+    assert with_window.keep == ("tokens", keep_token_budget(10_000, 80))
     without = _middleware(_ScriptedSummaryModel(messages=iter([])), window=None)
     assert without.keep == ("messages", runner_module.SUMMARY_KEEP_MESSAGES)
 
@@ -686,6 +696,7 @@ def test_the_middleware_cutoff_is_the_pure_rule():
         mw.token_counter,
         overhead=mw._overhead,
         allocated_window=10_000,
+        pct=80,
     )
 
 
@@ -722,14 +733,14 @@ def test_reported_usage_never_triggers_a_compaction():
 
 def test_the_middleware_trims_the_summarizer_input_to_the_window():
     mw = _middleware(_ScriptedSummaryModel(messages=iter([])), window=10_000)
-    assert mw.trim_tokens_to_summarize == summarize_trim_budget(10_000, 10_000)
+    assert mw.trim_tokens_to_summarize == summarize_trim_budget(10_000, 10_000, 80)
 
 
 def test_the_middleware_uses_the_working_window_and_the_allocated_one_for_the_trim():
     budget = SimpleNamespace(tokens_at_ceiling=lambda: 1500)
     mw = _middleware(_ScriptedSummaryModel(messages=iter([])), window=32_768, budget=budget)
-    assert mw.keep == ("tokens", keep_token_budget(1500))
-    assert mw.trim_tokens_to_summarize == summarize_trim_budget(1500, 32_768)
+    assert mw.keep == ("tokens", keep_token_budget(1500, 80))
+    assert mw.trim_tokens_to_summarize == summarize_trim_budget(1500, 32_768, 80)
 
 
 async def test_the_611_loop_compacts_once_and_not_on_the_next_turn():
@@ -1128,6 +1139,7 @@ async def _turn(runner, thread_id, question="next question"):
             thread_id=thread_id,
             summarize=True,
             emit_events=True,
+            compaction_threshold=80,
         )
     ]
 
@@ -1300,7 +1312,7 @@ async def test_the_memory_warning_projects_the_kept_suffix_plus_the_summary_cap(
     # O + count(all) in real tokens (nothing measured: the counter's script
     # weights), no summary.
     projected, counter, ratio = _projection(state)
-    assert compaction_cutoff(projected, 10_000, counter) == 0
+    assert compaction_cutoff(projected, 10_000, counter, pct=80) == 0
     fixed = request_overhead("s")
     overhead = overhead_tokens(
         RequestOverhead(fixed_est=fixed.fixed_est, fixed_text=fixed.fixed_text),
@@ -1322,14 +1334,14 @@ async def test_the_warning_never_counts_the_summary_twice():
     """Only the previous summary would go: nothing is compacted, and the
     state already holds its summary -- no second ``summary_cap`` on top."""
     state = [_previous_summary_message(), AIMessage(_text(300)), HumanMessage("q"), AIMessage("a")]
-    assert compaction_cutoff(state, 10_000, approx_token_count) == 0
+    assert compaction_cutoff(state, 10_000, approx_token_count, pct=80) == 0
 
     projected_tokens, _ = await AgentRunner()._project_next_request(
-        _agent_with_state(state), {}, 10_000
+        _agent_with_state(state), {}, 10_000, compaction_threshold=80
     )
 
     projected, counter, _ = _projection(state)
-    assert compaction_cutoff(projected, 10_000, counter) == 0
+    assert compaction_cutoff(projected, 10_000, counter, pct=80) == 0
     assert projected_tokens == counter(projected)
 
 

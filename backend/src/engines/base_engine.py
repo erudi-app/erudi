@@ -407,9 +407,12 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         return None
 
     @classmethod
-    def end_memory_window(cls, token: Any, *, abandoned: bool = False) -> Any:
-        """Close the window ``token`` opened and record what the turn used.
-        No-op here."""
+    def end_memory_window(
+        cls, token: Any, *, abandoned: bool = False, compaction_threshold: Optional[int] = None
+    ) -> Any:
+        """Close the window ``token`` opened and record what the turn used,
+        with the compaction threshold of the conversation that ran it
+        (``None``: an arena turn). No-op here."""
         return None
 
     # The memory brake (``src.engines.memory_brake``): MLX gives memory back

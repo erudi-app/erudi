@@ -1,16 +1,14 @@
 """The ONE canonical working context window (PR3.1).
 
-Three "context window" numbers used to coexist, each computed at its own call
-site:
+Two "context window" numbers serve different consumers:
 
 * the raw ALLOCATED window (``BaseEngine.effective_context_tokens`` -- the
   window the loaded child actually runs with), a TIME/BOUND fact: the
   first-chunk watchdog ceiling and the preflight retry are sized from it, and a
   prefill-timeout log quotes it. Those consumers must keep reading it RAW.
-* a MEMORY-bounded value the output budget and the compaction trigger each
-  folded their own way -- the budget read the raw window, compaction folded
-  ``min(0.8 * allocated, memory_ceiling)``. Two spellings of the same idea that
-  could disagree.
+* a MEMORY-bounded value the output budget and the compaction trigger share,
+  composed in one place so the two cannot disagree. The compaction trigger is
+  a share of it (the conversation's compaction threshold, ``trigger_tokens``).
 
 This module owns the single MEMORY value the memory consumers share:
 
@@ -45,12 +43,46 @@ from src.engines.memory_budget import MemoryBudget
 # for the model instead.
 MIN_KV_BOUND_TOKENS = 4096
 
-# Compaction fires at this fraction of the working window (the agent layer's
-# trigger, ``src.agents.runner.summarization_triggers``). It lives here, with
-# the window it is a fraction of, because the engine layer reads it too: the
-# memory brake shrinks the window only when the next turn would compact under
-# the shrunk one (``src.engines.memory_brake``).
-COMPACTION_WINDOW_FRACTION = 0.8
+# The compaction threshold (#607): the share of the working window, in whole
+# percent, at which a conversation compacts. Each conversation carries its
+# own (``Conversation.compaction_threshold``), copied at creation from the
+# global default (``UserSettings.default_compaction_threshold``). It lives
+# here, with the window it is a share of, because the engine layer reads it
+# too: the memory brake shrinks the window only when the next turn would
+# compact under the shrunk one (``src.engines.memory_brake``).
+COMPACTION_THRESHOLD_MIN = 50
+COMPACTION_THRESHOLD_MAX = 90
+COMPACTION_THRESHOLD_STEP = 5
+DEFAULT_COMPACTION_THRESHOLD = 80
+COMPACTION_THRESHOLDS = tuple(
+    range(COMPACTION_THRESHOLD_MIN, COMPACTION_THRESHOLD_MAX + 1, COMPACTION_THRESHOLD_STEP)
+)
+
+# What the trigger always leaves for the answer: the output budget's floor
+# (512, ``src.agents.output_budget.OUTPUT_BUDGET_FLOOR_TOKENS``) and its margin
+# floor (256, ``MARGIN_FLOOR_TOKENS``). Mirrored, not imported: the agent
+# layer pulls LangChain in, and this module is imported at boot.
+TRIGGER_ANSWER_ROOM_TOKENS = 768
+
+
+def is_compaction_threshold(value: Any) -> bool:
+    """A whole percent on the scale (``COMPACTION_THRESHOLDS``); a bool, a
+    float or a string is not one."""
+    return _is_int(value) and value in COMPACTION_THRESHOLDS
+
+
+def trigger_tokens(working_window: int, pct: int) -> int:
+    """The request size, in tokens, at which a conversation compacts.
+
+    Pure, integer: ``pct`` percent of the working window, never closer to the
+    window than ``TRIGGER_ANSWER_ROOM_TOKENS`` (a request at the trigger still
+    leaves the output budget its floor and margin), and at least 1. Every
+    reader of the trigger goes through it: the summarization trigger, the
+    room the keep budget leaves under it, the futility guard, the
+    summarizer's trim budget and the memory brake's shrink test. At 80 % the
+    answer-room bound only binds below 3840 tokens.
+    """
+    return max(1, min(working_window * pct // 100, working_window - TRIGGER_ANSWER_ROOM_TOKENS))
 
 
 def _positive_int(value: Any) -> Optional[int]:

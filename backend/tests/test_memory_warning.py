@@ -103,6 +103,7 @@ async def _warning(state, budget, window, engine):
         overhead=RequestOverhead(fixed_est=200, fixed_text="system prompt"),
         allocated_window=window,
         engine=engine,
+        compaction_threshold=80,
     )
 
 
@@ -119,7 +120,7 @@ def _projected(state, window):
 
     overhead = math.ceil(1.2 * 200)
     cut = compaction_cutoff(
-        projected_state, window, counter, overhead=overhead, allocated_window=window
+        projected_state, window, counter, overhead=overhead, allocated_window=window, pct=80
     )
     if cut > 0:
         return overhead + counter(projected_state[cut:]) + summary_cap(window)

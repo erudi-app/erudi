@@ -165,6 +165,7 @@ class ConversationService:
         custom_prompt: str = "",
         web_search_enabled: Optional[bool] = None,
         reasoning_effort: Optional[str] = None,
+        compaction_threshold: Optional[int] = None,
     ) -> Conversation:
         """Create a new conversation with the given LLM and generation params.
 
@@ -173,9 +174,11 @@ class ConversationService:
         constants, see ``src.database.generation_hints``); an explicit value
         wins. Mirrors
         ``web_search_enabled=None``, which copies the GLOBAL user-settings
-        default at creation (#310), and ``reasoning_effort=None``, which copies
-        the global default level the same way (1.1.2). The conversation owns its
-        values afterwards -- later model/global changes never retro-affect it.
+        default at creation (#310), ``reasoning_effort=None``, which copies
+        the global default level the same way (1.1.2), and
+        ``compaction_threshold=None``, which copies the global default
+        threshold (#607). The conversation owns its values afterwards -- later
+        model/global changes never retro-affect it.
         """
         logger.info(f"Creating new conversation with LLM {llm_id}")
         if temperature is None or top_p is None or max_tokens is None:
@@ -188,6 +191,8 @@ class ConversationService:
             web_search_enabled = settings_repo.get_web_search_enabled()
         if reasoning_effort is None:
             reasoning_effort = settings_repo.get_default_reasoning_effort()
+        if compaction_threshold is None:
+            compaction_threshold = settings_repo.get_default_compaction_threshold()
         return self.conversation_repo.create_conversation(
             llm_id=llm_id,
             name="New Conversation",
@@ -197,6 +202,7 @@ class ConversationService:
             custom_prompt=custom_prompt,
             web_search_enabled=web_search_enabled,
             reasoning_effort=reasoning_effort,
+            compaction_threshold=compaction_threshold,
         )
 
     def update_conversation(
@@ -210,6 +216,7 @@ class ConversationService:
         custom_prompt: Optional[str] = None,
         web_search_enabled: Optional[bool] = None,
         reasoning_effort: Optional[str] = None,
+        compaction_threshold: Optional[int] = None,
     ) -> Conversation:
         """Partial update of conversation metadata (only non-None fields)."""
         logger.info(f"Updating conversation {conversation_id}")
@@ -223,6 +230,7 @@ class ConversationService:
             custom_prompt=custom_prompt,
             web_search_enabled=web_search_enabled,
             reasoning_effort=reasoning_effort,
+            compaction_threshold=compaction_threshold,
         )
 
     # ===================== Deletion (DB + checkpointer thread) =====================
@@ -465,6 +473,10 @@ class ConversationService:
                     context=plan.context,
                     supports_vision=supports_vision,
                     effort_plan=effort_plan,
+                    # #607: the conversation OWNS its compaction threshold
+                    # (copied from the global default at creation); a lowered
+                    # one compacts on this very turn.
+                    compaction_threshold=conversation.compaction_threshold,
                     emit_events=True,
                 )
             ) as events:

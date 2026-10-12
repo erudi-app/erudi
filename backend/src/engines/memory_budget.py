@@ -177,8 +177,8 @@ def _formula_cannot_model(config: Dict[str, Any]) -> bool:
     (``kv_lora_rank``, DeepSeek lineage -- compressed latents, not per-head
     K/V). An over-estimate (4-7x measured on those shapes) would fire
     compaction far too early and silently amputate context, which is worse
-    than no signal -- so the KV fact is refused and only the 80 % window
-    signal protects those models.
+    than no signal -- so the KV fact is refused and only the compaction
+    threshold on the allocated window protects those models.
     """
     if _scoped_fact(config, "kv_lora_rank") is not None:
         return True

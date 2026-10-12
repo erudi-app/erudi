@@ -31,14 +31,16 @@ out, is resolved rather than hard-coded:
 | `custom_prompt` | string, ≤ 4096 chars | empty |
 | `web_search_enabled` | bool | copies the global default from `GET /erudi/user_settings/` |
 | `reasoning_effort` | `none` \| `low` \| `medium` \| `high` \| `xhigh` | copies the global default from `GET /erudi/user_settings/` |
+| `compaction_threshold` | int, 50–90 in steps of 5 (percent) | copies the global default from `GET /erudi/user_settings/` — see [compaction](#how-conversation-state-is-kept) |
 
 There is no `name` field: the conversation is created as `"New Conversation"` and renamed later.
 Once created, the conversation **owns** its values — a later change to the model's defaults, to the
-global web-search setting or to the global reasoning effort never retro-affects it.
+global web-search setting, to the global reasoning effort or to the global compaction threshold
+never retro-affects it.
 
 The response (`ConversationResponse`) carries `id`, `llm_id`, `name`, `created_at`,
 `last_message_time`, `temperature`, `top_p`, `max_tokens`, `custom_prompt`, `web_search_enabled`,
-`reasoning_effort`.
+`reasoning_effort`, `compaction_threshold`.
 `llm_id` is nullable: deleting the bound model nulls it server-side and the conversation survives,
 unbound, until it is pointed at another model.
 
@@ -416,7 +418,8 @@ curl -X PATCH http://127.0.0.1:27182/erudi/conversations/42 \
 ```
 
 `ConversationUpdate` accepts `name`, `llm_id`, `temperature`, `top_p`, `max_tokens`, `custom_prompt`,
-`web_search_enabled` and `reasoning_effort`; omitted fields are left unchanged. Switching `llm_id` is how an unbound
+`web_search_enabled`, `reasoning_effort` and `compaction_threshold`; omitted fields are left
+unchanged, and a `compaction_threshold` off the 50–90 scale (or not a multiple of 5) is a 422. Switching `llm_id` is how an unbound
 conversation (its model was deleted) is put back to work.
 
 ### Star and unstar a message
@@ -464,13 +467,25 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
 
 2. **Summarization middleware (compaction).** `SummarizationMiddleware`
    (`backend/src/agents/runner.py`, `_build_middleware`) runs on the **same local model**. It fires
-   when the request reaches **80 % of the working context window** — the conversation plus the
-   request overhead *O* (system prompt, knowledge-base block, tool schemas: what every request
-   carries beyond the stored history) — recomputed on every turn (the middleware is built after
-   the inference child spawned, so the window is fresh for this model on this machine). Token
-   pressure is the **only** trigger while a window is known: the number of messages says nothing
-   about the window — every tool round adds two messages, so an agentic conversation holds many
-   of them long before it fills the window.
+   when the request — the conversation plus the request overhead *O* (system prompt,
+   knowledge-base block, tool schemas: what every request carries beyond the stored history) —
+   reaches the conversation's **compaction threshold**, a share of the **working context window**
+   `W` recomputed on every turn (the middleware is built after the inference child spawned, so the
+   window is fresh for this model on this machine). Token pressure is the **only** trigger while a
+   window is known: the number of messages says nothing about the window — every tool round adds
+   two messages, so an agentic conversation holds many of them long before it fills the window.
+
+   The threshold is a whole percent from **50 to 90 in steps of 5, 80 by default**. Each
+   conversation owns its own (`compaction_threshold`, set from the chat header's settings panel or
+   the new-conversation panel); the Settings page's "Default compaction threshold" card sets the
+   default a new conversation copies (`default_compaction_threshold`). One helper turns it into the trigger every part of
+   compaction reads (`trigger_tokens` in `backend/src/engines/working_window.py`):
+   `T = max(1, min(⌊pct × W / 100⌋, W − 768))` — the second term always leaves the answer the output
+   budget's 512-token floor and its 256-token margin, and at 80 % it only binds below 3840 tokens.
+   A lower threshold summarizes sooner and more often and keeps the conversation smaller; a
+   higher one keeps more of it word for word and summarizes less often. Lowering it in an open
+   conversation compacts on the next turn when the conversation is already over the new share;
+   raising it changes nothing until the conversation grows to it.
 
    The **working context window** is the single canonical window the memory-aware parts of a turn
    share (`backend/src/engines/working_window.py`, `working_context_tokens`): the **smaller** of
@@ -516,8 +531,12 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    conversation.
 
    **What a compaction keeps** (`compaction_cutoff` in `runner.py`) starts from a **token budget**
-   of `max(1, min(0.4 × W, 0.8 × W − summary_cap(W) − 256) − O)` tokens, `W` being the working
-   window: the longest recent part that fits it, however many messages that is. The bound is in
+   of `max(1, min(0.4 × W, T − summary_cap(W) − max(256, T / 5)) − O)` tokens, `W` being the
+   working window and `T` the trigger: the longest recent part that fits it, however many messages
+   that is. The margin under the trigger scales with it, so a low threshold still leaves room to
+   grow: at 50 % a compaction leaves about 410 tokens under the trigger on a 4096-token window —
+   the next compaction comes a turn or two later — and about 820 on an 8192-token window; at 80 %
+   the margin changes nothing for a window of 3840 tokens or more. The bound is in
    tokens only — with token pressure the only trigger, the number of kept messages cannot re-fire
    anything, so a message cap on top would only discard recent context that fits the budget and
    bring the next compaction sooner. Three rules then adjust the cut:
@@ -541,8 +560,8 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    call and a prefix-cache reset — unless the request would overflow without it (`O + count + 512`
    above the allocated window, or `O + count` above the working window); the message-count
    fallback has no such guard. What is guaranteed:
-   with ordinary messages, the state left behind sits under `0.8 × W − 256` and the next model call
-   does not compact again. The documented exceptions keep more than the budget: the answer before
+   with ordinary messages, the state left behind sits under `T − max(256, T / 5)` and the next
+   model call does not compact again. The documented exceptions keep more than the budget: the answer before
    the current question when the cut falls on that question, a current message or a previous
    answer larger than the budget on its own (kept whole, summarized on a later turn, never
    truncated), and a tool round kept whole with its call because it follows the current question,
@@ -570,7 +589,7 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    `summary_cap(W) = clamp(W / 8, 128, 1024)` tokens, with no automatic output budget and no
    preflight retry (a smaller cap would silently truncate the summary; a rejection takes the size
    path below). It reads up to
-   `max(256, min(max(4000, 0.8 × W − cap), W − 2 × cap − 256, (allocated − 2 × cap − 512) / 2))`
+   `max(256, min(max(4000, T − cap), W − 2 × cap − 256, (allocated − 2 × cap − 512) / 2))`
    tokens of the history being summarized — sized from the working window, and kept inside the
    allocated window with a factor 2 for the error left in the ratio (it is a whole-request average:
    an English system prompt around a Chinese history under-counts the history). Past
@@ -578,8 +597,8 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    saw them. The **previous summary is always part of what the summarizer reads**, prepended on top
    of that budget, so the facts it carries survive every compaction.
 
-   With a large window, compaction is **rare and reads a large pool**. On a 40,960-token window the
-   first compaction fires near 32,768 tokens, keeps up to 16,384, and the summarizer reads up to
+   With a large window, compaction is **rare and reads a large pool**. On a 40,960-token window at
+   the default 80 % the first compaction fires near 32,768 tokens, keeps up to 16,384, and the summarizer reads up to
    19,200 tokens of history in one call, so that one turn waits for a long prefill before its
    answer starts — slowest on the CPU engine.
 
@@ -617,7 +636,10 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    a memory-bound model, 85 % of the memory ceiling. Only a model that alone fills the budget (a
    memory ceiling at or below zero: the working window is clamped to 1 token) gets the notice from
    the first turn; any other memory-bound model gets it as soon as the projected next request
-   reaches 85 % of the ceiling. The renderer then shows an amber notice above the
+   reaches 85 % of the ceiling. At a 90 % threshold, a next request between 85 % and the trigger
+   is not compacted yet, but the projection still counts the compaction the threshold will run:
+   the notice speaks of what compaction cannot save, never of growth the threshold allows. The
+   renderer then shows an amber notice above the
    composer with the approximate memory size of the model and the conversation together
    (`footprint_bytes`; on the CPU engine, what the child allocated at load for its window and
    its weights, since that does not grow with the conversation); the projection's numbers go to `backend.log` in one
