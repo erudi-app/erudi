@@ -193,6 +193,7 @@ their contents through history forever.
 | `thinking` | `text` | A chunk of the model's reasoning (see below) |
 | `tool_call` | `name`, `args` | The agent called a tool (`search_knowledge_base`, `web_search`, `calculator`) |
 | `tool_result` | `name`, `text` | What that tool returned |
+| `compaction` | `phase`; with `phase: "done"`: `summarized`, `reason`, `summary`, `summary_lost` | Earlier messages are summarized (see [compaction](#what-the-thread-shows-of-a-compaction)). `phase: "start"`: the summary call is about to run; never persisted. `phase: "done"`: the history was rewritten — `summarized` = the user messages and answers summarized (tool calls, tool results and the previous summary not counted), `reason` = `"memory"` (the computer's memory bounds the window) or `"length"`, `summary` = the summary text, `summary_lost: true` when no summary could be written (`summary` is then the previous summary the model keeps, possibly empty). Persisted in the turn's trace. Several per turn are possible: one before each model call that needs it |
 | `memory_reload` | — | Apple Silicon and the CPU engine: the memory brake unloaded the model (or, on the CPU engine, restarted it with a smaller window) while the computer's memory was under pressure, and this turn reloads it or re-reads the conversation (see below). Sent before anything else the model produces; never persisted |
 | `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one. `reason: "pressure"`: the computer's memory is under pressure and the memory brake shrank the window, so the conversation is summarized earlier. `reason: "pressure_external"`: the computer's memory is under pressure from other apps and this conversation uses little of it. `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
 | `error` | `text` | The turn failed; the text is the curated error message |
@@ -366,12 +367,16 @@ described in [Logging & Traceability](../logging.md).
 
 The user message is persisted immediately, so it shows up before generation starts. When the stream
 ends, the accumulated `answer` text becomes the assistant message's `content`, and the non-answer
-events (`thinking`, `tool_call`, `tool_result`) are stored in order as that message's `trace`, so the
-reasoning and tool panel can be replayed on reload. The serialized trace is capped at 32 KB,
-drop-oldest, with a `{"t": "truncated"}` marker prepended when events were dropped. Error turns
-persist no trace. `memory_warning` and `memory_reload` reach the wire but are **never** persisted:
-they describe the machine's memory at that moment, and an old conversation reopened on a bigger
-machine must not replay them.
+events (`thinking`, `tool_call`, `tool_result`, and `compaction` with `phase: "done"`) are stored in
+order as that message's `trace`, so the reasoning and tool panel and the compaction markers can be
+replayed on reload. The serialized trace is capped at 32 KB, drop-oldest, with a
+`{"t": "truncated"}` marker prepended when events were dropped; compaction events are never dropped
+(they lead the capped trace, ahead of the marker). Error turns persist their compaction events only —
+a compaction is checkpointed even when the model call after it fails — and no trace when they have
+none. `compaction` with `phase: "start"`, `memory_warning` and `memory_reload` reach the wire but
+are **never** persisted: the first describes the turn in flight, and the memory events describe the
+machine's memory at that moment — an old conversation reopened on a bigger machine must not replay
+them.
 
 ## Other endpoints
 
@@ -667,6 +672,35 @@ committed state already ends with an answer. The closing message carries no toke
 counted from its text like any new message). The write is bounded (10 s); past that, one warning
 in `backend.log` and the turn is released. The next question therefore never follows another
 question, and strict templates keep working.
+
+### What the thread shows of a compaction
+
+The compaction middleware announces itself on the turn's stream: LangGraph's `custom` stream mode,
+which the runner reads beside the `messages` one (`stream_mode=["messages", "custom"]`) and turns
+into `compaction` events. The summarizer's own tokens never reach the answer: the runner reads
+answer text from the `model` node only.
+
+- **While it runs.** `phase: "start"` goes out right before the summary call. The pending answer
+  shows a typing indicator and "Summarizing earlier messages to make room…" in the slot the reload
+  state uses (a compaction start replaces a reload state), until the model's first answer, thinking
+  or tool event, an error, or the end of the turn. The compaction's `done` does not end it: the
+  model still reads the shortened conversation again before it answers.
+- **Once it is done.** `phase: "done"` goes out after the history is rewritten (and the prefix
+  cache reset). It renders as a thin separator above the turn's reasoning strip and answer: "N
+  earlier messages were summarized to keep the conversation within the model's context", or "…to
+  fit this computer's memory" when `reason` is `memory` — the engine reports the window as bound by
+  memory (`memory_bound_tokens()`, the criterion of the amber notice), or the memory ceiling made
+  the working window smaller than the allocated one. N counts the user messages and the answers
+  summarized; with N at 0 the line names no number. "Show summary" reveals the summary as plain
+  text. A lost summary says "Earlier messages could not be summarized and were dropped from what
+  the model sees." and offers the previous summary the model keeps, when there is one. A turn
+  that compacts several times shows one separator per compaction, in order.
+- **After a reload.** The `done` events are part of the persisted trace, error turns included, so
+  the separators come back with the conversation; a trace holding only compactions shows no
+  reasoning strip.
+
+The announcements never cost a turn: a direct call of the middleware (no runtime) has no channel
+and stays silent, and a channel that fails is one warning in `backend.log` per turn.
 
 ### The prefix cache holds one conversation (Apple Silicon)
 

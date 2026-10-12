@@ -56,7 +56,8 @@ Routers are mounted under the `/erudi` prefix in `register_routers`
   message table; older turns are compacted by a summarization middleware when the
   conversation reaches 80 % of the working context window (the smaller of the
   allocated window and the Apple-Silicon memory ceiling; see the
-  [Conversations guide](guides/conversations.md))
+  [Conversations guide](guides/conversations.md)); the thread shows each compaction
+  while it runs and marks where it took over (`compaction` events)
 - [Reference](reference/conversations.md)
 
 ### 2. LLMs
@@ -548,7 +549,7 @@ none.
 ### Streaming
 
 Conversation turns stream as **NDJSON** (`application/x-ndjson`): one JSON event per
-line, typed `answer`, `thinking`, `tool_call`, `tool_result`, `memory_reload`, `memory_warning`, `error`,
+line, typed `answer`, `thinking`, `tool_call`, `tool_result`, `compaction`, `memory_reload`, `memory_warning`, `error`,
 or `done`. Title generation and Arena keep a plain-text stream.
 
 ## Main flows

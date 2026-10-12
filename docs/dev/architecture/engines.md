@@ -170,7 +170,7 @@ body — one `GET /v1/settings` with the same key and timeout reads the child's 
 child enforces the bound, it becomes the handle's `context_tokens`,
 so every consumer of the allocated window (the model-info card, the first-token
 watchdog, the preflight retry, compaction) follows it unchanged, exactly as with a
-window `--fit` reduced, and `memory_bound_tokens()` reports it; `backend.log` carries
+window `--fit` reduced, and `memory_bound_tokens()` reports it (the amber notice, the overflow copy and a compaction marker's `memory` reason read it); `backend.log` carries
 `[MLX_Engine] Window bounded by memory: trained=..., ceiling=..., bound=...` at load (with
 `, brake_cap=...` when a brake reload carried a cap). A trained window
 already at or below the floor needs no request: the child enforces it since its spawn,
