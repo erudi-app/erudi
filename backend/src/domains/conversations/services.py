@@ -26,6 +26,7 @@ from src.agents.kb_mode import plan_turn
 from src.agents.reasoning_effort import plan_reasoning_effort
 from src.agents.runner import (
     AgentRunner,
+    COMPACTION_EVENT,
     GenParams,
     ERROR_MESSAGE,
     ERROR_SENTINEL,
@@ -87,6 +88,10 @@ def build_stream_error_event(answer_event: dict) -> dict:
     return error_event
 
 
+def _is_compaction(event: dict) -> bool:
+    return event.get("t") == COMPACTION_EVENT
+
+
 def _cap_trace(events: list) -> Optional[list]:
     """Cap the serialized trace at ``TRACE_MAX_BYTES`` (drop-oldest).
 
@@ -94,16 +99,25 @@ def _cap_trace(events: list) -> Optional[list]:
     it is returned unchanged. Otherwise the oldest events are dropped -- with the
     ``{"t":"truncated"}`` marker counted in the budget -- until the marker plus the
     remaining events fit, always keeping at least the newest event.
+
+    Compaction events (#614) are pinned: a reasoning turn emits one event per
+    token, so a compaction announced at the first model call would be the first
+    dropped. They lead the capped trace, in their order, ahead of the marker,
+    and the other events are capped against what they leave -- all of them may
+    go. A summary is capped at ``summary_cap`` tokens, so a turn's compactions
+    stay far under the cap.
     """
     if not events:
         return None
     if len(json.dumps(events)) <= TRACE_MAX_BYTES:
         return list(events)
     marker = {"t": "truncated"}
-    capped = list(events)
-    while len(capped) > 1 and len(json.dumps([marker, *capped])) > TRACE_MAX_BYTES:
+    pinned = [e for e in events if _is_compaction(e)]
+    capped = [e for e in events if not _is_compaction(e)]
+    floor = 0 if pinned else 1
+    while len(capped) > floor and len(json.dumps([*pinned, marker, *capped])) > TRACE_MAX_BYTES:
         capped.pop(0)
-    return [marker, *capped]
+    return [*pinned, marker, *capped]
 
 
 def _sanitize_title(raw: str, *, max_words: int = 6, max_chars: int = 48) -> str:
@@ -298,20 +312,28 @@ class ConversationService:
 
         One JSON object per line: ``answer`` (streamed answer text), ``thinking``
         (streamed reasoning), ``tool_call`` / ``tool_result`` (agent activity),
-        ``error`` (the mapped ERROR sentinel), then a terminal ``done`` (#90).
+        ``compaction`` (#614: ``phase: "start"`` while earlier messages are being
+        summarized, ``phase: "done"`` with ``summarized``, ``reason``, ``summary``
+        and ``summary_lost`` once they were), ``memory_reload`` /
+        ``memory_warning`` (this machine's memory), ``error`` (the mapped ERROR
+        sentinel), then a terminal ``done`` (#90).
 
         The answer text is accumulated exactly as before and persisted as the
-        assistant message ``content``; non-answer events are collected into an
-        ordered ``trace`` (capped, drop-oldest) and persisted alongside so the
-        panel can replay on reload. Persists the user message up front (so it
-        shows immediately); the agent restores prior history from the checkpointer.
+        assistant message ``content``; thinking, tool and compaction-``done``
+        events are collected into an ordered ``trace`` (capped, drop-oldest,
+        compactions pinned) and persisted alongside so the panel and the
+        compaction marker replay on reload. ``compaction`` ``start`` and the
+        memory events reach the wire only. Persists the user message up front (so
+        it shows immediately); the agent restores prior history from the
+        checkpointer.
 
         Error mapping (#252/#225-D4): the runner yields its curated error as an
         ``answer`` event carrying the ERROR sentinel. Here that answer is (a) still
         appended to ``assistant_response`` so the persisted content is byte-for-byte
         the pre-#90 error turn, and (b) re-framed on the wire as an ``error`` event
         (the frontend renders the red bubble from ``error`` as it did from the
-        sentinel substring). Error turns persist no trace.
+        sentinel substring). Error turns persist only their compaction events
+        (the compaction is checkpointed even when the model call then fails).
         """
         start_s = time.perf_counter()
         # Local-first policy: log the question content (bounded), never image
@@ -354,8 +376,12 @@ class ConversationService:
             if persisted:
                 return
             persisted = True
-            persist_trace = None
-            if trace and ERROR_SENTINEL not in assistant_response:
+            # An error turn persists only its compactions: the compaction was
+            # checkpointed before the model call failed, and its marker must
+            # survive a reload.
+            if ERROR_SENTINEL in assistant_response:
+                persist_trace = _cap_trace([e for e in trace if _is_compaction(e)])
+            else:
                 persist_trace = _cap_trace(trace)
             await run_in_threadpool(
                 self._persist_assistant_message,
@@ -491,9 +517,14 @@ class ConversationService:
                         # reloads it -- a fact about this machine's memory at
                         # this moment, not part of the conversation.
                         yield _ndjson(event)
+                    elif event["t"] == COMPACTION_EVENT and event.get("phase") == "start":
+                        # Wire only (#614): the pending answer says the
+                        # conversation is being summarized; ``done`` (below)
+                        # is what the trace keeps.
+                        yield _ndjson(event)
                     else:
-                        # thinking / tool_call / tool_result -> wire AND
-                        # replay trace.
+                        # thinking / tool_call / tool_result / compaction done
+                        # -> wire AND replay trace.
                         trace.append(event)
                         yield _ndjson(event)
             await _persist_assistant_once()

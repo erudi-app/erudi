@@ -645,6 +645,11 @@ def _previous_summary_text(previous: Any) -> str:
         text = str(getattr(previous, "content", "") or "")
     if text.startswith(SUMMARY_MESSAGE_PREFIX):
         text = text[len(SUMMARY_MESSAGE_PREFIX) :]
+    return _without_lost_tail(text)
+
+
+def _without_lost_tail(text: str) -> str:
+    """``text`` without a closing placeholder sentence (``SUMMARY_*_LOST``)."""
     text = text.strip()
     for tail in (SUMMARY_LATER_LOST, SUMMARY_EARLIER_LOST):
         if text.endswith(tail):
@@ -673,6 +678,70 @@ def _summary_placeholder(previous: Any, max_tokens: Optional[int] = None) -> str
     if text:
         return f"{text}\n\n{SUMMARY_LATER_LOST}"
     return SUMMARY_EARLIER_LOST
+
+
+# The turn event a compaction becomes (#614). The middleware writes it on
+# LangGraph's custom stream: ``start`` right before the summary call (the
+# pending answer says the conversation is being summarized), ``done`` once the
+# history is rewritten -- the conversation service keeps that one in the
+# turn's trace, so the thread marks where the summary took over.
+COMPACTION_EVENT = "compaction"
+_COMPACTION_PHASES = frozenset({"start", "done"})
+# Why a compaction happened, as ``done`` says it: the computer's memory bounds
+# the working window, or the conversation outgrew the model's own window.
+COMPACTION_REASON_MEMORY = "memory"
+COMPACTION_REASON_LENGTH = "length"
+
+
+def summarized_message_count(messages: list) -> int:
+    """How many of the summarized messages a user would recognise as rows of
+    the thread: their questions and the model's answers -- an answer with an
+    empty text counts; the previous summary, tool calls and tool results do
+    not. One per persisted message in an ordinary history; a turn that failed
+    before its answer leaves a question the state holds without a reply."""
+    count = 0
+    for message in messages:
+        kind = getattr(message, "type", None)
+        if kind == "human" and not _is_previous_summary(message):
+            count += 1
+        elif kind == "ai" and not getattr(message, "tool_calls", None):
+            count += 1
+    return count
+
+
+def compaction_reason(
+    engine: Any, working_window: Optional[int], allocated_window: Optional[int]
+) -> str:
+    """``memory`` when the machine's memory bounds the window the compaction
+    ran against, ``length`` otherwise.
+
+    Memory bounds it when the engine says so (``memory_bound_tokens``: the CPU
+    and CUDA engines size their window from the memory budget at spawn, MLX
+    lowers its child's to the memory ceiling -- the criterion the amber
+    warning and the overflow copy use), or when the memory ceiling folded the
+    working window below the allocated one -- or stood alone, the allocated
+    window unknown (the compact-as-early-as-possible clamp). The
+    message-count fallback, with no window at all, is ``length``.
+    """
+    if _memory_bound_of(engine) is not None:
+        return COMPACTION_REASON_MEMORY
+    if _known_window(working_window) and (
+        not _known_window(allocated_window) or working_window < allocated_window
+    ):
+        return COMPACTION_REASON_MEMORY
+    return COMPACTION_REASON_LENGTH
+
+
+def _compaction_event(payload: Any) -> Optional[dict]:
+    """The turn event a custom-stream payload carries, or ``None``: only a
+    compaction announcement is one; anything else on that stream is ignored."""
+    if (
+        isinstance(payload, dict)
+        and payload.get("t") == COMPACTION_EVENT
+        and payload.get("phase") in _COMPACTION_PHASES
+    ):
+        return dict(payload)
+    return None
 
 
 def _truncate_for_summary(messages: list, budget: int, counter: Any, weight_of: Any) -> list:
@@ -775,8 +844,20 @@ def _summarization_middleware_class():
           past tool results as their markers, and a failed summary call never
           erases memory (``_acreate_summary``);
         * the ONE aggregate log line the QA spec promises ("backend.log
-          records the summarization"). ASCII, INFO: the app did its job.
+          records the summarization"). ASCII, INFO: the app did its job;
+        * the compaction is announced on the turn's stream (``_announce``,
+          #614): ``start`` before the summary call, ``done`` after the
+          rewrite.
         """
+
+        # The turn's runtime, stored by ``abefore_model`` (one instance per
+        # turn): its ``stream_writer`` is the channel the announcements take.
+        # ``None`` -- a direct call, a test -- is no channel, silently.
+        _runtime: Any = None
+        # What the compaction in flight produced, for its ``done`` event.
+        _last_compaction: Optional[dict] = None
+        # One WARNING per turn when the channel fails.
+        _announce_warned: bool = False
 
         def __init__(
             self,
@@ -844,13 +925,49 @@ def _summarization_middleware_class():
             raise NotImplementedError("compaction runs through abefore_model only")
 
         async def abefore_model(self, state, runtime):
+            self._runtime = runtime
+            self._last_compaction = None
             self._freeze(state["messages"])
             # Non-None exactly when the history was rewritten.
             result = await super().abefore_model(state, runtime)
             if result is not None:
                 if _engine_overrides(self.engine, "on_history_rewritten"):
                     await run_reset_shielded(self.engine.on_history_rewritten)
+                self._announce_done()
             return result
+
+        def _announce(self, build) -> None:
+            """Write the event ``build()`` returns on the turn's stream. The
+            announcement never costs the turn: no runtime is no channel, and
+            a failing channel is one WARNING per turn."""
+            writer = getattr(self._runtime, "stream_writer", None)
+            if writer is None:
+                return
+            try:
+                writer(build())
+            except Exception:
+                if not self._announce_warned:
+                    self._announce_warned = True
+                    logger.warning(
+                        "Announcing a compaction to the conversation failed; "
+                        "the turn goes on without it",
+                        exc_info=True,
+                    )
+
+        def _announce_done(self) -> None:
+            facts = self._last_compaction
+            if facts is None:
+                return
+            self._announce(
+                lambda: {
+                    "t": COMPACTION_EVENT,
+                    "phase": "done",
+                    "reason": compaction_reason(
+                        self.engine, self.working_window, self.allocated_window
+                    ),
+                    **facts,
+                }
+            )
 
         async def _acreate_summary(self, messages_to_summarize):
             """Summarize, never losing what the previous summary knew.
@@ -870,6 +987,9 @@ def _summarization_middleware_class():
 
             if not messages_to_summarize:
                 return "No previous conversation history."
+            # The summary call may take a while (it reads the whole pool):
+            # said before it starts.
+            self._announce(lambda: {"t": COMPACTION_EVENT, "phase": "start"})
             previous = next((m for m in messages_to_summarize if _is_previous_summary(m)), None)
             # The pool holds only past turns: their KB/web results are read as
             # the markers the model last saw, so what the summarizer reads is
@@ -900,7 +1020,9 @@ def _summarization_middleware_class():
                 cap = (
                     summary_cap(self.working_window) if _known_window(self.working_window) else None
                 )
-                summary = _summary_placeholder(previous, cap)
+                return self._compacted(
+                    messages_to_summarize, _summary_placeholder(previous, cap), lost=True
+                )
             return self._compacted(messages_to_summarize, summary)
 
         def _trim_for_summary(self, messages, budget, *, start_on):
@@ -957,12 +1079,19 @@ def _summarization_middleware_class():
                 return None
             return summary
 
-        @staticmethod
-        def _compacted(messages_to_summarize, summary):
+        def _compacted(self, messages_to_summarize, summary, *, lost=False):
+            """Log the compaction and record its facts for ``done``. A lost
+            summary is announced as what it carries -- the previous summary,
+            its closing placeholder sentence stripped -- flagged as lost."""
             logger.info(
                 f"Conversation compacted: {len(messages_to_summarize)} message(s) "
                 f"summarized into {len(summary or '')} chars"
             )
+            self._last_compaction = {
+                "summarized": summarized_message_count(messages_to_summarize),
+                "summary": _without_lost_tail(summary) if lost else summary,
+                "summary_lost": lost,
+            }
             return summary
 
     return _Logged_Summarization_Middleware
@@ -1390,7 +1519,9 @@ class AgentRunner:
         dedicated reasoning channel, plus inline ``<think>`` content caught by
         the fallback splitter, #554), one
         ``{"t":"tool_call","name":...,"args":{...}}`` per call, and
-        ``{"t":"tool_result","name":...,"text":...}`` per ToolMessage.
+        ``{"t":"tool_result","name":...,"text":...}`` per ToolMessage, and the
+        compaction middleware's ``{"t":"compaction","phase":"start"|"done",...}``
+        (#614), read from LangGraph's custom stream beside the messages.
 
         Error paths (#252 construction failure, streaming failure, #573 stream
         budget expiry) yield a curated ERROR sentinel as an ``answer`` event --
@@ -1675,12 +1806,20 @@ class AgentRunner:
                             {"messages": [HumanMessage(user_message)]},
                             config=run_config,
                             context=context,
-                            stream_mode="messages",
+                            # ``custom`` carries the compaction middleware's
+                            # announcements (``_compaction_event``).
+                            stream_mode=["messages", "custom"],
                         )
                     )
                 ) as agent_stream:
                     try:
-                        async for token, meta in agent_stream:
+                        async for mode, payload in agent_stream:
+                            if mode != "messages":
+                                announced = _compaction_event(payload)
+                                if announced is not None:
+                                    yield announced
+                                continue
+                            token, meta = payload
                             if getattr(token, "type", None) == "tool":
                                 # ToolMessage from the tools node: the model node has
                                 # finished streaming this step's tool_call_chunks, so emit
