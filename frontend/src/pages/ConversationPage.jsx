@@ -474,11 +474,13 @@ export default function ConversationPage() {
           // the end of the turn. Notices the backend streams as answer text
           // come BEFORE it, so they never end it. Never persisted.
           let reloading = false;
-          // Earlier messages are being summarized (`compaction` `start`,
-          // #614): shown in the pending bubble until the model speaks (its
-          // first answer, thinking or tool event), an error, or the end of
-          // the turn. The compaction's `done` does not end it: the model
-          // still re-reads the shortened conversation before it answers.
+          // A compaction in the pending bubble (#614): "during" from its
+          // `start` (typing indicator + "Summarizing earlier messages..."),
+          // "after" from its `done` (the indicator alone: the separator
+          // already says what was summarized, and the model still re-reads
+          // the shortened conversation -- clearing it outright would leave a
+          // blank bubble). The model speaking (its first answer, thinking or
+          // tool event), an error, or the end of the turn ends either.
           let compacting = false;
 
           // Push the current accumulators onto the streaming assistant message.
@@ -511,8 +513,9 @@ export default function ConversationPage() {
                 // trace keeps (persisted, replayed on reload).
                 if (evt.phase === "start") {
                   reloading = false;
-                  compacting = true;
+                  compacting = "during";
                 } else if (evt.phase === "done") {
+                  compacting = "after";
                   traceEvents.push(evt);
                 }
                 break;
@@ -1070,9 +1073,11 @@ export default function ConversationPage() {
               // it: its own state, independent of the content (a notice the
               // backend streamed as answer text may already be there).
               const showReload = !isUser && !!msg.reloading;
-              // Earlier messages are being summarized: the same slot, whatever
+              // A compaction is pending in the turn: the same slot, whatever
               // the strip shows (a later model call of the turn can compact).
+              // Its text only while the summary is being written.
               const showCompacting = !isUser && !!msg.compacting;
+              const showCompactingText = showCompacting && msg.compacting === "during";
 
               // Attached images (this session) render in their OWN panel,
               // separate from the text bubble. `displayText` is the readable
@@ -1193,9 +1198,11 @@ export default function ConversationPage() {
                           <div className="flex items-start pt-1">
                             <TypingIndicator size={8} className="-mt-1" />
                           </div>
-                          <div className="text-xs text-gray-400 italic mt-1">
-                            {t("chat:message.compacting")}
-                          </div>
+                          {showCompactingText && (
+                            <div className="text-xs text-gray-400 italic mt-1">
+                              {t("chat:message.compacting")}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>

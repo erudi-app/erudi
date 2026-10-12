@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useId, useState } from "react";
 import PropTypes from "prop-types";
 import { ChevronDown, ChevronRight } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -28,6 +28,8 @@ function reasonKeys(reason) {
 function CompactionSeparator({ event }) {
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
+  // Unique per separator, so each toggle names its own panel.
+  const panelId = useId();
   const count = Number.isInteger(event.summarized) && event.summarized > 0 ? event.summarized : 0;
   const keys = reasonKeys(event.reason);
   const lost = event.summary_lost === true;
@@ -54,6 +56,7 @@ function CompactionSeparator({ event }) {
           type="button"
           onClick={() => setOpen((v) => !v)}
           aria-expanded={open}
+          aria-controls={panelId}
           className="mx-auto flex items-center gap-1 transition-colors hover:text-[var(--ink)]"
         >
           {open ? (
@@ -65,7 +68,10 @@ function CompactionSeparator({ event }) {
         </button>
       )}
       {summary && open && (
-        <div className="mx-auto max-w-[75%] whitespace-pre-wrap rounded-xl border border-[var(--line-strong)] bg-white/[0.03] px-3 py-2 leading-relaxed text-[var(--ink-dim)]">
+        <div
+          id={panelId}
+          className="mx-auto max-h-48 max-w-[75%] overflow-y-auto whitespace-pre-wrap rounded-xl border border-[var(--line-strong)] bg-white/[0.03] px-3 py-2 leading-relaxed text-[var(--ink-dim)]"
+        >
           {summary}
         </div>
       )}

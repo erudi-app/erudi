@@ -122,4 +122,24 @@ describe("CompactionMarker", () => {
 
     expect(container.innerHTML).toBe("");
   });
+
+  it("links each toggle to its own scrollable summary panel", () => {
+    render(
+      <>
+        <CompactionMarker events={[done({ summary: "First." }), done({ summary: "Second." })]} />
+        <CompactionMarker events={[done({ summary: "Other turn." })]} />
+      </>
+    );
+
+    const toggles = screen.getAllByRole("button", { name: "Show summary" });
+    const ids = toggles.map((b) => b.getAttribute("aria-controls"));
+    expect(ids.every(Boolean)).toBe(true);
+    expect(new Set(ids).size).toBe(3);
+
+    fireEvent.click(toggles[1]);
+    const panel = document.getElementById(ids[1]);
+    expect(panel.textContent).toBe("Second.");
+    expect(panel.className).toContain("overflow-y-auto");
+    expect(panel.className).toMatch(/max-h-/);
+  });
 });

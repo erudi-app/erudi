@@ -5,9 +5,10 @@ import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-libra
 
 // A compaction is visible in the thread (#614):
 //  - `compaction` `start` shows a transient state in the pending answer (the
-//    slot the reload state uses) until the model speaks (answer, thinking,
-//    tool), an error, or the end of the turn -- `done` does not end it, the
-//    model still re-reads the shortened conversation;
+//    slot the reload state uses): a typing indicator and "Summarizing...".
+//    `done` drops the text but keeps the indicator (the model still re-reads
+//    the shortened conversation); the model speaking (answer, thinking,
+//    tool), an error or the end of the turn ends it;
 //  - `compaction` `done` lands in the turn's trace and renders a separator
 //    above the assistant bubble, kept on an error turn and after a reload;
 //  - a trace holding only compactions mounts no reasoning strip.
@@ -30,7 +31,22 @@ vi.mock("react-router-dom", () => ({
   useLocation: () => locationMock,
 }));
 
-// TraceStrip and CompactionMarker are the real components.
+// TraceStrip and CompactionMarker are the real components; TraceStrip is
+// wrapped so a test can tell whether the page MOUNTED it at all (the real
+// strip renders nothing for a trace without steps, which would hide a page
+// that mounts it for a compaction-only trace).
+vi.mock("../components/TraceStrip", async (importOriginal) => {
+  const mod = await importOriginal();
+  const Real = mod.default;
+  return {
+    ...mod,
+    default: (props) => (
+      <div data-testid="trace-strip">
+        <Real {...props} />
+      </div>
+    ),
+  };
+});
 vi.mock("../components/Sidebar", () => ({ default: () => null }));
 vi.mock("../components/ChatCollapsibleSection", () => ({ default: () => null }));
 vi.mock("../components/HeaderBar", () => ({ default: () => null }));
@@ -172,12 +188,39 @@ describe("ConversationPage compaction: while it runs", () => {
 
     await push(turn, '{"t":"answer","text":"Sure."}\n');
     await waitFor(() => expect(screen.queryByText(COMPACTING)).toBeNull());
+    expect(screen.queryAllByTestId("typing").length).toBe(0);
     await act(async () => {
       turn.end();
     });
   });
 
-  it("stays through done -- the model still re-reads the conversation -- until it speaks", async () => {
+  it("drops the text at done but keeps the indicator until the model answers", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute({ stream: turn }));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await push(turn, START);
+    expect(await screen.findByText(COMPACTING)).toBeTruthy();
+    expect(screen.getAllByTestId("typing").length).toBe(1);
+
+    await push(turn, doneLine());
+    // The separator says what was summarized; the pending answer no longer
+    // says it is summarizing, but still waits for the model.
+    expect(await screen.findByText(LENGTH_12)).toBeTruthy();
+    expect(screen.queryByText(COMPACTING)).toBeNull();
+    expect(screen.getAllByTestId("typing").length).toBe(1);
+    // A trace holding only the compaction mounts no reasoning strip.
+    expect(screen.queryByTestId("trace-strip")).toBeNull();
+
+    await push(turn, '{"t":"answer","text":"Sure."}\n');
+    await waitFor(() => expect(screen.queryAllByTestId("typing").length).toBe(0));
+    await act(async () => {
+      turn.end();
+    });
+  });
+
+  it("ends the indicator after done at the first thinking event", async () => {
     const turn = makeControlledStream();
     tracedFetchMock.mockImplementation(makeRoute({ stream: turn }));
     await renderAndSettle();
@@ -185,14 +228,12 @@ describe("ConversationPage compaction: while it runs", () => {
     fireEvent.click(screen.getByText("SEND"));
     await push(turn, START);
     await push(turn, doneLine());
-    expect(await screen.findByText(COMPACTING)).toBeTruthy();
-    // A trace holding only the compaction mounts no reasoning strip, and the
-    // pending answer keeps its indicator.
-    expect(screen.queryByRole("button", { name: /Reasoning/ })).toBeNull();
+    expect(await screen.findByText(LENGTH_12)).toBeTruthy();
     expect(screen.getAllByTestId("typing").length).toBe(1);
 
     await push(turn, '{"t":"thinking","text":"hm"}\n');
-    await waitFor(() => expect(screen.queryByText(COMPACTING)).toBeNull());
+    await waitFor(() => expect(screen.queryAllByTestId("typing").length).toBe(0));
+    expect(screen.getByTestId("trace-strip")).toBeTruthy();
     await act(async () => {
       turn.end();
     });
@@ -233,18 +274,6 @@ describe("ConversationPage compaction: while it runs", () => {
     await act(async () => {
       turn.end();
     });
-  });
-
-  it("never lands in the message content", async () => {
-    const turn = makeControlledStream();
-    tracedFetchMock.mockImplementation(makeRoute({ stream: turn }));
-    await renderAndSettle();
-
-    fireEvent.click(screen.getByText("SEND"));
-    await runTurn(turn, [START, doneLine(), '{"t":"answer","text":"Sure."}\n', '{"t":"done"}\n']);
-
-    await waitFor(() => expect(screen.getByTestId("answer").textContent).toBe("Sure."));
-    expect(screen.queryByText(COMPACTING)).toBeNull();
   });
 });
 
@@ -342,9 +371,33 @@ describe("ConversationPage compaction: the marker", () => {
     expect(
       await screen.findByText("1 earlier message was summarized to fit this computer's memory")
     ).toBeTruthy();
-    expect(screen.queryByRole("button", { name: /Reasoning/ })).toBeNull();
+    // A compaction-only trace mounts no strip at all.
+    expect(screen.queryByTestId("trace-strip")).toBeNull();
     expect(screen.getByTestId("answer").textContent).toBe("Then Lyon.");
     fireEvent.click(screen.getByRole("button", { name: "Show summary" }));
     expect(screen.getByText("Ada lives in Lyon.")).toBeTruthy();
+  });
+
+  it("shows the separator once after the refetch merges the stored turn", async () => {
+    const stored = JSON.parse(doneLine());
+    const rows = [
+      { id: 11, sender: "user", content: "hi", starred: false },
+      { id: 12, sender: "llm", content: "Sure.", starred: false, trace: [stored] },
+    ];
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute({ stream: turn, messages: rows }));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await runTurn(turn, [START, doneLine(), '{"t":"answer","text":"Sure."}\n', '{"t":"done"}\n']);
+
+    await waitFor(() =>
+      expect(
+        tracedFetchMock.mock.calls.filter(([url]) => String(url).includes("fetch_messages")).length
+      ).toBeGreaterThan(0)
+    );
+    await act(async () => {});
+    expect(screen.getAllByText(LENGTH_12).length).toBe(1);
+    expect(screen.getAllByTestId("answer").map((a) => a.textContent)).toEqual(["Sure."]);
   });
 });
