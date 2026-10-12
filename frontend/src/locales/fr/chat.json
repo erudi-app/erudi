@@ -72,6 +72,7 @@
   "message": {
     "firstReplyHint": "La première réponse peut prendre un peu plus de temps pendant le chargement du modèle en mémoire...",
     "memoryReload": "De la mémoire a été libérée sur votre ordinateur ; rechargement du modèle pour reprendre la conversation…",
+    "compacting": "Résumé des messages précédents pour faire de la place…",
     "imagePlaceholder": "🖼 image jointe",
     "attachmentAlt": "pièce jointe {{index}}",
     "copy": "Copier le message",
@@ -79,6 +80,18 @@
   },
   "conversation": {
     "untitled": "Nouvelle conversation"
+  },
+  "compaction": {
+    "length_one": "{{count}} message précédent a été résumé pour que la conversation tienne dans le contexte du modèle",
+    "length_other": "{{count}} messages précédents ont été résumés pour que la conversation tienne dans le contexte du modèle",
+    "lengthNoCount": "Les messages précédents ont été résumés pour que la conversation tienne dans le contexte du modèle",
+    "memory_one": "{{count}} message précédent a été résumé pour tenir dans la mémoire de cet ordinateur",
+    "memory_other": "{{count}} messages précédents ont été résumés pour tenir dans la mémoire de cet ordinateur",
+    "memoryNoCount": "Les messages précédents ont été résumés pour tenir dans la mémoire de cet ordinateur",
+    "lost": "Les messages précédents n'ont pas pu être résumés et ont été retirés de ce que voit le modèle.",
+    "showSummary": "Afficher le résumé",
+    "showKeptSummary": "Afficher le résumé que le modèle conserve",
+    "hideSummary": "Masquer le résumé"
   },
   "trace": {
     "summary": "Raisonnement",
