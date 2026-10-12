@@ -66,4 +66,6 @@ def test_inference_process_and_gpu_expectations():
     assert flavour.gpu_expectation(cuda) == "nvml"
     assert flavour.extra_check_values(cpu, "llama-server.exe --port 27201 --threads 8 -ngl 0 --api-key <redacted>") == {"threads": "8", "ngl": "0"}
     assert flavour.extra_check_values(cuda, "llama-server.exe --port 27201 --threads 8 -ngl 37") == {"threads": "8", "ngl": "37"}
+    # The CUDA engine passes -ngl -1 (auto: llama.cpp's fit places the layers) or -2 (all: a brake respawn).
+    assert flavour.extra_check_values(cuda, "llama-server.exe -c 40960 --threads 8 -ngl -1 -fitt 1024") == {"threads": "8", "ngl": "-1"}
     assert flavour.extra_check_values(mac, "backend --multiprocessing-fork tracker_fd=30") == {}

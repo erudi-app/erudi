@@ -2,8 +2,8 @@
 
 Complements `test_cuda_engine_server.py` (spawn hooks / config attrs) by
 pinning the NVML-driven hardware paths with a fake `pynvml` module injected
-into `sys.modules`, the VRAM-driven GPU-layer heuristic and the performance
-scoring pipeline.
+into `sys.modules`, the spawn's VRAM read (`_read_vram_info`, the one NVML
+seam of the window sizing) and the performance scoring pipeline.
 
 No real GPU, subprocess or model is required anywhere in this file.
 """
@@ -265,33 +265,116 @@ class TestNvmlHelpers:
 # =====================================================================
 
 
+def _add_spawn_reads(mod, *, totals=(24 * 1024**3,), v2=True, processes=None):
+    """Give the fake pynvml what the spawn's VRAM read needs: per-device
+    memory (v2 when ``v2``), a UUID and the compute-process list."""
+
+    def _memory(handle, version=None):
+        index = int(handle.split("-")[1])
+        if version is not None and not v2:
+            raise mod.NVMLError("Function Not Found")
+        return types.SimpleNamespace(total=totals[index], free=totals[index] - 1024**3)
+
+    mod.nvmlMemory_v2 = 0x02000028
+    mod.nvmlDeviceGetCount = lambda: len(totals)
+    mod.nvmlDeviceGetMemoryInfo = _memory
+    mod.nvmlDeviceGetUUID = lambda h: f"GPU-uuid-{h.split('-')[1]}"
+
+    def _processes(handle):
+        if processes is None:
+            raise mod.NVMLError("Not Supported")
+        return [types.SimpleNamespace(pid=pid, usedGpuMemory=used) for pid, used in processes]
+
+    mod.nvmlDeviceGetComputeRunningProcesses = _processes
+    return mod
+
+
 @pytest.mark.unit
-class TestComputeGpuLayers:
-    @pytest.mark.parametrize(
-        "vram,expected",
-        [
-            ("2", 0),  # < 3 GB -> CPU fallback
-            ("4.5", 20),  # < 6 GB -> partial
-            ("7", 32),  # < 10 GB -> partial
-            ("12", -1),  # >= 10 GB -> full offload
-        ],
-    )
-    def test_env_override_tiers(self, monkeypatch, vram, expected):
-        monkeypatch.setenv("ERUDI_VRAM_OVERRIDE_GB", vram)
-        assert CUDA_Engine._compute_gpu_layers() == expected
+class TestReadVramInfo:
+    """`_read_vram_info` is the ONE place the spawn path reads NVML: every
+    other CUDA test monkeypatches it. Here the fake pynvml module stands in."""
 
-    def test_invalid_override_falls_back_to_nvml(self, monkeypatch, fake_nvml):
-        monkeypatch.setenv("ERUDI_VRAM_OVERRIDE_GB", "lots")
-        # Fake NVML reports 20 GB free -> full offload
-        assert CUDA_Engine._compute_gpu_layers() == -1
+    def test_the_largest_card_is_selected_with_its_uuid_and_processes(self, monkeypatch):
+        mod = _add_spawn_reads(
+            make_fake_pynvml(),
+            totals=(8 * 1024**3, 24 * 1024**3),
+            processes=[(4242, 3 * 1024**3)],
+        )
+        monkeypatch.setitem(sys.modules, "pynvml", mod)
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        info = CUDA_Engine._read_vram_info()
+        assert info.present
+        assert info.index == 1
+        assert info.uuid == "GPU-uuid-1"
+        assert info.total_bytes == 24 * 1024**3
+        assert info.free_bytes == 23 * 1024**3
+        assert info.processes == ((4242, 3 * 1024**3),)
 
-    def test_no_gpu_returns_zero(self, monkeypatch, no_nvml):
+    def test_memory_info_falls_back_to_v1_and_processes_to_unknown(self, monkeypatch):
+        mod = _add_spawn_reads(make_fake_pynvml(), v2=False, processes=None)
+        monkeypatch.setitem(sys.modules, "pynvml", mod)
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        info = CUDA_Engine._read_vram_info()
+        assert info.total_bytes == 24 * 1024**3
+        assert info.processes is None
+
+    def test_a_user_cuda_visible_devices_restricts_the_selection(self, monkeypatch):
+        mod = _add_spawn_reads(make_fake_pynvml(), totals=(8 * 1024**3, 24 * 1024**3))
+        monkeypatch.setitem(sys.modules, "pynvml", mod)
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-uuid-0")
+        info = CUDA_Engine._read_vram_info()
+        assert info.index == 0
+        assert info.visible_devices == 1
+        # Two named devices: llama.cpp would split the model across both.
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-uuid-0,1")
+        assert CUDA_Engine._read_vram_info().visible_devices == 2
+
+    def test_an_empty_cuda_visible_devices_is_not_set(self, monkeypatch):
+        """backend/.env.example lists the variable empty: a developer who
+        copies it to .env must keep every GPU."""
+        mod = _add_spawn_reads(make_fake_pynvml(), totals=(8 * 1024**3, 24 * 1024**3))
+        monkeypatch.setitem(sys.modules, "pynvml", mod)
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+        info = CUDA_Engine._read_vram_info()
+        assert info.present
+        assert info.index == 1
+        assert info.visible_devices == 1
+
+    def test_no_device_is_no_gpu(self, monkeypatch):
+        mod = _add_spawn_reads(make_fake_pynvml(), totals=())
+        monkeypatch.setitem(sys.modules, "pynvml", mod)
+        info = CUDA_Engine._read_vram_info()
+        assert not info.present
+        assert info.unavailable is None
+
+    def test_without_pynvml_nvml_is_unreadable_and_silent(self, no_nvml, caplog):
+        import logging
+
+        with caplog.at_level(logging.DEBUG, logger="erudi"):
+            info = CUDA_Engine._read_vram_info()
+        assert not info.present
+        assert info.unavailable
+        assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+    def test_without_pynvml_the_spawn_falls_back_with_one_warning(
+        self, no_nvml, monkeypatch, caplog
+    ):
+        """Poisoned pynvml: the spawn takes the fallback shape (fit decides),
+        the VRAM readers answer unavailable, and nothing raises."""
+        import logging
+
+        from src.engines import memory_pressure
+
+        monkeypatch.delenv("ERUDI_CTX", raising=False)
         monkeypatch.delenv("ERUDI_VRAM_OVERRIDE_GB", raising=False)
-        assert CUDA_Engine._compute_gpu_layers() == 0
-
-    def test_nvml_path_full_offload(self, monkeypatch, fake_nvml):
-        monkeypatch.delenv("ERUDI_VRAM_OVERRIDE_GB", raising=False)
-        assert CUDA_Engine._compute_gpu_layers() == -1
+        with caplog.at_level(logging.WARNING, logger="erudi"):
+            ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-1")
+        assert (ctx["ctx_size"], ctx["gpu_layers"], ctx["window_sized"]) == (None, -1, False)
+        assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+        assert memory_pressure.child_vram_bytes(1, CUDA_Engine._read_vram_info().processes) is None
+        # The host's own GPU counters are never read here: the null provider.
+        monkeypatch.setattr(memory_pressure, "_PROVIDER", memory_pressure._NullProvider())
+        assert memory_pressure.read_vram(1).spill_bytes is None
 
 
 # =====================================================================

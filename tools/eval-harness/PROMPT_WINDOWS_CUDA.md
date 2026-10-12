@@ -49,7 +49,7 @@ You are running a memory and storage evaluation of the **installed** Erudi deskt
 6. In the report of each full run, read the **Flavour and model** section and check:
    - the running app confirmed `win-cuda` (backend_type `cuda`, engine `CUDA_Engine`);
    - the inference process was seen as `llama_server` and the `inference` category contains `llama-server.exe`;
-   - `-ngl` is greater than 0 (layers really offloaded to the GPU) and `--threads` is recorded;
+   - `-ngl` is `-1` (llama.cpp's fit places the layers on the GPU; `-2` after a memory-brake restart, `0` only when the app found no GPU) and `--threads` is recorded; `backend.log` says how the model was placed (`GPU placement: full offload` or `placed the model partly on the GPU`);
    - per-process VRAM is a number, or is explicitly reported as unavailable — under the WDDM driver model NVML often returns `[N/A]`, in which case the per-GPU used memory in the machine context is the only VRAM figure. Say which one you got.
    Also check the **model** line: an already-installed model must be reused ("matched by link" or "matched by name"), never downloaded twice. If a download starts while the model is already installed, that is a bug worth reporting.
 7. If a phase fails, read `events.jsonl`, `phases.json` and the copied logs in `results/<run>/logs/`, decide whether it is a harness bug (fix and re-run that phase with `--phases`) or an app behaviour (record it, do not "fix" the app).

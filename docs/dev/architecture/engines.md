@@ -15,7 +15,8 @@ BaseEngine
         │                         GGUF picker, `repetition_penalty → repeat_penalty`
         ├── CPU_Engine           (Popen + llama-server CPU, -ngl 0, ports 27200-27299;
         │                         sizes -c itself, binds the llama.cpp memory brake)
-        └── CUDA_Engine          (Popen + llama-server CUDA, -ngl <computed>, 27200-27299)
+        └── CUDA_Engine          (Popen + llama-server CUDA, -ngl -1 with fit, 27200-27299;
+                                  sizes -c against the VRAM, binds the brake on a full offload)
 ```
 
 Concrete engines implement only the four hooks that are genuinely backend-specific:
@@ -29,7 +30,7 @@ Concrete engines implement only the four hooks that are genuinely backend-specif
 
 The llama.cpp subclasses additionally implement `_build_spawn_argv` and
 `_build_spawn_env` (CUDA prepends the CUDA toolkit `bin/` to `PATH` so the runtime DLLs
-resolve).
+resolve, and pins the GPU it sized the window on with `CUDA_VISIBLE_DEVICES`).
 
 `multiprocessing.Process` is required for MLX because a PyInstaller frozen build has no
 Python interpreter at `sys.executable` to pass `-m` to; `mp.spawn` (configured in
@@ -127,8 +128,8 @@ mechanisms**, each kept inside its own engine:
 |  | llama-server (CPU / CUDA) | mlx_vlm.server (MLX) |
 |---|---|---|
 | KV allocation | **Fixed upfront**: the whole window's KV cache is allocated (and touched) at load — a ggml architectural fact (static graphs, fixed-shape tensors), linear in the window size | **Native lazy growth**: nothing allocated upfront, the cache grows with the conversation |
-| Window resolution | **CPU: sized by Erudi at spawn** — `-c = min(trained window, what 0.75 × RAM affords)`, folded with the memory brake's cap ([below](#the-window-on-the-cpu-engine)). **CUDA (and CPU when the GGUF header is unreadable): fit at load** — with no `-c`, the server itself resolves the window to the model's trained window and *continuously reduces* it against measured free memory, down to a 4096 floor, logging `context size reduced from X to Y` (`--fit`, ON by default in the pinned b10883) | **Preflight bound at spawn, lowered by memory after load**: the engine reads the trained window from the local artifact's `config.json` (`read_local_generation_hints`) and passes it as `--max-kv-size` — a validator, not a rotating cache. Once the child is up and its base footprint measured, a memory ceiling below the trained window lowers that bound live (see below), down to a 4096 floor; under memory pressure the memory brake moves it again |
-| `ERUDI_CTX` set | Passed verbatim as `-c`; llama-server honours an explicit `-c` unchanged ("no change"), and the CPU memory brake never resizes it | Not read — the bound always comes from the artifact |
+| Window resolution | **CPU: sized by Erudi at spawn** — `-c = min(trained window, what 0.75 × RAM affords)`, folded with the memory brake's cap ([below](#the-window-on-the-cpu-engine)). **CUDA: sized by Erudi at spawn for a full offload** — `-c = min(trained window, what min(0.9 × VRAM, VRAM free at load) − 1 GiB affords)`, with `-ngl -1` so llama.cpp's fit places the layers ([below](#the-window-on-the-cuda-engine)). **Fallback (a GGUF header the engine cannot read or model, a CUDA floor that does not fit): fit at load** — with no `-c`, the server itself resolves the window to the model's trained window and *continuously reduces* it against measured free memory, down to a 4096 floor, logging `context size reduced from X to Y` (`--fit`, ON by default in the pinned b10883) | **Preflight bound at spawn, lowered by memory after load**: the engine reads the trained window from the local artifact's `config.json` (`read_local_generation_hints`) and passes it as `--max-kv-size` — a validator, not a rotating cache. Once the child is up and its base footprint measured, a memory ceiling below the trained window lowers that bound live (see below), down to a 4096 floor; under memory pressure the memory brake moves it again |
+| `ERUDI_CTX` set | Passed verbatim as `-c`; llama-server honours an explicit `-c` unchanged ("no change"), and the memory brake of either llama.cpp engine never resizes it | Not read — the bound always comes from the artifact |
 | Overflow behaviour | Honest 400 carrying `n_prompt_tokens` and `n_ctx` | Honest 400 naming the exact budget (`prompt + max generation` vs `MAX_KV_SIZE`); *without* the bound, an oversized prompt would return 200 with silently degenerate output |
 | How the allocated window is known | **Read back after boot**: `_read_server_properties` (called by `_start_server` right after the probe) does one bounded `GET /props` and stamps `default_generation_settings.n_ctx`, `chat_template_caps` and `chat_template` on the handle | **Known at spawn, rewritten when memory binds**: the bound just passed *is* the window; `_read_server_properties` measures the child's base footprint and, when memory binds, stamps the memory bound as the window |
 | No derivable window | Cannot happen — the server always resolves one | No `--max-kv-size` (today's unbounded behaviour, one WARNING); a number is never invented |
@@ -352,9 +353,8 @@ MLX brake's safe points, pacing, episodes, unload and notices, and replaces the 
 and the useful-shrink test with a **respawn in place**. The law is
 `memory_brake.llama_step`; `BaseLlamaCppEngine._llama_brake_point` executes it and
 `CPU_Engine` binds it (`brake_point`, `begin_memory_window`, `memory_bound_tokens`, the
-respawn-aware `brake_reload_pending`). The CUDA engine binds none of it and its idle
-monitor never starts: its KV sits partly or wholly in VRAM, which a RAM budget would
-mis-size.
+respawn-aware `brake_reload_pending`). `CUDA_Engine` binds the same law over its own
+sensors ([below](#the-memory-brake-cuda)).
 
 **Sensors** (`src/engines/memory_pressure.py`, one provider per OS; every Linux and
 Windows threshold is a starting value to calibrate on real machines):
@@ -368,7 +368,9 @@ Windows threshold is a starting value to calibrate on real machines):
 An unreadable level turns the brake off with one WARNING naming why; a missing paging
 counter (PDH denied) is one WARNING too, and the level then decides alone.
 `ERUDI_FORCE_MEMORY_PRESSURE=warning|critical` (QA only) forces the level and paging
-evidence on every sample of the CPU engine.
+evidence on every RAM sample of both llama.cpp engines (on CUDA a full-offload child
+reads RAM pressure as `external`; the seam's `vram-warning|vram-critical` values force
+the spill instead: see [below](#the-memory-brake-cuda)).
 
 **The rules**, per pressure episode:
 
@@ -437,6 +439,175 @@ of the model — a brake reload, a swap back, a reap's reload, a crash respawn �
 the cap folds into `-c` and seeds the brake (an unload's record seeds first). A reap
 forgets the unload's record, never the window memory, so growth never returns to 90 % of
 the window that hurt while it is remembered, whatever reloads happen.
+
+### The window on the CUDA engine
+
+`CUDA_Engine` sizes `-c` itself, for a **full offload**, against the memory of the GPU it
+selects (`_prepare_spawn_context`, `src/engines/cuda_memory.py`):
+
+```
+ceiling = min(0.9 × VRAM total, VRAM free at load) − 1 GiB
+budget  = ceiling − weights − 256 MiB (compute intercept) − 512 MiB (CUDA context)
+window  = min(trained window, budget / (KV bytes per token + compute slope))
+```
+
+rounded down to 256 tokens and folded with the brake's cap, like the CPU window. The KV
+bytes per token, the weights (GGUF and mmproj on disk) and the shapes the formula refuses
+(MLA) or over-estimates (a sliding window, never reported memory-bound) are the CPU
+engine's (`gguf_memory`). The window is passed with `-ngl -1 -fitt 1024`.
+
+- **The free VRAM of the load** is read through NVML (`nvmlDeviceGetMemoryInfo`, v2 when the
+  binding and the driver have it) on the selected GPU — the largest card the child may
+  see. Sizing on 0.9 × total alone would leave llama.cpp's fit dropping layers on any
+  desktop that holds 1-3 GiB of VRAM; sizing on the free of the moment means the window
+  may differ from one load to the next. A brake respawn never re-reads it (below).
+- **The 1 GiB margin** (`CUDA_FREE_MARGIN_BYTES`) is room for the CUDA pool, which grows
+  during a generation; an allocation that fails there aborts the child mid-turn
+  (`CUDA_CHECK` → `ggml_cuda_error`), which surfaces as the curated child-death error,
+  and the next load sizes against the new free memory. The brake never acts
+  mid-generation; the margin is what keeps that abort rare.
+- **The compute slope** is the Flash-Attention KQ mask, 1 KiB per token, when FA is
+  proven for the model — the static mirror of the b10883 CUDA kernel gate
+  (`fattn.cu`): equal K and V head sizes in {40, 64, 72, 80, 96, 112, 128, 256}, no
+  ALiBi. Otherwise the non-FA attention scores, `n_ubatch (512) × n_head_max × 4 B` per
+  token. When llama.cpp disables FA anyway (its `Flash Attention not supported, set to
+  disabled` WARN in the child's output, scanned after the probe) one WARNING says the
+  window was sized on the wrong slope.
+- **The RAM ceiling does not bind** a full offload: the KV and the compute buffer live on
+  the device, the host keeps clean mapped file pages and pinned buffers. RAM pressure
+  still reaches the child through the brake's sensors.
+- **`ERUDI_VRAM_OVERRIDE_GB`** (QA only) stands in for the free VRAM of the sizing; the
+  total is then the larger of the override and the real total. It never invents a GPU (NVML
+  failed or saw none: it is ignored), and an empty value is unset.
+- Every CUDA constant that is not measured on the pinned build (the CUDA context, the
+  compute terms, the margins, the spill tiers and baseline, the classification
+  tolerance) is a starting value calibrated in QA on a Windows CUDA
+  machine and a Linux+NVIDIA one.
+
+**Division of labour with fit.** Erudi fixes the window: fit never changes an explicit
+`-c`, and the brake's cap, the window memory, `/context` and the compaction threshold all
+read it. Fit fixes the layers: `-ngl -1` is "auto" only while fit is on (at the model
+level a negative value means ALL layers, `llama.h:320`), and fit measures the real free
+memory (`cudaMemGetInfo`) with the margin Erudi hands it (`-fitt 1024`), so an
+optimistic estimate yields a partial offload instead of a dead child.
+
+**The spawn matrix.**
+
+| Case | Arguments | Brake |
+|---|---|---|
+| Sized load | `-c W -ngl -1 -fitt 1024` | On (`window_sized`), pending the placement below |
+| Brake respawn (Windows only: a spill is what drives it) | `-c min(static window, max(4096, cap)) -ngl -2 -fitt 1024`: nothing re-read; fit cannot change an explicit `-ngl` and keeps every layer on the device, where WDDM spills instead of failing | On, its state carried |
+| `ERUDI_CTX` pinned | `-c ERUDI_CTX -ngl -1 -fitt 1024` | Sampled, never resized |
+| Floor unfit, MLA, GGUF or NVML unreadable | No `-c`, `-ngl -1 -fitt 1024`: fit sizes the window and places the layers (one WARNING) | Off (`window_sized=False`): never sampled |
+| The user's `CUDA_VISIBLE_DEVICES` names several GPUs | No `-c`, `-ngl -1 -fitt 1024`: llama.cpp splits the layers across the cards, which a one-card sizing and measurement cannot model (one INFO) | Off |
+| NVML sees no GPU | No `-c`, `-ngl 0` (one WARNING) | Off |
+
+A brake respawn reuses the live handle's static window folded with the cap, so a series
+of respawns is deterministic and never reads the free VRAM a game left; it never falls
+to the fallback shape. A fresh sizing — and a fresh free reading — happens only at a
+load: a reap's reload, a swap back, the reload after an unload. On Linux the window is
+sized at spawn and never resized while the child runs: there is no spill to react to,
+and RAM pressure on a full-offload child is not the window's (below), so the brake there
+informs or unloads.
+
+**One GPU.** The child sees one GPU, pinned by its NVML UUID
+(`CUDA_VISIBLE_DEVICES=GPU-<uuid>`), immune to ordering differences between NVML and the
+CUDA runtime. A `CUDA_VISIBLE_DEVICES` the user set is never overridden: the selection is
+restricted to the devices it names (UUIDs by prefix, integers as NVML indexes); an
+empty value counts as unset (`backend/.env.example` lists the variable empty). When it
+names several devices the window is not sized and the brake is off (the matrix above).
+
+**Out of memory at load.** When a sized load dies with `CUDA_OUT_OF_MEMORY`, the engine
+retries once at the 4096 floor (one WARNING, which says the failed allocation may be the
+host's pinned memory: `cudaHostAlloc` prints the same); a second failure is the curated
+load error. A fit-sized, pinned or respawned child is not retried.
+
+**The placement.** Right after `/props`, before the brake is seeded, the engine
+classifies what fit did. "Partial" means some KV is not on the device — layers lost:
+that is what breaks the VRAM attribution. llama.cpp's own `offloaded N/M layers to GPU`
+line decides when it reaches the child's output (it is an INFO line, hidden at the
+default verbosity). Otherwise the child's device bytes — NVML's per-process memory on
+Linux, `Dedicated + (Shared − 128 MiB)` on Windows, so a spill at load does not read as
+partial — are compared with a floor of what a full offload certainly holds: the weights
+without `token_embd.weight` (the input embedding stays on the CPU) and without the MoE
+expert tensors, plus the KV the child really allocates (for a sliding-window model the
+exact mix of full and sliding layers when the GGUF carries the layer pattern, nothing
+when it does not). Partial means more than one layer's worth (net of 64 MiB) is missing;
+compute, the CUDA context and the pool are not counted, so a thin missing layer can hide
+behind them. An MoE whose experts fit moved to system memory keeps every layer and its
+KV on the device: it is a full offload, the brake stays on and its weights are partly in
+RAM. Models whose later layers share the KV of earlier ones (Gemma 3n,
+`attention.shared_kv_layers`) are not modelled: the KV is over-counted, in the safe
+direction — such a child may be classified partial and run brake-off. A partial child runs brake-off (one INFO naming the signal); the window memory keeps
+its cap, so the brake re-arms at the next load. No signal at all (Windows without PDH)
+is assumed full.
+
+**The post-load device check.** On a full child, its device bytes above
+`1.1 × (KV + compute + CUDA context + weights) + 256 MiB` are one WARNING — a
+mis-calibrated constant or a Flash-Attention mis-prediction. Skipped with a vision
+projector. The CPU engine's host-memory check is skipped for a child with GPU layers
+(one DEBUG line).
+
+### The memory brake (CUDA)
+
+`CUDA_Engine` binds the CPU engine's hooks and runs the same law,
+`memory_brake.llama_step`, unchanged; `_llama_read_signals` fuses two sensors into its
+inputs (`cuda_memory.fuse_signals`):
+
+- **The RAM half** is the CPU engine's (`memory_pressure.read_pressure`, the paging
+  counter, the child's anonymous memory).
+- **The VRAM half** is the spill. On Windows, WDDM satisfies an allocation that does not
+  fit from system RAM (the driver's "CUDA Sysmem Fallback Policy", on by default since
+  driver 536.40): the child keeps running, very slowly. NVML has no per-process memory
+  under WDDM, so `memory_pressure.read_vram` reads PDH's
+  `\GPU Process Memory(pid_<pid>_luid_..._phys_<n>)\Shared Usage` and `Dedicated Usage`
+  (English names, gauges) on the adapter holding most of the child's dedicated memory —
+  the discrete GPU on an Optimus laptop. The spill is the Shared Usage above the child's
+  baseline (its reading right after load, bounded by 128 MiB; a reading above 128 MiB is
+  one WARNING at a load and an INFO after a brake respawn). Warning at 256 MiB of spill,
+  critical at 1 GiB. PDH denied is one WARNING: spill detection is off, the RAM brake and
+  the window sized at spawn stand. On Linux there is no spill: an allocation that does
+  not fit fails, so the window is sized to fit, the engine never reads a spill there, and
+  the brake sees the RAM half alone.
+
+The level is the higher of the two; the resource at that level decides the attribution
+(VRAM on a tie: its lever, the window, is ours):
+
+| Dominant | KV share | Footprint share | Damage |
+|---|---|---|---|
+| VRAM (spill at warning or worse) | window × KV per token / VRAM | the child's dedicated + shared / VRAM | the spill itself: our bytes in system RAM pay the PCIe bus on every token |
+| RAM | 0: the KV is on the device, a smaller `-c` frees no RAM, so the notice is `external` and the window never moves | the child's anonymous memory / RAM | the paging since the previous sample |
+
+A calm spill is never damage (a stable small spill would otherwise count as a paging
+burst at every turn end). An unreadable RAM level does not turn the brake off while the
+spill reads. Under RAM pressure a full-offload child can still be unloaded after two idle
+criticals when its host share passes the 5 % gate: the unload frees its host commit (the
+CUDA runtime, cuBLAS workspaces, pinned buffers).
+
+**The QA seam** (`ERUDI_FORCE_MEMORY_PRESSURE`, never set in normal use): `warning` and
+`critical` force the RAM half, so on a full-offload child they draw the `external` notice
+and, under `critical` while the user is away, can drive the unload — never a shrink.
+`vram-warning` and `vram-critical` force the spill reading of `read_vram` to the healthy
+baseline plus the tier's threshold (256 MiB or 1 GiB above it; the dedicated VRAM stays
+the real one), so on Windows the spill path runs deterministically on a calm machine:
+a shrink at the turn end and a `-ngl -2` respawn once the user is away (warning), or a
+shrink and a respawn at the next turn boundary (critical), with the `acted` notice and
+the reload state. The forced spill is also seen at load (the spill-at-load WARNING, and
+possibly the device check's). On Linux the engine never reads the spill, so the VRAM
+values do nothing there.
+
+A child whose window Erudi did not size (the fallback shape) or that loaded partly on the
+GPU is never sampled: `brake_point` returns before any sensor is read, so nothing — not
+even the unload — acts on it.
+
+**Driver policy.** With the NVIDIA Control Panel's "Prefer No Sysmem Fallback", Windows
+fails an allocation like Linux: a `-ngl -2` respawn under a VRAM hog fails instead of spilling, the
+respawn degrades into the unload-shaped record (one WARNING), the next message reloads
+with `-ngl -1`, fit likely places the model partly on the GPU, and the brake stays off
+until a later load.
+
+**fit's probe pass** (a no-alloc model and context build) runs on every spawn, brake
+respawns included; it counts against the respawn's 30 s probe bound.
 
 `BaseLlamaCppEngine._find_llama_server` tries the configured flavour first and falls back
 to the other one: a CUDA-built artifact runs CPU inference fine, whereas the CPU artifact
@@ -520,10 +691,12 @@ it has been idle for longer than `_max_idle_time` (300 seconds, `base_engine.py`
 A generation in flight cannot be reaped because the idle tick (`_cleanup_tick`) takes the
 same lock as `generation_guard`, through the same `_acquire_generation_lock`: it waits until
 the generation releases the lock, by which point `_last_used` has been refreshed to the end
-of that generation. On Apple Silicon and on the CPU engine a second monitor, `start_pressure_task()`, takes
+of that generation. On every engine a second monitor, `start_pressure_task()`, takes
 the memory brake's idle samples every 60 seconds under the same lock (see
-[The memory brake (MLX)](#the-memory-brake-mlx) and [(CPU)](#the-memory-brake-cpu)); on
-CUDA it never starts (it starts only for an engine that overrides `brake_point`).
+[The memory brake (MLX)](#the-memory-brake-mlx), [(CPU)](#the-memory-brake-cpu) and
+[(CUDA)](#the-memory-brake-cuda)); it starts for an engine that overrides `brake_point`, and
+on CUDA a child whose window Erudi did not size, or that loaded partly on the GPU, is never
+sampled.
 
 ## Embeddings
 

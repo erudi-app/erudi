@@ -342,9 +342,10 @@ def _engine_overrides(engine: Any, hook_name: str) -> bool:
     memory-brake hook ``hook_name`` itself, rather than inheriting
     ``BaseEngine``'s no-op.
 
-    MLX implements all of them; the CPU engine implements the memory brake
-    and the turn's window (``brake_point``, ``begin_memory_window``); CUDA
-    implements none and must stay a strict no-op: no reset thread, no
+    MLX implements all of them; the CPU and CUDA engines implement the
+    memory brake and the turn's window (``brake_point``,
+    ``begin_memory_window``) and none of the prefix-cache hooks, which must
+    stay strict no-ops there: no reset thread, no
     ``BaseEngine._pending_reset`` -- so the runner calls ``run_reset_shielded``
     only for an engine that overrides the hook. An override anywhere in the
     engine's class hierarchy counts.
@@ -1090,9 +1091,10 @@ DECODE_TIMEOUT_MESSAGE = (
 # or shifts the conversation to make it fit. The turn names what limits the
 # conversation: the MEMORY wording when the limit the engine refused on is the
 # memory bound of the loaded child (``BaseEngine.memory_bound_tokens``: the
-# bound the MLX child enforces, or the window the CPU engine sized from the
-# RAM budget), the model-window wording otherwise (CUDA, a model whose own
-# window binds, a failed memory bound, an inherited ``MAX_KV_SIZE``).
+# bound the MLX child enforces, or the window a llama.cpp engine sized from
+# its memory budget: RAM on CPU, VRAM on CUDA), the model-window wording
+# otherwise (a model whose own window binds, a window llama-server's fit
+# chose, a failed memory bound, an inherited ``MAX_KV_SIZE``).
 CONTEXT_OVERFLOW_MESSAGE_TEMPLATE = (
     f"{ERROR_SENTINEL} This conversation no longer fits the model's context window "
     "(the request needs about {prompt_tokens} tokens; the window holds {context_tokens}). "

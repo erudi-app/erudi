@@ -237,8 +237,12 @@ Expected relative throughput for a similarly sized model:
 
 - **Apple Silicon** uses unified memory shared between CPU and GPU, which is why a Mac
   can hold a larger model than its GPU-only equivalent.
-- **NVIDIA** uses dedicated VRAM; the CUDA engine offloads as many layers as fit and
-  leaves the rest on the CPU.
+- **NVIDIA** uses dedicated VRAM. The CUDA engine gives the model the context window the
+  card's free memory affords with the whole model on the GPU (at most 90 % of the VRAM, minus
+  a safety margin), and llama.cpp keeps on the CPU only the layers that still do not fit. On
+  Windows, when another app crowds the card and the driver starts spilling the model into
+  system memory, the engine restarts it with a smaller window (see
+  [Engines](../dev/architecture/engines.md#the-window-on-the-cuda-engine)).
 - **CPU** uses system RAM only. The CPU engine gives the model the context window its RAM
   affords — at most three quarters of it for the model and that window together — and
   restarts it with a smaller window when other apps put the computer under memory pressure

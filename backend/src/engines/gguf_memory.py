@@ -37,17 +37,23 @@ build does not ship it, and the engines must import without it.
 A hybrid recurrent architecture declares 0 KV heads on its recurrent layers,
 which the per-layer sum counts as 0; their fixed per-sequence state rides in
 ``LLAMA_COMPUTE_FIXED_BYTES`` and the 25 % of RAM the budget leaves untouched.
+
+The CUDA engine reads the same header (``read_sizing_inputs``; the shape also
+keeps the attention heads, the sliding-window layer pattern and the ALiBi bias
+it needs) and the tensor infos (``read_tensor_bytes``: ``token_embd`` and the
+MoE experts) for its own window and placement check (``cuda_memory``).
 """
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Mapping, Optional, Tuple, Union
 
 from src.core.logging import logger
 from src.engines.memory_brake import LLAMA_CTX_PAD_TOKENS
-from src.engines.memory_budget import _KV_BYTES_PER_VALUE, artifact_bytes
+from src.engines.memory_budget import _KV_BYTES_PER_VALUE, artifact_bytes, gguf_family_parts
 from src.engines.working_window import MIN_KV_BOUND_TOKENS
 
 _MIB = 1024**2
@@ -89,6 +95,15 @@ class GgufShape:
     value_length: Tuple[int, ...]
     sliding_window: Optional[int] = None
     kv_lora_rank: Optional[int] = None
+    # The attention heads per layer (empty when the header omits them): the
+    # CUDA engine's non-Flash-Attention compute slope.
+    head_count: Tuple[int, ...] = ()
+    # ``attention.sliding_window_pattern``: a period (llama.cpp's
+    # ``set_swa_pattern``) or one flag per layer (True: sliding window);
+    # None when the header carries none.
+    sliding_window_pattern: Optional[Union[int, Tuple[bool, ...]]] = None
+    # ``attention.max_alibi_bias`` (ALiBi), None when absent.
+    max_alibi_bias: Optional[float] = None
 
     @property
     def swa_overestimated(self) -> bool:
@@ -163,6 +178,7 @@ def shape_from_fields(fields: Mapping[str, Any]) -> Optional[GgufShape]:
         return None
     sliding = _count(fields.get("sliding_window"))
     lora = _count(fields.get("kv_lora_rank"))
+    alibi = fields.get("max_alibi_bias")
     return GgufShape(
         architecture=architecture,
         block_count=layers,
@@ -172,7 +188,24 @@ def shape_from_fields(fields: Mapping[str, Any]) -> Optional[GgufShape]:
         value_length=values,
         sliding_window=sliding or None,
         kv_lora_rank=lora or None,
+        head_count=heads or (),
+        sliding_window_pattern=_swa_pattern(fields.get("sliding_window_pattern"), layers),
+        max_alibi_bias=(
+            float(alibi)
+            if isinstance(alibi, (int, float)) and not isinstance(alibi, bool)
+            else None
+        ),
     )
+
+
+def _swa_pattern(value: Any, layers: int) -> Optional[Union[int, Tuple[bool, ...]]]:
+    """A period as is, a per-layer flag list of the right length as booleans;
+    None otherwise (unreadable is never guessed)."""
+    if isinstance(value, (list, tuple)):
+        if len(value) != layers or not all(isinstance(item, (bool, int)) for item in value):
+            return None
+        return tuple(bool(item) for item in value)
+    return _count(value)
 
 
 def kv_bytes_per_token(shape: Optional[GgufShape]) -> Optional[int]:
@@ -216,19 +249,91 @@ def read_shape(gguf_path: Union[str, Path]) -> GgufShape:
             "value_length": value(Keys.Attention.VALUE_LENGTH.format(arch=arch)),
             "sliding_window": value(Keys.Attention.SLIDING_WINDOW.format(arch=arch)),
             "kv_lora_rank": value(Keys.Attention.KV_LORA_RANK.format(arch=arch)),
+            "sliding_window_pattern": value(
+                Keys.Attention.SLIDING_WINDOW_PATTERN.format(arch=arch)
+            ),
+            "max_alibi_bias": value(Keys.Attention.MAX_ALIBI_BIAS.format(arch=arch)),
         }
     finally:
-        mmap = getattr(getattr(reader, "data", None), "_mmap", None)
-        if mmap is not None:
-            try:
-                mmap.close()
-            except (BufferError, ValueError):
-                # A view still exported: the map closes with the reader.
-                pass
+        _close_reader(reader)
     shape = shape_from_fields(fields)
     if shape is None:
         raise ValueError("the KV header misses an essential field")
     return shape
+
+
+def _close_reader(reader: Any) -> None:
+    """Close a ``GGUFReader``'s memmap: an open map locks the file on
+    Windows."""
+    mmap = getattr(getattr(reader, "data", None), "_mmap", None)
+    if mmap is not None:
+        try:
+            mmap.close()
+        except (BufferError, ValueError):
+            # A view still exported: the map closes with the reader.
+            pass
+
+
+@dataclass(frozen=True)
+class TensorBytes:
+    """The tensors a full CUDA offload may legitimately keep off the device."""
+
+    # ``token_embd.weight``: the input embedding stays on the CPU
+    # (llama-model.cpp:1508, b10883).
+    tok_embd_bytes: int
+    # The MoE expert tensors, which fit moves to system memory before it
+    # drops a layer (fit.cpp:522, :617).
+    exps_bytes: int
+
+
+# fit.cpp's MoE tensor pattern (b10883): ``blk.<il>.ffn_(up|down|gate_up|gate)_(ch|)exps``.
+_EXPS_TENSOR_RE = re.compile(r"blk\.\d+\.ffn_(up|down|gate_up|gate)_(ch|)exps")
+
+
+def read_tensor_bytes(gguf_path: Union[str, Path]) -> TensorBytes:
+    """The bytes of ``token_embd.weight`` and of the MoE expert tensors,
+    summed over every part of a split family (one ``GGUFReader`` pass per
+    part, each memmap closed after it). Raises on an unreadable file or a
+    missing ``gguf`` package."""
+    from gguf import GGUFReader
+
+    tok_embd = exps = 0
+    for part in gguf_family_parts(Path(gguf_path)):
+        reader = GGUFReader(str(part))
+        try:
+            for tensor in reader.tensors:
+                if tensor.name == "token_embd.weight":
+                    tok_embd += int(tensor.n_bytes)
+                elif _EXPS_TENSOR_RE.match(tensor.name):
+                    exps += int(tensor.n_bytes)
+        finally:
+            _close_reader(reader)
+    return TensorBytes(tok_embd_bytes=tok_embd, exps_bytes=exps)
+
+
+def read_sizing_inputs(
+    gguf_path: Union[str, Path], mmproj_path: Optional[Path] = None
+) -> Optional[Tuple[GgufShape, int]]:
+    """The shape of ``gguf_path`` and the weights the engine loads with it
+    (every part of a split family, its mmproj when one is loaded). ``None``
+    -- one WARNING -- when either cannot be read: the engine then passes no
+    ``-c`` and llama-server's own fit sizes the window. Never raises."""
+    try:
+        shape = read_shape(gguf_path)
+    except Exception as exc:
+        # Degraded to llama-server's own fit: the model still loads.
+        logger.warning(
+            f"GGUF shape unreadable at {gguf_path} ({type(exc).__name__}); "
+            f"llama-server sizes the window itself"
+        )
+        return None
+    weights = artifact_bytes(Path(gguf_path))
+    if weights is None:
+        logger.warning(f"GGUF size unreadable at {gguf_path}; llama-server sizes the window itself")
+        return None
+    if mmproj_path is not None:
+        weights += artifact_bytes(mmproj_path) or 0
+    return shape, weights
 
 
 def window_for(
@@ -281,21 +386,10 @@ def spawn_window(
     if not total_ram_bytes:
         logger.warning("Physical RAM unreadable; llama-server sizes the window itself")
         return None
-    try:
-        shape = read_shape(gguf_path)
-    except Exception as exc:
-        # Degraded to llama-server's own fit: the model still loads.
-        logger.warning(
-            f"GGUF shape unreadable at {gguf_path} ({type(exc).__name__}); "
-            f"llama-server sizes the window itself"
-        )
+    inputs = read_sizing_inputs(gguf_path, mmproj_path)
+    if inputs is None:
         return None
-    weights = artifact_bytes(Path(gguf_path))
-    if weights is None:
-        logger.warning(f"GGUF size unreadable at {gguf_path}; llama-server sizes the window itself")
-        return None
-    if mmproj_path is not None:
-        weights += artifact_bytes(mmproj_path) or 0
+    shape, weights = inputs
     window = window_for(
         shape, weights_bytes=weights, total_ram_bytes=total_ram_bytes, brake_cap=brake_cap
     )
