@@ -107,13 +107,17 @@ from src.engines.memory_brake import (
     POINT_TURN_START,
 )
 from src.engines.memory_budget import MemoryBudget
-from src.engines.working_window import COMPACTION_WINDOW_FRACTION, canonical_working_window
+from src.engines.working_window import canonical_working_window, trigger_tokens
 
 if TYPE_CHECKING:
     from langgraph.checkpoint.base import BaseCheckpointSaver
 
 
-# Auto-summarization (compaction) fires at 80 % of the WORKING window, the
+# Auto-summarization (compaction) fires at the conversation's compaction
+# threshold (#607: a whole percent from 50 to 90, 80 by default, copied from
+# the global default at creation) of the WORKING window, through ONE helper
+# (``src.engines.working_window.trigger_tokens``, which also always leaves the
+# answer the output budget's floor and margin). The working window is the
 # smaller of two values recomputed PER TURN (``_build_middleware`` runs after
 # the child spawned, so both are fresh):
 #   1. the ALLOCATED context window (``BaseEngine.effective_context_tokens``;
@@ -170,15 +174,23 @@ MEMORY_WARNING_FRACTION = 0.85
 # token pressure the only trigger, a count of kept messages cannot re-fire
 # anything, so a message cap on top would only discard recent context that
 # fits the budget and bring the next compaction sooner.
-# The budget leaves room for the summary and a margin under the trigger, so
-# with ordinary messages the post-compaction state stays under
-# ``0.8 W - 256`` for every window and the next turn does not re-fire it (the
-# exceptions ``compaction_cutoff`` documents keep more): ``max(1, min(0.4 W,
-# 0.8 W - summary_cap(W) - 256))`` (non-positive below ~480 tokens, hence the
-# floor of one token). 0.4 is a design value, not a measurement: it trades
-# kept detail for room to grow before the next compaction.
+# The budget leaves room for the summary and a margin under the trigger T
+# (``trigger_tokens(W, pct)``), so with ordinary messages the post-compaction
+# state stays under ``T - margin`` for every window and threshold and the next
+# turn does not re-fire it (the exceptions ``compaction_cutoff`` documents
+# keep more): ``max(1, min(0.4 W, T - summary_cap(W) - margin))`` with
+# ``margin = max(256, T // 5)``. Below 1172 tokens the trigger is ``W - 768``
+# at every threshold, and that room is non-positive (or a single token): the
+# keep falls to its floor of one token. The margin scales with the trigger so
+# a low threshold still leaves room to grow: at 50 % of a 4096-token window a
+# compaction leaves ~410 tokens under the trigger -- the next one comes about
+# a turn or two later --, ~820 at 8192. At 80 % the keep is unchanged for a
+# window of 2229 tokens or more (the 0.4 W bound binds there). 0.4 is a
+# design value, not a measurement: it trades kept detail for room to grow
+# before the next compaction.
 KEEP_FRACTION = 0.4
 POST_COMPACTION_MARGIN_TOKENS = 256
+POST_COMPACTION_MARGIN_DIVISOR = 5
 
 # The summary's own length is BOUNDED: the summary client is built with
 # ``max_tokens = summary_cap(W)`` and no automatic output budget (which would
@@ -190,8 +202,8 @@ SUMMARY_CAP_CEILING_TOKENS = 1024
 # How much history the summarizer reads. LangChain trims what it summarizes to
 # 4000 tokens by default (strategy "last"), so with a big window the previous
 # summary would fall out of the summarizer's input and its facts would be lost
-# at every compaction. With a known window the budget is
-#   max(256, min(max(4000, 0.8 W - cap),
+# at every compaction. With a known window and its trigger T the budget is
+#   max(256, min(max(4000, T - cap),
 #                W - 2 cap - 256,
 #                (W_alloc - 2 cap - 512) // 2))
 # -- the second term keeps the summarizer prompt (input + the prepended
@@ -227,14 +239,15 @@ SUMMARY_LATER_LOST = "Later messages of this conversation could not be summarize
 SUMMARY_EARLIER_LOST = "Earlier messages of this conversation could not be summarized."
 
 
-def summarization_triggers(working_window: Optional[int]) -> list:
+def summarization_triggers(working_window: Optional[int], pct: int) -> list:
     """The one-clause trigger list for ``SummarizationMiddleware``.
 
     ``working_window`` is the ONE canonical working context window
     (``src.engines.working_window.canonical_working_window`` -- the minimum of
     the allocated window and the memory ceiling, over whichever candidates are
-    known). With a known window its 80 % (``COMPACTION_WINDOW_FRACTION``) is
-    the only trigger: token pressure. The memory fold happens at the call
+    known). With a known window, ``trigger_tokens(W, pct)`` -- ``pct`` is the
+    conversation's compaction threshold -- is the only trigger: token
+    pressure. The memory fold happens at the call
     site, so this function sees a single value: ``None`` (no window and no
     memory ceiling), like any non-positive or non-int value, leaves the
     ``SUMMARY_TRIGGER_MESSAGES`` message fallback alone.
@@ -245,17 +258,23 @@ def summarization_triggers(working_window: Optional[int]) -> list:
     ``count + O`` in real tokens (``_should_summarize``).
     """
     if _known_window(working_window):
-        return [("tokens", max(1, int(COMPACTION_WINDOW_FRACTION * working_window)))]
+        return [("tokens", trigger_tokens(working_window, pct))]
     return [("messages", SUMMARY_TRIGGER_MESSAGES)]
 
 
-def _close_memory_window(engine: Any, token: Any, *, abandoned: bool) -> None:
-    """Close the turn's memory measurement window; a failure costs the
-    observation, never the turn (one WARNING)."""
+def _close_memory_window(
+    engine: Any, token: Any, *, abandoned: bool, compaction_threshold: Optional[int]
+) -> None:
+    """Close the turn's memory measurement window, with the compaction
+    threshold the turn ran at (``None``: an arena turn) -- the memory brake
+    judges the turn's largest request against that trigger. A failure costs
+    the observation, never the turn (one WARNING)."""
     if token is None:
         return
     try:
-        engine.end_memory_window(token, abandoned=abandoned)
+        engine.end_memory_window(
+            token, abandoned=abandoned, compaction_threshold=compaction_threshold
+        )
     except Exception:
         logger.warning("Closing the memory measurement window failed", exc_info=True)
 
@@ -436,18 +455,20 @@ def summary_cap(working_window: int) -> int:
     return max(SUMMARY_CAP_FLOOR_TOKENS, min(SUMMARY_CAP_CEILING_TOKENS, working_window // 8))
 
 
-def keep_token_budget(working_window: int) -> int:
-    """Tokens a compaction may keep: ``max(1, min(0.4 W, 0.8 W - cap - 256))``."""
-    room_under_trigger = (
-        int(COMPACTION_WINDOW_FRACTION * working_window)
-        - summary_cap(working_window)
-        - POST_COMPACTION_MARGIN_TOKENS
-    )
+def keep_token_budget(working_window: int, pct: int) -> int:
+    """Tokens a compaction may keep at threshold ``pct``:
+    ``max(1, min(0.4 W, T - cap - max(256, T // 5)))``, ``T`` the trigger."""
+    trigger = trigger_tokens(working_window, pct)
+    margin = max(POST_COMPACTION_MARGIN_TOKENS, trigger // POST_COMPACTION_MARGIN_DIVISOR)
+    room_under_trigger = trigger - summary_cap(working_window) - margin
     return max(1, min(int(KEEP_FRACTION * working_window), room_under_trigger))
 
 
-def summarize_trim_budget(working_window: Optional[int], allocated_window: Optional[int]) -> int:
-    """Tokens of history the summarizer reads (see the constants above).
+def summarize_trim_budget(
+    working_window: Optional[int], allocated_window: Optional[int], pct: int
+) -> int:
+    """Tokens of history the summarizer reads at threshold ``pct`` (see the
+    constants above).
 
     No known working window: LangChain's own 4000. The allocated-window term
     is dropped when the allocation is unknown.
@@ -456,7 +477,7 @@ def summarize_trim_budget(working_window: Optional[int], allocated_window: Optio
         return SUMMARY_TRIM_DEFAULT_TOKENS
     cap = summary_cap(working_window)
     terms = [
-        max(SUMMARY_TRIM_DEFAULT_TOKENS, int(COMPACTION_WINDOW_FRACTION * working_window) - cap),
+        max(SUMMARY_TRIM_DEFAULT_TOKENS, trigger_tokens(working_window, pct) - cap),
         working_window - 2 * cap - SUMMARY_TRIM_MEMORY_MARGIN_TOKENS,
     ]
     if _known_window(allocated_window):
@@ -472,6 +493,7 @@ def compaction_cutoff(
     working_window: Optional[int],
     counter: Any,
     *,
+    pct: int,
     overhead: int = 0,
     allocated_window: Optional[int] = None,
 ) -> int:
@@ -481,10 +503,11 @@ def compaction_cutoff(
     the amber-warning projection (which has no middleware instance).
     ``counter`` counts real tokens as sent; ``overhead`` is O, what the
     request carries beyond the state (system prompt, KB block, tool schemas),
-    already scaled.
+    already scaled. ``pct`` is the conversation's compaction threshold: the
+    keep budget and the futility guard read the trigger through it.
 
     1. With a known window, the token cutoff alone: the earliest suffix that
-       fits ``max(1, keep_token_budget(W) - O)`` tokens, however many
+       fits ``max(1, keep_token_budget(W, pct) - O)`` tokens, however many
        messages that is (token pressure is the only trigger there, so a
        count bound is not needed). Without a window, the message cutoff
        alone: the last ``SUMMARY_KEEP_MESSAGES`` messages, the fallback
@@ -514,10 +537,12 @@ def compaction_cutoff(
        summary), nothing is: re-summarizing a summary alone adds nothing and
        would reset the prefix cache for nothing.
     6. Futility guard -- only with a known window, where the token trigger is
-       the only trigger, and only when it fired (``count + O >= 0.8 W``; the
-       amber-warning projection also asks below it): a compaction whose gain
-       ``count(all) - count(kept) - summary_cap(W)`` is below
-       ``POST_COMPACTION_MARGIN_TOKENS`` (256) -- nothing at all included --
+       the only trigger, and only when it fired (``count + O >=
+       trigger_tokens(W, pct)``; the amber-warning projection also asks below
+       it): a compaction whose gain ``count(all) - count(kept) -
+       summary_cap(W)`` is below ``POST_COMPACTION_MARGIN_TOKENS`` (256, the
+       keep margin's floor in a different role: the smallest gain worth a
+       summary call, whatever the threshold) -- nothing at all included --
        is skipped unless the request would overflow without it: against the
        allocated window (``O + count + 512 > W_alloc``, the output budget's
        floor) or the working window (``O + count > W``). A small gain is not
@@ -546,7 +571,7 @@ def compaction_cutoff(
     safe_point = SummarizationMiddleware._find_safe_cutoff_point
     last_human = last_human_index(messages)
     if _known_window(working_window):
-        keep_budget = max(1, keep_token_budget(working_window) - overhead)
+        keep_budget = max(1, keep_token_budget(working_window, pct) - overhead)
         cutoff = _token_cutoff(messages, keep_budget, counter)
         if (
             last_human is not None
@@ -599,13 +624,15 @@ def compaction_cutoff(
         return 0
     if cutoff > 0 and _known_window(working_window):
         total = counter(messages)
-        threshold = max(1, int(COMPACTION_WINDOW_FRACTION * working_window))
-        if total + overhead >= threshold:
+        if total + overhead >= trigger_tokens(working_window, pct):
             gain = total - counter(messages[cutoff:]) - summary_cap(working_window)
             overflows = overhead + total > working_window or (
                 _known_window(allocated_window)
                 and overhead + total + OUTPUT_BUDGET_FLOOR_TOKENS > allocated_window
             )
+            # The keep margin's 256-token floor, in another role: the
+            # smallest gain worth a summary call. It does not scale with the
+            # threshold.
             if gain < POST_COMPACTION_MARGIN_TOKENS and not overflows:
                 return 0
     return cutoff
@@ -774,14 +801,18 @@ def _summarization_middleware_class():
         * the summarizer input always carries the previous summary, reads
           past tool results as their markers, and a failed summary call never
           erases memory (``_acreate_summary``);
+        * the trigger, the keep and the futility guard are sized at the
+          conversation's ``compaction_threshold`` (#607);
         * the ONE aggregate log line the QA spec promises ("backend.log
-          records the summarization"). ASCII, INFO: the app did its job.
+          records the summarization"), with the threshold it ran at. ASCII,
+          INFO: the app did its job.
         """
 
         def __init__(
             self,
             *,
             working_window: Optional[int],
+            compaction_threshold: int,
             engine: Any,
             allocated_window: Optional[int] = None,
             overhead: Optional[RequestOverhead] = None,
@@ -795,6 +826,7 @@ def _summarization_middleware_class():
             self._overhead = 0
             super().__init__(token_counter=self._real_count, **kwargs)
             self.working_window = working_window
+            self.compaction_threshold = compaction_threshold
             self.allocated_window = allocated_window
             self.engine = engine
 
@@ -825,6 +857,7 @@ def _summarization_middleware_class():
                 messages,
                 self.working_window,
                 self._real_count,
+                pct=self.compaction_threshold,
                 overhead=self._overhead,
                 allocated_window=self.allocated_window,
             )
@@ -957,11 +990,11 @@ def _summarization_middleware_class():
                 return None
             return summary
 
-        @staticmethod
-        def _compacted(messages_to_summarize, summary):
+        def _compacted(self, messages_to_summarize, summary):
             logger.info(
                 f"Conversation compacted: {len(messages_to_summarize)} message(s) "
-                f"summarized into {len(summary or '')} chars"
+                f"summarized into {len(summary or '')} chars, "
+                f"threshold={self.compaction_threshold}%"
             )
             return summary
 
@@ -1330,6 +1363,7 @@ class AgentRunner:
         context: Optional[Any] = None,
         supports_vision: Optional[bool] = None,
         effort_plan: Optional[EffortPlan] = None,
+        compaction_threshold: Optional[int] = None,
         emit_events: bool = False,
     ) -> AsyncIterator:
         """Project the turn's event stream (:meth:`_astream_events`).
@@ -1342,6 +1376,12 @@ class AgentRunner:
         in str mode the sentinel is yielded exactly as before (the conversation
         service maps it to an ``error`` event on the wire; DB persistence
         unchanged).
+
+        ``compaction_threshold`` is the conversation's compaction threshold
+        (#607, a whole percent): required with ``summarize=True``, where it
+        sizes the trigger, the keep and the futility guard; it also reaches
+        the memory brake with the turn's measurement. ``None`` on a turn that
+        never compacts (arena).
         """
         # ``aclosing``: closing THIS generator closes the capture loop (and,
         # through it, LangGraph) right away, inside the generation guard.
@@ -1359,6 +1399,7 @@ class AgentRunner:
                 context=context,
                 supports_vision=supports_vision,
                 effort_plan=effort_plan,
+                compaction_threshold=compaction_threshold,
             )
         ) as events:
             async for event in events:
@@ -1382,6 +1423,7 @@ class AgentRunner:
         context: Optional[Any] = None,
         supports_vision: Optional[bool] = None,
         effort_plan: Optional[EffortPlan] = None,
+        compaction_threshold: Optional[int] = None,
     ) -> AsyncIterator[dict]:
         """The single capture loop: structured events for the whole turn (#90).
 
@@ -1399,6 +1441,10 @@ class AgentRunner:
         wire event while still accumulating the sentinel STRING for persistence
         (DB behavior unchanged per #225-D4); arena yields it as plain text.
         """
+        if summarize and compaction_threshold is None:
+            # A caller contract, not a turn failure: a compacting turn must
+            # say at which share of the window it compacts.
+            raise ValueError("compaction_threshold is required when summarize=True")
         # Deferred (#160): first turn pays the agent-stack import, boot doesn't.
         from langchain.agents import create_agent
         from langchain_core.messages import HumanMessage
@@ -1514,7 +1560,12 @@ class AgentRunner:
                     else None
                 )
                 middleware = (
-                    self._build_middleware(summary_model, budget, overhead=overhead)
+                    self._build_middleware(
+                        summary_model,
+                        budget,
+                        overhead=overhead,
+                        compaction_threshold=compaction_threshold,
+                    )
                     if summarize
                     else []
                 )
@@ -1599,7 +1650,11 @@ class AgentRunner:
                 turn_memory_finished = True
                 if memory_token is not None:
                     await run_in_threadpool(
-                        _close_memory_window, engine, memory_token, abandoned=False
+                        _close_memory_window,
+                        engine,
+                        memory_token,
+                        abandoned=False,
+                        compaction_threshold=compaction_threshold,
                     )
                 if _engine_overrides(engine, "brake_point"):
                     await run_reset_shielded(functools.partial(engine.brake_point, POINT_TURN_END))
@@ -1879,6 +1934,7 @@ class AgentRunner:
                                     ),
                                     allocated_window=allocated_window,
                                     engine=engine,
+                                    compaction_threshold=compaction_threshold,
                                 )
                             if budget is not None and budget.used_fraction(0) is not None:
                                 _track_memory_warning(engine, thread_id, warning is not None)
@@ -2029,7 +2085,12 @@ class AgentRunner:
                 # Synchronous on purpose: the exit in flight (a closed
                 # consumer, a cancellation) must not wait on a thread. It
                 # reads two process counters and writes one small file.
-                _close_memory_window(engine, memory_token, abandoned=True)
+                _close_memory_window(
+                    engine,
+                    memory_token,
+                    abandoned=True,
+                    compaction_threshold=compaction_threshold,
+                )
                 if stateful:
                     # The cancelled model node never committed this turn's
                     # answer: close the turn in the thread state, inside the
@@ -2141,7 +2202,12 @@ class AgentRunner:
                     yield event["text"]
 
     def _build_middleware(
-        self, model, memory_budget=None, *, overhead: Optional[RequestOverhead] = None
+        self,
+        model,
+        memory_budget=None,
+        *,
+        overhead: Optional[RequestOverhead] = None,
+        compaction_threshold: int,
     ):
         """Auto-summarization using the SAME local model, on token pressure.
 
@@ -2158,7 +2224,8 @@ class AgentRunner:
         ``summary_cap(W)`` tokens.
 
         With a known working window the middleware triggers on token pressure
-        alone (80 % of the window), keeps a TOKEN budget (``compaction_cutoff``)
+        alone (``trigger_tokens(W, compaction_threshold)``: the conversation's
+        share of the window, #607), keeps a TOKEN budget (``compaction_cutoff``)
         and reads up to ``summarize_trim_budget`` tokens of history; without one it
         falls back to the message pair -- it triggers at
         ``SUMMARY_TRIGGER_MESSAGES`` messages and keeps the last
@@ -2175,7 +2242,7 @@ class AgentRunner:
 
         allocated_window, working_window = self._compaction_windows(memory_budget)
         keep = (
-            ("tokens", keep_token_budget(working_window))
+            ("tokens", keep_token_budget(working_window, compaction_threshold))
             if _known_window(working_window)
             else ("messages", SUMMARY_KEEP_MESSAGES)
         )
@@ -2184,11 +2251,14 @@ class AgentRunner:
             _StripStaleToolResults(),
             _summarization_middleware_class()(
                 model=model,
-                trigger=summarization_triggers(working_window),
+                trigger=summarization_triggers(working_window, compaction_threshold),
                 keep=keep,
                 summary_prompt=SUMMARY_PROMPT,
-                trim_tokens_to_summarize=summarize_trim_budget(working_window, allocated_window),
+                trim_tokens_to_summarize=summarize_trim_budget(
+                    working_window, allocated_window, compaction_threshold
+                ),
                 working_window=working_window,
+                compaction_threshold=compaction_threshold,
                 allocated_window=allocated_window,
                 overhead=overhead,
                 engine=config.LLM_Engine,
@@ -2232,6 +2302,7 @@ class AgentRunner:
         *,
         overhead: Optional[RequestOverhead] = None,
         allocated_window: Optional[int] = None,
+        compaction_threshold: int,
     ) -> Optional[tuple[int, int]]:
         """``(projected_tokens, conversation_tokens)`` of the NEXT request,
         or ``None`` on an empty thread.
@@ -2252,10 +2323,14 @@ class AgentRunner:
         ``O + count(kept) + summary_cap(W)``; otherwise ``O + count(all)`` --
         no summary is added when nothing would be compacted. The projection
         does not check whether the trigger fires: between the keep budget
-        (about ``0.4 W``) and ``0.8 W`` it projects a compaction the next
-        request will not run yet. That request is then under ``0.8 W``,
-        below the 85 % threshold, so the projection can warn up to one turn
-        early, never late.
+        (about ``0.4 W``) and the trigger ``T`` (``trigger_tokens(W,
+        compaction_threshold)``) it projects a compaction the next request
+        will not run yet. Up to an 85 % threshold that request is then under
+        ``T``, below the warning's 85 %, so the projection can warn up to one
+        turn early, never late. At 90 % a next request between 85 % and ``T``
+        is not compacted yet, and the projection still counts the compaction
+        the threshold will run: the warning speaks of what compaction cannot
+        save, never of growth the user's threshold allows.
         ``conversation_tokens`` is ``O + count(all)``, the request before any
         compaction.
         """
@@ -2285,6 +2360,7 @@ class AgentRunner:
             projected,
             working_window,
             counter,
+            pct=compaction_threshold,
             overhead=fixed,
             allocated_window=allocated_window,
         )
@@ -2305,6 +2381,7 @@ class AgentRunner:
         overhead: Optional[RequestOverhead] = None,
         allocated_window: Optional[int] = None,
         engine: Any = None,
+        compaction_threshold: int,
     ) -> Optional[dict]:
         """The ``memory_warning`` event for this turn, or ``None``.
 
@@ -2338,6 +2415,7 @@ class AgentRunner:
                 working_window,
                 overhead=overhead,
                 allocated_window=allocated_window,
+                compaction_threshold=compaction_threshold,
             )
             if projection is None:
                 return None

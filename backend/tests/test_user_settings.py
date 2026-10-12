@@ -180,6 +180,7 @@ class TestUserSettingsEndpoints:
             "auto_update_enabled": True,
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
+            "default_compaction_threshold": 80,
         }
 
     def test_put_updates_and_persists(self, client):
@@ -191,6 +192,7 @@ class TestUserSettingsEndpoints:
             "auto_update_enabled": True,
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
+            "default_compaction_threshold": 80,
         }
         assert client.get("/erudi/user_settings/").json() == {
             "web_search_enabled": True,
@@ -198,6 +200,7 @@ class TestUserSettingsEndpoints:
             "auto_update_enabled": True,
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
+            "default_compaction_threshold": 80,
         }
 
     def test_put_back_to_false(self, client):
@@ -225,6 +228,7 @@ class TestUserSettingsEndpoints:
             "auto_update_enabled": True,
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
+            "default_compaction_threshold": 80,
         }
 
     def test_put_web_search_leaves_language_untouched(self, client):
@@ -236,6 +240,7 @@ class TestUserSettingsEndpoints:
             "auto_update_enabled": True,
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
+            "default_compaction_threshold": 80,
         }
 
     @pytest.mark.parametrize("code", ["de", "EN", "fr-FR", "", 42])
@@ -267,6 +272,7 @@ class TestUserSettingsEndpoints:
             "auto_update_enabled": False,
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
+            "default_compaction_threshold": 80,
         }
 
     def test_put_auto_update_back_on(self, client):
@@ -299,6 +305,7 @@ class TestUserSettingsEndpoints:
             "auto_update_enabled": True,
             "inference_backend": "cpu",
             "default_reasoning_effort": "medium",
+            "default_compaction_threshold": 80,
         }
 
     @pytest.mark.parametrize("value", ["gpu", "cuda", "CPU", "", 1])
@@ -329,6 +336,7 @@ class TestUserSettingsEndpoints:
             "auto_update_enabled": True,
             "inference_backend": "auto",
             "default_reasoning_effort": "none",
+            "default_compaction_threshold": 80,
         }
 
     def test_put_rejects_a_value_that_is_not_a_boolean(self, client):

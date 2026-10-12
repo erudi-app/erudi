@@ -1073,7 +1073,9 @@ class MLX_Engine(BaseChatServerEngine):
         window["in_flight"] = {"seq": window["seq"], "n_est": int(estimated_prompt_tokens or 0)}
 
     @classmethod
-    def end_memory_window(cls, token: Any, *, abandoned: bool = False) -> Optional[Dict[str, Any]]:
+    def end_memory_window(
+        cls, token: Any, *, abandoned: bool = False, compaction_threshold: Optional[int] = None
+    ) -> Optional[Dict[str, Any]]:
         """Close the window and record the turn's observation; returns it, or
         ``None`` when nothing could be recorded.
 
@@ -1090,6 +1092,10 @@ class MLX_Engine(BaseChatServerEngine):
         estimate of the call in flight (``n_est``: an abandoned turn, or one
         that recovered from an error before any usage arrived, such as a
         first-chunk timeout); a turn with neither keeps the previous value.
+        ``compaction_threshold`` -- the threshold of the conversation that
+        sent it, ``None`` for an arena turn -- is written beside it, to
+        ``handle["last_request_threshold"]``, and only then: the pair stays
+        the request of one turn and the trigger it is judged against.
         The memory brake shrinks the window only when the next turn would
         compact under it, and a missing SPI or base must not hide that."""
         import time
@@ -1130,6 +1136,7 @@ class MLX_Engine(BaseChatServerEngine):
         largest_request = n if n is not None else n_est
         if largest_request is not None:
             handle["last_request_tokens"] = largest_request
+            handle["last_request_threshold"] = compaction_threshold
         base = handle.get("base_footprint_bytes")
         if not window.get("spi_started") or base is None:
             return None
@@ -1300,6 +1307,7 @@ class MLX_Engine(BaseChatServerEngine):
                 swapped_pages=swapped,
                 excess_bytes=excess,
                 last_request_tokens=handle.get("last_request_tokens"),
+                compaction_threshold=handle.get("last_request_threshold"),
                 last_used=(
                     cls._last_used.timestamp() if isinstance(cls._last_used, datetime) else None
                 ),

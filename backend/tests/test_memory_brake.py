@@ -31,7 +31,7 @@ from src.engines.memory_brake import (
     Sample,
     step,
 )
-from src.engines.working_window import COMPACTION_WINDOW_FRACTION, MIN_KV_BOUND_TOKENS
+from src.engines.working_window import MIN_KV_BOUND_TOKENS, trigger_tokens
 
 pytestmark = pytest.mark.unit
 
@@ -398,7 +398,7 @@ def test_a_shrink_never_goes_under_the_floor():
 
 def test_a_shrink_only_when_the_next_turn_compacts():
     new = int(W * SHRINK_FACTOR)
-    threshold = COMPACTION_WINDOW_FRACTION * new
+    threshold = trigger_tokens(new, 80)
     under = _one(point=mb.POINT_TURN_END, last_request_tokens=int(threshold) - 1)
     assert under.cap_change is None
     assert under.state.cap is None
@@ -406,6 +406,27 @@ def test_a_shrink_only_when_the_next_turn_compacts():
     assert unknown.cap_change is None
     useful = _one(point=mb.POINT_TURN_END, last_request_tokens=int(threshold) + 1)
     assert useful.cap_change == "shrink"
+
+
+def test_a_shrink_judges_the_last_request_at_its_conversations_threshold():
+    # The last request belongs to a conversation compacting at its own share
+    # of the window (#607): the shrink is useful when THAT trigger fires
+    # under the shrunk window. None -- an arena turn, a handle no turn has
+    # stamped yet -- is the default, 80 %.
+    new = int(W * SHRINK_FACTOR)
+    between = (trigger_tokens(new, 50) + trigger_tokens(new, 80)) // 2
+    at_default = _one(point=mb.POINT_TURN_END, last_request_tokens=between)
+    assert at_default.cap_change is None
+    unstamped = _one(
+        point=mb.POINT_TURN_END, last_request_tokens=between, compaction_threshold=None
+    )
+    assert unstamped.cap_change is None
+    low = _one(point=mb.POINT_TURN_END, last_request_tokens=between, compaction_threshold=50)
+    assert low.cap_change == "shrink"
+    over_80 = trigger_tokens(new, 80) + 1
+    assert _one(point=mb.POINT_TURN_END, last_request_tokens=over_80).cap_change == "shrink"
+    high = _one(point=mb.POINT_TURN_END, last_request_tokens=over_80, compaction_threshold=90)
+    assert high.cap_change is None
 
 
 def test_one_shrink_at_warning_then_one_more_at_critical():

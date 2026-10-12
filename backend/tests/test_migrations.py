@@ -284,6 +284,63 @@ def test_reasoning_effort_columns_backfill_existing_rows(fresh_cluster):
 
 
 @pytest.mark.integration
+def test_compaction_threshold_columns_backfill_existing_rows(fresh_cluster):
+    # #607: the threshold is NOT NULL with a server default, so a settings row
+    # and a conversation that predate the feature both come out of the
+    # migration at 80 -- the percentage compaction always fired at.
+    url = fresh_cluster.sqlalchemy_url
+    cfg = _alembic_config(url)
+    command.upgrade(cfg, "b7f1c4e9a25d")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO user_settings (web_search_enabled) VALUES (true)"))
+            conn.execute(
+                text(
+                    "INSERT INTO llms (name, local, link, type, quantized, is_base, category, "
+                    "is_attached_to_kb) VALUES ('Old', 0, 'org/old', 'qwen', true, false, "
+                    "'general', false)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO conversations (llm_id, name, web_search_enabled) "
+                    "SELECT id, 'Old chat', false FROM llms WHERE link='org/old'"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    run_migrations(fresh_cluster)
+
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            assert (
+                conn.execute(
+                    text("SELECT default_compaction_threshold FROM user_settings")
+                ).scalar()
+                == 80
+            )
+            assert (
+                conn.execute(text("SELECT compaction_threshold FROM conversations")).scalar() == 80
+            )
+            settings_columns = {c["name"]: c for c in inspect(conn).get_columns("user_settings")}
+            conversation_columns = {
+                c["name"]: c for c in inspect(conn).get_columns("conversations")
+            }
+    finally:
+        engine.dispose()
+    for column in (
+        settings_columns["default_compaction_threshold"],
+        conversation_columns["compaction_threshold"],
+    ):
+        assert column["nullable"] is False
+        assert str(column["type"]) == "SMALLINT"
+    assert _alembic_version(url) == _head_revision(cfg)
+
+
+@pytest.mark.integration
 def test_backup_database_writes_a_dump(fresh_cluster):
     # pg_dump (custom format) of the LIVE cluster produces a non-empty snapshot.
     engine = create_engine(fresh_cluster.sqlalchemy_url)

@@ -23,11 +23,26 @@ from __future__ import annotations
 
 from datetime import datetime
 from typing import Optional
-from sqlalchemy import Column, Integer, String, ForeignKey, DateTime, Float, Text, Boolean
+from sqlalchemy import (
+    Column,
+    Integer,
+    SmallInteger,
+    String,
+    ForeignKey,
+    DateTime,
+    Float,
+    Text,
+    Boolean,
+)
 from sqlalchemy.orm import relationship, validates
 from src.agents.reasoning_effort import (
     DEFAULT_REASONING_EFFORT,
     REASONING_EFFORT_LEVELS,
+)
+from src.engines.working_window import (
+    COMPACTION_THRESHOLDS,
+    DEFAULT_COMPACTION_THRESHOLD,
+    is_compaction_threshold,
 )
 from src.database.generation_hints import (
     FALLBACK_MAX_TOKENS,
@@ -58,6 +73,10 @@ class Conversation(Base):
         max_tokens: Maximum tokens to generate (1-32768, validated).
         custom_prompt: Optional additional system instructions.
         name: Conversation title (default "New Conversation").
+        web_search_enabled: Per-conversation web-search toggle.
+        reasoning_effort: How much the model may deliberate (validated).
+        compaction_threshold: Share of the working window, in percent, at
+            which the conversation compacts (50-90 step 5, validated).
         messages: Relationship to Message entities (ordered by id = insertion order).
         llm: Relationship to Llm entity (which model).
         message_count: Hybrid property returning number of messages.
@@ -94,6 +113,13 @@ class Conversation(Base):
     # from the GLOBAL user-settings default at creation, owned by the
     # conversation afterwards.
     reasoning_effort = Column(String(8), default=DEFAULT_REASONING_EFFORT, nullable=False)
+    # The share of the working window, in whole percent, at which this
+    # conversation compacts (#607), one of COMPACTION_THRESHOLDS. Same
+    # lifecycle as the reasoning effort: copied from the GLOBAL user-settings
+    # default at creation, owned by the conversation afterwards.
+    compaction_threshold = Column(
+        SmallInteger, default=DEFAULT_COMPACTION_THRESHOLD, nullable=False
+    )
 
     # Relationships — ordered by pk, NOT timestamp: PostgreSQL's now() is
     # frozen per transaction, so a user/assistant pair written in the same
@@ -178,6 +204,25 @@ class Conversation(Base):
         if reasoning_effort not in REASONING_EFFORT_LEVELS:
             raise ValueError(f"Reasoning effort must be one of {REASONING_EFFORT_LEVELS}")
         return reasoning_effort
+
+    @validates("compaction_threshold")
+    def validate_compaction_threshold(self, key: str, compaction_threshold: int) -> int:
+        """Validate the compaction threshold is a whole percent on the scale.
+
+        Args:
+            key: Column name ("compaction_threshold").
+            compaction_threshold: Percentage to validate.
+
+        Returns:
+            Validated percentage.
+
+        Raises:
+            ValueError: If it is not an int in COMPACTION_THRESHOLDS (50-90,
+                step 5); a bool, a float or a string is rejected.
+        """
+        if not is_compaction_threshold(compaction_threshold):
+            raise ValueError(f"Compaction threshold must be one of {COMPACTION_THRESHOLDS}")
+        return compaction_threshold
 
     @hybrid_property
     def message_count(self) -> int:

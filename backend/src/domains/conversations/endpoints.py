@@ -362,13 +362,14 @@ async def create_conversation(
     try:
         conv = await run_in_threadpool(
             service.create_conversation,
-            payload.llm_id,
-            payload.temperature,
-            payload.top_p,
-            payload.max_tokens,
-            payload.custom_prompt,
-            payload.web_search_enabled,
-            payload.reasoning_effort,
+            llm_id=payload.llm_id,
+            temperature=payload.temperature,
+            top_p=payload.top_p,
+            max_tokens=payload.max_tokens,
+            custom_prompt=payload.custom_prompt,
+            web_search_enabled=payload.web_search_enabled,
+            reasoning_effort=payload.reasoning_effort,
+            compaction_threshold=payload.compaction_threshold,
         )
         db.commit()
         logger.info(
@@ -376,7 +377,8 @@ async def create_conversation(
             f"temperature={payload.temperature}, top_p={payload.top_p}, "
             f"max_tokens={payload.max_tokens}, "
             f"web_search_enabled={conv.web_search_enabled}, "
-            f"reasoning_effort={conv.reasoning_effort}"
+            f"reasoning_effort={conv.reasoning_effort}, "
+            f"compaction_threshold={conv.compaction_threshold}"
         )
         return conv
     except Exception:
@@ -467,15 +469,16 @@ async def update_conversation(
     try:
         result = await run_in_threadpool(
             service.update_conversation,
-            conversation_id,
-            payload.name,
-            payload.llm_id,
-            payload.temperature,
-            payload.top_p,
-            payload.max_tokens,
-            payload.custom_prompt,
-            payload.web_search_enabled,
-            payload.reasoning_effort,
+            conversation_id=conversation_id,
+            name=payload.name,
+            llm_id=payload.llm_id,
+            temperature=payload.temperature,
+            top_p=payload.top_p,
+            max_tokens=payload.max_tokens,
+            custom_prompt=payload.custom_prompt,
+            web_search_enabled=payload.web_search_enabled,
+            reasoning_effort=payload.reasoning_effort,
+            compaction_threshold=payload.compaction_threshold,
         )
         db.commit()
         updated_fields = [
@@ -489,6 +492,7 @@ async def update_conversation(
                 ("custom_prompt", payload.custom_prompt),
                 ("web_search_enabled", payload.web_search_enabled),
                 ("reasoning_effort", payload.reasoning_effort),
+                ("compaction_threshold", payload.compaction_threshold),
             )
             if value is not None
         ]

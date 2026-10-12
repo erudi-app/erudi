@@ -7,6 +7,11 @@ import Tooltip from "./Tooltip";
 import ToggleSwitch from "./ToggleSwitch";
 import { formatNumber } from "../i18n/format";
 import { REASONING_EFFORT_LEVELS } from "../utils/reasoningEffort";
+import {
+  COMPACTION_THRESHOLDS,
+  DEFAULT_COMPACTION_THRESHOLD,
+  formatCompactionThreshold,
+} from "../utils/compactionThreshold";
 
 // Temperature / top-p read-outs: two decimals in the active locale.
 const TWO_DECIMALS = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
@@ -55,6 +60,14 @@ export default function HeaderBar({
   showReasoningEffort = false,
   initialReasoningEffort = "medium",
   onReasoningEffortChange,
+  // Per-conversation Compaction threshold control (#607): the share of the
+  // context window at which older messages are summarized. Same opt-in
+  // pattern as showReasoningEffort: hidden by default so the Arena (which
+  // never compacts) keeps an unchanged panel; ConversationPage opts in and
+  // persists changes through onCompactionThresholdChange.
+  showCompactionThreshold = false,
+  initialCompactionThreshold = DEFAULT_COMPACTION_THRESHOLD,
+  onCompactionThresholdChange,
   // The model's publisher gives no sampling recommendation (#388,
   // `sampling_defaults.source === "none"`): a discreet line under the sliders
   // says the neutral defaults apply. Nothing is shown when one exists.
@@ -66,6 +79,7 @@ export default function HeaderBar({
   const [topP, setTopP] = useState(initialTopP);
   const [webSearch, setWebSearch] = useState(initialWebSearch);
   const [reasoningEffort, setReasoningEffort] = useState(initialReasoningEffort);
+  const [compactionThreshold, setCompactionThreshold] = useState(initialCompactionThreshold);
 
   // Sync internal state with props when they change
   useEffect(() => {
@@ -79,6 +93,10 @@ export default function HeaderBar({
   useEffect(() => {
     setReasoningEffort(initialReasoningEffort);
   }, [initialReasoningEffort]);
+
+  useEffect(() => {
+    setCompactionThreshold(initialCompactionThreshold);
+  }, [initialCompactionThreshold]);
 
   useEffect(() => {
     setTopP(initialTopP);
@@ -155,7 +173,9 @@ export default function HeaderBar({
               ? t("chat:header.tooltips.webSearch")
               : id === "reasoning-effort"
                 ? t("chat:header.tooltips.reasoningEffort")
-                : "";
+                : id === "compaction-threshold"
+                  ? t("chat:header.tooltips.compactionThreshold")
+                  : "";
     const widthClass = isXs ? "w-40" : isSm ? "w-52" : "w-64";
     const iconSize = isXs ? "w-3 h-3" : isSm ? "w-3.5 h-3.5" : "w-4 h-4";
     return (
@@ -510,6 +530,36 @@ export default function HeaderBar({
                     </div>
                   )}
 
+                  {showCompactionThreshold && (
+                    <div className="flex items-center gap-3">
+                      <span
+                        className={`${labelText} uppercase tracking-wide font-semibold text-gray-300/80`}
+                      >
+                        {t("chat:header.compactionThreshold")}
+                      </span>
+                      <TooltipIcon
+                        id="compaction-threshold"
+                        side={isNarrow ? "bottom-right" : "right"}
+                      />
+                      <select
+                        aria-label={t("chat:header.compactionThreshold")}
+                        value={compactionThreshold}
+                        onChange={(e) => {
+                          const next = Number(e.target.value);
+                          setCompactionThreshold(next);
+                          onCompactionThresholdChange?.(next);
+                        }}
+                        className="ml-auto text-[11px] font-semibold rounded-md border border-emerald-400/25 bg-emerald-500/10 text-emerald-200/90 px-2 py-1 focus:outline-none focus:border-emerald-400/50 transition-colors cursor-pointer"
+                      >
+                        {COMPACTION_THRESHOLDS.map((value) => (
+                          <option key={value} value={value}>
+                            {formatCompactionThreshold(value)}
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
                   <div className={`flex ${actionsLayout} gap-3 w-full`}>
                     <div
                       className={`flex ${
@@ -573,6 +623,9 @@ HeaderBar.propTypes = {
   showReasoningEffort: PropTypes.bool,
   initialReasoningEffort: PropTypes.oneOf(REASONING_EFFORT_LEVELS),
   onReasoningEffortChange: PropTypes.func,
+  showCompactionThreshold: PropTypes.bool,
+  initialCompactionThreshold: PropTypes.oneOf(COMPACTION_THRESHOLDS),
+  onCompactionThresholdChange: PropTypes.func,
   disabled: PropTypes.bool,
   models: PropTypes.arrayOf(
     PropTypes.shape({

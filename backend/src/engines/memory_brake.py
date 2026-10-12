@@ -34,8 +34,10 @@ must not shrink the window to the floor nor release every minute):
 * **Shrink** (one step of the working window, ``SHRINK_FACTOR``, never under
   ``MIN_KV_BOUND_TOKENS``): one per episode under warning, one more once it is
   critical, never two without a turn between them, and only when it is useful
-  -- the last turn's largest request reaches the compaction threshold of the
-  shrunk window, so the next turn compacts and frees KV.
+  -- the last turn's largest request reaches the compaction trigger of the
+  shrunk window (``trigger_tokens`` at the threshold of the conversation that
+  sent it, the default for an arena turn), so the next turn compacts and frees
+  KV.
 * **Unload** (idle only): critical at two consecutive idle samples with no
   turn between them (a calm or warning idle sample in between starts over),
   at most once per episode (a brake reload carries the
@@ -62,7 +64,11 @@ from __future__ import annotations
 from dataclasses import dataclass, replace
 from typing import Any, Dict, Optional
 
-from src.engines.working_window import COMPACTION_WINDOW_FRACTION, MIN_KV_BOUND_TOKENS
+from src.engines.working_window import (
+    DEFAULT_COMPACTION_THRESHOLD,
+    MIN_KV_BOUND_TOKENS,
+    trigger_tokens,
+)
 
 # QA-tuned starting values.
 SHRINK_FACTOR = 0.75
@@ -228,6 +234,10 @@ class Sample:
     excess_bytes: Optional[int] = None
     # The largest request of the last measured turn.
     last_request_tokens: Optional[int] = None
+    # The compaction threshold of the conversation that sent it (#607), in
+    # percent; None (an arena turn, a handle no turn has stamped) is the
+    # default. An idle sample judges the last measured pair.
+    compaction_threshold: Optional[int] = None
     # When the last turn ended (the engine's idle clock).
     last_used: Optional[float] = None
     # llama.cpp: paging since the previous sample, in bytes, and whether the
@@ -392,6 +402,14 @@ def _calm(state: BrakeState, context: Context, level: int) -> Decision:
     return Decision(state=state, level=level, cap_change="grow")
 
 
+def _threshold_of(sample: Sample) -> int:
+    """The compaction threshold the last request is judged at (the default
+    when none was stamped)."""
+    if sample.compaction_threshold is None:
+        return DEFAULT_COMPACTION_THRESHOLD
+    return sample.compaction_threshold
+
+
 def _pressure(
     state: BrakeState, sample: Sample, context: Context, level: int, window: int
 ) -> Decision:
@@ -427,7 +445,7 @@ def _pressure(
         and not state.shrunk_since_turn
         and new_window < window
         and sample.last_request_tokens is not None
-        and sample.last_request_tokens >= COMPACTION_WINDOW_FRACTION * new_window
+        and sample.last_request_tokens >= trigger_tokens(new_window, _threshold_of(sample))
     )
     idle_for = sample.now - sample.last_used if sample.last_used is not None else None
     release = (

@@ -125,7 +125,9 @@ def _mw(window, *, overhead=None, budget=None, summary=None):
     summary = summary or _ScriptedSummaryModel(messages=iter([]))
     if isinstance(overhead, int):
         overhead = _fixed(overhead)
-    built = AgentRunner()._build_middleware(summary, budget, overhead=overhead)
+    built = AgentRunner()._build_middleware(
+        summary, budget, overhead=overhead, compaction_threshold=80
+    )
     return next(m for m in built if isinstance(m, SummarizationMiddleware))
 
 
@@ -295,12 +297,12 @@ async def test_the_kb_additions_cost_their_own_weight_not_the_ratio():
 def test_the_keep_budget_subtracts_the_overhead():
     window = 10_000
     state = _alternating_kept(window)
-    no_overhead = compaction_cutoff(state, window, approx_token_count)
-    with_overhead = compaction_cutoff(state, window, approx_token_count, overhead=2500)
+    no_overhead = compaction_cutoff(state, window, approx_token_count, pct=80)
+    with_overhead = compaction_cutoff(state, window, approx_token_count, overhead=2500, pct=80)
     assert with_overhead > no_overhead
-    assert approx_token_count(state[with_overhead:]) <= keep_token_budget(window) - 2500
+    assert approx_token_count(state[with_overhead:]) <= keep_token_budget(window, 80) - 2500
     # Never below one token of keep.
-    huge = compaction_cutoff(state, window, approx_token_count, overhead=10**6)
+    huge = compaction_cutoff(state, window, approx_token_count, overhead=10**6, pct=80)
     assert huge == len(state) - 2  # the answer before the current question
 
 
@@ -363,7 +365,8 @@ def test_the_trims_allocated_term_uses_the_heterogeneity_factor_2():
     assert runner_module.SUMMARY_TRIM_HETEROGENEITY_FACTOR == 2
     window = allocated = 10_000
     assert (
-        summarize_trim_budget(window, allocated) == (allocated - 2 * summary_cap(window) - 512) // 2
+        summarize_trim_budget(window, allocated, 80)
+        == (allocated - 2 * summary_cap(window) - 512) // 2
     )
 
 
@@ -425,8 +428,8 @@ def test_no_guard_without_a_window():
         AIMessage(_text(7000)),
         HumanMessage("q"),
     ]
-    assert compaction_cutoff(state, None, _counter_r1, overhead=5000) == compaction_cutoff(
-        state, None, _counter_r1
+    assert compaction_cutoff(state, None, _counter_r1, overhead=5000, pct=80) == compaction_cutoff(
+        state, None, _counter_r1, pct=80
     )
 
 
@@ -444,7 +447,7 @@ def test_a_tiny_gain_compaction_is_skipped():
     state = _tiny_gain_state()
     window = 10_000
     assert _counter_r1(state) >= int(0.8 * window)
-    assert compaction_cutoff(state, window, _counter_r1, allocated_window=window) == 0
+    assert compaction_cutoff(state, window, _counter_r1, allocated_window=window, pct=80) == 0
 
 
 def test_a_small_gain_is_taken_when_the_request_would_overflow_the_allocated_window():
@@ -460,19 +463,19 @@ def test_a_small_gain_is_taken_when_the_request_would_overflow_the_allocated_win
     kept = _counter_r1(state[3:])
     gain = total - kept - summary_cap(window)
     assert 0 < gain < 256
-    assert compaction_cutoff(state, window, _counter_r1, allocated_window=10_000) == 0
+    assert compaction_cutoff(state, window, _counter_r1, allocated_window=10_000, pct=80) == 0
     # The same state on an allocation it overflows (count + floor > W_alloc).
     tight = total + 512 - 1
-    assert compaction_cutoff(state, window, _counter_r1, allocated_window=tight) == 3
+    assert compaction_cutoff(state, window, _counter_r1, allocated_window=tight, pct=80) == 3
     # ...or on the working window itself (O + count > W).
-    assert compaction_cutoff(state, window, _counter_r1, overhead=window - total + 1) == 3
+    assert compaction_cutoff(state, window, _counter_r1, overhead=window - total + 1, pct=80) == 3
 
 
 def test_a_compaction_with_no_gain_is_skipped_when_nothing_overflows():
     state = _tiny_gain_state()
     total = _counter_r1(state)
     assert total - _counter_r1(state[3:]) - summary_cap(10_000) <= 0
-    assert compaction_cutoff(state, 10_000, _counter_r1, allocated_window=10_000) == 0
+    assert compaction_cutoff(state, 10_000, _counter_r1, allocated_window=10_000, pct=80) == 0
 
 
 def test_the_message_count_bounds_the_keep_only_without_a_window():
@@ -484,9 +487,9 @@ def test_the_message_count_bounds_the_keep_only_without_a_window():
         (HumanMessage if i % 2 == 0 else AIMessage)(_text(20), id=f"m{i}") for i in range(30)
     ] + [HumanMessage("q", id="q")]
     assert len(state) > runner_module.SUMMARY_TRIGGER_MESSAGES
-    assert _counter_r1(state) < keep_token_budget(window)
-    assert compaction_cutoff(state, window, _counter_r1) == 0
-    assert compaction_cutoff(state, None, _counter_r1) == (
+    assert _counter_r1(state) < keep_token_budget(window, 80)
+    assert compaction_cutoff(state, window, _counter_r1, pct=80) == 0
+    assert compaction_cutoff(state, None, _counter_r1, pct=80) == (
         len(state) - runner_module.SUMMARY_KEEP_MESSAGES
     )
 
@@ -586,6 +589,7 @@ async def test_the_runner_hands_the_kb_text_to_the_client_and_reads_no_checkpoin
             kb_context_block="EXCERPTS",
             kb_language_line="Answer in English.",
             emit_events=True,
+            compaction_threshold=80,
         )
     ]
 
@@ -631,7 +635,12 @@ def _projection(state):
 
 async def _project(state, window, **kwargs):
     projected_tokens, _ = await AgentRunner()._project_next_request(
-        _agent_with_state(state), {}, window, allocated_window=window, **kwargs
+        _agent_with_state(state),
+        {},
+        window,
+        allocated_window=window,
+        **kwargs,
+        compaction_threshold=80,
     )
     return projected_tokens
 
@@ -656,7 +665,9 @@ async def test_the_projection_is_overhead_plus_kept_plus_the_cap_otherwise():
     ]
     projected, counter, ratio = _projection(state)
     assert ratio == 1.0
-    cut = compaction_cutoff(projected, window, counter, overhead=300, allocated_window=window)
+    cut = compaction_cutoff(
+        projected, window, counter, overhead=300, allocated_window=window, pct=80
+    )
     assert cut > 0
 
     projected_tokens = await _project(state, window, overhead=_fixed(300))
@@ -675,7 +686,7 @@ async def test_the_projection_keeps_what_the_next_requests_compaction_keeps():
         AIMessage(_text(900), id="a1"),
     ]
     projected, counter, _ = _projection(state)
-    cut = compaction_cutoff(projected, window, counter, allocated_window=window)
+    cut = compaction_cutoff(projected, window, counter, allocated_window=window, pct=80)
 
     projected_tokens = await _project(state, window)
 
@@ -707,13 +718,16 @@ async def test_the_warning_payload_includes_the_overhead():
         overhead=_fixed(400),
         allocated_window=window,
         engine=_BoundEngine(window),
+        compaction_threshold=80,
     )
 
     projected, counter, _ = _projection(state)
     # Nothing measured: O at its own script weight, floored. The overhead
     # alone is past the trigger, so the projection is O + kept + summary cap.
     overhead = math.ceil(FLOOR * 400)
-    cut = compaction_cutoff(projected, window, counter, overhead=overhead, allocated_window=window)
+    cut = compaction_cutoff(
+        projected, window, counter, overhead=overhead, allocated_window=window, pct=80
+    )
     assert cut > 0
     expected = overhead + counter(projected[cut:]) + summary_cap(window)
     assert expected >= 0.85 * window
@@ -747,6 +761,7 @@ async def test_the_runner_projects_without_the_kb_block_of_the_turn_just_answere
             kb_context_block="EXCERPTS " * 100,
             kb_language_line="Answer in English.",
             emit_events=True,
+            compaction_threshold=80,
         )
     ]
 
@@ -772,7 +787,9 @@ async def test_llama_cpp_engines_trigger_in_real_tokens_without_a_memory_ceiling
     monkeypatch.setattr(config, "LLM_Engine", _GgufEngine)
     budget = MemoryBudget.from_engine(_GgufEngine)
     assert AgentRunner._compaction_windows(budget) == (8192, 8192)
-    built = AgentRunner()._build_middleware(_ScriptedSummaryModel(messages=iter([])), budget)
+    built = AgentRunner()._build_middleware(
+        _ScriptedSummaryModel(messages=iter([])), budget, compaction_threshold=80
+    )
     mw = built[-1]
     # Unscaled, this state is under the 80 % trigger; with the question before
     # the measured hop at r = 2.0 it is over it.

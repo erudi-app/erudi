@@ -165,6 +165,7 @@ def _stream(runner, *, thread_id="1", summarize=True, question="hi"):
         thread_id=thread_id,
         summarize=summarize,
         emit_events=True,
+        compaction_threshold=80,
     )
 
 
