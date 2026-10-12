@@ -76,11 +76,13 @@ def trigger_tokens(working_window: int, pct: int) -> int:
 
     Pure, integer: ``pct`` percent of the working window, never closer to the
     window than ``TRIGGER_ANSWER_ROOM_TOKENS`` (a request at the trigger still
-    leaves the output budget its floor and margin), and at least 1. Every
+    leaves the output budget its 512-token floor plus the FLOOR of its margin,
+    256 tokens -- the margin itself is ``max(256, 10 % of the prompt
+    estimate)``, so a large prompt can take more), and at least 1. Every
     reader of the trigger goes through it: the summarization trigger, the
     room the keep budget leaves under it, the futility guard, the
     summarizer's trim budget and the memory brake's shrink test. At 80 % the
-    answer-room bound only binds below 3840 tokens.
+    answer-room bound only binds below 3836 tokens.
     """
     return max(1, min(working_window * pct // 100, working_window - TRIGGER_ANSWER_ROOM_TOKENS))
 

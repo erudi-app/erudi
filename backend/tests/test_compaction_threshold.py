@@ -9,9 +9,9 @@ percent between 50 and 90 in steps of 5, copied at creation from the global
 One integer helper, ``trigger_tokens(W, pct)``, owns the trigger for every
 reader: the middleware's trigger, the keep budget's room, the futility guard,
 the summarizer's trim budget and the memory brake's shrink test. It never
-leaves less than the output budget's floor and margin (512 + 256) for the
-answer. At 80 % every reader behaves as before for any window of 3840 tokens
-or more.
+leaves less than the output budget's floor and its margin floor (512 + 256)
+for the answer. At 80 % the trigger is unchanged for any window of 3836
+tokens or more, the keep for any window of 2229 tokens or more.
 """
 
 from __future__ import annotations
@@ -94,9 +94,9 @@ def test_the_answer_room_is_the_output_budgets_floor_and_margin():
 # ===================== the trigger =====================
 
 
-@pytest.mark.parametrize("window", [3840, 4096, 8192, 10_000, 32_768, 40_960, 131_072])
-def test_at_the_default_the_trigger_is_unchanged_from_3840_tokens(window):
-    assert trigger_tokens(window, 80) == int(0.8 * window)
+def test_at_the_default_the_trigger_is_unchanged_from_3836_tokens():
+    assert all(trigger_tokens(window, 80) == int(0.8 * window) for window in range(3836, 140_000))
+    assert trigger_tokens(3835, 80) < int(0.8 * 3835)
 
 
 @pytest.mark.parametrize("pct", BOUNDS_AND_DEFAULT)
@@ -169,10 +169,12 @@ def test_the_keep_leaves_a_pinned_headroom_under_the_trigger(window, pct, keep, 
     assert headroom >= max(256, trigger // 5)
 
 
-@pytest.mark.parametrize("window", [3840, 4096, 8192, 10_000, 32_768, 131_072])
-def test_at_the_default_the_keep_is_unchanged_from_3840_tokens(window):
-    old = max(1, min(int(0.4 * window), int(0.8 * window) - summary_cap(window) - 256))
-    assert keep_token_budget(window, 80) == old
+def test_at_the_default_the_keep_is_unchanged_from_2229_tokens():
+    def old(window):
+        return max(1, min(int(0.4 * window), int(0.8 * window) - summary_cap(window) - 256))
+
+    assert all(keep_token_budget(window, 80) == old(window) for window in range(2229, 140_000))
+    assert keep_token_budget(2228, 80) < old(2228)
 
 
 @pytest.mark.parametrize("pct", BOUNDS_AND_DEFAULT)

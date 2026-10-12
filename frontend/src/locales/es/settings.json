@@ -24,7 +24,7 @@
   "compactionThreshold": {
     "title": "Umbral de compactación predeterminado",
     "description": "Define el umbral de compactación inicial para las conversaciones nuevas: los mensajes más antiguos se resumen cuando una conversación llena esta parte de la ventana de contexto del modelo. Cada conversación conserva después su propio control de umbral de compactación en la cabecera del chat, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
-    "note": "80 % por defecto. Más bajo: resume antes y con más frecuencia, usa menos memoria. Más alto: conserva más de la conversación palabra por palabra, resume con menos frecuencia.",
+    "note": "80 % por defecto. Más bajo: resume antes y con más frecuencia, lo que mantiene la conversación más corta. Más alto: conserva más de ella palabra por palabra y resume con menos frecuencia.",
     "selectLabel": "Umbral de compactación predeterminado"
   },
   "autoUpdate": {

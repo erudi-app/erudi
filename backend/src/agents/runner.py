@@ -179,12 +179,13 @@ MEMORY_WARNING_FRACTION = 0.85
 # state stays under ``T - margin`` for every window and threshold and the next
 # turn does not re-fire it (the exceptions ``compaction_cutoff`` documents
 # keep more): ``max(1, min(0.4 W, T - summary_cap(W) - margin))`` with
-# ``margin = max(256, T // 5)`` (non-positive for tiny windows, hence the floor
-# of one token). The margin scales with the trigger so a low threshold still
-# leaves room to grow: at 50 % of a 4096-token window a compaction leaves
-# ~410 tokens under the trigger -- the next one comes about a turn or two
-# later --, ~820 at 8192. At 80 % the scaled margin changes nothing for a
-# window of 3840 tokens or more (the 0.4 W bound binds there). 0.4 is a
+# ``margin = max(256, T // 5)``. Below 1172 tokens the trigger is ``W - 768``
+# at every threshold, and that room is non-positive (or a single token): the
+# keep falls to its floor of one token. The margin scales with the trigger so
+# a low threshold still leaves room to grow: at 50 % of a 4096-token window a
+# compaction leaves ~410 tokens under the trigger -- the next one comes about
+# a turn or two later --, ~820 at 8192. At 80 % the keep is unchanged for a
+# window of 2229 tokens or more (the 0.4 W bound binds there). 0.4 is a
 # design value, not a measurement: it trades kept detail for room to grow
 # before the next compaction.
 KEEP_FRACTION = 0.4

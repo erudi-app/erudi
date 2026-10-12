@@ -123,7 +123,7 @@ non-functional behavior.
 - [ ] When I lower the threshold below where a long conversation already is, then the **next turn compacts** — one `Conversation compacted ... threshold=<new>%` line in `backend.log`; when I raise it, nothing happens until the conversation grows to the new share.
 - [ ] When I set **50 %** on a small-window model (about 4,096 tokens), then compaction comes about every turn or two, the turn right after a compaction does not compact again, and the answers are never cut short for lack of budget.
 - [ ] When I set **90 %**, then the turn just before a compaction still answers with a real budget (never cut after a few tokens), on a small-window model too.
-- [ ] When I pick a threshold in the **new-conversation panel** before the first message, then the conversation is created with it (the header panel shows the same value once it opens); before the global default has loaded, the control is disabled.
+- [ ] When I pick a threshold in the **new-conversation panel** before the first message, then the conversation is created with it (the header panel shows the same value once it opens); before the global default has loaded, the control is disabled; if it cannot be loaded, the control shows 80 % and the conversation gets the global default unless I pick a value.
 - [ ] When I use the Arena, then there is no threshold control (Arena panels never compact).
 - [ ] When the interface is in French, then the percentages read `80 %`; in English, `80%`.
 
@@ -277,7 +277,7 @@ non-functional behavior.
 - [ ] When any command popup opens, then it carries a **subtitle** and a **`?` tooltip** next to each field explaining what it does.
 
 **/config**
-- [ ] When I run **/config**, then one popup shows every adjustable parameter of the current conversation with its current value: reasoning effort as a **5-notch graduated slider** (None → Low → Medium → High → Xhigh), web search as a switch, creativity and diversity as sliders with their real bounds, the compaction threshold as a slider, and custom instructions (the existing instructions modal). There is **no** "defaults for new conversations" section.
+- [ ] When I run **/config**, then one popup shows every adjustable parameter of the current conversation with its current value: reasoning effort as a **5-notch graduated slider** (None → Low → Medium → High → Xhigh), web search as a switch, creativity and diversity as sliders with their real bounds, the compaction threshold as a select (50 % to 90 % in steps of 5), and custom instructions (the existing instructions modal). There is **no** "defaults for new conversations" section.
 - [ ] When I change a value and close **/config**, then it takes effect on the next turn, and the header settings panel reflects the same value (the two entry points never disagree).
 - [ ] When I run **/config global**, then the current values are saved as the defaults **for the current model** (the popup explains this) — a **different** model's defaults are left untouched, so a model's own recommended sampling values are never overwritten by another's.
 

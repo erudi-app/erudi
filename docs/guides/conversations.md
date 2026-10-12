@@ -481,7 +481,7 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    default a new conversation copies (`default_compaction_threshold`). One helper turns it into the trigger every part of
    compaction reads (`trigger_tokens` in `backend/src/engines/working_window.py`):
    `T = max(1, min(⌊pct × W / 100⌋, W − 768))` — the second term always leaves the answer the output
-   budget's 512-token floor and its 256-token margin, and at 80 % it only binds below 3840 tokens.
+   budget's 512-token floor and its 256-token margin, and at 80 % it only binds below 3836 tokens.
    A lower threshold summarizes sooner and more often and keeps the conversation smaller; a
    higher one keeps more of it word for word and summarizes less often. Lowering it in an open
    conversation compacts on the next turn when the conversation is already over the new share;
@@ -536,7 +536,7 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    that is. The margin under the trigger scales with it, so a low threshold still leaves room to
    grow: at 50 % a compaction leaves about 410 tokens under the trigger on a 4096-token window —
    the next compaction comes a turn or two later — and about 820 on an 8192-token window; at 80 %
-   the margin changes nothing for a window of 3840 tokens or more. The bound is in
+   the keep is unchanged for a window of 2229 tokens or more. The bound is in
    tokens only — with token pressure the only trigger, the number of kept messages cannot re-fire
    anything, so a message cap on top would only discard recent context that fits the budget and
    bring the next compaction sooner. Three rules then adjust the cut:

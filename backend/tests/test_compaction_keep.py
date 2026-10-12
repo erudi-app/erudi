@@ -63,6 +63,7 @@ def _projection(state):
 
 from src.core import config
 from src.engines.base_engine import BaseEngine
+from src.engines.working_window import trigger_tokens
 from tests._helpers import ToolableFakeChatModel
 
 pytestmark = pytest.mark.unit
@@ -237,18 +238,28 @@ def test_the_keep_budget_is_at_least_one_token_for_tiny_windows(window):
     assert keep_token_budget(window, 80) == 1
 
 
-@pytest.mark.parametrize("window", [1000, 2000, 4000, 10_000, 32_768])
-def test_the_keep_budget_leaves_room_for_the_summary_under_the_trigger(window):
-    keep = keep_token_budget(window, 80)
+@pytest.mark.parametrize("pct", [50, 80, 90])
+@pytest.mark.parametrize("window", [1200, 2000, 2048, 4000, 4096, 8192, 10_000, 32_768, 40_960])
+def test_the_keep_budget_leaves_room_for_the_summary_under_the_trigger(window, pct):
+    keep = keep_token_budget(window, pct)
     assert keep <= int(KEEP_FRACTION * window)
-    # kept suffix + the longest summary stays 256 under the 80 % trigger.
-    assert keep + summary_cap(window) <= int(0.8 * window) - 256
+    # kept suffix + the longest summary stays a margin under the trigger.
+    trigger = trigger_tokens(window, pct)
+    assert keep + summary_cap(window) <= trigger - max(256, trigger // 5)
+
+
+@pytest.mark.parametrize("pct", [50, 80, 90])
+def test_the_keep_budget_falls_to_its_floor_below_1172_tokens(pct):
+    # Below 1172 tokens the trigger is W - 768 at every threshold, too close
+    # to the summary and the margin to keep anything: one token.
+    assert all(keep_token_budget(window, pct) == 1 for window in range(1, 1172))
+    assert keep_token_budget(1172, pct) > 1
 
 
 def test_the_keep_budget_values():
     assert KEEP_FRACTION == 0.4
     assert keep_token_budget(10_000, 80) == 4000
-    # Below 3840 tokens the trigger leaves the answer its 768 tokens (#607):
+    # Below 3836 tokens the trigger leaves the answer its 768 tokens (#607):
     # 2000 -> trigger 1232, keep 1232 - 250 - 256; 600 -> trigger 1, keep 1.
     assert keep_token_budget(2000, 80) == 726
     assert keep_token_budget(600, 80) == 1

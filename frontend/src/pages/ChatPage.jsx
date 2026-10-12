@@ -67,8 +67,12 @@ export default function ChatPage() {
   // the FIRST turn already honors it.
   const [reasoningEffort, setReasoningEffort] = useState(null);
   // Compaction threshold (#607): same null-until-fetched pattern, seeded
-  // from the global default and sent explicitly once known.
+  // from the global default and sent explicitly once known. When the fetch
+  // fails, the select shows the shipped default and stays usable, but the
+  // value is sent only once the user picks one: until then the backend
+  // copies the real global default.
   const [compactionThreshold, setCompactionThreshold] = useState(null);
+  const [globalDefaultsFailed, setGlobalDefaultsFailed] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -87,6 +91,9 @@ export default function ChatPage() {
         }
       } catch (error) {
         // The backend applies its own default: degraded, not failed.
+        if (!cancelled) {
+          setGlobalDefaultsFailed(true);
+        }
         log.warn(
           "Failed to fetch the global chat defaults (web search, reasoning effort, compaction threshold)",
           error
@@ -665,9 +672,14 @@ export default function ChatPage() {
                             <select
                               aria-label={t("chat:header.compactionThreshold")}
                               // Disabled and blank until the global default is
-                              // known, like the reasoning effort above.
-                              disabled={compactionThreshold === null}
-                              value={compactionThreshold ?? ""}
+                              // known, like the reasoning effort above; if it
+                              // cannot be fetched, the shipped default shows
+                              // (not sent until the user picks a value).
+                              disabled={compactionThreshold === null && !globalDefaultsFailed}
+                              value={
+                                compactionThreshold ??
+                                (globalDefaultsFailed ? DEFAULT_COMPACTION_THRESHOLD : "")
+                              }
                               onChange={(e) => setCompactionThreshold(Number(e.target.value))}
                               className="ml-auto text-[11px] font-semibold rounded-md border border-emerald-400/25 bg-emerald-500/10 text-emerald-200/90 px-2 py-1 focus:outline-none focus:border-emerald-400/50 transition-colors cursor-pointer"
                             >

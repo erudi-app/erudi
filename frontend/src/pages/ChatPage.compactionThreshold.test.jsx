@@ -124,6 +124,42 @@ describe("ChatPage compaction threshold control (#607)", () => {
     expect(creationBody().compaction_threshold).toBe(90);
   });
 
+  describe("when the global default cannot be fetched", () => {
+    beforeEach(() => {
+      apiClient.get.mockImplementation(async (path) => {
+        if (path === "/llms/local") return [QWEN3];
+        if (path === "/user_settings/") throw new Error("backend unreachable");
+        return [];
+      });
+    });
+
+    it("shows 80 %, enabled, and leaves the field to the backend", async () => {
+      renderPage();
+      await screen.findByTitle("Qwen3 0.6B");
+      openSettings();
+
+      await waitFor(() => expect(thresholdSelect().disabled).toBe(false));
+      expect(thresholdSelect().value).toBe("80");
+      fireEvent.click(screen.getByText("send-question"));
+
+      await waitFor(() => expect(tracedFetchMock).toHaveBeenCalled());
+      expect(creationBody()).not.toHaveProperty("compaction_threshold");
+    });
+
+    it("sends a value the user picked", async () => {
+      renderPage();
+      await screen.findByTitle("Qwen3 0.6B");
+      openSettings();
+      await waitFor(() => expect(thresholdSelect().disabled).toBe(false));
+
+      fireEvent.change(thresholdSelect(), { target: { value: "60" } });
+      fireEvent.click(screen.getByText("send-question"));
+
+      await waitFor(() => expect(tracedFetchMock).toHaveBeenCalled());
+      expect(creationBody().compaction_threshold).toBe(60);
+    });
+  });
+
   it("is disabled and omitted from the creation POST while the global default has not loaded", async () => {
     apiClient.get.mockImplementation(async (path) => {
       if (path === "/llms/local") return [QWEN3];

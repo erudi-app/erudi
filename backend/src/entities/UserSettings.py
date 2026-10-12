@@ -69,8 +69,8 @@ class UserSettings(Base):
         default_compaction_threshold: One of COMPACTION_THRESHOLDS (50-90,
             step 5), the GLOBAL share of the working window, in percent, at
             which new conversations compact; each copies it at creation. 80
-            by default: the threshold compaction fired at before the setting
-            existed. Arena panels never compact, so nothing else reads it.
+            by default, the value every row that predates the column holds.
+            Arena panels never compact, so nothing else reads it.
 
     Constraints:
         - web_search_enabled must be a Boolean (enforced by validator).
