@@ -477,10 +477,11 @@ engine's (`gguf_memory`). The window is passed with `-ngl -1 -fitt 1024`.
   the device, the host keeps clean mapped file pages and pinned buffers. RAM pressure
   still reaches the child through the brake's sensors.
 - **`ERUDI_VRAM_OVERRIDE_GB`** (QA only) stands in for the free VRAM of the sizing; the
-  total is then the larger of the override and the real total.
+  total is then the larger of the override and the real total. It never invents a GPU (NVML
+  failed or saw none: it is ignored), and an empty value is unset.
 - Every CUDA constant that is not measured on the pinned build (the CUDA context, the
   compute terms, the margins, the spill tiers and baseline, the classification
-  tolerance, the respawn wait) is a starting value calibrated in QA on a Windows CUDA
+  tolerance) is a starting value calibrated in QA on a Windows CUDA
   machine and a Linux+NVIDIA one.
 
 **Division of labour with fit.** Erudi fixes the window: fit never changes an explicit
@@ -495,9 +496,10 @@ optimistic estimate yields a partial offload instead of a dead child.
 | Case | Arguments | Brake |
 |---|---|---|
 | Sized load | `-c W -ngl -1 -fitt 1024` | On (`window_sized`), pending the placement below |
-| Brake respawn (Windows only: a spill is what drives it) | `-c max(4096, min(static window, cap)) -ngl -2 -fitt 1024`: nothing re-read; fit cannot change an explicit `-ngl` and keeps every layer on the device, where WDDM spills instead of failing | On, its state carried |
+| Brake respawn (Windows only: a spill is what drives it) | `-c min(static window, max(4096, cap)) -ngl -2 -fitt 1024`: nothing re-read; fit cannot change an explicit `-ngl` and keeps every layer on the device, where WDDM spills instead of failing | On, its state carried |
 | `ERUDI_CTX` pinned | `-c ERUDI_CTX -ngl -1 -fitt 1024` | Sampled, never resized |
 | Floor unfit, MLA, GGUF or NVML unreadable | No `-c`, `-ngl -1 -fitt 1024`: fit sizes the window and places the layers (one WARNING) | Off (`window_sized=False`): never sampled |
+| The user's `CUDA_VISIBLE_DEVICES` names several GPUs | No `-c`, `-ngl -1 -fitt 1024`: llama.cpp splits the layers across the cards, which a one-card sizing and measurement cannot model (one INFO) | Off |
 | NVML sees no GPU | No `-c`, `-ngl 0` (one WARNING) | Off |
 
 A brake respawn reuses the live handle's static window folded with the cap, so a series
@@ -511,7 +513,9 @@ informs or unloads.
 **One GPU.** The child sees one GPU, pinned by its NVML UUID
 (`CUDA_VISIBLE_DEVICES=GPU-<uuid>`), immune to ordering differences between NVML and the
 CUDA runtime. A `CUDA_VISIBLE_DEVICES` the user set is never overridden: the selection is
-restricted to the devices it names (UUIDs by prefix, integers as NVML indexes).
+restricted to the devices it names (UUIDs by prefix, integers as NVML indexes); an
+empty value counts as unset (`backend/.env.example` lists the variable empty). When it
+names several devices the window is not sized and the brake is off (the matrix above).
 
 **Out of memory at load.** When a sized load dies with `CUDA_OUT_OF_MEMORY`, the engine
 retries once at the 4096 floor (one WARNING, which says the failed allocation may be the

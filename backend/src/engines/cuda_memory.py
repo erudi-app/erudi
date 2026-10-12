@@ -123,6 +123,9 @@ class DeviceMemory:
     # (WDDM does not report them).
     processes: Optional[Tuple[Tuple[int, Optional[int]], ...]] = None
     unavailable: Optional[str] = None
+    # How many GPUs the child sees: more than one only when the user's own
+    # CUDA_VISIBLE_DEVICES names several (llama.cpp then splits the layers).
+    visible_devices: int = 1
 
     @property
     def present(self) -> bool:
@@ -148,7 +151,6 @@ class VramWindow:
     # the CUDA context.
     static_device_bytes: int
     fa_proven: bool
-    compute_token_bytes: int
     # The KV the child really allocates at ``window`` (the classification's
     # term); None when a sliding-window pattern is unreadable.
     kv_classify_bytes: Optional[int]
@@ -223,7 +225,6 @@ def _window(
             window * (kv + slope) + CUDA_COMPUTE_FIXED_BYTES + CUDA_CONTEXT_OVERHEAD_BYTES
         ),
         fa_proven=fa,
-        compute_token_bytes=slope,
         kv_classify_bytes=kv_classify_bytes(shape, window),
     )
 
@@ -275,12 +276,11 @@ def respawn_window(
     memory_bound: bool,
 ) -> Optional[VramWindow]:
     """The window of a brake respawn: the live child's static window folded
-    with the cap, ``max(floor, min(static, cap))`` -- no VRAM reading goes
-    in, so a series of respawns is deterministic. The other facts carry
-    over from the live child."""
+    with the cap, ``min(static, max(floor, cap))`` -- at worst the floor,
+    never above the static window (a trained window under the floor stays
+    whole) -- with no VRAM reading in, so a series of respawns is
+    deterministic. The other facts carry over from the live child."""
     window = _capped(static_window, cap)
-    if cap is not None and cap > 0:
-        window = max(MIN_KV_BOUND_TOKENS, window)
     return _window(
         shape,
         window=window,
@@ -431,13 +431,12 @@ def visible_devices(
     """The NVML devices a ``CUDA_VISIBLE_DEVICES`` value lets the child see:
     every device when unset; UUID entries matched by prefix (as CUDA does),
     integer entries as NVML indexes (NVML and CUDA usually agree on the
-    order); an empty value hides them all. None when the value names nothing
-    NVML can map (a MIG instance, an unknown id)."""
-    if visible is None:
-        return list(devices)
-    entries = [entry.strip() for entry in visible.split(",") if entry.strip()]
+    order). An empty value is unset (``backend/.env.example`` lists the
+    variable empty). None when the value names nothing NVML can map (a MIG
+    instance, an unknown id)."""
+    entries = [entry.strip() for entry in (visible or "").split(",") if entry.strip()]
     if not entries:
-        return []
+        return list(devices)
     chosen = []
     for device in devices:
         uuid = device.get("uuid") or ""

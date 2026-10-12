@@ -161,7 +161,11 @@ def test_the_non_fa_slope_sizes_a_smaller_window():
     )
     assert non_fa.fa_proven is False
     assert non_fa.window < fa.window
-    assert non_fa.compute_token_bytes == 512 * 16 * 4
+    assert non_fa.static_device_bytes == (
+        non_fa.window * (KV + 512 * 16 * 4)
+        + cm.CUDA_COMPUTE_FIXED_BYTES
+        + cm.CUDA_CONTEXT_OVERHEAD_BYTES
+    )
 
 
 def test_a_brake_cap_folds_in_rounded_without_making_the_window_memory_bound():
@@ -223,7 +227,13 @@ def test_a_trained_window_under_the_floor_is_sized():
 
 @pytest.mark.parametrize(
     "static, cap, expected",
-    [(40_960, 30_720, 30_720), (20_480, 30_720, 20_480), (40_960, 3_000, MIN_KV_BOUND_TOKENS)],
+    [
+        (40_960, 30_720, 30_720),
+        (20_480, 30_720, 20_480),
+        (40_960, 3_000, MIN_KV_BOUND_TOKENS),
+        # A trained window under the floor is never exceeded.
+        (2_048, MIN_KV_BOUND_TOKENS, 2_048),
+    ],
 )
 def test_a_respawn_window_is_the_static_window_folded_with_the_cap(static, cap, expected):
     kwargs = dict(
@@ -428,7 +438,9 @@ DEVICES = [
         ("GPU-aaaa", [0]),  # CUDA accepts a UUID prefix
         ("1", [1]),
         ("1,GPU-aaaa-1111", [0, 1]),
-        ("", []),
+        # Empty is "not set": a copied .env template must not hide the GPUs.
+        ("", [0, 1]),
+        ("  ", [0, 1]),
         ("MIG-unknown", None),
     ],
 )

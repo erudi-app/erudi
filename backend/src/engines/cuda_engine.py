@@ -79,6 +79,7 @@ Note:
     - Thread-safe through BaseEngine._lock
 """
 
+import dataclasses
 import os
 import time  # used by hardware methods
 import platform
@@ -179,7 +180,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
         """Resolve the per-spawn CUDA context -- the spawn matrix:
 
         * a brake respawn (``respawn_from``, the live handle of the same
-          alias): ``-c = max(floor, min(its static window, cap))``, nothing
+          alias): ``-c = min(its static window, max(floor, cap))``, nothing
           re-read from NVML, every layer pinned (``-ngl -2``: fit then keeps
           the placement and WDDM spills instead of failing) -- Windows only,
           the spill being the one thing that drives a respawn;
@@ -191,6 +192,9 @@ class CUDA_Engine(BaseLlamaCppEngine):
           or NVML is unreadable: no ``-c``, ``-ngl -1`` -- fit sizes the
           window and places the layers -- and the brake off
           (``window_sized=False``), ONE WARNING;
+        * the user's ``CUDA_VISIBLE_DEVICES`` names several GPUs (llama.cpp
+          splits the layers across them, which a one-card sizing cannot
+          model): no ``-c``, ``-ngl -1``, the brake off, ONE INFO;
         * NVML sees no GPU: no ``-c``, ``-ngl 0``, the brake off.
 
         ``-ngl -1`` is "auto" while fit is on (llama.cpp ``common.h:473``);
@@ -228,6 +232,18 @@ class CUDA_Engine(BaseLlamaCppEngine):
                 ctx.update(gpu_layers=-1)
             ctx.setdefault("ctx_size", None)
             ctx.update(window_sized=False)
+            return ctx
+        if device.visible_devices > 1:
+            # The user's CUDA_VISIBLE_DEVICES names several cards: llama.cpp
+            # splits the layers across them, which a one-card sizing and
+            # measurement cannot model.
+            logger.info(
+                f"[{cls.__name__}] CUDA_VISIBLE_DEVICES leaves several GPUs visible "
+                f"({device.visible_devices}): llama-server's fit places the model across them "
+                f"and sizes the window; the memory brake is off for this model"
+            )
+            ctx.setdefault("ctx_size", None)
+            ctx.update(gpu_layers=-1, window_sized=False)
             return ctx
         ctx.update(gpu_layers=-1, gpu_uuid=device.uuid)
         mmproj = cls._find_mmproj(model_path)
@@ -503,13 +519,14 @@ class CUDA_Engine(BaseLlamaCppEngine):
         the runtime DLLs (cuBLAS, cuDNN, etc.), and pin the GPU the window
         was sized on: ``CUDA_VISIBLE_DEVICES=GPU-<uuid>`` (immune to any
         ordering difference between NVML and the CUDA runtime) -- never over
-        a value the user set, which the selection already honoured."""
+        a value the user set, which the selection already honoured (an
+        empty value is unset)."""
         env = os.environ.copy()
         cuda_bin = cls._resolve_cuda_bin_dir()
         if cuda_bin:
             env["PATH"] = str(cuda_bin) + os.pathsep + env.get("PATH", "")
             logger.debug(f"[CUDA_Engine] Prepended CUDA bin to PATH: {cuda_bin}")
-        if gpu_uuid and "CUDA_VISIBLE_DEVICES" not in env:
+        if gpu_uuid and not env.get("CUDA_VISIBLE_DEVICES"):
             env["CUDA_VISIBLE_DEVICES"] = gpu_uuid
         return env
 
@@ -572,7 +589,8 @@ class CUDA_Engine(BaseLlamaCppEngine):
                 if isinstance(uuid, bytes):
                     uuid = uuid.decode("ascii", errors="replace")
                 devices.append({"id": idx, "uuid": uuid, "handle": handle})
-            visible = os.environ.get("CUDA_VISIBLE_DEVICES")
+            # Empty is unset: backend/.env.example lists the variable empty.
+            visible = os.environ.get("CUDA_VISIBLE_DEVICES") or None
             if visible and any(entry.strip().isdigit() for entry in visible.split(",")):
                 logger.debug(
                     f"[{cls.__name__}] CUDA_VISIBLE_DEVICES={visible}: integer entries are "
@@ -603,6 +621,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
                 total_bytes=best["total"],
                 free_bytes=best["free"],
                 processes=cls._nvml_processes(nv, best["handle"]),
+                visible_devices=len(candidates) if visible else 1,
             )
         except Exception as exc:
             return cuda_memory.DeviceMemory(
@@ -617,10 +636,12 @@ class CUDA_Engine(BaseLlamaCppEngine):
     def _device_for_sizing(cls) -> cuda_memory.DeviceMemory:
         """The GPU memory a load is sized against: NVML's, or the QA seam
         ``ERUDI_VRAM_OVERRIDE_GB`` standing in for the free VRAM (the total
-        is then the larger of the override and the real total)."""
+        is then the larger of the override and the real total). The override
+        never invents a GPU: when NVML failed or sees none, it is ignored.
+        An empty value is unset."""
         device = cls._read_vram_info()
-        raw = os.environ.get("ERUDI_VRAM_OVERRIDE_GB")
-        if raw is None:
+        raw = os.environ.get("ERUDI_VRAM_OVERRIDE_GB", "").strip()
+        if not raw or not device.present:
             return device
         try:
             free = int(float(raw) * 1024**3)
@@ -628,13 +649,8 @@ class CUDA_Engine(BaseLlamaCppEngine):
             logger.warning(f"[ERUDI_VRAM_OVERRIDE_GB] Invalid value '{raw}', ignoring.")
             return device
         logger.info(f"[ERUDI_VRAM_OVERRIDE_GB] Simulating {float(raw):.1f} GB free VRAM.")
-        present = device.present
-        return cuda_memory.DeviceMemory(
-            index=device.index if present else None,
-            uuid=device.uuid if present else None,
-            total_bytes=max(free, device.total_bytes if present else 0),
-            free_bytes=free,
-            processes=device.processes,
+        return dataclasses.replace(
+            device, total_bytes=max(free, device.total_bytes), free_bytes=free
         )
 
     # ---------- after load: the placement and the post-load checks ----------

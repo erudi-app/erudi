@@ -322,9 +322,23 @@ class TestReadVramInfo:
         mod = _add_spawn_reads(make_fake_pynvml(), totals=(8 * 1024**3, 24 * 1024**3))
         monkeypatch.setitem(sys.modules, "pynvml", mod)
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-uuid-0")
-        assert CUDA_Engine._read_vram_info().index == 0
+        info = CUDA_Engine._read_vram_info()
+        assert info.index == 0
+        assert info.visible_devices == 1
+        # Two named devices: llama.cpp would split the model across both.
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "GPU-uuid-0,1")
+        assert CUDA_Engine._read_vram_info().visible_devices == 2
+
+    def test_an_empty_cuda_visible_devices_is_not_set(self, monkeypatch):
+        """backend/.env.example lists the variable empty: a developer who
+        copies it to .env must keep every GPU."""
+        mod = _add_spawn_reads(make_fake_pynvml(), totals=(8 * 1024**3, 24 * 1024**3))
+        monkeypatch.setitem(sys.modules, "pynvml", mod)
         monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
-        assert not CUDA_Engine._read_vram_info().present
+        info = CUDA_Engine._read_vram_info()
+        assert info.present
+        assert info.index == 1
+        assert info.visible_devices == 1
 
     def test_no_device_is_no_gpu(self, monkeypatch):
         mod = _add_spawn_reads(make_fake_pynvml(), totals=())

@@ -239,6 +239,40 @@ class TestSpawnContextAndArgv:
         assert ctx["ctx_size"] == 40_960
         assert len(_warnings(caplog)) == 1
 
+    def test_an_empty_vram_override_is_unset(self, gpu, monkeypatch, caplog):
+        monkeypatch.setenv("ERUDI_VRAM_OVERRIDE_GB", "")
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert ctx["ctx_size"] == 40_960
+        assert not _warnings(caplog)
+        assert not [r for r in caplog.records if "ERUDI_VRAM_OVERRIDE_GB" in r.getMessage()]
+
+    @pytest.mark.parametrize("unavailable, gpu_layers", [(None, 0), ("pynvml missing", -1)])
+    def test_a_vram_override_never_invents_a_gpu(self, gpu, monkeypatch, unavailable, gpu_layers):
+        """NVML failed or saw no GPU: the override changes nothing."""
+        monkeypatch.setenv("ERUDI_VRAM_OVERRIDE_GB", "12")
+        gpu.device = cuda_memory.DeviceMemory(
+            index=None, uuid=None, total_bytes=0, free_bytes=0, unavailable=unavailable
+        )
+        ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert (ctx["ctx_size"], ctx["gpu_layers"], ctx["window_sized"]) == (
+            None,
+            gpu_layers,
+            False,
+        )
+
+    def test_several_visible_gpus_take_the_unsized_shape(self, gpu, caplog):
+        """A user's CUDA_VISIBLE_DEVICES naming several cards: llama.cpp
+        splits the layers across them while the sizing reads one card."""
+        gpu.device = dataclasses.replace(_device(), visible_devices=2)
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert (ctx["ctx_size"], ctx["gpu_layers"], ctx["window_sized"]) == (None, -1, False)
+        assert "gpu_uuid" not in ctx
+        (info,) = [r for r in caplog.records if "several GPUs" in r.getMessage()]
+        assert info.levelno == logging.INFO
+        assert "-c" not in _argv(**ctx)
+
     def test_build_spawn_argv_emits_required_flags(self):
         llama_server = Path("/bin/llama-server")
         model_gguf = Path("/m.gguf")
@@ -319,6 +353,12 @@ class TestBuildSpawnEnv:
         with patch.object(CUDA_Engine, "_resolve_cuda_bin_dir", return_value=None):
             env = CUDA_Engine._build_spawn_env(gpu_uuid=UUID)
         assert env["CUDA_VISIBLE_DEVICES"] == "1"
+
+    def test_an_empty_cuda_visible_devices_is_replaced_by_the_pin(self, monkeypatch):
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "")
+        with patch.object(CUDA_Engine, "_resolve_cuda_bin_dir", return_value=None):
+            env = CUDA_Engine._build_spawn_env(gpu_uuid=UUID)
+        assert env["CUDA_VISIBLE_DEVICES"] == UUID
 
     def test_no_selected_gpu_sets_nothing(self, monkeypatch):
         monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
