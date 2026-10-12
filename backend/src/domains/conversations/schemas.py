@@ -15,7 +15,7 @@ Schema Hierarchy:
         ConversationResponse → ConversationWithMessagesResponse
 
 Validation Rules:
-    - Message content: 1-32768 characters
+    - Message content: non-empty, no length cap
     - Message sender: Must be "user" or "assistant"
     - Temperature: 0.0-2.0 (default 0.2)
     - Top-p: 0.0-1.0 (default 0.5)
@@ -60,12 +60,12 @@ class MessageBase(BaseModel):
 
     Attributes:
         sender: Message sender, must be "user" or "assistant".
-        content: Message content, 1-32768 characters.
+        content: Message content, non-empty, no length cap.
     """
 
     """Base schema for messages."""
     sender: str = Field(..., description="Message sender (user or assistant)")
-    content: str = Field(..., min_length=1, max_length=32768, description="Message content")
+    content: str = Field(..., min_length=1, description="Message content")
 
     @validator("sender")
     def validate_sender(cls, v):

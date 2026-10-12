@@ -64,6 +64,11 @@ class _FakeEngine(BaseEngine):
 _VISION_NOTICE = "*This model doesn't support images — your image was ignored.*\n\n"
 
 
+def _long_text(n):
+    """Return exactly ``n`` characters of space-separated words, ending on a letter."""
+    return ("lorem ipsum dolor " * (n // 18 + 1))[: n - 1] + "x"
+
+
 def _fake_chat_model(*texts):
     """Return a ``build_chat_model`` replacement yielding a scripted fake model.
 
@@ -1144,6 +1149,52 @@ class TestConversationService:
         assert messages[1].trace is not None
         assert not any(e.get("t") == "memory_reload" for e in messages[1].trace)
 
+    async def test_query_stream_stores_an_answer_beyond_32k_chars(
+        self, test_db_session, mock_llm, monkeypatch, caplog
+    ):
+        """#643: a long answer streams, is stored whole, and logs no failure."""
+        answer = _long_text(78_762)
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(agent_runner, "build_chat_model", _fake_chat_model(answer))
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+        payload = ConversationQuery(question="Write a lot", temperature=0.7)
+
+        with caplog.at_level("ERROR"):
+            result = [t async for t in service.query_and_respond_stream(conversation.id, payload)]
+
+        assert _parse_ndjson(result)[-1] == {"t": "done"}
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert [m.sender for m in messages] == ["user", "llm"]
+        assert messages[1].content == answer
+        assert not [r for r in caplog.records if "Query streaming failed" in r.getMessage()]
+
+    async def test_query_stream_stores_a_question_beyond_32k_chars(
+        self, test_db_session, mock_llm, monkeypatch, caplog
+    ):
+        """#643: a long question is stored whole and the turn completes."""
+        question = _long_text(40_000)
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(agent_runner, "build_chat_model", _fake_chat_model("Noted."))
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+        payload = ConversationQuery(question=question, temperature=0.7)
+
+        with caplog.at_level("ERROR"):
+            result = [t async for t in service.query_and_respond_stream(conversation.id, payload)]
+
+        assert _parse_ndjson(result)[-1] == {"t": "done"}
+        assert _answer_text(result) == "Noted."
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert [m.sender for m in messages] == ["user", "llm"]
+        assert messages[0].content == question
+        assert messages[1].content == "Noted."
+        assert not [r for r in caplog.records if r.levelname == "ERROR"]
+
 
 class TestTraceHelpers:
     """Unit tests for the NDJSON framing + trace-cap helpers (#90)."""
@@ -1350,6 +1401,39 @@ class TestConversationEndpoints:
         assert len(messages) == 2
         assert messages[0]["content"] == "Hello"
         assert messages[1]["content"] == "Hi there"
+
+    def test_get_messages_endpoint_returns_a_100k_char_message_intact(
+        self, client, mock_llm, test_db_session
+    ):
+        """#643: the response model no longer rejects a long stored message."""
+        content = _long_text(100_000)
+        create_response = client.post(
+            "/erudi/conversations/", json={"llm_id": mock_llm.id, "name": "Long"}
+        )
+        conversation_id = create_response.json()["id"]
+        MessageRepository(test_db_session).create_message(conversation_id, content, "llm")
+
+        response = client.get(f"/erudi/conversations/{conversation_id}/fetch_messages")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert response.json()[0]["content"] == content
+
+
+class TestMessageEntityContent:
+    """Message.validate_content: non-empty, no length cap (#643)."""
+
+    @pytest.mark.parametrize("content", ["", "   ", "\n\t "])
+    def test_empty_or_blank_content_is_rejected(self, content):
+        from src.entities.Message import Message
+
+        with pytest.raises(ValueError):
+            Message(conversation_id=1, sender="user", content=content)
+
+    def test_content_beyond_32k_chars_is_accepted(self):
+        from src.entities.Message import Message
+
+        content = _long_text(100_000)
+        assert Message(conversation_id=1, sender="user", content=content).content == content
 
 
 class TestTitleSanitization:
