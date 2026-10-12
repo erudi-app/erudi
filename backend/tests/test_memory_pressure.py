@@ -26,6 +26,7 @@ from types import SimpleNamespace
 
 import pytest
 
+from src.engines import cuda_memory
 from src.engines import memory_pressure as mp
 from src.engines import process_footprint
 from src.engines.memory_brake import LLAMA_WARNING_DAMAGE_MIN_BYTES
@@ -562,6 +563,48 @@ def test_read_vram_delegates_and_never_raises(monkeypatch):
 )
 def test_child_vram_bytes_filters_on_the_pid(processes, expected):
     assert mp.child_vram_bytes(12, processes) == expected
+
+
+# ===================== the VRAM QA seam =====================
+
+
+class _CalmGpu:
+    name = "calm-gpu"
+
+    def read(self):
+        return mp.PressureReading(level=1, damage_total_bytes=7)
+
+    def vram(self, pid):
+        return mp.VramReading(spill_bytes=0, dedicated_bytes=6 * GIB)
+
+
+@pytest.mark.parametrize(
+    "forced, above",
+    [
+        ("vram-warning", cuda_memory.CUDA_SPILL_WARNING_BYTES),
+        ("vram-critical", cuda_memory.CUDA_SPILL_CRITICAL_BYTES),
+    ],
+)
+def test_the_vram_seam_forces_a_spill_and_leaves_the_ram_alone(monkeypatch, caplog, forced, above):
+    """The spill read is the healthy baseline plus the tier's threshold:
+    once the baseline is stamped, the gauge sits exactly at the tier, and
+    it is the damage evidence too. The dedicated VRAM stays the real one;
+    the RAM reading is the provider's, with no warning."""
+    monkeypatch.setattr(mp, "_PROVIDER", _CalmGpu())
+    monkeypatch.setenv("ERUDI_FORCE_MEMORY_PRESSURE", forced)
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        reading = mp.read_vram(7)
+        assert mp.read_pressure() == mp.PressureReading(level=1, damage_total_bytes=7)
+    assert reading.spill_bytes == cuda_memory.CUDA_SPILL_BASELINE_BYTES + above
+    assert reading.dedicated_bytes == 6 * GIB
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+@pytest.mark.parametrize("forced", ["warning", "critical"])
+def test_the_ram_seam_does_not_reach_the_vram_reading(monkeypatch, forced):
+    monkeypatch.setattr(mp, "_PROVIDER", _CalmGpu())
+    monkeypatch.setenv("ERUDI_FORCE_MEMORY_PRESSURE", forced)
+    assert mp.read_vram(7) == mp.VramReading(spill_bytes=0, dedicated_bytes=6 * GIB)
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the native Windows calls")

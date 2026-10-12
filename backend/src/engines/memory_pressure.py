@@ -54,11 +54,19 @@ Every threshold for Linux and Windows is a starting value, to be calibrated
 on real machines. Nothing native is loaded at import: the Windows and macOS
 libraries are opened on first use, so every CI leg imports this module.
 
-``ERUDI_FORCE_MEMORY_PRESSURE=warning|critical`` (a QA seam, never set in
-normal use) forces the level AND the damage evidence of every reading -- each
-read advances a synthetic counter by ``LLAMA_WARNING_DAMAGE_MIN_BYTES`` -- so a
-shrink and an idle respawn can be exercised on a calm machine. It acts here,
-so on the llama.cpp engines only: the MLX brake reads ``process_footprint``.
+``ERUDI_FORCE_MEMORY_PRESSURE`` (a QA seam, never set in normal use) acts
+here, so on the llama.cpp engines only (the MLX brake reads
+``process_footprint``):
+
+* ``warning|critical`` force the RAM level AND the damage evidence of every
+  ``read_pressure`` -- each read advances a synthetic counter by
+  ``LLAMA_WARNING_DAMAGE_MIN_BYTES`` -- so the CPU engine's shrink and idle
+  respawn can be exercised on a calm machine (on a full-offload CUDA child,
+  RAM pressure is ``external``: it informs, or unloads, never shrinks);
+* ``vram-warning|vram-critical`` force the spill of every ``read_vram`` to the
+  healthy baseline plus the tier's threshold (the dedicated VRAM stays the
+  real one), so the CUDA engine's spill shrink and ``-ngl -2`` respawn can be
+  exercised on a calm Windows machine; the RAM reading is left alone.
 """
 
 from __future__ import annotations
@@ -74,6 +82,11 @@ from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 import psutil
 
 from src.core.logging import logger
+from src.engines.cuda_memory import (
+    CUDA_SPILL_BASELINE_BYTES,
+    CUDA_SPILL_CRITICAL_BYTES,
+    CUDA_SPILL_WARNING_BYTES,
+)
 from src.engines.memory_brake import (
     LEVEL_CALM,
     LEVEL_CRITICAL,
@@ -98,6 +111,12 @@ WIN_COMMIT_WARN_FRACTION = 0.85
 WIN_COMMIT_CRITICAL_FRACTION = 0.93
 
 _FORCED_LEVELS = {"warning": LEVEL_WARNING, "critical": LEVEL_CRITICAL}
+# The spill reading a forced VRAM tier stands for: once the child's baseline is
+# stamped (at most ``CUDA_SPILL_BASELINE_BYTES``), the gauge sits at the tier.
+_FORCED_SPILL_BYTES = {
+    "vram-warning": CUDA_SPILL_BASELINE_BYTES + CUDA_SPILL_WARNING_BYTES,
+    "vram-critical": CUDA_SPILL_BASELINE_BYTES + CUDA_SPILL_CRITICAL_BYTES,
+}
 _FORCED_DAMAGE_BYTES = 0
 _FORCE_WARNED = False
 _PROVIDER: Any = None
@@ -597,15 +616,23 @@ def sensor_name() -> str:
     return _provider().name
 
 
+def _forced() -> str:
+    """The QA seam's value, normalized; empty when unset."""
+    return os.environ.get("ERUDI_FORCE_MEMORY_PRESSURE", "").strip().lower()
+
+
 def _forced_level() -> Optional[int]:
     global _FORCE_WARNED
-    raw = os.environ.get("ERUDI_FORCE_MEMORY_PRESSURE", "").strip().lower()
-    if not raw:
+    raw = _forced()
+    if not raw or raw in _FORCED_SPILL_BYTES:
         return None
     level = _FORCED_LEVELS.get(raw)
     if level is None and not _FORCE_WARNED:
         _FORCE_WARNED = True
-        logger.warning("ERUDI_FORCE_MEMORY_PRESSURE is not 'warning' or 'critical'; ignoring it")
+        logger.warning(
+            "ERUDI_FORCE_MEMORY_PRESSURE is not 'warning', 'critical', 'vram-warning' or "
+            "'vram-critical'; ignoring it"
+        )
     return level
 
 
@@ -646,13 +673,18 @@ def effective_total_ram_bytes() -> Optional[int]:
 
 def read_vram(pid: Optional[int]) -> VramReading:
     """The CUDA child's spill and dedicated VRAM now (Windows only; the
-    other providers answer unavailable). Never raises."""
+    other providers answer unavailable), the spill forced by the QA seam's
+    VRAM values. Never raises."""
     if not pid:
         return VramReading(None, None, unavailable="no child")
     try:
-        return _provider().vram(pid)
+        reading = _provider().vram(pid)
     except Exception as exc:
-        return VramReading(None, None, unavailable=f"{type(exc).__name__}")
+        reading = VramReading(None, None, unavailable=f"{type(exc).__name__}")
+    forced = _FORCED_SPILL_BYTES.get(_forced())
+    if forced is None:
+        return reading
+    return VramReading(forced, reading.dedicated_bytes)
 
 
 def child_vram_bytes(
