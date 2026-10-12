@@ -1149,6 +1149,99 @@ class TestConversationService:
         assert messages[1].trace is not None
         assert not any(e.get("t") == "memory_reload" for e in messages[1].trace)
 
+    async def test_a_compaction_start_is_wire_only_and_its_done_is_persisted(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        """#614: ``start`` is a statement about the turn in flight (wire only);
+        ``done`` marks where the summary took over, replayed on reload."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+        done = {
+            "t": "compaction",
+            "phase": "done",
+            "summarized": 12,
+            "reason": "length",
+            "summary": "Ada lives in Lyon.",
+            "summary_lost": False,
+        }
+
+        async def fake_stream(**kwargs):
+            yield {"t": "compaction", "phase": "start"}
+            yield dict(done)
+            yield {"t": "answer", "text": "Sure."}
+
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        payload = ConversationQuery(question="Go on")
+        result = [t async for t in service.query_and_respond_stream(conversation.id, payload)]
+
+        events = _parse_ndjson(result)
+        assert events[:2] == [{"t": "compaction", "phase": "start"}, done]
+        assert events[-1] == {"t": "done"}
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[1].content == "Sure."
+        assert messages[1].trace == [done]
+
+    async def test_an_error_turn_keeps_its_compaction_in_the_trace(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        """The compaction is checkpointed even when the model call then fails:
+        the error turn persists the compaction (and nothing else of its
+        trace), so the marker survives a reload."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+        done = {
+            "t": "compaction",
+            "phase": "done",
+            "summarized": 3,
+            "reason": "memory",
+            "summary": "S.",
+            "summary_lost": False,
+        }
+
+        async def fake_stream(**kwargs):
+            yield {"t": "compaction", "phase": "start"}
+            yield dict(done)
+            yield {"t": "thinking", "text": "hm"}
+            yield {"t": "answer", "text": f"{_SENTINEL} The model failed."}
+
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        payload = ConversationQuery(question="Go on")
+        result = [t async for t in service.query_and_respond_stream(conversation.id, payload)]
+
+        assert any(e["t"] == "error" for e in _parse_ndjson(result))
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[1].content.startswith(_SENTINEL)
+        assert messages[1].trace == [done]
+
+    async def test_an_error_turn_without_a_compaction_persists_no_trace(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+
+        async def fake_stream(**kwargs):
+            yield {"t": "thinking", "text": "hm"}
+            yield {"t": "answer", "text": f"{_SENTINEL} The model failed."}
+
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        payload = ConversationQuery(question="Go on")
+        [t async for t in service.query_and_respond_stream(conversation.id, payload)]
+
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[1].trace is None
+
     async def test_query_stream_stores_an_answer_beyond_32k_chars(
         self, test_db_session, mock_llm, monkeypatch, caplog
     ):
@@ -1242,6 +1335,64 @@ class TestTraceHelpers:
         assert capped[0] == {"t": "truncated"}
         assert capped[-1] == events[-1]  # newest survives
         assert events[0] not in capped  # oldest dropped
+
+    def test_cap_trace_pins_compaction_events(self):
+        """#614: a reasoning turn emits one event per token, so the oldest --
+        a compaction announced at the first hop -- would be the first dropped.
+        Compaction events are pinned ahead of the truncated marker."""
+        big = "x" * 1000
+        done = {
+            "t": "compaction",
+            "phase": "done",
+            "summarized": 8,
+            "reason": "length",
+            "summary": "s" * 4000,
+            "summary_lost": False,
+        }
+        second = {**done, "summarized": 2, "summary": "t" * 100}
+        events = (
+            [done]
+            + [{"t": "thinking", "text": f"{i}-{big}"} for i in range(50)]
+            + [second]
+            + [{"t": "thinking", "text": "last"}]
+        )
+
+        capped = _cap_trace(events)
+
+        assert len(json.dumps(capped)) <= TRACE_MAX_BYTES
+        assert capped[:3] == [done, second, {"t": "truncated"}]
+        assert capped[-1] == events[-1]
+        assert events[1] not in capped
+
+    def test_cap_trace_marks_nothing_when_only_compactions_overflow(self):
+        """Compactions alone over the cap are kept whole; nothing was elided,
+        so no truncated marker."""
+        first = {"t": "compaction", "phase": "done", "summary": "a" * 20_000}
+        second = {"t": "compaction", "phase": "done", "summary": "b" * 20_000}
+
+        assert _cap_trace([first, second]) == [first, second]
+
+    def test_cap_trace_marks_truncated_only_when_a_step_was_dropped(self):
+        step = {"t": "thinking", "text": "hm"}
+        small_first = {"t": "compaction", "phase": "done", "summary": "a" * 10_000}
+        small_second = {"t": "compaction", "phase": "done", "summary": "b" * 10_000}
+        big_first = {"t": "compaction", "phase": "done", "summary": "a" * 20_000}
+        big_second = {"t": "compaction", "phase": "done", "summary": "b" * 20_000}
+
+        # Fits: unchanged, in its own order.
+        assert _cap_trace([small_first, step, small_second]) == [small_first, step, small_second]
+        # Over the cap: the step goes, the compactions stay in order, marked.
+        assert _cap_trace([big_first, step, big_second]) == [
+            big_first,
+            big_second,
+            {"t": "truncated"},
+        ]
+
+    def test_cap_trace_keeps_compaction_events_alone_when_nothing_else_fits(self):
+        done = {"t": "compaction", "phase": "done", "summary": "s" * 40_000}
+        events = [done, {"t": "thinking", "text": "x" * 1000}]
+
+        assert _cap_trace(events) == [done, {"t": "truncated"}]
 
 
 # ============ Endpoint Tests ============

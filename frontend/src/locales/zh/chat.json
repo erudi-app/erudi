@@ -74,6 +74,7 @@
   "message": {
     "firstReplyHint": "首次回复可能会稍慢一些，因为模型正在加载到内存中...",
     "memoryReload": "已在您的电脑上释放内存；正在重新加载模型以继续对话…",
+    "compacting": "正在总结之前的消息以腾出空间…",
     "imagePlaceholder": "🖼 图片附件",
     "attachmentAlt": "附件 {{index}}",
     "copy": "复制消息",
@@ -81,6 +82,18 @@
   },
   "conversation": {
     "untitled": "新对话"
+  },
+  "compaction": {
+    "length_one": "已将 {{count}} 条之前的消息总结为摘要，使对话保持在模型的上下文范围内",
+    "length_other": "已将 {{count}} 条之前的消息总结为摘要，使对话保持在模型的上下文范围内",
+    "lengthNoCount": "已将之前的消息总结为摘要，使对话保持在模型的上下文范围内",
+    "memory_one": "已将 {{count}} 条之前的消息总结为摘要，以适应这台电脑的内存",
+    "memory_other": "已将 {{count}} 条之前的消息总结为摘要，以适应这台电脑的内存",
+    "memoryNoCount": "已将之前的消息总结为摘要，以适应这台电脑的内存",
+    "lost": "之前的消息无法总结，已从模型可见的内容中移除。",
+    "showSummary": "显示摘要",
+    "showKeptSummary": "显示模型保留的摘要",
+    "hideSummary": "隐藏摘要"
   },
   "trace": {
     "summary": "推理过程",

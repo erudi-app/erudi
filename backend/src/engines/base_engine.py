@@ -306,13 +306,14 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         ``None`` when memory is not what bounds it.
 
         Set by an engine whose child's window memory limits: MLX, which lowers
-        its child's window to the memory ceiling after load, and the CPU
-        engine, which sizes ``-c`` from the RAM budget at spawn (never for a
-        sliding-window model, whose window the budget over-estimates); it
-        then equals the allocated window. ``None`` means the model's own
-        window binds (or the bound could not be applied): no memory notice and
-        no memory wording on an overflow apply. CUDA answers ``None``: its
-        window is llama-server's own fit."""
+        its child's window to the memory ceiling after load, the CPU engine,
+        which sizes ``-c`` from the RAM budget at spawn (never for a
+        sliding-window model, whose window the budget over-estimates), and
+        the CUDA engine, which sizes it from the VRAM budget at spawn; it then
+        equals the allocated window. ``None`` means the model's own
+        window binds (or the bound could not be applied): no memory notice, no
+        memory wording on an overflow and no memory reason on a compaction
+        apply."""
         return None
 
     @classmethod

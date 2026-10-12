@@ -96,7 +96,8 @@ class MessageResponse(MessageBase):
         timestamp: Message creation timestamp.
         starred: Whether message is bookmarked (default False).
         trace: Optional list of the assistant turn's non-answer stream events
-            (thinking / tool_call / tool_result) for replay on reload (#90).
+            (thinking / tool_call / tool_result, and the compaction ``done``
+            events, #614) for replay on reload (#90).
     """
 
     """Schema for message responses."""
@@ -106,7 +107,10 @@ class MessageResponse(MessageBase):
     starred: bool = Field(default=False, description="Whether message is starred")
     trace: Optional[List[dict]] = Field(
         default=None,
-        description="Assistant turn's non-answer stream events (thinking/tool activity), for replay (#90)",
+        description=(
+            "Assistant turn's non-answer stream events (thinking/tool activity, "
+            "compaction markers), for replay (#90, #614)"
+        ),
     )
 
     class Config:

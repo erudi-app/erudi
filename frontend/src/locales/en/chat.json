@@ -74,6 +74,7 @@
   "message": {
     "firstReplyHint": "First response may take a bit longer while loading the model into memory...",
     "memoryReload": "Memory was freed on your computer; reloading the model to resume the conversation…",
+    "compacting": "Summarizing earlier messages to make room…",
     "imagePlaceholder": "🖼 image attachment",
     "attachmentAlt": "attachment {{index}}",
     "copy": "Copy message",
@@ -81,6 +82,18 @@
   },
   "conversation": {
     "untitled": "New Conversation"
+  },
+  "compaction": {
+    "length_one": "{{count}} earlier message was summarized to keep the conversation within the model's context",
+    "length_other": "{{count}} earlier messages were summarized to keep the conversation within the model's context",
+    "lengthNoCount": "Earlier messages were summarized to keep the conversation within the model's context",
+    "memory_one": "{{count}} earlier message was summarized to fit this computer's memory",
+    "memory_other": "{{count}} earlier messages were summarized to fit this computer's memory",
+    "memoryNoCount": "Earlier messages were summarized to fit this computer's memory",
+    "lost": "Earlier messages could not be summarized and were dropped from what the model sees.",
+    "showSummary": "Show summary",
+    "showKeptSummary": "Show the summary the model keeps",
+    "hideSummary": "Hide summary"
   },
   "trace": {
     "summary": "Reasoning",

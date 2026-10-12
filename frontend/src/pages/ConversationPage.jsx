@@ -11,6 +11,7 @@ import { AlertTriangle, Copy, Check, FileText, Star } from "lucide-react";
 import TypingIndicator from "../components/TypingIndicator";
 import MarkdownRenderer from "../components/MarkdownRenderer";
 import TraceStrip from "../components/TraceStrip";
+import CompactionMarker from "../components/CompactionMarker";
 import { API_BASE_URL } from "../config/api.js";
 import apiClient, { tracedFetch } from "../services/api/client";
 import { createLogger } from "../utils/logger";
@@ -28,6 +29,7 @@ import {
   getImagePaths,
 } from "../utils/messageContent";
 import { formatBytes } from "../utils/formatBytes";
+import { compactionMarkers, compactionsOnly, hasStripEvents } from "../utils/traceEvents";
 import { DEFAULT_COMPACTION_THRESHOLD } from "../utils/compactionThreshold";
 
 const log = createLogger("ConversationPage");
@@ -385,7 +387,8 @@ export default function ConversationPage() {
         sender: "llm",
         content: "",
         // Live NDJSON trace (#90): thinking / tool_call / tool_result events
-        // collected as they stream, replayed by the TraceStrip above the bubble.
+        // collected as they stream, replayed by the TraceStrip above the bubble,
+        // and the compaction markers (#614) rendered above the strip.
         // `streaming` gates the strip's expanded-while-only-content behavior.
         trace: [],
         streaming: true,
@@ -470,14 +473,15 @@ export default function ConversationPage() {
           // (application/x-ndjson). We split on "\n" and carry the trailing
           // partial line across reads. Answer events stream into the bubble
           // exactly as raw text did before; thinking / tool_call / tool_result
-          // accrue into the message's live trace; error maps to the red bubble;
+          // and compaction `done` accrue into the message's live trace;
+          // compaction `start` is a transient state; error maps to the red bubble;
           // done is terminal. Unknown event types are ignored (forward compat).
           // NOTE: the title-gen reader above is a SEPARATE plain-text loop.
           const reader = responseRes.body.getReader();
           const decoder = new TextDecoder("utf-8");
           let buffer = ""; // partial-line carry across reads
           let answerText = ""; // accumulated answer bubble text
-          const traceEvents = []; // ordered thinking / tool_call / tool_result
+          const traceEvents = []; // ordered thinking / tool / compaction-done events
           let gotFirstEvent = false;
           let parseWarned = false;
           let sawError = false;
@@ -489,13 +493,27 @@ export default function ConversationPage() {
           // the end of the turn. Notices the backend streams as answer text
           // come BEFORE it, so they never end it. Never persisted.
           let reloading = false;
+          // A compaction in the pending bubble (#614): "during" from its
+          // `start` (typing indicator + "Summarizing earlier messages..."),
+          // "after" from its `done` (the indicator alone: the separator
+          // already says what was summarized, and the model still re-reads
+          // the shortened conversation -- clearing it outright would leave a
+          // blank bubble). The model speaking (its first answer, thinking or
+          // tool event), an error, or the end of the turn ends either.
+          let compacting = false;
 
           // Push the current accumulators onto the streaming assistant message.
           const flushMessage = () => {
             setMessages((prev) =>
               prev.map((msg) =>
                 msg.id === assistantMessage.id
-                  ? { ...msg, content: answerText, trace: traceEvents.slice(), reloading }
+                  ? {
+                      ...msg,
+                      content: answerText,
+                      trace: traceEvents.slice(),
+                      reloading,
+                      compacting,
+                    }
                   : msg
               )
             );
@@ -509,14 +527,27 @@ export default function ConversationPage() {
               case "memory_reload":
                 reloading = true;
                 break;
+              case "compaction":
+                // `start` is the transient state; `done` is the marker the
+                // trace keeps (persisted, replayed on reload).
+                if (evt.phase === "start") {
+                  reloading = false;
+                  compacting = "during";
+                } else if (evt.phase === "done") {
+                  compacting = "after";
+                  traceEvents.push(evt);
+                }
+                break;
               case "answer":
                 reloading = false;
+                compacting = false;
                 answerText += evt.text || "";
                 break;
               case "thinking":
               case "tool_call":
               case "tool_result":
                 reloading = false;
+                compacting = false;
                 traceEvents.push(evt);
                 break;
               case "error":
@@ -526,6 +557,7 @@ export default function ConversationPage() {
                 // The backend error text is already sentinel-prefixed.
                 sawError = true;
                 reloading = false;
+                compacting = false;
                 // The backend has the traceback; this side records that the
                 // turn failed, on which conversation, and the engine's reason.
                 log.error(`Generation failed for conversation ${id}`, {
@@ -557,6 +589,7 @@ export default function ConversationPage() {
               case "done":
                 sawDone = true;
                 reloading = false;
+                compacting = false;
                 break;
               default:
                 // Unknown event type: ignore for forward compatibility.
@@ -627,17 +660,19 @@ export default function ConversationPage() {
               setMemoryWarning(null);
             }
             // Turn is over: stop the live strip (it settles to the collapsed
-            // summary) and drop the trace on an error turn to match persisted
-            // history (the backend persists no trace for error turns).
+            // summary) and keep only the compactions of an error turn's trace
+            // to match persisted history (the backend persists nothing else
+            // for error turns).
             setMessages((prev) =>
               prev.map((msg) =>
                 msg.id === assistantMessage.id
                   ? {
                       ...msg,
                       content: answerText,
-                      trace: sawError ? null : traceEvents.slice(),
+                      trace: sawError ? compactionsOnly(traceEvents) : traceEvents.slice(),
                       streaming: false,
                       reloading: false,
+                      compacting: false,
                     }
                   : msg
               )
@@ -659,7 +694,14 @@ export default function ConversationPage() {
           setMessages((prev) =>
             prev.map((msg) =>
               msg.id === assistantMessage.id
-                ? { ...msg, content: assistantMessage.content, trace: null, streaming: false }
+                ? {
+                    ...msg,
+                    content: assistantMessage.content,
+                    trace: null,
+                    streaming: false,
+                    reloading: false,
+                    compacting: false,
+                  }
                 : msg
             )
           );
@@ -1030,23 +1072,35 @@ export default function ConversationPage() {
               const bubbleClass = bubbleClassFor(isUser, isError);
 
               // Reasoning/trace strip (#90): only for assistant turns that carried
-              // non-answer activity, never for error turns (they have no trace,
-              // matching persisted history). `traceLive` is true while the strip
+              // thinking or tool activity, never for error turns (their persisted
+              // trace holds compactions only). `traceLive` is true while the strip
               // is the only content (streaming, no answer yet) -> expanded; it
               // flips false on the first answer event -> auto-collapse.
               const traceEvents = !isUser ? msg.trace : null;
-              const showTrace =
-                !isUser && !isError && Array.isArray(traceEvents) && traceEvents.length > 0;
+              const showTrace = !isUser && !isError && hasStripEvents(traceEvents);
               const traceLive = showTrace && !!msg.streaming && !msg.content;
+              // Where a compaction took over (#614): separators above the
+              // strip and the bubble, error turns included.
+              const compactions = !isUser ? compactionMarkers(traceEvents) : [];
 
               // Show TypingIndicator for assistant messages that are loading, but
               // not once the live trace strip has taken over the pre-answer wait.
               const showTypingIndicator =
-                !isUser && loading && !msg.content && !showTrace && !msg.reloading;
+                !isUser &&
+                loading &&
+                !msg.content &&
+                !showTrace &&
+                !msg.reloading &&
+                !msg.compacting;
               // The model is being reloaded after the memory brake unloaded
               // it: its own state, independent of the content (a notice the
               // backend streamed as answer text may already be there).
               const showReload = !isUser && !!msg.reloading;
+              // A compaction is pending in the turn: the same slot, whatever
+              // the strip shows (a later model call of the turn can compact).
+              // Its text only while the summary is being written.
+              const showCompacting = !isUser && !!msg.compacting;
+              const showCompactingText = showCompacting && msg.compacting === "during";
 
               // Attached images (this session) render in their OWN panel,
               // separate from the text bubble. `displayText` is the readable
@@ -1066,6 +1120,7 @@ export default function ConversationPage() {
 
               return (
                 <div key={msg.id} className={`group flex flex-col mb-2 ${alignmentClass}`}>
+                  {compactions.length > 0 && <CompactionMarker events={compactions} />}
                   {showTrace && <TraceStrip events={traceEvents} live={traceLive} />}
                   {/* Attached images: their OWN glass panel (chat-header
                       material), a sibling of the text bubble, not nested in it. */}
@@ -1147,7 +1202,9 @@ export default function ConversationPage() {
                         </div>
                       ) : (
                         // Assistant normal messages: render markdown
-                        (msg.content || !showReload) && <MarkdownRenderer content={msg.content} />
+                        (msg.content || (!showReload && !showCompacting)) && (
+                          <MarkdownRenderer content={msg.content} />
+                        )
                       )}
                       {showReload && (
                         <div className="flex flex-col gap-2">
@@ -1157,6 +1214,18 @@ export default function ConversationPage() {
                           <div className="text-xs text-gray-400 italic mt-1">
                             {t("chat:message.memoryReload")}
                           </div>
+                        </div>
+                      )}
+                      {showCompacting && (
+                        <div className="flex flex-col gap-2">
+                          <div className="flex items-start pt-1">
+                            <TypingIndicator size={8} className="-mt-1" />
+                          </div>
+                          {showCompactingText && (
+                            <div className="text-xs text-gray-400 italic mt-1">
+                              {t("chat:message.compacting")}
+                            </div>
+                          )}
                         </div>
                       )}
                     </div>
