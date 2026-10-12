@@ -648,6 +648,15 @@ def _previous_summary_text(previous: Any) -> str:
     return _without_lost_tail(text)
 
 
+def _answer_part(text: str) -> str:
+    """``text`` without its inline ``<think>`` blocks: a model that thinks in
+    its content even at effort "none" must not store its reasoning as the
+    conversation's summary (nor show it in the compaction marker)."""
+    splitter = ThinkSplitter()
+    events = splitter.feed(text or "") + splitter.flush()
+    return "".join(e["text"] for e in events if e["t"] == "answer").strip()
+
+
 def _without_lost_tail(text: str) -> str:
     """``text`` without a closing placeholder sentence (``SUMMARY_*_LOST``)."""
     text = text.strip()
@@ -1071,10 +1080,11 @@ def _summarization_middleware_class():
                         exc_info=True,
                     )
                 return None
-            summary = response.text.strip()
+            summary = _answer_part(response.text)
             if not summary:
                 # An empty summary would replace the whole history with
-                # nothing: a failure, never a success.
+                # nothing: a failure, never a success. A summary that only
+                # thought (an unclosed ``<think>``) is one too.
                 logger.warning(f"Compaction summary call returned no text ({attempt} attempt)")
                 return None
             return summary

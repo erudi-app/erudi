@@ -102,10 +102,13 @@ def _cap_trace(events: list) -> Optional[list]:
 
     Compaction events (#614) are pinned: a reasoning turn emits one event per
     token, so a compaction announced at the first model call would be the first
-    dropped. They lead the capped trace, in their order, ahead of the marker,
-    and the other events are capped against what they leave -- all of them may
-    go. A summary is capped at ``summary_cap`` tokens, so a turn's compactions
-    stay far under the cap.
+    dropped. They lead the capped trace, in their order, and are never dropped;
+    the other events are capped against what they leave -- all of them may go,
+    and the marker follows the compactions only when one of them did. With a
+    known window a summary is capped at ``summary_cap`` tokens and a turn's
+    compactions fit easily; without one the summary client runs on the
+    conversation's output budget, so compactions alone can exceed the cap --
+    they are kept whole all the same.
     """
     if not events:
         return None
@@ -113,10 +116,14 @@ def _cap_trace(events: list) -> Optional[list]:
         return list(events)
     marker = {"t": "truncated"}
     pinned = [e for e in events if _is_compaction(e)]
-    capped = [e for e in events if not _is_compaction(e)]
+    others = [e for e in events if not _is_compaction(e)]
+    capped = list(others)
     floor = 0 if pinned else 1
     while len(capped) > floor and len(json.dumps([*pinned, marker, *capped])) > TRACE_MAX_BYTES:
         capped.pop(0)
+    if len(capped) == len(others):
+        # Nothing elided: only the compactions themselves exceed the cap.
+        return [*pinned, *capped]
     return [*pinned, marker, *capped]
 
 

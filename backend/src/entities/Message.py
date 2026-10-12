@@ -59,8 +59,10 @@ class Message(Base):
     timestamp = Column(DateTime, server_default=func.now(), nullable=False)
     starred = Column(Boolean, default=False, nullable=False)
     # Ordered list of non-answer stream events for an assistant turn (#90):
-    # thinking / tool_call / tool_result (and a truncated marker when capped).
-    # Nullable: user messages and turns with neither thinking nor tools have none.
+    # thinking / tool_call / tool_result and the compaction ``done`` events
+    # (#614), with a truncated marker when steps were dropped by the cap.
+    # Nullable: user messages and turns with no thinking, tool or compaction
+    # have none (an error turn keeps its compactions only).
     trace = Column(JSON, nullable=True)
 
     # Relationships

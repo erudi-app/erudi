@@ -159,6 +159,37 @@ async def test_done_carries_the_count_the_summary_and_no_loss():
     assert done["summary_lost"] is False
 
 
+async def test_a_summary_written_with_inline_thinking_keeps_only_its_answer():
+    """A model that thinks in its content even at effort "none": the stored
+    summary and the marker carry the answer part alone."""
+    summary = _ProbeSummaryModel(
+        messages=iter([]), script=["<think>Let me see.</think>Ada lives in Lyon."]
+    )
+    mw = _middleware(summary, window=10_000)
+
+    after = _after(
+        await mw.abefore_model({"messages": _compacting_state()}, _runtime(summary.written))
+    )
+
+    assert (
+        after[0].content == "Here is a summary of the conversation to date:\n\nAda lives in Lyon."
+    )
+    assert summary.written[-1]["summary"] == "Ada lives in Lyon."
+
+
+async def test_a_summary_that_only_thinks_is_a_failure_and_is_retried():
+    summary = _ProbeSummaryModel(messages=iter([]), script=["<think>It never closes", "Recovered."])
+    mw = _middleware(summary, window=10_000)
+
+    after = _after(
+        await mw.abefore_model({"messages": _compacting_state()}, _runtime(summary.written))
+    )
+
+    assert after[0].content.endswith("Recovered.")
+    assert "It never closes" not in after[0].content
+    assert summary.written[-1]["summary"] == "Recovered."
+
+
 async def test_a_lost_summary_sends_the_carried_summary_without_the_closing_sentence():
     summary = _ProbeSummaryModel(messages=iter([]), script=[_overflow_400(), _overflow_400()])
     mw = _middleware(summary, window=10_000)
@@ -316,23 +347,21 @@ async def test_a_turn_without_compaction_streams_no_compaction_event(monkeypatch
 
 async def test_thinking_tool_calls_and_answers_keep_their_order(monkeypatch):
     """The custom channel rides beside the message stream: an agentic turn
-    still streams its narration, tool call, result and answer in order."""
-    from tests._helpers import ToolableFakeChatModel
+    still streams its reasoning, tool call, result, post-tool reasoning and
+    answer in order."""
     from src.agents.tools import calculator
+    from tests.test_agent_runner import _calc_tool_call_chunk, _raw_chunk, _raw_chunk_model
 
     _WindowEngine.window = 10_000
-    main = ToolableFakeChatModel(
-        messages=iter(
-            [
-                AIMessage(
-                    content="",
-                    tool_calls=[
-                        {"name": "calculator", "args": {"expression": "2 + 2"}, "id": "k1"}
-                    ],
-                ),
-                AIMessage(content="It is 4."),
-            ]
-        )
+    main = _raw_chunk_model(
+        [
+            _raw_chunk(reasoning="I should add. "),
+            _raw_chunk(content="", tool_calls=_calc_tool_call_chunk("2 + 2")),
+        ],
+        [
+            _raw_chunk(reasoning="The tool says 4. "),
+            _raw_chunk(content="It is 4.", finish_reason="stop"),
+        ],
     )
     summary = _ScriptedSummaryModel(messages=iter([]))
 
@@ -362,10 +391,14 @@ async def test_thinking_tool_calls_and_answers_keep_their_order(monkeypatch):
     assert _kinds(events) == [
         ("compaction", "start"),
         ("compaction", "done"),
+        ("thinking", None),
         ("tool_call", None),
         ("tool_result", None),
+        ("thinking", None),
         ("answer", None),
     ]
+    thinking = [e["text"] for e in events if e["t"] == "thinking"]
+    assert thinking == ["I should add. ", "The tool says 4. "]
     assert "".join(e["text"] for e in events if e["t"] == "answer") == "It is 4."
 
 

@@ -1364,6 +1364,30 @@ class TestTraceHelpers:
         assert capped[-1] == events[-1]
         assert events[1] not in capped
 
+    def test_cap_trace_marks_nothing_when_only_compactions_overflow(self):
+        """Compactions alone over the cap are kept whole; nothing was elided,
+        so no truncated marker."""
+        first = {"t": "compaction", "phase": "done", "summary": "a" * 20_000}
+        second = {"t": "compaction", "phase": "done", "summary": "b" * 20_000}
+
+        assert _cap_trace([first, second]) == [first, second]
+
+    def test_cap_trace_marks_truncated_only_when_a_step_was_dropped(self):
+        step = {"t": "thinking", "text": "hm"}
+        small_first = {"t": "compaction", "phase": "done", "summary": "a" * 10_000}
+        small_second = {"t": "compaction", "phase": "done", "summary": "b" * 10_000}
+        big_first = {"t": "compaction", "phase": "done", "summary": "a" * 20_000}
+        big_second = {"t": "compaction", "phase": "done", "summary": "b" * 20_000}
+
+        # Fits: unchanged, in its own order.
+        assert _cap_trace([small_first, step, small_second]) == [small_first, step, small_second]
+        # Over the cap: the step goes, the compactions stay in order, marked.
+        assert _cap_trace([big_first, step, big_second]) == [
+            big_first,
+            big_second,
+            {"t": "truncated"},
+        ]
+
     def test_cap_trace_keeps_compaction_events_alone_when_nothing_else_fits(self):
         done = {"t": "compaction", "phase": "done", "summary": "s" * 40_000}
         events = [done, {"t": "thinking", "text": "x" * 1000}]

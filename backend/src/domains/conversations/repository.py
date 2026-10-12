@@ -363,7 +363,8 @@ class MessageRepository:
             content: Message content
             sender: Message sender ("user" or "llm")
             trace: Optional list of the assistant turn's non-answer stream events
-                (thinking / tool_call / tool_result) for replay on reload (#90).
+                (thinking / tool_call / tool_result, and the compaction ``done``
+                events, #614) for replay on reload (#90).
 
         Returns:
             The created Message object
