@@ -9,6 +9,12 @@ fallback, cgroup v2 only inside a real container), Windows (the commit
 charge from ``GlobalMemoryStatusEx``, the paging counter from PDH). The
 parsing and the tiering run here on text fixtures and fake natives, on every
 CI leg; the native calls themselves run on their own OS only.
+
+The VRAM half (``read_vram``) reads the child's ``\\GPU Process Memory``
+Shared Usage on Windows -- WDDM spills an overflowing CUDA allocation into
+system RAM, and that gauge is the spill -- and is unavailable on Linux by
+design (a hard cliff: nothing to react to). ``child_vram_bytes`` filters the
+NVML process list the CUDA engine passes in.
 """
 
 from __future__ import annotations
@@ -440,3 +446,125 @@ def test_the_module_imports_no_native_library_at_import():
     with open(source, encoding="utf-8") as handle:
         top = handle.read().split("\nclass ", 1)[0]
     assert "windll" not in top
+
+
+# ===================== the VRAM half: spill (Windows) and per-pid VRAM =====================
+
+
+class _FakeWindowsGpu(mp._WindowsProvider):
+    """The Windows provider with ``\\GPU Process Memory`` faked above PDH:
+    instance name -> bytes for Dedicated and Shared Usage."""
+
+    def __init__(self, dedicated=None, shared=None, *, denied=False):
+        super().__init__()
+        self.dedicated = dedicated or {}
+        self.shared = shared or {}
+        self.denied = denied
+
+    def _pdh_gpu_process_memory(self):
+        if self.denied:
+            raise OSError("PdhAddEnglishCounterW status 0xc0000bb8")
+        return dict(self.dedicated), dict(self.shared)
+
+
+LUID_D = "luid_0x00000000_0x0000D1E5"
+LUID_I = "luid_0x00000000_0x0000A001"
+
+
+def test_windows_vram_matches_the_exact_pid_prefix():
+    provider = _FakeWindowsGpu(
+        dedicated={f"pid_12_{LUID_D}_phys_0": 4 * GIB, f"pid_123_{LUID_D}_phys_0": 9 * GIB},
+        shared={f"pid_12_{LUID_D}_phys_0": 300 * MIB, f"pid_123_{LUID_D}_phys_0": 5 * GIB},
+    )
+    reading = provider.vram(12)
+    assert reading.dedicated_bytes == 4 * GIB
+    assert reading.spill_bytes == 300 * MIB
+    assert reading.unavailable is None
+
+
+def test_windows_vram_keeps_the_adapter_with_the_largest_dedicated_usage():
+    """Optimus: the iGPU instance of the same pid is ignored; the luid chosen
+    at the first read stays for that pid."""
+    provider = _FakeWindowsGpu(
+        dedicated={f"pid_7_{LUID_I}_phys_0": 50 * MIB, f"pid_7_{LUID_D}_phys_0": 6 * GIB},
+        shared={f"pid_7_{LUID_I}_phys_0": 2 * GIB, f"pid_7_{LUID_D}_phys_0": 100 * MIB},
+    )
+    first = provider.vram(7)
+    assert first.dedicated_bytes == 6 * GIB
+    assert first.spill_bytes == 100 * MIB
+    # Later the iGPU's dedicated grows past the dGPU's: the luid is kept.
+    provider.dedicated[f"pid_7_{LUID_I}_phys_0"] = 8 * GIB
+    provider.shared[f"pid_7_{LUID_D}_phys_0"] = 700 * MIB
+    second = provider.vram(7)
+    assert second.dedicated_bytes == 6 * GIB
+    assert second.spill_bytes == 700 * MIB
+
+
+def test_windows_vram_counters_are_gauges():
+    provider = _FakeWindowsGpu(
+        dedicated={f"pid_7_{LUID_D}_phys_0": 6 * GIB},
+        shared={f"pid_7_{LUID_D}_phys_0": 900 * MIB},
+    )
+    assert provider.vram(7).spill_bytes == 900 * MIB
+    provider.shared[f"pid_7_{LUID_D}_phys_0"] = 200 * MIB
+    assert provider.vram(7).spill_bytes == 200 * MIB
+
+
+def test_windows_vram_without_an_instance_for_the_pid_is_unavailable():
+    provider = _FakeWindowsGpu(dedicated={f"pid_8_{LUID_D}_phys_0": GIB})
+    reading = provider.vram(7)
+    assert reading.spill_bytes is None and reading.dedicated_bytes is None
+    assert "pid 7" in reading.unavailable
+
+
+def test_windows_vram_denied_is_unavailable_and_one_warning(caplog):
+    provider = _FakeWindowsGpu(denied=True)
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        first = provider.vram(7)
+        second = provider.vram(7)
+    assert first.spill_bytes is None and second.spill_bytes is None
+    assert "OSError" in first.unavailable
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert "spill detection off" in warnings[0].getMessage()
+
+
+def test_linux_vram_is_unavailable_by_design(tmp_path, monkeypatch):
+    provider, *_ = _linux(tmp_path, monkeypatch)
+    reading = provider.vram(42)
+    assert reading.spill_bytes is None
+    assert reading.unavailable == "hard cliff: nothing to react to"
+
+
+def test_read_vram_delegates_and_never_raises(monkeypatch):
+    class _Broken:
+        name = "broken"
+
+        def vram(self, pid):
+            raise RuntimeError("boom")
+
+    monkeypatch.setattr(mp, "_PROVIDER", _Broken())
+    reading = mp.read_vram(7)
+    assert reading.spill_bytes is None
+    assert "RuntimeError" in reading.unavailable
+    assert mp.read_vram(None).unavailable
+
+
+@pytest.mark.parametrize(
+    "processes, expected",
+    [
+        (((12, 3 * GIB), (123, 9 * GIB)), 3 * GIB),
+        (((123, 9 * GIB),), None),
+        (((12, None),), None),  # usedGpuMemory not available: silently unknown
+        ((), None),
+        (None, None),
+    ],
+)
+def test_child_vram_bytes_filters_on_the_pid(processes, expected):
+    assert mp.child_vram_bytes(12, processes) == expected
+
+
+@pytest.mark.skipif(sys.platform != "win32", reason="the native Windows calls")
+def test_windows_native_vram_never_raises():
+    reading = mp._WindowsProvider().vram(1)
+    assert reading.spill_bytes is None or reading.spill_bytes >= 0

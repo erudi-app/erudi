@@ -12,6 +12,14 @@ every OS; a provider chosen once per process on ``sys.platform`` gives them:
   and the post-load check.
 * ``effective_total_ram_bytes()``: the physical RAM the window budget and the
   shares are computed on.
+* ``read_vram(pid)``: a CUDA child's GPU memory -- its dedicated VRAM and the
+  bytes spilled into shared GPU memory -- on Windows only: WDDM satisfies an
+  allocation that does not fit from system RAM (the driver's sysmem
+  fallback), very slowly and silently. Linux has no spill by design (a
+  ``cudaMalloc`` that does not fit fails: nothing to react to), macOS no CUDA.
+* ``child_vram_bytes(pid, processes)``: the device bytes NVML attributes to
+  the child in the process list the CUDA engine read (Linux; WDDM reports
+  none).
 
 Providers:
 
@@ -37,7 +45,10 @@ Providers:
   ``\\Memory\\Pages Output/sec`` added by its English name (locale-proof),
   read RAW (cumulative pages, 4 KiB); without PDH the tiers stand and the
   brake decides on the level alone. Anonymous memory: the private commit
-  (``memory_info().private``).
+  (``memory_info().private``). GPU memory: PDH's ``\\GPU Process
+  Memory(pid_<pid>_luid_..._phys_<n>)\\Dedicated Usage`` and ``Shared Usage``
+  (gauges, English names), on the adapter holding most of the child's
+  dedicated memory.
 
 Every threshold for Linux and Windows is a starting value, to be calibrated
 on real machines. Nothing native is loaded at import: the Windows and macOS
@@ -58,7 +69,7 @@ import sys
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Callable, Dict, Optional, Tuple
+from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 
 import psutil
 
@@ -101,6 +112,17 @@ class PressureReading:
     unavailable: Optional[str] = None
 
 
+@dataclass(frozen=True)
+class VramReading:
+    """One reading of a CUDA child's GPU memory (Windows WDDM): its bytes in
+    dedicated VRAM and in shared GPU memory (system RAM -- the spill), both
+    gauges. ``unavailable`` says why they are None."""
+
+    spill_bytes: Optional[int]
+    dedicated_bytes: Optional[int]
+    unavailable: Optional[str] = None
+
+
 def _psutil_total() -> Optional[int]:
     total = int(psutil.virtual_memory().total)
     return total if total > 0 else None
@@ -119,6 +141,9 @@ class _NullProvider:
 
     def total_ram_bytes(self) -> Optional[int]:
         return _psutil_total()
+
+    def vram(self, pid: int) -> VramReading:
+        return VramReading(None, None, unavailable=f"no GPU memory counter on {sys.platform}")
 
 
 class _MacProvider(_NullProvider):
@@ -317,15 +342,41 @@ class _LinuxProvider(_NullProvider):
             return min(total, limit)
         return total
 
+    def vram(self, pid: int) -> VramReading:
+        """Nothing to read by design: a CUDA allocation that does not fit
+        fails (``cudaMalloc``) instead of spilling, so the window is sized to
+        fit at spawn and there is no spill to react to."""
+        return VramReading(None, None, unavailable="hard cliff: nothing to react to")
+
+
+def _gpu_bytes_by_luid(values: Dict[str, int], pid: int) -> Dict[str, int]:
+    """``\\GPU Process Memory`` instances of ``pid`` summed per adapter.
+    Instance names read ``pid_<pid>_luid_<high>_<low>_phys_<n>``; the prefix
+    is matched exactly (``pid_12_`` never matches pid 123)."""
+    prefix = f"pid_{pid}_"
+    out: Dict[str, int] = {}
+    for name, value in values.items():
+        if name.startswith(prefix):
+            luid = name[len(prefix) :].split("_phys", 1)[0]
+            out[luid] = out.get(luid, 0) + int(value)
+    return out
+
 
 class _WindowsProvider(_NullProvider):
     name = "windows"
 
     _PAGES_OUTPUT = "\\Memory\\Pages Output/sec"
+    _GPU_DEDICATED = "\\GPU Process Memory(*)\\Dedicated Usage"
+    _GPU_SHARED = "\\GPU Process Memory(*)\\Shared Usage"
 
     def __init__(self) -> None:
         self._pdh: Any = None
         self._pdh_warned = False
+        self._gpu_pdh: Any = None
+        self._gpu_warned = False
+        # (pid, luid): the adapter a child's CUDA memory lives on, chosen at
+        # its first read.
+        self._gpu_luid: Optional[Tuple[int, str]] = None
 
     def _page_file(self) -> Tuple[int, int]:
         """``(ullAvailPageFile, ullTotalPageFile)`` of ``GlobalMemoryStatusEx``."""
@@ -424,6 +475,108 @@ class _WindowsProvider(_NullProvider):
         count, the mapped weights never do."""
         return int(psutil.Process(pid).memory_info().private)
 
+    def _pdh_gpu_process_memory(self) -> Tuple[Dict[str, int], Dict[str, int]]:
+        """``\\GPU Process Memory(*)\\Dedicated Usage`` and ``Shared Usage``
+        of every process, instance name -> bytes (gauges, not rates). Added by
+        their English names (locale-proof); the wildcard instance is expanded
+        at every collection, so a child spawned later is seen."""
+        import ctypes
+        from ctypes import wintypes
+
+        class _Value(ctypes.Union):
+            _fields_ = [
+                ("longValue", ctypes.c_long),
+                ("doubleValue", ctypes.c_double),
+                ("largeValue", ctypes.c_longlong),
+                ("AnsiStringValue", ctypes.c_char_p),
+                ("WideStringValue", ctypes.c_wchar_p),
+            ]
+
+        class _FmtCounterValue(ctypes.Structure):
+            _fields_ = [("CStatus", wintypes.DWORD), ("value", _Value)]
+
+        class _FmtCounterValueItem(ctypes.Structure):
+            _fields_ = [("szName", ctypes.c_wchar_p), ("FmtValue", _FmtCounterValue)]
+
+        pdh_fmt_large = 0x00000400
+        pdh_more_data = 0x800007D2
+        pdh = ctypes.windll.pdh
+        if self._gpu_pdh is None:
+            query = ctypes.c_void_p()
+            status = pdh.PdhOpenQueryW(None, None, ctypes.byref(query))
+            if status != 0:
+                raise OSError(f"PdhOpenQueryW status {status & 0xFFFFFFFF:#x}")
+            counters = []
+            for path in (self._GPU_DEDICATED, self._GPU_SHARED):
+                counter = ctypes.c_void_p()
+                status = pdh.PdhAddEnglishCounterW(query, path, None, ctypes.byref(counter))
+                if status != 0:
+                    raise OSError(f"PdhAddEnglishCounterW status {status & 0xFFFFFFFF:#x}")
+                counters.append(counter)
+            self._gpu_pdh = (query, counters[0], counters[1])
+        query, dedicated, shared = self._gpu_pdh
+        status = pdh.PdhCollectQueryData(query)
+        if status != 0:
+            raise OSError(f"PdhCollectQueryData status {status & 0xFFFFFFFF:#x}")
+
+        def _values(counter: Any) -> Dict[str, int]:
+            size, count = wintypes.DWORD(0), wintypes.DWORD(0)
+            status = pdh.PdhGetFormattedCounterArrayW(
+                counter, pdh_fmt_large, ctypes.byref(size), ctypes.byref(count), None
+            )
+            if status & 0xFFFFFFFF != pdh_more_data:
+                if status == 0:
+                    return {}
+                raise OSError(f"PdhGetFormattedCounterArrayW status {status & 0xFFFFFFFF:#x}")
+            buffer = (ctypes.c_byte * size.value)()
+            status = pdh.PdhGetFormattedCounterArrayW(
+                counter, pdh_fmt_large, ctypes.byref(size), ctypes.byref(count), buffer
+            )
+            if status != 0:
+                raise OSError(f"PdhGetFormattedCounterArrayW status {status & 0xFFFFFFFF:#x}")
+            items = ctypes.cast(buffer, ctypes.POINTER(_FmtCounterValueItem))
+            out: Dict[str, int] = {}
+            for index in range(count.value):
+                item = items[index]
+                # PDH_CSTATUS_VALID_DATA (0) and PDH_CSTATUS_NEW_DATA (1).
+                if item.szName and item.FmtValue.CStatus in (0, 1):
+                    out[item.szName] = int(item.FmtValue.value.largeValue)
+            return out
+
+        return _values(dedicated), _values(shared)
+
+    def vram(self, pid: int) -> VramReading:
+        """Our child's dedicated VRAM and its shared GPU memory -- the bytes
+        WDDM spilled into system RAM -- on the adapter holding most of its
+        dedicated memory (the discrete GPU on an Optimus laptop), chosen at
+        the child's first read and kept for it. PDH denied or absent:
+        unavailable, ONE WARNING per process."""
+        try:
+            dedicated, shared = self._pdh_gpu_process_memory()
+        except Exception as exc:
+            if not self._gpu_warned:
+                # Degraded once per process: the RAM brake and the window
+                # sized at spawn stand without the spill gauge.
+                self._gpu_warned = True
+                logger.warning(
+                    f"GPU process memory unavailable (PDH, {type(exc).__name__}); spill "
+                    f"detection off; the RAM brake and the spawn sizing stand"
+                )
+            return VramReading(
+                None, None, unavailable=f"PDH GPU Process Memory unreadable ({type(exc).__name__})"
+            )
+        by_luid = _gpu_bytes_by_luid(dedicated, pid)
+        spill_by_luid = _gpu_bytes_by_luid(shared, pid)
+        if not by_luid and not spill_by_luid:
+            return VramReading(
+                None, None, unavailable=f"no GPU Process Memory instance for pid {pid}"
+            )
+        if self._gpu_luid is None or self._gpu_luid[0] != pid:
+            candidates = by_luid or spill_by_luid
+            self._gpu_luid = (pid, max(candidates, key=candidates.get))
+        luid = self._gpu_luid[1]
+        return VramReading(spill_by_luid.get(luid, 0), by_luid.get(luid, 0))
+
 
 def _provider() -> Any:
     """The provider of this process, chosen once on ``sys.platform``."""
@@ -489,3 +642,29 @@ def child_anonymous_bytes(pid: Optional[int]) -> Optional[int]:
 def effective_total_ram_bytes() -> Optional[int]:
     """Physical RAM (bounded by a container's finite limit on Linux), or None."""
     return _guarded(lambda: _provider().total_ram_bytes())
+
+
+def read_vram(pid: Optional[int]) -> VramReading:
+    """The CUDA child's spill and dedicated VRAM now (Windows only; the
+    other providers answer unavailable). Never raises."""
+    if not pid:
+        return VramReading(None, None, unavailable="no child")
+    try:
+        return _provider().vram(pid)
+    except Exception as exc:
+        return VramReading(None, None, unavailable=f"{type(exc).__name__}")
+
+
+def child_vram_bytes(
+    pid: Optional[int], processes: Optional[Iterable[Tuple[int, Optional[int]]]]
+) -> Optional[int]:
+    """The device bytes NVML attributes to ``pid`` in ``processes`` -- the
+    ``(pid, usedGpuMemory)`` pairs of ``nvmlDeviceGetComputeRunningProcesses``
+    the CUDA engine read -- or None: no entry, no list (WDDM reports none),
+    or an entry whose ``usedGpuMemory`` is not available."""
+    if not pid or processes is None:
+        return None
+    used = [value for entry_pid, value in processes if entry_pid == pid]
+    if not used or any(value is None for value in used):
+        return None
+    return sum(used)

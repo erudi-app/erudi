@@ -45,9 +45,10 @@ The accounting is **MLX-only**. On both llama.cpp engines (CPU and CUDA) the KV
 cache is allocated in full at load: memory use does not grow with the
 conversation, so there is nothing per-token to measure -- every fact is
 ``None`` there, and nothing is written on their handle (``total_memory_bytes``
-also names the partial-offload reason on discrete cards). The CPU engine's
-accounting happens once, at spawn: ``src.engines.gguf_memory`` sizes the
-window it passes as ``-c`` against the RAM budget.
+also names the partial-offload reason on discrete cards). The llama.cpp
+engines' accounting happens once, at spawn: ``src.engines.gguf_memory`` sizes
+the CPU engine's ``-c`` against the RAM budget, ``src.engines.cuda_memory``
+the CUDA engine's against the VRAM.
 
 Any fact that cannot be read answers ``None`` and the ceiling and the warning
 are simply OFF for that model -- notably a KV shape the formula cannot model
@@ -61,7 +62,7 @@ import os
 import re
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Dict, Optional
+from typing import Any, Dict, List, Optional
 
 from src.core.logging import logger
 
@@ -244,6 +245,25 @@ def vocab_size_of(config: Any) -> Optional[int]:
 _GGUF_SPLIT_RE = re.compile(r"^(?P<stem>.+)-\d{5}-of-(?P<total>\d{5})\.gguf$", re.IGNORECASE)
 
 
+def gguf_family_parts(gguf_path: Path) -> List[Path]:
+    """Every part of the split family ``gguf_path`` belongs to, sorted, or
+    the file alone. Raises ``OSError`` when the directory is unreadable."""
+    path = Path(gguf_path)
+    split = _GGUF_SPLIT_RE.match(path.name)
+    if not split:
+        return [path]
+    family = re.compile(
+        re.escape(split.group("stem"))
+        + r"-\d{5}-of-"
+        + re.escape(split.group("total"))
+        + r"\.gguf$",
+        re.IGNORECASE,
+    )
+    return sorted(
+        part for part in path.parent.iterdir() if part.is_file() and family.match(part.name)
+    )
+
+
 def artifact_bytes(model_path: Path) -> Optional[int]:
     """On-disk size of the loaded artifact: the file for a GGUF (ALL sibling
     parts of a split family, [L3]), the recursive file sum for an MLX snapshot
@@ -251,21 +271,7 @@ def artifact_bytes(model_path: Path) -> Optional[int]:
     try:
         path = Path(model_path)
         if path.is_file():
-            split = _GGUF_SPLIT_RE.match(path.name)
-            if split:
-                family = re.compile(
-                    re.escape(split.group("stem"))
-                    + r"-\d{5}-of-"
-                    + re.escape(split.group("total"))
-                    + r"\.gguf$",
-                    re.IGNORECASE,
-                )
-                return sum(
-                    part.stat().st_size
-                    for part in path.parent.iterdir()
-                    if part.is_file() and family.match(part.name)
-                )
-            return path.stat().st_size
+            return sum(part.stat().st_size for part in gguf_family_parts(path))
         if path.is_dir():
             return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())
     except OSError as exc:
@@ -287,8 +293,8 @@ def total_memory_bytes(engine: Any) -> Optional[int]:
     policy, which keeps the memory signal OFF there. The real reason: their
     KV cache is allocated IN FULL at load -- memory use does not grow with
     the conversation at all, and the window was sized to fit at load time
-    (the CPU engine's RAM budget, ``gguf_memory``; llama-server's own fit on
-    CUDA), so a per-conversation-token accounting would model a phenomenon
+    (the CPU engine's RAM budget, ``gguf_memory``; the CUDA engine's VRAM
+    budget, ``cuda_memory``), so a per-conversation-token accounting would model a phenomenon
     that does not exist on those engines. (On a
     discrete card, partial layer offload would additionally split the weights
     between VRAM and system RAM in proportions this process cannot know,

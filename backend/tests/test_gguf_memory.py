@@ -223,7 +223,7 @@ def test_the_post_load_limit_uses_the_measured_intercept_and_one_weights_copy():
 # ===================== the reader (needs gguf) =====================
 
 
-def _write_gguf(path, *, arch="qwen3", kv_heads=(2, 0), sliding=None):
+def _write_gguf(path, *, arch="qwen3", kv_heads=(2, 0), sliding=None, pattern=None, alibi=None):
     gguf = pytest.importorskip("gguf")
     import numpy as np
 
@@ -237,6 +237,10 @@ def _write_gguf(path, *, arch="qwen3", kv_heads=(2, 0), sliding=None):
     writer.add_value_length(16)
     if sliding is not None:
         writer.add_sliding_window(sliding)
+    if pattern is not None:
+        writer.add_sliding_window_pattern(pattern)
+    if alibi is not None:
+        writer.add_max_alibi_bias(alibi)
     writer.add_tensor("x", np.zeros(4, dtype=np.float32))
     writer.write_header_to_file()
     writer.write_kv_data_to_file()
@@ -257,6 +261,15 @@ def test_read_shape_reads_the_header_and_releases_the_file(tmp_path):
     # The memmap is closed: the model file can be deleted (Windows locks it).
     path.unlink()
     assert not path.exists()
+
+
+@pytest.mark.parametrize("pattern, expected", [(6, 6), ([True, False], (True, False))])
+def test_read_shape_reads_the_swa_pattern_and_the_alibi_bias(tmp_path, pattern, expected):
+    path = _write_gguf(tmp_path / "m.gguf", sliding=512, pattern=pattern, alibi=8.0)
+    shape = gguf_memory.read_shape(path)
+    assert shape.sliding_window_pattern == expected
+    assert shape.max_alibi_bias == 8.0
+    assert shape.head_count == (4, 4)
 
 
 def test_spawn_window_adds_the_mmproj_to_the_weights(tmp_path):
@@ -302,3 +315,83 @@ def test_no_total_ram_means_no_window(tmp_path, caplog):
     with caplog.at_level(logging.WARNING, logger="erudi"):
         assert gguf_memory.spawn_window(path, total_ram_bytes=None) is None
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+# ===================== what the CUDA engine reads besides the KV =====================
+
+
+def test_the_shape_keeps_the_heads_the_swa_pattern_and_the_alibi_bias():
+    shape = _shape(sliding_window=1024, sliding_window_pattern=6, max_alibi_bias=8.0)
+    assert shape.head_count == (16,) * 28
+    assert shape.sliding_window_pattern == 6
+    assert shape.max_alibi_bias == 8.0
+    per_layer = _shape(
+        block_count=3, sliding_window=1024, sliding_window_pattern=[True, True, False]
+    )
+    assert per_layer.sliding_window_pattern == (True, True, False)
+    # A per-layer list of the wrong length is unreadable, not guessed.
+    assert _shape(sliding_window_pattern=[True, False]).sliding_window_pattern is None
+    assert _shape().sliding_window_pattern is None
+    assert _shape().max_alibi_bias is None
+
+
+def test_the_sizing_inputs_are_the_shape_and_the_weights(tmp_path):
+    path = _write_gguf(tmp_path / "m.gguf")
+    mmproj = tmp_path / "mmproj-m.gguf"
+    mmproj.write_bytes(b"\0" * 4096)
+    shape, weights = gguf_memory.read_sizing_inputs(path)
+    assert shape.architecture == "qwen3"
+    assert weights == path.stat().st_size
+    _, with_vision = gguf_memory.read_sizing_inputs(path, mmproj_path=mmproj)
+    assert with_vision == weights + 4096
+
+
+def test_unreadable_sizing_inputs_are_one_warning(tmp_path, monkeypatch, caplog):
+    monkeypatch.setitem(sys.modules, "gguf", None)
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        assert gguf_memory.read_sizing_inputs(tmp_path / "m.gguf") is None
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+
+
+def _write_tensors(path, tensors):
+    gguf = pytest.importorskip("gguf")
+    import numpy as np
+
+    writer = gguf.GGUFWriter(str(path), "qwen3moe")
+    writer.add_block_count(1)
+    for name, count in tensors:
+        writer.add_tensor(name, np.zeros(count, dtype=np.float32))
+    writer.write_header_to_file()
+    writer.write_kv_data_to_file()
+    writer.write_tensors_to_file()
+    writer.close()
+    return path
+
+
+def test_the_tensor_bytes_are_tok_embd_and_the_moe_experts(tmp_path):
+    path = _write_tensors(
+        tmp_path / "m.gguf",
+        [
+            ("token_embd.weight", 64),
+            ("blk.0.attn_q.weight", 32),
+            ("blk.0.ffn_up_exps.weight", 16),
+            ("blk.0.ffn_gate_up_exps.weight", 8),
+            ("blk.0.ffn_down_chexps.weight", 4),
+            ("blk.0.ffn_up_shexp.weight", 2),  # the shared expert stays on the device
+        ],
+    )
+    tensors = gguf_memory.read_tensor_bytes(path)
+    assert tensors.tok_embd_bytes == 64 * 4
+    assert tensors.exps_bytes == (16 + 8 + 4) * 4
+    path.unlink()  # the memmap is closed
+
+
+def test_the_tensor_bytes_sum_every_part_of_a_split_family(tmp_path):
+    first = _write_tensors(
+        tmp_path / "m-00001-of-00002.gguf",
+        [("token_embd.weight", 64), ("blk.0.ffn_up_exps.weight", 16)],
+    )
+    _write_tensors(tmp_path / "m-00002-of-00002.gguf", [("blk.1.ffn_down_exps.weight", 8)])
+    tensors = gguf_memory.read_tensor_bytes(first)
+    assert tensors.tok_embd_bytes == 64 * 4
+    assert tensors.exps_bytes == (16 + 8) * 4
