@@ -71,6 +71,7 @@ here, so on the llama.cpp engines only (the MLX brake reads
 
 from __future__ import annotations
 
+import ctypes
 import mmap
 import os
 import sys
@@ -368,6 +369,65 @@ class _LinuxProvider(_NullProvider):
         return VramReading(None, None, unavailable="hard cliff: nothing to react to")
 
 
+class _PdhValue(ctypes.Union):
+    """``PDH_FMT_COUNTERVALUE``'s value union."""
+
+    _fields_ = [
+        ("longValue", ctypes.c_int32),
+        ("doubleValue", ctypes.c_double),
+        ("largeValue", ctypes.c_longlong),
+        ("AnsiStringValue", ctypes.c_char_p),
+        ("WideStringValue", ctypes.c_wchar_p),
+    ]
+
+
+class _PdhFmtCounterValue(ctypes.Structure):
+    """``PDH_FMT_COUNTERVALUE`` (``CStatus`` is a DWORD)."""
+
+    _fields_ = [("CStatus", ctypes.c_uint32), ("value", _PdhValue)]
+
+
+class _PdhFmtCounterValueItem(ctypes.Structure):
+    """``PDH_FMT_COUNTERVALUE_ITEM_W``."""
+
+    _fields_ = [("szName", ctypes.c_wchar_p), ("FmtValue", _PdhFmtCounterValue)]
+
+
+_PDH_FMT_LARGE = 0x00000400
+_PDH_MORE_DATA = 0x800007D2
+# The instance list can grow between the sizing call and the read (a process
+# starts): the read is retried this many times with the larger size.
+_PDH_ARRAY_RETRIES = 4
+
+
+def _pdh_counter_array(pdh: Any, counter: Any) -> Dict[str, int]:
+    """A wildcard counter's values, instance name -> value
+    (``PdhGetFormattedCounterArrayW``: a sizing call, then the read)."""
+    size, count = ctypes.c_uint32(0), ctypes.c_uint32(0)
+    status = pdh.PdhGetFormattedCounterArrayW(
+        counter, _PDH_FMT_LARGE, ctypes.byref(size), ctypes.byref(count), None
+    )
+    if status == 0:
+        return {}
+    for _ in range(_PDH_ARRAY_RETRIES):
+        if status & 0xFFFFFFFF != _PDH_MORE_DATA:
+            raise OSError(f"PdhGetFormattedCounterArrayW status {status & 0xFFFFFFFF:#x}")
+        buffer = (ctypes.c_byte * size.value)()
+        status = pdh.PdhGetFormattedCounterArrayW(
+            counter, _PDH_FMT_LARGE, ctypes.byref(size), ctypes.byref(count), buffer
+        )
+        if status == 0:
+            items = ctypes.cast(buffer, ctypes.POINTER(_PdhFmtCounterValueItem))
+            out: Dict[str, int] = {}
+            for index in range(count.value):
+                item = items[index]
+                # PDH_CSTATUS_VALID_DATA (0) and PDH_CSTATUS_NEW_DATA (1).
+                if item.szName and item.FmtValue.CStatus in (0, 1):
+                    out[item.szName] = int(item.FmtValue.value.largeValue)
+            return out
+    raise OSError(f"PdhGetFormattedCounterArrayW status {status & 0xFFFFFFFF:#x} after retries")
+
+
 def _gpu_bytes_by_luid(values: Dict[str, int], pid: int) -> Dict[str, int]:
     """``\\GPU Process Memory`` instances of ``pid`` summed per adapter.
     Instance names read ``pid_<pid>_luid_<high>_<low>_phys_<n>``; the prefix
@@ -498,28 +558,12 @@ class _WindowsProvider(_NullProvider):
         """``\\GPU Process Memory(*)\\Dedicated Usage`` and ``Shared Usage``
         of every process, instance name -> bytes (gauges, not rates). Added by
         their English names (locale-proof); the wildcard instance is expanded
-        at every collection, so a child spawned later is seen."""
-        import ctypes
-        from ctypes import wintypes
-
-        class _Value(ctypes.Union):
-            _fields_ = [
-                ("longValue", ctypes.c_long),
-                ("doubleValue", ctypes.c_double),
-                ("largeValue", ctypes.c_longlong),
-                ("AnsiStringValue", ctypes.c_char_p),
-                ("WideStringValue", ctypes.c_wchar_p),
-            ]
-
-        class _FmtCounterValue(ctypes.Structure):
-            _fields_ = [("CStatus", wintypes.DWORD), ("value", _Value)]
-
-        class _FmtCounterValueItem(ctypes.Structure):
-            _fields_ = [("szName", ctypes.c_wchar_p), ("FmtValue", _FmtCounterValue)]
-
-        pdh_fmt_large = 0x00000400
-        pdh_more_data = 0x800007D2
+        at every collection, so a child spawned later is seen. A query whose
+        counters PDH refused is closed and never reopened (the refusal is
+        remembered)."""
         pdh = ctypes.windll.pdh
+        if self._gpu_pdh is False:
+            raise OSError("GPU Process Memory counters refused earlier")
         if self._gpu_pdh is None:
             query = ctypes.c_void_p()
             status = pdh.PdhOpenQueryW(None, None, ctypes.byref(query))
@@ -530,6 +574,8 @@ class _WindowsProvider(_NullProvider):
                 counter = ctypes.c_void_p()
                 status = pdh.PdhAddEnglishCounterW(query, path, None, ctypes.byref(counter))
                 if status != 0:
+                    pdh.PdhCloseQuery(query)
+                    self._gpu_pdh = False
                     raise OSError(f"PdhAddEnglishCounterW status {status & 0xFFFFFFFF:#x}")
                 counters.append(counter)
             self._gpu_pdh = (query, counters[0], counters[1])
@@ -537,32 +583,7 @@ class _WindowsProvider(_NullProvider):
         status = pdh.PdhCollectQueryData(query)
         if status != 0:
             raise OSError(f"PdhCollectQueryData status {status & 0xFFFFFFFF:#x}")
-
-        def _values(counter: Any) -> Dict[str, int]:
-            size, count = wintypes.DWORD(0), wintypes.DWORD(0)
-            status = pdh.PdhGetFormattedCounterArrayW(
-                counter, pdh_fmt_large, ctypes.byref(size), ctypes.byref(count), None
-            )
-            if status & 0xFFFFFFFF != pdh_more_data:
-                if status == 0:
-                    return {}
-                raise OSError(f"PdhGetFormattedCounterArrayW status {status & 0xFFFFFFFF:#x}")
-            buffer = (ctypes.c_byte * size.value)()
-            status = pdh.PdhGetFormattedCounterArrayW(
-                counter, pdh_fmt_large, ctypes.byref(size), ctypes.byref(count), buffer
-            )
-            if status != 0:
-                raise OSError(f"PdhGetFormattedCounterArrayW status {status & 0xFFFFFFFF:#x}")
-            items = ctypes.cast(buffer, ctypes.POINTER(_FmtCounterValueItem))
-            out: Dict[str, int] = {}
-            for index in range(count.value):
-                item = items[index]
-                # PDH_CSTATUS_VALID_DATA (0) and PDH_CSTATUS_NEW_DATA (1).
-                if item.szName and item.FmtValue.CStatus in (0, 1):
-                    out[item.szName] = int(item.FmtValue.value.largeValue)
-            return out
-
-        return _values(dedicated), _values(shared)
+        return _pdh_counter_array(pdh, dedicated), _pdh_counter_array(pdh, shared)
 
     def vram(self, pid: int) -> VramReading:
         """Our child's dedicated VRAM and its shared GPU memory -- the bytes

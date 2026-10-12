@@ -19,6 +19,7 @@ NVML process list the CUDA engine passes in.
 
 from __future__ import annotations
 
+import ctypes
 import logging
 import mmap
 import sys
@@ -563,6 +564,95 @@ def test_read_vram_delegates_and_never_raises(monkeypatch):
 )
 def test_child_vram_bytes_filters_on_the_pid(processes, expected):
     assert mp.child_vram_bytes(12, processes) == expected
+
+
+# ===================== the PDH GPU reader, faked at ctypes.windll.pdh =====================
+
+PDH_MORE_DATA = 0x800007D2
+
+
+class _FakePdh:
+    """``ctypes.windll.pdh`` for the GPU Process Memory reader: two
+    wildcard counters, an instance list that may grow between the sizing
+    call and the read (``grow`` times), or a refused counter."""
+
+    def __init__(self, items=None, *, add_status=0, grow=0):
+        self.items = dict(items or {})
+        self.add_status = add_status
+        self.grow = grow
+        self.calls = []
+        self._keep = []
+
+    def PdhOpenQueryW(self, source, user, query):
+        self.calls.append("open")
+        return 0
+
+    def PdhAddEnglishCounterW(self, query, path, user, counter):
+        self.calls.append("add")
+        return self.add_status
+
+    def PdhCloseQuery(self, query):
+        self.calls.append("close")
+        return 0
+
+    def PdhCollectQueryData(self, query):
+        self.calls.append("collect")
+        return 0
+
+    def PdhGetFormattedCounterArrayW(self, counter, fmt, size, count, buffer):
+        item = ctypes.sizeof(mp._PdhFmtCounterValueItem)
+        if buffer is None:
+            size._obj.value = item * len(self.items)
+            count._obj.value = len(self.items)
+            return PDH_MORE_DATA if self.items else 0
+        if self.grow:
+            self.grow -= 1
+            size._obj.value += item
+            return PDH_MORE_DATA
+        array = (mp._PdhFmtCounterValueItem * len(self.items)).from_buffer(buffer)
+        for slot, (name, value) in zip(array, self.items.items()):
+            text = ctypes.create_unicode_buffer(name)
+            self._keep.append(text)
+            slot.szName = ctypes.cast(text, ctypes.c_wchar_p)
+            slot.FmtValue.CStatus = 0
+            slot.FmtValue.value.largeValue = value
+        count._obj.value = len(self.items)
+        return 0
+
+
+def _native_windows(monkeypatch, pdh):
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(pdh=pdh), raising=False)
+    return mp._WindowsProvider()
+
+
+def test_the_pdh_reader_parses_the_formatted_counter_array(monkeypatch):
+    pdh = _FakePdh({f"pid_7_{LUID_D}_phys_0": 5 * GIB})
+    dedicated, shared = _native_windows(monkeypatch, pdh)._pdh_gpu_process_memory()
+    assert dedicated == shared == {f"pid_7_{LUID_D}_phys_0": 5 * GIB}
+
+
+def test_an_instance_list_that_grows_between_the_calls_is_read_again(monkeypatch):
+    pdh = _FakePdh({f"pid_7_{LUID_D}_phys_0": 5 * GIB}, grow=2)
+    dedicated, _ = _native_windows(monkeypatch, pdh)._pdh_gpu_process_memory()
+    assert dedicated == {f"pid_7_{LUID_D}_phys_0": 5 * GIB}
+
+
+def test_an_instance_list_that_never_settles_is_bounded(monkeypatch):
+    pdh = _FakePdh({f"pid_7_{LUID_D}_phys_0": GIB}, grow=1000)
+    with pytest.raises(OSError):
+        _native_windows(monkeypatch, pdh)._pdh_gpu_process_memory()
+    assert pdh.grow > 900
+
+
+def test_a_refused_counter_closes_its_query_and_is_never_reopened(monkeypatch, caplog):
+    pdh = _FakePdh(add_status=0xC0000BB8)
+    provider = _native_windows(monkeypatch, pdh)
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        first = provider.vram(7)
+        second = provider.vram(7)
+    assert first.unavailable and second.unavailable
+    assert pdh.calls == ["open", "add", "close"]
+    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
 
 # ===================== the VRAM QA seam =====================
