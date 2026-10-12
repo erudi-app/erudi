@@ -1,7 +1,7 @@
 """P2 / Wave C — engine generation guard + idle-cleanup serialization.
 
 The agent layer wraps model resolution + the whole token stream in
-``generation_guard``. Idle cleanup (``_cleanup_tick``, looped every 300s by
+``generation_guard``. Idle cleanup (``_cleanup_tick``, looped every 30 s by
 ``_cleanup_monitor``) shares the SAME asyncio lock as the guard, so:
 
   - the monitor can never reap a model mid-generation (it waits on the lock),
@@ -139,4 +139,72 @@ async def test_idle_tick_cannot_reap_during_generation():
         await asyncio.wait_for(tick, timeout=5)
         assert _GuardEngine._model is not None
     finally:
+        _reset()
+
+
+# ───────────────────── idle cadence (30 s tick, 300 s threshold) ─────────────────────
+
+
+def test_idle_release_contract_is_300_to_330_seconds():
+    """A model is released 300 s after its last use, noticed within one 30 s tick."""
+    assert BaseEngine._max_idle_time == 300
+    assert BaseEngine._cleanup_interval_s == 30.0
+
+
+async def test_idle_tick_does_not_queue_on_the_lock_when_nothing_to_reap():
+    """A tick with nothing to reap returns at once, even during a generation.
+
+    With a 30 s tick, an idle check must not wait behind a running generation.
+    """
+    _GuardEngine._model = object()
+    _GuardEngine._model_id = "x"
+    _GuardEngine._last_used = datetime.now()
+    try:
+        async with _GuardEngine._acquire_generation_lock():
+            await asyncio.wait_for(_GuardEngine._cleanup_tick(), timeout=1)
+        assert _GuardEngine._model is not None
+    finally:
+        _reset()
+
+
+async def test_idle_tick_reap_waits_for_a_running_generation():
+    """An idle model is reaped only once the generation holding the lock is done."""
+    _GuardEngine._model = object()
+    _GuardEngine._model_id = "x"
+    _GuardEngine._last_used = datetime.now() - timedelta(seconds=10_000)
+    try:
+        async with _GuardEngine._acquire_generation_lock():
+            tick = asyncio.create_task(_GuardEngine._cleanup_tick())
+            await asyncio.sleep(0.05)
+            assert not tick.done()
+            assert _GuardEngine._model is not None
+        await asyncio.wait_for(tick, timeout=5)
+        assert _GuardEngine._model is None
+    finally:
+        _reset()
+
+
+class _VanishingTimestamp:
+    """A ``_last_used`` that reads as a datetime once, then as None.
+
+    Stands for ``cleanup()`` running on another thread between two reads of the
+    attribute made by the tick's lock-free pre-check.
+    """
+
+    def __init__(self):
+        self._reads = 0
+
+    def __get__(self, obj, objtype=None):
+        self._reads += 1
+        return datetime.now() - timedelta(seconds=10_000) if self._reads == 1 else None
+
+
+def test_should_cleanup_reads_the_idle_clock_once(monkeypatch):
+    """A concurrent cleanup() cannot turn the idle clock into None mid-check."""
+    _GuardEngine._model = object()
+    try:
+        monkeypatch.setattr(_GuardEngine, "_last_used", _VanishingTimestamp())
+        assert _GuardEngine._should_cleanup() in (True, False)
+    finally:
+        monkeypatch.undo()
         _reset()

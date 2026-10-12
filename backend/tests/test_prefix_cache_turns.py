@@ -15,7 +15,7 @@ import asyncio
 import gc
 import threading
 from contextlib import asynccontextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from typing import Any, Callable, ClassVar, Optional
 
 import anyio
@@ -568,7 +568,15 @@ async def _next_acquirer(kind, runner):
             )
         ]
     else:
-        await _RecEngine._cleanup_tick()
+        # A tick with nothing to reap returns before the lock; this one has an
+        # idle model to reap, so it queues like any other acquirer.
+        _RecEngine._model = object()
+        _RecEngine._model_id = "idle"
+        _RecEngine._last_used = datetime.now() - timedelta(seconds=10_000)
+        try:
+            await _RecEngine._cleanup_tick()
+        finally:
+            _RecEngine._model = _RecEngine._model_id = _RecEngine._last_used = None
     _RecEngine.events.append(("next-proceeded", kind))
 
 

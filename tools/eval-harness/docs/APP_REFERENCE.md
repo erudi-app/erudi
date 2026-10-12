@@ -69,5 +69,5 @@ Electron appends every backend stdout line to the stdout capture log prefixed `B
 
 ## Timing constants
 
-- Idle unload: threshold 300 s, check tick 300 s → the inference child exits 300–600 s after the last use (`backend/src/engines/base_engine.py`).
+- Idle unload: threshold 300 s, check tick 30 s → the inference child exits about 300–330 s after the last use (300–600 s on 1.1.2 and earlier, tick 300 s) (`backend/src/engines/base_engine.py`).
 - Backend startup budgets: 120 s (300 s on first run); Electron outer cap 330 s.

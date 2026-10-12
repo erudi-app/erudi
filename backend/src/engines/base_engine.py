@@ -944,10 +944,12 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         # loaded to reap. The mid-generation reap protection is NOT this
         # sentinel: it is the shared generation LOCK, which `_cleanup_tick`
         # acquires too, so cleanup cannot run while a generation holds it.
-        if cls._last_used is None or cls._model is None:
+        # The tick's pre-check reads this without the lock, so another thread
+        # may run `cleanup()` at any moment: `_last_used` is read once.
+        last_used = cls._last_used
+        if last_used is None or cls._model is None:
             return False
-        idle_time = datetime.now() - cls._last_used
-        return idle_time > timedelta(seconds=cls._max_idle_time)
+        return datetime.now() - last_used > timedelta(seconds=cls._max_idle_time)
 
     @classmethod
     def _should_not_reload_model(cls, llm_id: str) -> bool:
@@ -1058,19 +1060,28 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     async def _cleanup_tick(cls):
         """One idle-check pass: reap the model iff it has been idle too long.
 
-        Acquires the SAME asyncio lock as ``generation_guard``, through the
-        same draining helper (so it can never run during a generation, nor
-        reap a child an orphan prefix-cache reset still talks to) and runs the
-        blocking ``cleanup()`` — which kills the child subprocess — off the
-        event loop via ``asyncio.to_thread``.
+        Takes the lock only when there is something to reap. It is the SAME
+        asyncio lock as ``generation_guard``, taken through the same draining
+        helper (so a reap can never run during a generation, nor reap a child
+        an orphan prefix-cache reset still talks to), and the idle check is
+        repeated under it. Runs the blocking ``cleanup()`` — which kills the
+        child subprocess — off the event loop via ``asyncio.to_thread``.
         """
+        # Cheap check first: with a 30 s tick, an idle check must not queue
+        # behind a running generation every 30 s. The re-check under the lock
+        # is what guarantees no reap happens during a generation.
+        if not cls._should_cleanup():
+            return
         async with cls._acquire_generation_lock():
             if cls._should_cleanup():
                 await asyncio.to_thread(cls.cleanup)
 
-    # Seconds between idle-cleanup ticks. A class attribute so tests can run
-    # the monitor loop at speed.
-    _cleanup_interval_s: ClassVar[float] = 300.0
+    # Seconds between idle-cleanup ticks. The idle threshold stays 300 s; a
+    # 30 s tick releases an idle model about 300-330 s after its last use
+    # instead of up to 600 s (the monitor sleeps after each tick, and a reap
+    # can queue behind a generation or a pressure tick). A class attribute so
+    # tests can run the monitor loop at speed.
+    _cleanup_interval_s: ClassVar[float] = 30.0
 
     @classmethod
     async def _cleanup_monitor(cls):

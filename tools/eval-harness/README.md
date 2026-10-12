@@ -165,7 +165,7 @@ Every phase is marked in `events.jsonl`, and the sampler tags each 1 s sample wi
 | 12 | `kb_stress` (opt-in) | ingests `corpus/stress/*` into a second assistant | 2–10 min |
 | 13 | `web_search` (opt-in, network) | conversation with web search on; fails without a `web_search` tool call | ~1 min |
 | 14 | `arena` (opt-in) | one arena query | ~1 min |
-| 15 | `idle_unload` | waits until the inference process exits on its own (the backend unloads 300–600 s after last use; timeout 660 s), then 60 s | 5–11 min |
+| 15 | `idle_unload` | waits until the inference process exits on its own (the backend unloads about 300–330 s after last use, 300–600 s on 1.1.2 and earlier; timeout 660 s), then 60 s | 5–11 min |
 | 16 | `cleanup` | only with `--cleanup` (see deviations) | seconds |
 | 17 | `quit` | graceful quit; lists processes still alive at +5 s and +30 s; final storage snapshot | 5–35 s |
 
@@ -274,7 +274,7 @@ Unit tests cover classification over process fixtures (one recorded from a real 
 ## Known limitations
 
 - **No token counts**: the API does not expose them; throughput is characters per second of answer text.
-- **Idle unload is slow by design**: the backend checks every 300 s, so the inference process exits 300–600 s after the last use.
+- **Idle unload is slow by design**: the backend checks every 30 s for a model idle over 300 s, so the inference process exits about 300–330 s after the last use (300–600 s on 1.1.2 and earlier, which checked every 300 s; the harness keeps a 660 s timeout for both).
 - **MLX child identification** relies on "child of the backend running the backend executable, not the multiprocessing resource tracker". A future helper process spawned the same way would be counted as inference.
 - **KB embedder** runs inside the backend and is never unloaded: its cost shows up as a `backend` delta across `kb_ingest`, not as `embedding`.
 - On macOS `uss` of other processes needs root and is recorded as unreadable; `phys_footprint` is readable for the app's processes (checked on a running 1.1.2).

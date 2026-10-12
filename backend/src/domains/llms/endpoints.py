@@ -648,8 +648,8 @@ async def _unload_if_resident(llm_id: int) -> None:
     base model, on a path that no longer exists; for a KB assistant, on weights
     that belong to the base and survive. Either way the accelerator stays busy
     after the one action that should free it, and Diagnostics keeps naming a
-    model the user just deleted, until the 300s idle sweep happens to notice
-    (#521).
+    model the user just deleted, until the idle sweep (300 s idle, checked
+    every 30 s) happens to notice (#521).
 
     Takes the same lock as that sweep, so it can never land under a generation.
     Called per delete branch rather than once up front: a delete refused with
