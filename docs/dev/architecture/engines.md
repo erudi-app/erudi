@@ -272,10 +272,14 @@ the reload (`memory_reload`) before it resolves the model.
 
 **The idle reload.** The idle reap (`BaseEngine._cleanup_tick`) leaves
 `_idle_unload = {"model_id": ...}` after `cleanup()` returns; `cleanup()` itself clears it,
-so a model switch, a delete, the shutdown and the brake's unload never leave one. The
-runner calls `take_idle_reload(llm.id)` when no brake reload is pending: it is true once
-for the reaped model while nothing is loaded (a record found with a model loaded is stale
-and dropped), and the turn then yields `{"t": "memory_reload", "reason": "idle"}`. A turn
+so a delete, the shutdown and the brake's unload never leave one. A model switch does not
+call `cleanup()`: what keeps it from reading as an idle reap is that `take_idle_reload`
+drops a record found while a model is loaded. The runner calls `take_idle_reload(llm.id)`
+when no brake reload is pending, always consuming the record before it resolves the model
+(a turn cancelled before the load loses the notice); it is true once for the reaped model
+while nothing is loaded. The turn yields `{"t": "memory_reload", "reason": "idle"}` only
+when the caller passes `announce_idle_reload=True`, which the conversation service does for
+a conversation that already has messages (a new one shows its first-reply hint). A turn
 announces at most one reload.
 
 **Logs.** A shrink, a grow and a release are one INFO line each,

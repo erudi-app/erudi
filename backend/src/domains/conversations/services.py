@@ -415,6 +415,9 @@ class ConversationService:
             user_message = self._build_user_message(
                 prepend_attachment_block(attachments.block, payload.question), payload.images
             )
+            # Read BEFORE the user message is persisted: a new conversation
+            # shows its first-reply hint, not the idle-reload notice.
+            has_turns = await run_in_threadpool(self.message_repo.has_messages, conversation_id)
             await run_in_threadpool(
                 self._persist_user_message,
                 conversation_id,
@@ -513,6 +516,7 @@ class ConversationService:
                     # one compacts on this very turn.
                     compaction_threshold=conversation.compaction_threshold,
                     emit_events=True,
+                    announce_idle_reload=has_turns,
                 )
             ) as events:
                 async for event in events:

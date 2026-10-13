@@ -79,6 +79,11 @@ class _BrakeEngine(BaseEngine):
         return llm_id in cls.pending
 
     @classmethod
+    def take_idle_reload(cls, llm_id):
+        cls.calls.append(("take", llm_id))
+        return super().take_idle_reload(llm_id)
+
+    @classmethod
     def begin_memory_window(cls):
         cls.calls.append(("begin",))
         return ("token",)
@@ -113,9 +118,12 @@ def _engine(monkeypatch):
     _BrakeEngine.turn_start_outcome = BrakeOutcome()
     _BrakeEngine._idle_unload = None
     _BrakeEngine._model = None
+    _BrakeEngine._model_id = None
     monkeypatch.setattr(config, "LLM_Engine", _BrakeEngine)
     yield
     _BrakeEngine._idle_unload = None
+    _BrakeEngine._model = None
+    _BrakeEngine._model_id = None
     _BrakeEngine._last_used = None
 
 
@@ -425,27 +433,45 @@ IDLE_RELOAD = {"t": "memory_reload", "reason": "idle"}
 
 
 async def test_a_turn_after_an_idle_reap_announces_why_the_model_reloads(monkeypatch):
+    """The record is consumed before the model is resolved, so a turn
+    cancelled before the load loses the notice (accepted)."""
     _answer(monkeypatch)
     _BrakeEngine._idle_unload = {"model_id": 7}
 
-    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()), announce_idle_reload=True)
 
     assert events[0] == IDLE_RELOAD
     assert sum(1 for e in events if e["t"] == "memory_reload") == 1
     names = [c[0] for c in _BrakeEngine.calls]
-    assert names.index("pending") < names.index("build")
+    assert names.index("take") < names.index("build")
     assert _BrakeEngine._idle_unload is None
 
 
-async def test_a_turn_after_a_model_switch_announces_nothing(monkeypatch):
-    """A switch goes through ``cleanup()``, which leaves no idle record."""
+async def test_a_first_turn_consumes_the_idle_record_without_announcing_it(monkeypatch):
+    """A new conversation shows its first-reply hint, not the idle copy: the
+    record is taken (it must not leak to a later turn) but not announced."""
     _answer(monkeypatch)
     _BrakeEngine._idle_unload = {"model_id": 7}
-    _BrakeEngine.cleanup()
 
     events = await _events(AgentRunner(checkpointer=InMemorySaver()))
 
     assert not any(e["t"] == "memory_reload" for e in events)
+    assert ("take", 7) in _BrakeEngine.calls
+    assert _BrakeEngine._idle_unload is None
+
+
+async def test_a_record_left_by_another_model_is_dropped_when_one_is_loaded(monkeypatch):
+    """A model switch does not go through ``cleanup()``: the protection is
+    that a record found while a model is loaded is stale."""
+    _answer(monkeypatch)
+    _BrakeEngine._idle_unload = {"model_id": 7}
+    _BrakeEngine._model = object()
+    _BrakeEngine._model_id = 8
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()), announce_idle_reload=True)
+
+    assert not any(e["t"] == "memory_reload" for e in events)
+    assert _BrakeEngine._idle_unload is None
 
 
 async def test_the_brake_reload_wins_over_an_idle_record(monkeypatch):
@@ -453,7 +479,7 @@ async def test_the_brake_reload_wins_over_an_idle_record(monkeypatch):
     _BrakeEngine.pending = {7}
     _BrakeEngine._idle_unload = {"model_id": 7}
 
-    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()), announce_idle_reload=True)
 
     assert [e for e in events if e["t"] == "memory_reload"] == [{"t": "memory_reload"}]
 
@@ -463,7 +489,7 @@ async def test_an_idle_reload_is_not_announced_twice_by_a_turn_start_respawn(mon
     _BrakeEngine._idle_unload = {"model_id": 7}
     _BrakeEngine.turn_start_outcome = BrakeOutcome(acted=True, action="respawn")
 
-    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()), announce_idle_reload=True)
 
     assert [e for e in events if e["t"] == "memory_reload"] == [IDLE_RELOAD]
 

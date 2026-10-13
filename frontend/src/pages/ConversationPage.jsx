@@ -488,9 +488,9 @@ export default function ConversationPage() {
           let sawDone = false;
           let sawMemoryWarning = false;
           // The memory brake or the idle timeout (`reason: "idle"`) unloaded
-          // the model and this turn reloads it (`memory_reload`): shown in the pending bubble until the model
-          // speaks (its first answer, thinking or tool event), an error, or
-          // the end of the turn. Notices the backend streams as answer text
+          // the model and this turn reloads it (`memory_reload`): shown in
+          // the pending bubble until the model speaks (its first answer,
+          // thinking or tool event), an error, or the end of the turn. Notices the backend streams as answer text
           // come BEFORE it, so they never end it. Never persisted.
           let reloading = false;
           // A compaction in the pending bubble (#614): "during" from its
@@ -1094,8 +1094,8 @@ export default function ConversationPage() {
                 !showTrace &&
                 !msg.reloading &&
                 !msg.compacting;
-              // The model is being reloaded after the memory brake unloaded
-              // it: its own state, independent of the content (a notice the
+              // The model is being reloaded after the memory brake or the idle
+              // timeout unloaded it: its own state, independent of the content (a notice the
               // backend streamed as answer text may already be there).
               const showReload = !isUser && !!msg.reloading;
               // A compaction is pending in the turn: the same slot, whatever

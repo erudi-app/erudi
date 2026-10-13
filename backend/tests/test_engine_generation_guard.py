@@ -173,8 +173,9 @@ async def test_a_tick_that_does_not_reap_leaves_no_record():
 
 
 def test_any_other_unload_forgets_the_record():
-    """A model switch, a delete, a shutdown or the brake's unload all call
-    ``cleanup()``: none of them may leave an idle record behind."""
+    """A delete, a shutdown or the brake's unload all call ``cleanup()``: none
+    of them may leave an idle record behind. (A model switch does not; the
+    stale-drop in ``take_idle_reload`` covers it.)"""
     _load_idle("x")
     _GuardEngine._idle_unload = {"model_id": "x"}
     try:

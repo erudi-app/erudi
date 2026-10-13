@@ -196,7 +196,7 @@ their contents through history forever.
 | `tool_call` | `name`, `args` | The agent called a tool (`search_knowledge_base`, `web_search`, `calculator`) |
 | `tool_result` | `name`, `text` | What that tool returned |
 | `compaction` | `phase`; with `phase: "done"`: `summarized`, `reason`, `summary`, `summary_lost` | Earlier messages are summarized (see [compaction](#what-the-thread-shows-of-a-compaction)). `phase: "start"`: the summary call is about to run; never persisted. `phase: "done"`: the history was rewritten — `summarized` = the user messages and answers summarized (tool calls, tool results and the previous summary not counted), `reason` = `"memory"` (the computer's memory bounds the window) or `"length"`, `summary` = the summary text, `summary_lost: true` when no summary could be written (`summary` is then the previous summary the model keeps, possibly empty). Persisted in the turn's trace. Several per turn are possible: one before each model call that needs it |
-| `memory_reload` | `reason` (`"idle"` only) | Without `reason`, Apple Silicon and the CPU engine: the memory brake unloaded the model (or, on the CPU engine, restarted it with a smaller window) while the computer's memory was under pressure, and this turn reloads it or re-reads the conversation (see below). `reason: "idle"` (any engine): the model was unloaded after about five minutes without use, and this turn reloads it; the renderer says so instead of blaming memory. A model switch never sends it, and a turn announces at most one reload. Sent before anything else the model produces; never persisted |
+| `memory_reload` | `reason` (`"idle"` only) | Without `reason`, Apple Silicon and the CPU engine: the memory brake unloaded the model (or, on the CPU engine, restarted it with a smaller window) while the computer's memory was under pressure, and this turn reloads it or re-reads the conversation (see below). `reason: "idle"` (any engine): the model was unloaded after about five minutes without use, and this turn reloads it; the renderer says so instead of blaming memory. Only a conversation that already has messages gets it (a new one shows its first-reply hint), a model switch never sends it, and a turn announces at most one reload. Sent before anything else the model produces; never persisted |
 | `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one. `reason: "pressure"`: the computer's memory is under pressure and the memory brake shrank the window, so the conversation is summarized earlier. `reason: "pressure_external"`: the computer's memory is under pressure from other apps and this conversation uses little of it. `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
 | `error` | `text` | The turn failed; the text is the curated error message |
 | `done` | — | Terminal event, always sent, including after an `error` |
@@ -784,7 +784,9 @@ the tool's explicit failure text instead of a silently missing tool.
 Only one model is resident at a time, and it is unloaded after about five minutes without a request:
 `BaseEngine._max_idle_time` is 300 seconds and the cleanup monitor started by the FastAPI lifespan
 ticks every 30 seconds, so the unload lands about 300 to 330 seconds after the last request.
-The next question reloads it, which costs the usual load time. See
+The next question reloads it, which costs the usual load time; the next turn of an existing
+conversation says why it reloads (`memory_reload` with `reason: "idle"`), while a new conversation
+shows its usual first-reply hint. See
 [LLMs](llms.md#memory-and-the-idle-unload).
 
 ## Related pages

@@ -1153,6 +1153,34 @@ class TestConversationService:
         assert messages[1].trace is not None
         assert not any(e.get("t") == "memory_reload" for e in messages[1].trace)
 
+    @pytest.mark.parametrize("prior_turns,announces", [(0, False), (1, True)])
+    async def test_only_a_conversation_with_turns_announces_an_idle_reload(
+        self, test_db_session, mock_llm, monkeypatch, prior_turns, announces
+    ):
+        """A new conversation shows the first-reply hint, so the runner is told
+        not to announce an idle reload there (it still consumes the record)."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+        for _ in range(prior_turns):
+            service.message_repo.create_message(
+                conversation_id=conversation.id, content="earlier", sender="user"
+            )
+        seen = {}
+
+        async def fake_stream(**kwargs):
+            seen.update(kwargs)
+            yield {"t": "answer", "text": "ok"}
+
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        payload = ConversationQuery(question="Hello")
+        [t async for t in service.query_and_respond_stream(conversation.id, payload)]
+
+        assert seen["announce_idle_reload"] is announces
+
     async def test_a_compaction_start_is_wire_only_and_its_done_is_persisted(
         self, test_db_session, mock_llm, monkeypatch
     ):

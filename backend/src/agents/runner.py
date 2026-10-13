@@ -1513,6 +1513,7 @@ class AgentRunner:
         effort_plan: Optional[EffortPlan] = None,
         compaction_threshold: Optional[int] = None,
         emit_events: bool = False,
+        announce_idle_reload: bool = False,
     ) -> AsyncIterator:
         """Project the turn's event stream (:meth:`_astream_events`).
 
@@ -1530,6 +1531,12 @@ class AgentRunner:
         sizes the trigger, the keep and the futility guard; it also reaches
         the memory brake with the turn's measurement. ``None`` on a turn that
         never compacts (arena).
+
+        ``announce_idle_reload``: whether this turn may tell the user the model
+        reloads because the idle timeout unloaded it (a conversation that
+        already has turns; a new one shows its first-reply hint). The idle
+        record is consumed either way, before the model is resolved, so a turn
+        cancelled before the load loses the notice.
         """
         # ``aclosing``: closing THIS generator closes the capture loop (and,
         # through it, LangGraph) right away, inside the generation guard.
@@ -1548,6 +1555,7 @@ class AgentRunner:
                 supports_vision=supports_vision,
                 effort_plan=effort_plan,
                 compaction_threshold=compaction_threshold,
+                announce_idle_reload=announce_idle_reload,
             )
         ) as events:
             async for event in events:
@@ -1572,6 +1580,7 @@ class AgentRunner:
         supports_vision: Optional[bool] = None,
         effort_plan: Optional[EffortPlan] = None,
         compaction_threshold: Optional[int] = None,
+        announce_idle_reload: bool = False,
     ) -> AsyncIterator[dict]:
         """The single capture loop: structured events for the whole turn (#90).
 
@@ -1624,9 +1633,10 @@ class AgentRunner:
                 reload_announced = _brake_reload_pending(engine, llm)
                 if reload_announced:
                     yield {"t": "memory_reload"}
-                elif _idle_reload_taken(engine, llm):
+                elif _idle_reload_taken(engine, llm) and announce_idle_reload:
                     # The idle timeout unloaded it (not the brake): same state
-                    # on the wire, with the reason the copy follows.
+                    # on the wire, with the reason the copy follows. The record
+                    # is taken first, whether or not this turn says it.
                     reload_announced = True
                     yield {"t": "memory_reload", "reason": "idle"}
                 # The brake's turn_start sample, for the child this turn will

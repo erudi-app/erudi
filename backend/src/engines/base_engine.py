@@ -259,8 +259,10 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     _max_idle_time = 300  # 5 min
     # What the last idle-timeout reap unloaded (``{"model_id": ...}``), so the
     # next turn for that model can say why it reloads (``take_idle_reload``).
-    # Only ``_cleanup_tick`` writes it; every other unload (``cleanup``) clears
-    # it, so a model switch is never mistaken for an idle reap.
+    # Only ``_cleanup_tick`` writes it; every other ``cleanup()`` (delete,
+    # shutdown, the brake's unload) clears it. A model switch does not call
+    # ``cleanup()``: ``take_idle_reload`` drops a record found while a model
+    # is loaded, which is what keeps a switch from being read as an idle reap.
     _idle_unload: ClassVar[Optional[dict]] = None
 
     # HF library tag identifying THIS engine's runnable format ("mlx" / "gguf").
