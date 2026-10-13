@@ -74,6 +74,7 @@
   "message": {
     "firstReplyHint": "La primera respuesta puede tardar un poco más mientras el modelo se carga en memoria...",
     "memoryReload": "Se liberó memoria en su equipo; recargando el modelo para retomar la conversación…",
+    "idleReload": "El modelo se descargó tras unos minutos sin uso; recargándolo para retomar la conversación…",
     "compacting": "Resumiendo los mensajes anteriores para hacer espacio…",
     "imagePlaceholder": "🖼 imagen adjunta",
     "attachmentAlt": "adjunto {{index}}",

@@ -74,6 +74,7 @@
   "message": {
     "firstReplyHint": "First response may take a bit longer while loading the model into memory...",
     "memoryReload": "Memory was freed on your computer; reloading the model to resume the conversation…",
+    "idleReload": "The model was unloaded after a few minutes without use; reloading it to resume the conversation…",
     "compacting": "Summarizing earlier messages to make room…",
     "imagePlaceholder": "🖼 image attachment",
     "attachmentAlt": "attachment {{index}}",

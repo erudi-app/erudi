@@ -487,8 +487,8 @@ export default function ConversationPage() {
           let sawError = false;
           let sawDone = false;
           let sawMemoryWarning = false;
-          // The memory brake unloaded the model and this turn reloads it
-          // (`memory_reload`): shown in the pending bubble until the model
+          // The memory brake or the idle timeout (`reason: "idle"`) unloaded
+          // the model and this turn reloads it (`memory_reload`): shown in the pending bubble until the model
           // speaks (its first answer, thinking or tool event), an error, or
           // the end of the turn. Notices the backend streams as answer text
           // come BEFORE it, so they never end it. Never persisted.
@@ -525,7 +525,9 @@ export default function ConversationPage() {
             }
             switch (evt.t) {
               case "memory_reload":
-                reloading = true;
+                // Why the model reloads picks the copy: "idle" (the idle
+                // timeout unloaded it) or "memory" (the memory brake did).
+                reloading = evt.reason === "idle" ? "idle" : "memory";
                 break;
               case "compaction":
                 // `start` is the transient state; `done` is the marker the
@@ -1212,7 +1214,11 @@ export default function ConversationPage() {
                             <TypingIndicator size={8} className="-mt-1" />
                           </div>
                           <div className="text-xs text-gray-400 italic mt-1">
-                            {t("chat:message.memoryReload")}
+                            {t(
+                              msg.reloading === "idle"
+                                ? "chat:message.idleReload"
+                                : "chat:message.memoryReload"
+                            )}
                           </div>
                         </div>
                       )}

@@ -1119,12 +1119,16 @@ class TestConversationService:
         assert messages[1].trace is not None
         assert not any(e.get("t") == "memory_warning" for e in messages[1].trace)
 
+    @pytest.mark.parametrize(
+        "reload_event", [{"t": "memory_reload"}, {"t": "memory_reload", "reason": "idle"}]
+    )
     async def test_memory_reload_reaches_the_wire_but_never_the_trace(
-        self, test_db_session, mock_llm, monkeypatch
+        self, test_db_session, mock_llm, monkeypatch, reload_event
     ):
-        """The memory brake unloaded the model: the reload is announced on the
-        wire, before the answer, and never persisted -- it describes this
-        machine's memory at that moment, not the conversation."""
+        """The memory brake (or, with ``reason: "idle"``, the idle timeout)
+        unloaded the model: the reload is announced on the wire as is, before
+        the answer, and never persisted -- it describes this machine at that
+        moment, not the conversation."""
         monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
         service = ConversationService(test_db_session, InMemorySaver())
         conversation = service.create_conversation(
@@ -1132,7 +1136,7 @@ class TestConversationService:
         )
 
         async def fake_stream(**kwargs):
-            yield {"t": "memory_reload"}
+            yield reload_event
             yield {"t": "thinking", "text": "hm"}
             yield {"t": "answer", "text": "Back."}
 
@@ -1142,7 +1146,7 @@ class TestConversationService:
         result = [t async for t in service.query_and_respond_stream(conversation.id, payload)]
 
         events = _parse_ndjson(result)
-        assert events[0] == {"t": "memory_reload"}
+        assert events[0] == reload_event
         assert events[-1] == {"t": "done"}
         messages = service.message_repo.get_messages_by_conversation(conversation.id)
         assert messages[1].content == "Back."

@@ -111,8 +111,11 @@ def _engine(monkeypatch):
     _BrakeEngine.bound_footprint = None
     _BrakeEngine.window = None
     _BrakeEngine.turn_start_outcome = BrakeOutcome()
+    _BrakeEngine._idle_unload = None
+    _BrakeEngine._model = None
     monkeypatch.setattr(config, "LLM_Engine", _BrakeEngine)
     yield
+    _BrakeEngine._idle_unload = None
     _BrakeEngine._last_used = None
 
 
@@ -413,6 +416,56 @@ async def test_a_respawn_after_an_announced_reload_is_not_announced_twice(monkey
     events = await _events(AgentRunner(checkpointer=InMemorySaver()))
 
     assert sum(1 for e in events if e["t"] == "memory_reload") == 1
+
+
+# ===================== idle reload (#619) =====================
+
+
+IDLE_RELOAD = {"t": "memory_reload", "reason": "idle"}
+
+
+async def test_a_turn_after_an_idle_reap_announces_why_the_model_reloads(monkeypatch):
+    _answer(monkeypatch)
+    _BrakeEngine._idle_unload = {"model_id": 7}
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    assert events[0] == IDLE_RELOAD
+    assert sum(1 for e in events if e["t"] == "memory_reload") == 1
+    names = [c[0] for c in _BrakeEngine.calls]
+    assert names.index("pending") < names.index("build")
+    assert _BrakeEngine._idle_unload is None
+
+
+async def test_a_turn_after_a_model_switch_announces_nothing(monkeypatch):
+    """A switch goes through ``cleanup()``, which leaves no idle record."""
+    _answer(monkeypatch)
+    _BrakeEngine._idle_unload = {"model_id": 7}
+    _BrakeEngine.cleanup()
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    assert not any(e["t"] == "memory_reload" for e in events)
+
+
+async def test_the_brake_reload_wins_over_an_idle_record(monkeypatch):
+    _answer(monkeypatch)
+    _BrakeEngine.pending = {7}
+    _BrakeEngine._idle_unload = {"model_id": 7}
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    assert [e for e in events if e["t"] == "memory_reload"] == [{"t": "memory_reload"}]
+
+
+async def test_an_idle_reload_is_not_announced_twice_by_a_turn_start_respawn(monkeypatch):
+    _answer(monkeypatch)
+    _BrakeEngine._idle_unload = {"model_id": 7}
+    _BrakeEngine.turn_start_outcome = BrakeOutcome(acted=True, action="respawn")
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    assert [e for e in events if e["t"] == "memory_reload"] == [IDLE_RELOAD]
 
 
 @pytest.mark.parametrize("action", ["shrink", "grow", None])

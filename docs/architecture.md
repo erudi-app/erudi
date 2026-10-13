@@ -539,7 +539,8 @@ of every turn and every minute while it is idle (a second lifespan monitor, unde
 same lock), never during an answer. On Apple Silicon the MLX child shrinks the working
 window so the next turn compacts earlier, releases the prefix cache and MLX's buffer
 cache, and, under critical pressure while the user is away, unloads the model, which the
-next message reloads with the reduced window (`memory_reload` on the wire). On the CPU
+next message reloads with the reduced window (`memory_reload` on the wire; the idle
+timeout's own unload sends the same event with `reason: "idle"`). On the CPU
 engine (`llama-server`, whose KV cache is allocated in full at load) the brake restarts
 the same model with a smaller window — at once under critical pressure, after two
 minutes of user idle under warning — or unloads it; the turn that re-reads the

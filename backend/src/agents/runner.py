@@ -303,6 +303,13 @@ def _brake_reload_pending(engine: Any, llm: Any) -> bool:
     return bool(probe(getattr(llm, "id", None))) if callable(probe) else False
 
 
+def _idle_reload_taken(engine: Any, llm: Any) -> bool:
+    """Whether this turn reloads a model the idle timeout unloaded (the record
+    is consumed), read defensively like the other engine probes."""
+    probe = getattr(engine, "take_idle_reload", None)
+    return bool(probe(getattr(llm, "id", None))) if callable(probe) else False
+
+
 def _respawned(outcome: Any) -> bool:
     """Whether a brake sample's outcome restarted the child (``respawn``,
     ``shrink+respawn``, or a ``respawn-failed`` whose model reloads now)."""
@@ -1617,6 +1624,11 @@ class AgentRunner:
                 reload_announced = _brake_reload_pending(engine, llm)
                 if reload_announced:
                     yield {"t": "memory_reload"}
+                elif _idle_reload_taken(engine, llm):
+                    # The idle timeout unloaded it (not the brake): same state
+                    # on the wire, with the reason the copy follows.
+                    reload_announced = True
+                    yield {"t": "memory_reload", "reason": "idle"}
                 # The brake's turn_start sample, for the child this turn will
                 # use, BEFORE the model is resolved: a shrink here applies to
                 # this very turn. Shielded: it may talk to the child.
