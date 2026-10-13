@@ -31,6 +31,7 @@ def _reset():
     _GuardEngine._tokenizer = None
     _GuardEngine._model_id = None
     _GuardEngine._last_used = None
+    _GuardEngine._idle_unload = None
 
 
 # ───────────────────────── generation_guard ─────────────────────────
@@ -140,6 +141,84 @@ async def test_idle_tick_cannot_reap_during_generation():
         assert _GuardEngine._model is not None
     finally:
         _reset()
+
+
+# ───────────────── idle reload record (#619: say why a model reloads) ─────────────────
+
+
+def _load_idle(model_id="x", idle_s=10_000):
+    _GuardEngine._model = object()
+    _GuardEngine._model_id = model_id
+    _GuardEngine._last_used = datetime.now() - timedelta(seconds=idle_s)
+
+
+async def test_idle_reap_records_which_model_it_unloaded():
+    _load_idle("x")
+    try:
+        await asyncio.wait_for(_GuardEngine._cleanup_tick(), timeout=5)
+        assert _GuardEngine._model is None
+        assert _GuardEngine._idle_unload == {"model_id": "x"}
+    finally:
+        _reset()
+
+
+async def test_a_tick_that_does_not_reap_leaves_no_record():
+    _load_idle("x", idle_s=1)
+    try:
+        await asyncio.wait_for(_GuardEngine._cleanup_tick(), timeout=5)
+        assert _GuardEngine._model is not None
+        assert _GuardEngine._idle_unload is None
+    finally:
+        _reset()
+
+
+def test_any_other_unload_forgets_the_record():
+    """A delete, a shutdown or the brake's unload all call ``cleanup()``: none
+    of them may leave an idle record behind. (A model switch does not; the
+    stale-drop in ``take_idle_reload`` covers it.)"""
+    _load_idle("x")
+    _GuardEngine._idle_unload = {"model_id": "x"}
+    try:
+        _GuardEngine.cleanup()
+        assert _GuardEngine._idle_unload is None
+    finally:
+        _reset()
+
+
+def test_take_idle_reload_is_true_once_for_the_reaped_model():
+    _GuardEngine._idle_unload = {"model_id": "x"}
+    try:
+        assert _GuardEngine.take_idle_reload("x") is True
+        assert _GuardEngine.take_idle_reload("x") is False
+        assert _GuardEngine._idle_unload is None
+    finally:
+        _reset()
+
+
+def test_take_idle_reload_is_false_for_another_model_and_keeps_the_record():
+    _GuardEngine._idle_unload = {"model_id": "x"}
+    try:
+        assert _GuardEngine.take_idle_reload("y") is False
+        assert _GuardEngine._idle_unload == {"model_id": "x"}
+    finally:
+        _reset()
+
+
+def test_take_idle_reload_is_false_and_clears_when_a_model_is_loaded():
+    """The title request of a new conversation may have reloaded the model
+    already: the record is stale, and the turn must not announce a reload."""
+    _GuardEngine._idle_unload = {"model_id": "x"}
+    _GuardEngine._model = object()
+    _GuardEngine._model_id = "x"
+    try:
+        assert _GuardEngine.take_idle_reload("x") is False
+        assert _GuardEngine._idle_unload is None
+    finally:
+        _reset()
+
+
+def test_take_idle_reload_without_a_record_is_false():
+    assert _GuardEngine.take_idle_reload("x") is False
 
 
 # ───────────────────── idle cadence (30 s tick, 300 s threshold) ─────────────────────

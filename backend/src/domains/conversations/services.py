@@ -329,8 +329,10 @@ class ConversationService:
         (streamed reasoning), ``tool_call`` / ``tool_result`` (agent activity),
         ``compaction`` (#614: ``phase: "start"`` while earlier messages are being
         summarized, ``phase: "done"`` with ``summarized``, ``reason``, ``summary``
-        and ``summary_lost`` once they were), ``memory_reload`` /
-        ``memory_warning`` (this machine's memory), ``error`` (the mapped ERROR
+        and ``summary_lost`` once they were), ``memory_reload``
+        (the model reloads: the memory brake unloaded it, or, with
+        ``reason: "idle"``, the idle timeout did) / ``memory_warning`` (this
+        machine's memory), ``error`` (the mapped ERROR
         sentinel), then a terminal ``done`` (#90).
 
         The answer text is accumulated exactly as before and persisted as the
@@ -413,6 +415,9 @@ class ConversationService:
             user_message = self._build_user_message(
                 prepend_attachment_block(attachments.block, payload.question), payload.images
             )
+            # Read BEFORE the user message is persisted: a new conversation
+            # shows its first-reply hint, not the idle-reload notice.
+            has_turns = await run_in_threadpool(self.message_repo.has_messages, conversation_id)
             await run_in_threadpool(
                 self._persist_user_message,
                 conversation_id,
@@ -511,6 +516,7 @@ class ConversationService:
                     # one compacts on this very turn.
                     compaction_threshold=conversation.compaction_threshold,
                     emit_events=True,
+                    announce_idle_reload=has_turns,
                 )
             ) as events:
                 async for event in events:
@@ -532,9 +538,10 @@ class ConversationService:
                         yield _ndjson(event)
                     elif event["t"] == "memory_reload":
                         # Wire only, never persisted, for the same reason: the
-                        # memory brake unloaded the model, and this turn
-                        # reloads it -- a fact about this machine's memory at
-                        # this moment, not part of the conversation.
+                        # memory brake or the idle timeout (``reason``)
+                        # unloaded the model, and this turn reloads it -- a
+                        # fact about this machine at this moment, not part of
+                        # the conversation. ``reason`` passes through as is.
                         yield _ndjson(event)
                     elif event["t"] == COMPACTION_EVENT and event.get("phase") == "start":
                         # Wire only (#614): the pending answer says the

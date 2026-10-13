@@ -333,6 +333,16 @@ class MessageRepository:
         except SQLAlchemyError as e:
             raise DatabaseException("Could not retrieve messages", trace=str(e))
 
+    def has_messages(self, conversation_id: int) -> bool:
+        """Whether the conversation holds any message (read-only, one row)."""
+        try:
+            return (
+                self.db.query(Message.id).filter(Message.conversation_id == conversation_id).first()
+                is not None
+            )
+        except SQLAlchemyError as e:
+            raise DatabaseException("Could not retrieve messages", trace=str(e))
+
     def get_starred_messages(self, conversation_id: int) -> List[str]:
         """
         Get all starred messages in a conversation.

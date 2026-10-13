@@ -74,6 +74,7 @@
   "message": {
     "firstReplyHint": "首次回复可能会稍慢一些，因为模型正在加载到内存中...",
     "memoryReload": "已在您的电脑上释放内存；正在重新加载模型以继续对话…",
+    "idleReload": "模型在闲置几分钟后已被卸载；正在重新加载以继续对话…",
     "compacting": "正在总结之前的消息以腾出空间…",
     "imagePlaceholder": "🖼 图片附件",
     "attachmentAlt": "附件 {{index}}",

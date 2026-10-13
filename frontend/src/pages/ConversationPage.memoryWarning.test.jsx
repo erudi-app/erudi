@@ -12,7 +12,8 @@ import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-libra
 //  - the warning is transient state only: it never lands in the answer bubble
 //    (so it cannot be copied with the message) and a LATER turn that carries
 //    no warning clears it;
-//  - a `memory_reload` event (the memory brake unloaded the model) shows a
+//  - a `memory_reload` event (the memory brake unloaded the model; with
+//    `reason: "idle"`, the idle timeout did, and the copy says so) shows a
 //    reload state in the pending assistant bubble -- even below a notice
 //    already streamed as answer text -- until the model's first thinking,
 //    answer or tool event, an error, or the end of the turn.
@@ -265,6 +266,8 @@ describe("ConversationPage memory warning reasons", () => {
 });
 
 const RELOAD = "Memory was freed on your computer; reloading the model to resume the conversation…";
+const IDLE_RELOAD =
+  "The model was unloaded after a few minutes without use; reloading it to resume the conversation…";
 
 describe("ConversationPage reload state", () => {
   const push = async (stream, line) => {
@@ -284,6 +287,37 @@ describe("ConversationPage reload state", () => {
 
     await push(turn, '{"t":"answer","text":"Back."}\n');
     await waitFor(() => expect(screen.queryByText(RELOAD)).toBeNull());
+    await act(async () => {
+      turn.end();
+    });
+  });
+
+  it("says the model was unloaded after a pause when the reason is idle", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await push(turn, '{"t":"memory_reload","reason":"idle"}\n');
+    expect(await screen.findByText(IDLE_RELOAD)).toBeTruthy();
+    expect(screen.queryByText(RELOAD)).toBeNull();
+
+    await push(turn, '{"t":"answer","text":"Back."}\n');
+    await waitFor(() => expect(screen.queryByText(IDLE_RELOAD)).toBeNull());
+    await act(async () => {
+      turn.end();
+    });
+  });
+
+  it("keeps the memory copy for a reload without the idle reason", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await push(turn, '{"t":"memory_reload"}\n');
+    expect(await screen.findByText(RELOAD)).toBeTruthy();
+    expect(screen.queryByText(IDLE_RELOAD)).toBeNull();
     await act(async () => {
       turn.end();
     });

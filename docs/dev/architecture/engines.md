@@ -270,6 +270,18 @@ in the same episode and no extra shrink. Any successful spawn, an idle-timeout r
 the shutdown forget the record; `brake_reload_pending(llm_id)` lets the runner announce
 the reload (`memory_reload`) before it resolves the model.
 
+**The idle reload.** The idle reap (`BaseEngine._cleanup_tick`) leaves
+`_idle_unload = {"model_id": ...}` after `cleanup()` returns; `cleanup()` itself clears it,
+so a delete, the shutdown and the brake's unload never leave one. A model switch does not
+call `cleanup()`: what keeps it from reading as an idle reap is that `take_idle_reload`
+drops a record found while a model is loaded. The runner calls `take_idle_reload(llm.id)`
+when no brake reload is pending, always consuming the record before it resolves the model
+(a turn cancelled before the load loses the notice); it is true once for the reaped model
+while nothing is loaded. The turn yields `{"t": "memory_reload", "reason": "idle"}` only
+when the caller passes `announce_idle_reload=True`, which the conversation service does for
+a conversation that already has messages (a new one shows its first-reply hint). A turn
+announces at most one reload.
+
 **Logs.** A shrink, a grow and a release are one INFO line each,
 `[MLX_Engine] Memory brake: point=..., level=..., action=..., window=A->B, excess_mib=...`
 (a release quotes the excess before and after); an unload is one WARNING, the app having

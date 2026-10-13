@@ -257,6 +257,13 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     # --- Lifecycle management ---
     _cleanup_task = None
     _max_idle_time = 300  # 5 min
+    # What the last idle-timeout reap unloaded (``{"model_id": ...}``), so the
+    # next turn for that model can say why it reloads (``take_idle_reload``).
+    # Only ``_cleanup_tick`` writes it; every other ``cleanup()`` (delete,
+    # shutdown, the brake's unload) clears it. A model switch does not call
+    # ``cleanup()``: ``take_idle_reload`` drops a record found while a model
+    # is loaded, which is what keeps a switch from being read as an idle reap.
+    _idle_unload: ClassVar[Optional[dict]] = None
 
     # HF library tag identifying THIS engine's runnable format ("mlx" / "gguf").
     # The catalog is built ONLY from repos carrying this tag (searched via
@@ -1053,6 +1060,7 @@ class BaseEngine(ABC, metaclass=EngineMeta):
             Calls garbage collector to ensure memory is freed.
 
         """
+        cls._idle_unload = None
         if cls._model or cls._tokenizer:
             import gc
 
@@ -1078,7 +1086,31 @@ class BaseEngine(ABC, metaclass=EngineMeta):
             return
         async with cls._acquire_generation_lock():
             if cls._should_cleanup():
+                reaped_id = cls._model_id
                 await asyncio.to_thread(cls.cleanup)
+                # After cleanup(), which clears the record: only this path
+                # leaves one.
+                cls._idle_unload = {"model_id": reaped_id}
+
+    @classmethod
+    def take_idle_reload(cls, llm_id: Any) -> bool:
+        """Whether this turn reloads ``llm_id`` after an idle-timeout reap.
+
+        True once (the record is consumed) when the reap unloaded ``llm_id``
+        and nothing is loaded. A record found while a model is loaded is stale
+        (the title request of a new conversation reloaded it first) and is
+        dropped. Identity is ``llm.id``, as in ``_should_not_reload_model``.
+        """
+        record = cls._idle_unload
+        if not isinstance(record, dict):
+            return False
+        if cls._model is not None:
+            cls._idle_unload = None
+            return False
+        if record.get("model_id") != llm_id:
+            return False
+        cls._idle_unload = None
+        return True
 
     # Seconds between idle-cleanup ticks. The idle threshold stays 300 s; a
     # 30 s tick releases an idle model about 300-330 s after its last use

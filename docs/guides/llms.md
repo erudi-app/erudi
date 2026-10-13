@@ -302,8 +302,9 @@ when the model has been idle longer than `_max_idle_time`, 300 seconds, so an id
 about 300 to 330 seconds after its last use (`backend/src/engines/base_engine.py`).
 
 In practice: after about five minutes without a request, the model is unloaded and its memory freed.
-The next request reloads it, which costs the usual load time. Switching to another model swaps the
-resident one.
+The next request reloads it, which costs the usual load time; the next turn of an existing
+conversation says why it reloads (a new conversation shows its usual first-reply hint). Switching
+to another model swaps the resident one.
 
 Do not instantiate engines. Call class methods on the result of `BaseEngine.get_engine()`; the
 selected engine is also available as `src.core.config.LLM_Engine`.

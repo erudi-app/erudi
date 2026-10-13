@@ -74,6 +74,7 @@
   "message": {
     "firstReplyHint": "La première réponse peut prendre un peu plus de temps pendant le chargement du modèle en mémoire...",
     "memoryReload": "De la mémoire a été libérée sur votre ordinateur ; rechargement du modèle pour reprendre la conversation…",
+    "idleReload": "Le modèle avait été déchargé après quelques minutes d'inactivité ; rechargement pour reprendre la conversation…",
     "compacting": "Résumé des messages précédents pour faire de la place…",
     "imagePlaceholder": "🖼 image jointe",
     "attachmentAlt": "pièce jointe {{index}}",
