@@ -13,7 +13,9 @@ anywhere; deleting it loses only the recorded observations). One entry per
 path: the model's architecture (its config ``model_type``; never the
 conversation's model name, renameable free text), the artifact's size, the
 GPU working set, the macOS, mlx and mlx_vlm versions, the child's runtime
-configuration. Not the app version. Only measured bases are recorded (never
+configuration (including the buffer-cache limit, so observations recorded under
+another limit land in their own ring: a fresh calibration for that
+configuration). Not the app version. Only measured bases are recorded (never
 the weights-on-disk fallback); a child that died during a turn is recorded
 with ``child_died`` and no peak, and an abandoned turn whose call was cut
 before its usage arrived with ``n_est`` (the client's estimate) instead of a

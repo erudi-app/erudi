@@ -507,7 +507,7 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
      per-token KV-cache cost (`2 × layers × kv_heads × head_dim × 2 bytes f16`, read from the local
      artifact's `config.json`), `step × vocab × 2 bytes` the last prefill chunk's logits, and three
      named priors measured on an M4 16 GB (`c0 = 3.5` KV units per token — the cache, its
-     prefix-cache copy and MLX's buffer cache —, `t0 = 1 GiB`, a margin `m = 1.10`; provisional
+     prefix-cache copy and MLX's buffer cache as measured with its default limit; the child now bounds it at 0, which only lowers the peak —, `t0 = 1 GiB`, a margin `m = 1.10`; provisional
      until the release measurement campaign). The ceiling reserves the output budget's 512-token
      floor and stacks no further margin. Nothing is learned while the app runs: every turn's real
      peak is recorded next to its prediction in `memory_calibration.json` in the data folder, and a

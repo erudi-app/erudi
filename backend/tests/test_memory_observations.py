@@ -513,7 +513,7 @@ def _components(**overrides):
         model="Qwen3-0.6B",
         artifact_bytes=500_000_000,
         working_set_bytes=12 * GIB,
-        runtime={"apc_block_size": 16, "prefill_step": 2048, "buffer_cache_limit": "default"},
+        runtime={"apc_block_size": 16, "prefill_step": 2048, "buffer_cache_limit": 0},
     )
     components.update(overrides)
     return components

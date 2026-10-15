@@ -756,22 +756,8 @@ class TestChildRuntimeEnv:
         assert captured == {"num_blocks": None, "timeout": None}
 
 
-@pytest.fixture(autouse=True)
-def _no_real_cache_limit(request, monkeypatch):
-    """Keep `run_mlx_vlm_server` from capping the test process's own MLX cache.
-
-    On an MLX host the real `mx.set_cache_limit(0)` would apply to the pytest
-    process. Only `TestBufferCacheBound`, which fakes `mlx.core`, runs the real
-    function.
-    """
-    if request.cls is not None and request.cls.__name__ == "TestBufferCacheBound":
-        return
-    from src.engines import _mlx_vlm_server_runner as runner
-
-    monkeypatch.setattr(runner, "_bound_buffer_cache", lambda: None)
-
-
 @pytest.mark.unit
+@pytest.mark.real_cache_limit
 class TestBufferCacheBound:
     """The child bounds MLX's buffer cache at 0 before the server runs (#622)."""
 
@@ -797,21 +783,43 @@ class TestBufferCacheBound:
         monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
         monkeypatch.setattr(sys, "argv", ["pytest"])
 
-    def test_limit_constant_is_zero(self):
+    def test_the_predictors_limit_is_the_one_the_child_applies(self):
+        """The memory prior is keyed on the child's buffer-cache limit: the
+        two must be the same value, and the registered prior must be found
+        under it."""
         from src.engines import _mlx_vlm_server_runner as runner
+        from src.engines import memory_budget
 
-        assert runner.MLX_BUFFER_CACHE_LIMIT_BYTES == 0
+        assert memory_budget.MLX_BUFFER_CACHE_LIMIT == runner.MLX_BUFFER_CACHE_LIMIT_BYTES
+        assert (
+            memory_budget.MLX_PREFILL_STEP_TOKENS,
+            runner.MLX_BUFFER_CACHE_LIMIT_BYTES,
+        ) in memory_budget.MEMORY_PRIORS
 
-    def test_cache_limit_set_once_before_the_server_main_runs(self, monkeypatch):
+    def test_cache_limit_set_once_before_the_server_is_imported(self, monkeypatch, capsys):
         from src.engines import _mlx_vlm_server_runner as runner
 
         calls: list = []
-        self._install_fake_mlx_core(monkeypatch, lambda n: calls.append(("limit", n)))
+
+        def _set_cache_limit(n):
+            calls.append(("limit", n))
+            return 123
+
+        self._install_fake_mlx_core(monkeypatch, _set_cache_limit)
         self._stub_runner(monkeypatch, runner, lambda: calls.append(("main", None)))
+        monkeypatch.setattr(
+            runner,
+            "_import_mlx_vlm_server_main",
+            lambda: (calls.append(("import", None)), lambda: calls.append(("main", None)))[1],
+        )
 
         runner.run_mlx_vlm_server(["mlx_vlm.server"])
 
-        assert calls == [("limit", 0), ("main", None)]
+        assert calls == [("limit", 0), ("import", None), ("main", None)]
+        lines = capsys.readouterr().err.strip().splitlines()
+        assert len(lines) == 1
+        assert "[INFO]" in lines[0]
+        assert "MLX buffer cache limit set to 0 bytes (was 123)" in lines[0]
 
     def test_missing_mlx_core_still_runs_main_with_one_diagnostic(self, monkeypatch, capsys):
         import sys

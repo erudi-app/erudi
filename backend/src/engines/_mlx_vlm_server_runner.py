@@ -102,9 +102,12 @@ from src.engines.mlx_child_log import child_warning, redirect_stdio_to, write_ch
 APC_BLOCK_SIZE_TOKENS = 16
 
 # Ceiling, in bytes, on the pool of freed GPU buffers MLX keeps for reuse (its
-# "buffer cache"). MLX's default is the size of the working-set limit, and
-# nothing else in this path bounds it, so a long prefill leaves gigabytes of
-# freed buffers in the pool. Measured on an M4 16 GB (mlx 0.32.2, mlx-vlm
+# "buffer cache"). MLX's default cache limit is its memory limit, 1.5 x the
+# device's recommended working set (mlx/include/mlx/memory.h), so in practice
+# nothing bounds it in this child, and a long prefill leaves gigabytes of freed
+# buffers in the pool. The memory predictor derives its configuration key from
+# this constant (``src.engines.memory_budget``), which is why it lives here: the
+# child must not import ``src.core.logging``. Measured on an M4 16 GB (mlx 0.32.2, mlx-vlm
 # 0.6.17), prefix cache reset after each request, limit 0 against the default:
 # no measurable speed cost (Qwen3-4B: a ~6k-token prompt 24.0 s to first token
 # and ~29 tok/s both ways, a short one 0.33 s and ~40 tok/s; Qwen3-0.6B: 4.92 s
@@ -275,7 +278,7 @@ def _bound_buffer_cache() -> None:
     try:
         import mlx.core as mx
 
-        mx.set_cache_limit(MLX_BUFFER_CACHE_LIMIT_BYTES)
+        previous = mx.set_cache_limit(MLX_BUFFER_CACHE_LIMIT_BYTES)
     except Exception as exc:
         child_warning(
             f"MLX buffer cache not bounded: {type(exc).__name__}: {exc}. "
@@ -283,7 +286,8 @@ def _bound_buffer_cache() -> None:
         )
         return
     write_child_record(
-        "INFO", f"MLX buffer cache limit set to {MLX_BUFFER_CACHE_LIMIT_BYTES} bytes"
+        "INFO",
+        f"MLX buffer cache limit set to {MLX_BUFFER_CACHE_LIMIT_BYTES} bytes (was {previous})",
     )
 
 
