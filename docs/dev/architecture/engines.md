@@ -197,6 +197,19 @@ the trained window and the memory bound with `context_tokens` (`MLX_Engine`'s ow
 
 ### The memory brake (MLX)
 
+**The buffer cache is bounded at 0.** MLX keeps freed GPU buffers in a pool for reuse (its
+buffer cache), and by default nothing bounds it. The child sets
+`mx.set_cache_limit(MLX_BUFFER_CACHE_LIMIT_BYTES)`, which is 0
+(`_mlx_vlm_server_runner.py`), after redirecting its output and before importing the
+server, so a freed buffer goes back to the system at once. Measured on an M4 16 GB with the
+prefix cache reset after each request, against MLX's default: no measurable speed cost
+(Qwen3-4B, a ~6k-token prompt: 24.0 s to the first token and ~29 tok/s either way), a peak
+lower by 1.25-1.8 GiB on a long prefill (Qwen3-4B 7.19 to 5.37 GiB), and a footprint at
+rest lower by 0.7-0.85 GiB once the conversation's prefix cache is reset (Qwen3-4B 4.37 to
+3.53 GiB). A bound was chosen over a clear at idle because it also lowers the peak. If
+`mlx.core` or `set_cache_limit` is unavailable, the child logs one WARNING and starts with
+MLX's default.
+
 The MLX child's memory grows with the conversation, so when macOS comes under memory
 pressure the engine gives some of it back. The control law is a pure module
 (`src/engines/memory_brake.py`, table-tested); `MLX_Engine.brake_point(point)` reads
@@ -239,7 +252,7 @@ opens at the first non-calm sample and ends after 2 calm samples in a row.
 | Unload | Idle only: critical at two consecutive idle samples with no turn between them (a calm or warning idle sample in between starts over), at most once per episode, never within 600 s of a brake reload, only for a child holding 5 % or more of the memory total | The idle reap's path, under the lock the monitor holds |
 | Grow | Outside an episode, every 3 calm samples | One step back up (`cap / 0.75`), never back to 90 % of the window that hurt while it is remembered (forgotten after 10 calm samples); the cap is dropped once growth reaches the window without brake |
 
-**Why a release is a reset and a request.** Measured on the streamed path every
+**Why a release is a reset and a request.** Measured with MLX's default buffer cache (before the child bounded it at 0, above), on the streamed path every
 conversation turn takes (Qwen2.5-0.5B, a 22.9k-token streamed turn, prefix cache on): the
 child went from a 0.727 GiB base to 1.833 GiB; the prefix-cache reset alone left it at
 1.832 GiB (mlx_vlm's `APCManager.clear` drops the blocks without clearing MLX's buffer

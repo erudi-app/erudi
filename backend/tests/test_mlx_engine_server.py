@@ -756,6 +756,100 @@ class TestChildRuntimeEnv:
         assert captured == {"num_blocks": None, "timeout": None}
 
 
+@pytest.fixture(autouse=True)
+def _no_real_cache_limit(request, monkeypatch):
+    """Keep `run_mlx_vlm_server` from capping the test process's own MLX cache.
+
+    On an MLX host the real `mx.set_cache_limit(0)` would apply to the pytest
+    process. Only `TestBufferCacheBound`, which fakes `mlx.core`, runs the real
+    function.
+    """
+    if request.cls is not None and request.cls.__name__ == "TestBufferCacheBound":
+        return
+    from src.engines import _mlx_vlm_server_runner as runner
+
+    monkeypatch.setattr(runner, "_bound_buffer_cache", lambda: None)
+
+
+@pytest.mark.unit
+class TestBufferCacheBound:
+    """The child bounds MLX's buffer cache at 0 before the server runs (#622)."""
+
+    @staticmethod
+    def _install_fake_mlx_core(monkeypatch, set_cache_limit):
+        import sys
+        import types
+
+        fake_core = types.ModuleType("mlx.core")
+        if set_cache_limit is not None:
+            fake_core.set_cache_limit = set_cache_limit
+        fake_pkg = types.ModuleType("mlx")
+        fake_pkg.core = fake_core
+        monkeypatch.setitem(sys.modules, "mlx", fake_pkg)
+        monkeypatch.setitem(sys.modules, "mlx.core", fake_core)
+
+    @staticmethod
+    def _stub_runner(monkeypatch, runner, fake_main):
+        import sys
+
+        monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
+        monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
+        monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
+        monkeypatch.setattr(sys, "argv", ["pytest"])
+
+    def test_limit_constant_is_zero(self):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        assert runner.MLX_BUFFER_CACHE_LIMIT_BYTES == 0
+
+    def test_cache_limit_set_once_before_the_server_main_runs(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        calls: list = []
+        self._install_fake_mlx_core(monkeypatch, lambda n: calls.append(("limit", n)))
+        self._stub_runner(monkeypatch, runner, lambda: calls.append(("main", None)))
+
+        runner.run_mlx_vlm_server(["mlx_vlm.server"])
+
+        assert calls == [("limit", 0), ("main", None)]
+
+    def test_missing_mlx_core_still_runs_main_with_one_diagnostic(self, monkeypatch, capsys):
+        import sys
+
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        monkeypatch.setitem(sys.modules, "mlx", None)
+        monkeypatch.setitem(sys.modules, "mlx.core", None)
+        fake_main = MagicMock()
+        self._stub_runner(monkeypatch, runner, fake_main)
+
+        runner.run_mlx_vlm_server(["mlx_vlm.server"])
+
+        fake_main.assert_called_once()
+        lines = capsys.readouterr().err.strip().splitlines()
+        assert len(lines) == 1
+        assert "[WARNING]" in lines[0]
+        assert "buffer cache not bounded" in lines[0]
+
+    @pytest.mark.parametrize("missing", [True, False])
+    def test_set_cache_limit_missing_or_raising_still_runs_main(self, monkeypatch, capsys, missing):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        def _boom(_n):
+            raise RuntimeError("boom")
+
+        self._install_fake_mlx_core(monkeypatch, None if missing else _boom)
+        fake_main = MagicMock()
+        self._stub_runner(monkeypatch, runner, fake_main)
+
+        runner.run_mlx_vlm_server(["mlx_vlm.server"])
+
+        fake_main.assert_called_once()
+        lines = capsys.readouterr().err.strip().splitlines()
+        assert len(lines) == 1
+        assert "buffer cache not bounded" in lines[0]
+
+
 @pytest.mark.unit
 class TestGemmaEndOfTurnStopPatch:
     """`_patch_gemma_end_of_turn_stop` adds Gemma's `<end_of_turn>` to the server's
