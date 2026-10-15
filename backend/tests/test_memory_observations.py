@@ -202,6 +202,56 @@ def test_an_exceeded_prediction_warns_once_per_child_and_changes_nothing(child, 
     assert _predict(handle, 1010) == before
 
 
+def _exceeded(caplog):
+    return [r for r in caplog.records if "exceeded" in r.getMessage()]
+
+
+def test_a_peak_over_the_prediction_only_by_its_starting_residue_does_not_warn(child, caplog):
+    """A small turn right after a large one (a conversation switch) starts on the
+    residue the OS has not reclaimed yet: that residue is not the turn's own."""
+    scripted, handle = child
+    predicted = _predict(handle, 1010)
+    scripted.current = scripted.base + 2 * GIB
+    with caplog.at_level(logging.WARNING):
+        token = MLX_Engine.begin_memory_window()
+        MLX_Engine.note_call_usage(handle, 1000, 10)
+        scripted.peak = scripted.base + predicted + 2 * GIB
+        observation = MLX_Engine.end_memory_window(token)
+
+    assert not _exceeded(caplog)
+    # The record stays raw: the calibration data keeps both numbers.
+    assert observation["y_bytes"] == predicted + 2 * GIB
+    assert observation["residue_at_start_bytes"] == 2 * GIB
+
+
+def test_a_peak_beyond_the_prediction_and_its_residue_still_warns_once(child, caplog):
+    scripted, handle = child
+    predicted = _predict(handle, 1010)
+    scripted.current = scripted.base + 2 * GIB
+    with caplog.at_level(logging.WARNING):
+        for _ in range(2):
+            token = MLX_Engine.begin_memory_window()
+            MLX_Engine.note_call_usage(handle, 1000, 10)
+            scripted.peak = scripted.base + predicted + 2 * GIB + 1
+            MLX_Engine.end_memory_window(token)
+
+    assert len(_exceeded(caplog)) == 1
+
+
+@pytest.mark.parametrize("current", [None, "base"])
+def test_without_a_positive_residue_the_comparison_is_unchanged(child, caplog, current):
+    scripted, handle = child
+    predicted = _predict(handle, 1010)
+    scripted.current = None if current is None else scripted.base
+    with caplog.at_level(logging.WARNING):
+        token = MLX_Engine.begin_memory_window()
+        MLX_Engine.note_call_usage(handle, 1000, 10)
+        scripted.peak = scripted.base + predicted + 1
+        MLX_Engine.end_memory_window(token)
+
+    assert len(_exceeded(caplog)) == 1
+
+
 def test_an_image_turn_never_warns(child, caplog):
     scripted, handle = child
     with caplog.at_level(logging.WARNING):

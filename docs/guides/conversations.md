@@ -511,7 +511,7 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
      until the release measurement campaign). The ceiling reserves the output budget's 512-token
      floor and stacks no further margin. Nothing is learned while the app runs: every turn's real
      peak is recorded next to its prediction in `memory_calibration.json` in the data folder, and a
-     peak above the prediction writes one warning to `backend.log` (see
+     peak above the prediction writes one warning to `backend.log`, the memory the previous turn left in the child at the start of the turn being set aside (see
      [Privacy](../privacy.md)). Requests that carry images are outside the prediction (a vision
      tower's activations do not scale with the conversation). The ceiling exists only on MLX because only
      MLX grows its KV cache lazily with usage; on both llama.cpp engines (CPU and CUDA) the cache is

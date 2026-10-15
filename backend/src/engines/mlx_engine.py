@@ -1201,12 +1201,25 @@ class MLX_Engine(BaseChatServerEngine):
         except Exception:
             # The observation is lost, nothing else: the turn already ended.
             logger.warning("[MLX_Engine] Recording a memory observation failed", exc_info=True)
+        # The warning sets aside what the previous turn left in the child at
+        # this turn's start: right after a large turn (a conversation switch
+        # resets the prefix cache with no barrier) the OS reclaims that residue
+        # over a few seconds (0.3-2.2 GiB measured, cache limit 0), and a small
+        # turn would otherwise exceed ``predict`` at its own size (Qwen3-4B, 512
+        # tokens after 8192: 2.93 GiB above base against 2.01 GiB predicted)
+        # while the absolute footprint stayed far below the prediction of the
+        # large turn the window was admitted for. The record keeps both raw.
+        residue = observation["residue_at_start_bytes"]
+        own_bytes = (
+            observation["y_bytes"] - (residue if residue is not None and residue > 0 else 0)
+            if observation["y_bytes"] is not None
+            else None
+        )
         if (
             predicted is not None
             and n is not None
-            and observation["y_bytes"] is not None
             and not has_images
-            and observation["y_bytes"] > predicted
+            and (own_bytes is not None and own_bytes > predicted)
         ):
             warned = handle.setdefault("memory_exceeded_warned", set())
             key = memory_observations.entry_key(components)
