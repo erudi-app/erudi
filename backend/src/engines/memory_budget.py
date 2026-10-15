@@ -65,16 +65,21 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from src.core.logging import logger
+from src.engines._mlx_vlm_server_runner import MLX_BUFFER_CACHE_LIMIT_BYTES
 
 _GIB = 1024**3
 
 # --- The measured prior (PROVISIONAL) ---------------------------------------
 #
 # Fitted on ONE machine (M4 16 GB, mlx 0.32.2 / mlx-vlm 0.6.17, prefill steps
-# 2048 and 512, default buffer cache): with these values all 107 points of the
+# 2048 and 512, MLX's default buffer cache): with these values all 107 points of the
 # campaign stay under ``predict`` (minimum ratio 1.20, minimum slack 0.35 GiB;
 # ``tests/fixtures/memory_prior_bench5.json``). The gate campaign of plan 3.2b
-# Part II confirms or replaces them before release.
+# Part II confirms or replaces them before release. The child now runs with the
+# buffer cache bounded at 0, whose measured peaks are 1.25-1.8 GiB lower than
+# those of the default cache the fit includes: the prior is registered for that
+# configuration as provisional and conservative, and the gate campaign's
+# cache-limit-0 block confirms or replaces it.
 #
 # t0 and c0 belong to a runtime configuration of the child (its prefill step
 # and buffer-cache limit): ``MEMORY_PRIORS`` is keyed by it, and a child whose
@@ -90,8 +95,9 @@ LOGITS_BYTES_PER_VALUE = 2
 # The child's prefill step: Erudi does not pass ``--prefill-step-size``, so
 # mlx_vlm's own default applies (``DEFAULT_PREFILL_STEP_SIZE``, 0.6.17).
 MLX_PREFILL_STEP_TOKENS = 2048
-# The child's MLX buffer-cache limit: not set by Erudi (MLX's default).
-MLX_BUFFER_CACHE_LIMIT = "default"
+# The child's MLX buffer-cache limit, in bytes: the one the child applies
+# (``_mlx_vlm_server_runner``), which owns the value.
+MLX_BUFFER_CACHE_LIMIT = MLX_BUFFER_CACHE_LIMIT_BYTES
 # The output budget's floor (``src.agents.output_budget``): a turn can run
 # past the window by up to this much, so the ceiling reserves it.
 _OUTPUT_FLOOR_TOKENS = 512

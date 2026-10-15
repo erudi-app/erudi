@@ -81,6 +81,22 @@ def _memory_observations_in_tmp(tmp_path, monkeypatch):
     yield path
 
 
+@pytest.fixture(autouse=True)
+def _no_real_cache_limit(request, monkeypatch):
+    """Keep `run_mlx_vlm_server` from capping the test process's own MLX cache.
+
+    On an MLX host the real `mx.set_cache_limit(0)` would apply to the pytest
+    process, and off a Mac its failure path would add a warning to every test
+    that records the child's diagnostics. A test that exercises the real
+    function opts out with `@pytest.mark.real_cache_limit`.
+    """
+    if request.node.get_closest_marker("real_cache_limit"):
+        return
+    from src.engines import _mlx_vlm_server_runner as runner
+
+    monkeypatch.setattr(runner, "_bound_buffer_cache", lambda: None)
+
+
 # ============ Database Fixtures ============
 
 

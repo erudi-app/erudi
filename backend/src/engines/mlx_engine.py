@@ -401,7 +401,8 @@ class MLX_Engine(BaseChatServerEngine):
         # window leaves mlx-vlm's 2048-block default. The pool counts toward the
         # child's footprint: the memory prior accounts it in its per-token
         # multiplier (``memory_budget.PRIOR_KV_MULTIPLIER``: the KV cache plus
-        # its prefix-cache copy and MLX's buffer cache), and every turn's real
+        # its prefix-cache copy and the buffers of a prefill; fitted with MLX's
+        # default buffer cache, which the child now bounds at 0), and every turn's real
         # peak is measured against it (``end_memory_window``).
         apc_num_blocks: Optional[int] = (
             math.ceil(context_tokens / APC_BLOCK_SIZE_TOKENS)
@@ -658,7 +659,7 @@ class MLX_Engine(BaseChatServerEngine):
 
     # What a failed barrier costs, by purpose: a claim's barrier defers the
     # reset to the next claim; the memory brake's release barrier leaves
-    # MLX's buffer cache to a later release.
+    # the fallback clear (see ``_send_barrier``) to a later release.
     _BARRIER_FAILURE_OUTCOMES = {
         "claim": "reset deferred to the next claim",
         "release": "memory release incomplete, a later release returns it",
@@ -684,8 +685,11 @@ class MLX_Engine(BaseChatServerEngine):
         long prefill does. ``timeout_s`` bounds it tighter (the memory brake).
 
         It is NON-streamed on purpose: mlx_vlm's non-streamed chat handler
-        clears MLX's buffer cache after generation, which makes this request
-        the second half of the memory brake's release (``purpose="release"``).
+        clears MLX's buffer cache after generation. The child bounds that
+        cache at 0, so the prefix-cache reset alone returns the memory and this
+        clear only matters for a child whose bound failed to apply; it stays as
+        that fallback, as the second half of the memory brake's release
+        (``purpose="release"``).
         """
         from src.agents.chat_model import first_chunk_ceiling_s
 
@@ -1017,8 +1021,9 @@ class MLX_Engine(BaseChatServerEngine):
             "window": window_id,
             "seq": int(previous.get("seq", 0)) + 1,
             "open": True,
-            # What the previous request left behind (MLX's buffer cache):
-            # it can raise this turn's peak.
+            # What the previous request left behind above base (the prefix
+            # cache, plus any buffers MLX still pools): it can raise this
+            # turn's peak.
             "residue_at_start_bytes": (
                 current - base if current is not None and base is not None else None
             ),
@@ -1196,12 +1201,25 @@ class MLX_Engine(BaseChatServerEngine):
         except Exception:
             # The observation is lost, nothing else: the turn already ended.
             logger.warning("[MLX_Engine] Recording a memory observation failed", exc_info=True)
+        # The warning sets aside what the previous turn left in the child at
+        # this turn's start: right after a large turn (a conversation switch
+        # resets the prefix cache with no barrier) the OS reclaims that residue
+        # over a few seconds (0.3-2.2 GiB measured, cache limit 0), and a small
+        # turn would otherwise exceed ``predict`` at its own size (Qwen3-4B, 512
+        # tokens after 8192: 2.93 GiB above base against 2.01 GiB predicted)
+        # while the absolute footprint stayed far below the prediction of the
+        # large turn the window was admitted for. The record keeps both raw.
+        residue = observation["residue_at_start_bytes"]
+        own_bytes = (
+            observation["y_bytes"] - (residue if residue is not None and residue > 0 else 0)
+            if observation["y_bytes"] is not None
+            else None
+        )
         if (
             predicted is not None
             and n is not None
-            and observation["y_bytes"] is not None
             and not has_images
-            and observation["y_bytes"] > predicted
+            and (own_bytes is not None and own_bytes > predicted)
         ):
             warned = handle.setdefault("memory_exceeded_warned", set())
             key = memory_observations.entry_key(components)
@@ -1232,10 +1250,13 @@ class MLX_Engine(BaseChatServerEngine):
     #   the child enforce min(memory ceiling, cap) -- the next turn compacts
     #   under the smaller window and frees its KV;
     # * release: the prefix cache is reset, then a NON-streamed 1-token
-    #   request runs, after which mlx_vlm clears MLX's buffer cache (its
-    #   streamed path never does, and the reset alone frees nothing: measured
-    #   on Qwen2.5-0.5B, 1.833 GiB after a streamed 22.9k-token turn, 1.832
-    #   after the reset, 1.054 after the 1-token request, for a 0.727 base).
+    #   request runs, after which mlx_vlm clears MLX's buffer cache. The child
+    #   bounds that cache at 0, so the reset alone returns the memory and the
+    #   request is the fallback for a child whose bound failed to apply. Measured
+    #   under MLX's DEFAULT cache, before the bound, on Qwen2.5-0.5B: 1.833 GiB
+    #   after a streamed 22.9k-token turn (mlx_vlm's streamed path never clears
+    #   the cache), 1.832 after the reset, 1.054 after the 1-token request, for
+    #   a 0.727 base.
     #   Both barriers it may send are bounded by ``RELEASE_BARRIER_TIMEOUT_S``
     #   so a shielded release never holds a shutdown for long. The prefix
     #   owner is kept;
@@ -1401,8 +1422,8 @@ class MLX_Engine(BaseChatServerEngine):
 
     @classmethod
     def _brake_release(cls, handle: Dict[str, Any], *, settle: bool) -> Optional[int]:
-        """Reset the prefix cache, then send the non-streamed barrier that
-        makes mlx_vlm clear MLX's buffer cache; returns what the child keeps
+        """Reset the prefix cache, then send the non-streamed barrier (the
+        fallback clear of MLX's buffer cache, see ``_send_barrier``); returns what the child keeps
         above base afterwards -- only when both succeeded and the footprint
         is readable, else None. A failure is the reset's or the barrier's own
         WARNING. ``settle``: read the residual over ``RELEASE_SETTLE_S`` (idle
@@ -1431,9 +1452,10 @@ class MLX_Engine(BaseChatServerEngine):
     # mlx_vlm clears MLX's buffer cache synchronously, before the barrier's
     # answer is sent (``server/openai.py``: ``mx.clear_cache()`` then
     # ``gc.collect()`` ahead of building the response), but the process
-    # footprint the kernel reports catches up a moment later (measured:
-    # 656 MiB above base right after the answer, the ~0.33 GiB residual a few
-    # seconds on). So at idle the residual is the lowest footprint over a
+    # footprint the kernel reports catches up a moment later (measured under
+    # MLX's default cache, before the child bounded it: 656 MiB above base
+    # right after the answer, the ~0.33 GiB residual a few seconds on; not
+    # re-measured with the bound). So at idle the residual is the lowest footprint over a
     # short, bounded window (under the lock, nobody waiting); at turn_end it
     # is one read -- the turn's last events must not wait, and a residual
     # read too early only makes the next release need a little more.

@@ -81,6 +81,9 @@ tests that only pass `argv`/`log_path`. The same helper always caps the running
 batch at one sequence (`MLX_VLM_MAX_NUM_SEQS=1`), which the prefix-cache
 barrier relies on (see `_apply_child_runtime_env`).
 
+The child also bounds MLX's buffer cache at 0 (``MLX_BUFFER_CACHE_LIMIT_BYTES``,
+see ``_bound_buffer_cache``) before the server is imported.
+
 Once invoked, this function blocks for the lifetime of the HTTP server,
 exiting only when the child process is terminated by the parent.
 """
@@ -90,13 +93,30 @@ from __future__ import annotations
 import os
 from typing import List, Optional
 
-from src.engines.mlx_child_log import child_warning, redirect_stdio_to
+from src.engines.mlx_child_log import child_warning, redirect_stdio_to, write_child_record
 
 # Automatic Prefix Caching (APC) block size, in tokens. The parent sizes the
 # APC pool to cover the child's allocated window as ``ceil(window / this)``
 # (``src.engines.mlx_engine._spawn_child``), so the two MUST agree -- this is
 # the single source of truth for the block size, exported to the parent.
 APC_BLOCK_SIZE_TOKENS = 16
+
+# Ceiling, in bytes, on the pool of freed GPU buffers MLX keeps for reuse (its
+# "buffer cache"). MLX's default cache limit is its memory limit, 1.5 x the
+# device's recommended working set (mlx/include/mlx/memory.h), so in practice
+# nothing bounds it in this child, and a long prefill leaves gigabytes of freed
+# buffers in the pool. The memory predictor derives its configuration key from
+# this constant (``src.engines.memory_budget``), which is why it lives here: the
+# child must not import ``src.core.logging``. Measured on an M4 16 GB (mlx 0.32.2, mlx-vlm
+# 0.6.17), prefix cache reset after each request, limit 0 against the default:
+# no measurable speed cost (Qwen3-4B: a ~6k-token prompt 24.0 s to first token
+# and ~29 tok/s both ways, a short one 0.33 s and ~40 tok/s; Qwen3-0.6B: 4.92 s
+# and 80 tok/s, short 237 tok/s, identical over 12 requests each), the peak of
+# a long prefill lower by 1.25-1.8 GiB (4B: 7.19 -> 5.37 GiB; 0.6B: 4.37 ->
+# 3.12 GiB) and the footprint at rest after a conversation is reset lower by
+# 0.7-0.85 GiB (4B: 4.37 -> 3.53 GiB). Bounding beats clearing at idle because
+# it also lowers the peak, not only the resting size.
+MLX_BUFFER_CACHE_LIMIT_BYTES = 0
 
 
 def _patch_gemma3_tied_lm_head_quant() -> bool:
@@ -248,6 +268,29 @@ def _patch_gemma_end_of_turn_stop() -> bool:
     return True
 
 
+def _bound_buffer_cache() -> None:
+    """Cap MLX's buffer cache at ``MLX_BUFFER_CACHE_LIMIT_BYTES`` in this child.
+
+    A failure (``mlx.core`` missing, ``set_cache_limit`` absent or raising) is
+    one warning in the child's log and the server starts anyway: the bound is a
+    memory saving, never a precondition for inference.
+    """
+    try:
+        import mlx.core as mx
+
+        previous = mx.set_cache_limit(MLX_BUFFER_CACHE_LIMIT_BYTES)
+    except Exception as exc:
+        child_warning(
+            f"MLX buffer cache not bounded: {type(exc).__name__}: {exc}. "
+            f"The child keeps MLX's default cache."
+        )
+        return
+    write_child_record(
+        "INFO",
+        f"MLX buffer cache limit set to {MLX_BUFFER_CACHE_LIMIT_BYTES} bytes (was {previous})",
+    )
+
+
 def _import_mlx_vlm_server_main():
     """Import and return `mlx_vlm.server.cli.main`.
 
@@ -368,6 +411,8 @@ def run_mlx_vlm_server(
             # last words. Reported on the inherited stderr, which the Electron
             # main process writes to the app log.
             print(f"[WARNING] mlx-vlm child output capture disabled: {exc}", file=sys.stderr)
+    # Before the server is imported, so no buffer is pooled under the default.
+    _bound_buffer_cache()
     # APC on, the aligned token-queue timeout and the one-sequence batch,
     # BEFORE the server is imported: mlx-vlm reads them from the environment
     # (the APC pool in `apc.from_env`, the timeout in `server.runtime_config`,
