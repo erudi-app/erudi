@@ -1,6 +1,6 @@
 import React, { useState } from "react";
 import PropTypes from "prop-types";
-import { ChevronDown, ChevronRight, RefreshCcw, Plus, Edit3, X } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCcw, Plus, Edit3, X, Download } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import ErrorModal from "./modals/ErrorModal";
@@ -8,6 +8,7 @@ import { API_BASE_URL } from "../config/api.js";
 import { tracedFetch } from "../services/api/client";
 import { createLogger } from "../utils/logger";
 import { conversationPath } from "../utils/routes";
+import { formatConversationToMarkdown } from "../utils/markdownExport";
 const log = createLogger("ChatCollapsibleSection");
 // Route of the new-chat screen (mirrors the Sidebar link).
 const CHAT_PATH = "/erudi/chat";
@@ -24,6 +25,7 @@ ChatCollapsibleSection.propTypes = {
   onSelect: PropTypes.func,
   onRename: PropTypes.func,
   onDelete: PropTypes.func,
+  onExport: PropTypes.func,
   onRefresh: PropTypes.func,
   disabled: PropTypes.bool,
 };
@@ -34,6 +36,7 @@ ChatCollapsibleSection.defaultProps = {
   onSelect: null,
   onRename: null,
   onDelete: null,
+  onExport: null,
   onRefresh: null,
   disabled: false,
 };
@@ -45,6 +48,7 @@ export default function ChatCollapsibleSection({
   onSelect,
   onRename,
   onDelete,
+  onExport,
   onRefresh,
   disabled = false,
 }) {
@@ -102,6 +106,33 @@ export default function ChatCollapsibleSection({
     }
   };
 
+  const exportConversation = async (id) => {
+    try {
+      const res = await tracedFetch(`${API_BASE_URL}/conversations/${id}`);
+      if (!res.ok) {
+        throw new Error(res.status);
+      }
+      const conv = await res.json();
+      const mdContent = formatConversationToMarkdown(conv);
+      
+      const blob = new Blob([mdContent], { type: 'text/markdown' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a');
+      a.href = url;
+      const safeName = (conv.name || "conversation").replace(/[^a-z0-9]/gi, '_').toLowerCase();
+      a.download = `${safeName}_${id}.md`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+      
+      onExport?.(id);
+    } catch (err) {
+      log.error(err);
+      alert(t("chat:history.exportFailed", { error: err.message, defaultValue: "Export failed: {{error}}" }));
+    }
+  };
+
   const renderItems = () => {
     if (loading) {
       return (
@@ -153,6 +184,15 @@ export default function ChatCollapsibleSection({
             )}
 
             <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-2 opacity-0 group-hover:opacity-100">
+              <Download
+                role="button"
+                aria-label={t("chat:history.exportConversation", { defaultValue: "Export conversation" })}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  exportConversation(conv.id);
+                }}
+                className="w-4 h-4 text-gray-400 hover:text-gray-200 cursor-pointer"
+              />
               <Edit3
                 role="button"
                 aria-label={t("chat:history.renameConversation")}
