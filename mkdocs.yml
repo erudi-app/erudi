@@ -9,6 +9,9 @@ edit_uri: edit/main/docs/
 
 theme:
   name: material
+  # System fonts: the theme would otherwise load Google Fonts from the reader's
+  # browser, a third-party request the website does not make anywhere else.
+  font: false
   features:
     - navigation.sections
     - navigation.expand
