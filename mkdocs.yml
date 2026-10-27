@@ -2,7 +2,11 @@
 # Zensical reads this file natively — `theme.name: material` selects its
 # built-in Material-compatible theme, not the mkdocs-material package.
 site_name: Erudi Documentation
-site_url: https://erudi-app.github.io/erudi/
+# Published under the website (https://www.erudi.app), which serves pages at
+# clean URLs without a trailing slash: .github/workflows/docs.yml rewrites the
+# built links for them (scripts/docs/prepare_site.py). The former address,
+# https://erudi-app.github.io/erudi/, keeps one redirect page per page.
+site_url: https://www.erudi.app/open-source/desktop/docs/
 repo_url: https://github.com/erudi-app/erudi
 repo_name: erudi-app/erudi
 edit_uri: edit/main/docs/

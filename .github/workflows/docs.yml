@@ -1,15 +1,38 @@
-# Publishes the documentation site to GitHub Pages (https://erudi-app.github.io/erudi/).
+# Publishes the documentation at https://www.erudi.app/open-source/desktop/docs
+# and leaves a redirect page per page at its former address, GitHub Pages
+# (https://erudi-app.github.io/erudi/).
+#
 # Built with Zensical (docs/requirements.txt) reading mkdocs.yml directly —
 # Material for MkDocs reaches end of life on 2026-11-05 and Zensical is its
-# maintained successor.
+# maintained successor. mkdocstrings renders the API reference by static
+# analysis (griffe), so the backend's dependencies are not installed: only the
+# documentation tooling is.
+#
+# The documentation lives under the prefix open-source/desktop/docs/ of the
+# website's S3 bucket, served by the website's CloudFront distribution (both
+# managed in erudi-app/erudi-infra; the website repo never writes under that
+# prefix). The CDN serves pages at clean URLs, without a trailing slash, so the
+# build is rewritten for them (scripts/docs/prepare_site.py) and checked before
+# anything is published.
 #
 # Pull requests only build — with --strict, so a broken link or a mkdocstrings
-# path that no longer exists fails the check instead of shipping a 404. The
-# deploy job runs on main only and uses the Pages deployment API rather than a
-# gh-pages branch, so no commit is ever pushed by CI.
+# path that no longer exists fails the check instead of shipping a 404 — and run
+# the same rewrite and check. On main (merge or manual run):
+#   build     no AWS access, no token: build, rewrite, check;
+#   publish   OIDC role erudi-global-website-desktop-docs-publish, which can only
+#             write under open-source/desktop/docs/ and invalidate the website
+#             distribution; syncs the build, invalidates, smoke-tests;
+#   redirects GitHub Pages deployment of the redirect pages, only once the new
+#             address answers (a failed publish leaves the former site as is).
 #
-# mkdocstrings renders the API reference by static analysis (griffe), so the
-# backend's dependencies are not installed: only the documentation tooling is.
+# Repository variables (Settings > Secrets and variables > Actions > Variables,
+# values from the erudi-infra outputs; no secret, credentials come from OIDC):
+#   DOCS_BUCKET            website bucket (output website_bucket_name)
+#   DOCS_DISTRIBUTION_ID   website distribution (output website_distribution_id)
+#   DOCS_PUBLISH_ROLE_ARN  role (output website_desktop_docs_publish_role_arn)
+#   AWS_REGION             optional, region of the bucket (default: eu-west-3)
+# The role trusts this workflow file on main only: the publish job must not
+# declare a GitHub environment (its OIDC subject would change).
 name: Docs
 
 on:
@@ -19,46 +42,175 @@ on:
       - "docs/**"
       - "mkdocs.yml"
       - "backend/src/**"
+      - "scripts/docs/**"
       - ".github/workflows/docs.yml"
   pull_request:
     paths:
       - "docs/**"
       - "mkdocs.yml"
+      - "scripts/docs/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
 
 permissions:
   contents: read
 
+# A pull request cancels its previous run; a publish on main is never cancelled
+# halfway through (a newer run waits, then publishes the newer build).
 concurrency:
   group: docs-${{ github.ref }}
-  cancel-in-progress: true
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  DOCS_URL: https://www.erudi.app/open-source/desktop/docs
+  # Key prefix in the bucket, without a trailing slash. Same value as the
+  # prefix of the publish role in erudi-infra (environments/global/website.tf).
+  DOCS_PREFIX: open-source/desktop/docs
 
 jobs:
   build:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
+        with:
+          persist-credentials: false
       - uses: actions/setup-python@v7
         with:
           python-version: "3.12"
           cache: pip
           cache-dependency-path: docs/requirements.txt
+      # Stdlib only: runs before the tooling is installed.
+      - name: Test the publishing script
+        run: python -m unittest discover -s scripts/docs -p "test_*.py"
       - name: Install documentation tooling
         run: |
           python -m pip install --upgrade pip
           pip install -r docs/requirements.txt
       - name: Build (strict)
         run: zensical build --strict
+      # From the built pages (their titles), before the rewrite: one page per
+      # former address, pointing at its new URL.
+      - name: Redirect pages of the former address
+        run: python scripts/docs/prepare_site.py redirects site pages-redirects --site-url "$DOCS_URL" --old-base-path /erudi
+      - name: Rewrite for clean URLs
+        run: python scripts/docs/prepare_site.py rewrite site --site-url "$DOCS_URL"
+      # Canonicals, root paths, every internal link and asset, search index,
+      # sitemap, no third-party font: nothing is published if it fails.
+      - name: Check the build
+        run: python scripts/docs/prepare_site.py check site --site-url "$DOCS_URL"
+      - uses: actions/upload-artifact@v7
+        if: github.event_name != 'pull_request'
+        with:
+          name: docs-site
+          path: site
+          if-no-files-found: error
+          retention-days: 1
       - uses: actions/upload-pages-artifact@v5
         if: github.event_name != 'pull_request'
         with:
-          path: site
+          path: pages-redirects
 
-  deploy:
-    if: github.event_name != 'pull_request'
+  publish:
+    if: github.event_name != 'pull_request' && github.ref == 'refs/heads/main'
     needs: build
     runs-on: ubuntu-latest
+    timeout-minutes: 15
+    permissions:
+      id-token: write # OIDC token exchanged for the publish role
+      contents: read
+    env:
+      DOCS_BUCKET: ${{ vars.DOCS_BUCKET }}
+      DOCS_DISTRIBUTION_ID: ${{ vars.DOCS_DISTRIBUTION_ID }}
+      DOCS_PUBLISH_ROLE_ARN: ${{ vars.DOCS_PUBLISH_ROLE_ARN }}
+      AWS_REGION: ${{ vars.AWS_REGION || 'eu-west-3' }}
+    steps:
+      - name: Check configuration
+        run: |
+          missing=()
+          for name in DOCS_BUCKET DOCS_DISTRIBUTION_ID DOCS_PUBLISH_ROLE_ARN; do
+            if [ -z "${!name}" ]; then missing+=("$name"); fi
+          done
+          if [ "${#missing[@]}" -gt 0 ]; then
+            echo "::error title=Missing repository variables::Set ${missing[*]} (values come from the erudi-infra outputs). Nothing was published."
+            exit 1
+          fi
+
+      - uses: actions/download-artifact@v8
+        with:
+          name: docs-site
+          path: site
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v6
+        with:
+          role-to-assume: ${{ vars.DOCS_PUBLISH_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      # Everything below writes under s3://<bucket>/open-source/desktop/docs/
+      # only (the role refuses any other key). Three passes so that a page is
+      # never online before what it references, nor a referenced file removed
+      # before the pages that use it:
+      # 1. new and changed files other than pages, nothing deleted;
+      - name: Upload files
+        run: |
+          aws s3 sync site "s3://${DOCS_BUCKET}/${DOCS_PREFIX}" \
+            --exclude "*.html" \
+            --cache-control "public, max-age=300" \
+            --no-progress
+
+      # 2. pages, revalidated on every visit; pages dropped from the build go;
+      - name: Upload pages
+        run: |
+          aws s3 sync site "s3://${DOCS_BUCKET}/${DOCS_PREFIX}" \
+            --delete \
+            --exclude "*" \
+            --include "*.html" \
+            --cache-control "no-cache" \
+            --no-progress
+
+      # 3. files dropped from the build go (nothing left to upload).
+      - name: Remove stale files
+        run: |
+          aws s3 sync site "s3://${DOCS_BUCKET}/${DOCS_PREFIX}" \
+            --delete \
+            --exclude "*.html" \
+            --cache-control "public, max-age=300" \
+            --no-progress
+
+      # One path (billed as one): the prefix and everything under it. The CDN
+      # caches pages under their rewritten key (/x/index.html), covered too.
+      - name: Invalidate the CDN cache
+        run: |
+          id=$(aws cloudfront create-invalidation \
+            --distribution-id "${DOCS_DISTRIBUTION_ID}" \
+            --paths "/${DOCS_PREFIX}*" \
+            --query 'Invalidation.Id' --output text)
+          echo "Invalidation ${id} created, waiting for it."
+          aws cloudfront wait invalidation-completed --distribution-id "${DOCS_DISTRIBUTION_ID}" --id "${id}"
+
+      # The full check is erudi-infra's scripts/verify-desktop-docs.py; this one
+      # only proves the publication answers before the redirects go live.
+      - name: Smoke test
+        run: |
+          fail=0
+          for path in "" /privacy /guides/hardware /search.json /sitemap.xml; do
+            code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "${DOCS_URL}${path}") || code=000
+            echo "${DOCS_URL}${path} -> ${code}"
+            if [ "$code" != "200" ]; then fail=1; fi
+          done
+          code=$(curl -sS -o /dev/null -w '%{http_code}' --max-time 20 "https://www.erudi.app/") || code=000
+          echo "https://www.erudi.app/ -> ${code}"
+          if [ "$code" != "200" ]; then fail=1; fi
+          if [ "$fail" != 0 ]; then
+            echo "::error title=Smoke test::The published documentation does not answer as expected. The redirects of the former address were not deployed."
+            exit 1
+          fi
+
+  redirects:
+    needs: publish
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
     permissions:
       pages: write
       id-token: write
