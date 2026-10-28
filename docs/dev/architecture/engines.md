@@ -529,7 +529,7 @@ optimistic estimate yields a partial offload instead of a dead child.
 |---|---|---|
 | Sized load | `-c W -ngl -1 -fitt 1024` | On (`window_sized`), pending the placement below |
 | Brake respawn (Windows only: a spill is what drives it) | `-c min(static window, max(4096, cap)) -ngl -2 -fitt 1024`: nothing re-read; fit cannot change an explicit `-ngl` and keeps every layer on the device, where WDDM spills instead of failing | On, its state carried |
-| `ERUDI_CTX` pinned | `-c ERUDI_CTX -ngl -1 -fitt 1024` | Sampled, never resized |
+| `ERUDI_CTX` pinned | `-c ERUDI_CTX -ngl -1 -fitt 1024` | Sampled, never resized; off (one INFO) when the allocated window stays unknown (`ERUDI_CTX=0` lets llama-server pick it, and `/props` failed) |
 | Floor unfit, MLA, GGUF or NVML unreadable | No `-c`, `-ngl -1 -fitt 1024`: fit sizes the window and places the layers (one WARNING) | Off (`window_sized=False`): never sampled |
 | The user's `CUDA_VISIBLE_DEVICES` names several GPUs | No `-c`, `-ngl -1 -fitt 1024`: llama.cpp splits the layers across the cards, which a one-card sizing and measurement cannot model (one INFO) | Off |
 | NVML sees no GPU | No `-c`, `-ngl 0` (one WARNING) | Off |
@@ -605,8 +605,11 @@ the discrete GPU on an Optimus laptop.
 A healthy child already holds Shared GPU memory: its pinned host buffers, a fixed part
 plus the `CUDA_Host` compute buffer, which grows with the window. Its **healthy level**
 (`cuda_memory.healthy_shared_bytes`) is `128 MiB + window × 1 KiB` with Flash Attention,
-`128 MiB + window × 2 KiB` without (Flash Attention runs when it is proven for the model
-and llama.cpp did not disable it at load; the engine stamps that on the handle). #661
+`128 MiB + window × 2 KiB` without. Whether Flash Attention runs is what llama.cpp logged
+at context creation — its `Flash Attention enabled` INFO or its `Flash Attention not
+supported, set to disabled` WARN, the last one in the child's output (fit's probe pass
+creates a context too) — and, when neither line reached the output, the static proof for
+the model; the engine stamps it on the handle at load, on Windows only. #661
 measured 90 MiB at 8192 tokens, 106 MiB at 4096 and 130 MiB at 40960 — fixed parts of
 78-99 MiB — and a `CUDA_Host` compute buffer of 11.51 MiB at 8192 tokens with Flash
 Attention against 20.01 MiB with `-fa off`. The child's **baseline** is its reading right
@@ -621,9 +624,10 @@ is the Shared Usage above the baseline: warning at 256 MiB, critical at 1 GiB
 | The spill's tier | window × KV per token / VRAM | the child's dedicated + shared / VRAM | at warning or worse, the spill itself: our bytes in system RAM pay the PCIe bus on every token |
 
 A calm spill is never damage (a stable small spill would otherwise count as a paging
-burst at every turn end). An unreadable gauge (PDH refused, no instance for the child) is
-one WARNING per process, "GPU spill gauge unreadable (...); the memory brake is off", and
-no sample acts.
+burst at every turn end). While the gauge is unreadable (PDH refused, no instance for the
+child) no sample acts; each such episode is one WARNING, "GPU spill gauge unreadable
+(...); the memory brake is off while it stays unreadable", re-armed by the next reading
+that succeeds.
 
 **Linux** has no spill: an allocation that does not fit fails, so the window is sized to
 fit at spawn. With RAM pressure out, the brake has no signal there: `brake_point`

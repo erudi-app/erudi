@@ -962,14 +962,13 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         return cls.loaded_child_for(llm_id) and bool(cls._model.get("brake_respawned"))
 
     @classmethod
-    def _llama_warn_sensor_off(
-        cls, unavailable: Optional[str], *, sensor: str = "Memory pressure"
-    ) -> None:
-        """The brake's ``sensor`` is unreadable: the brake is off, said once."""
+    def _llama_warn_sensor_off(cls, unavailable: Optional[str]) -> None:
+        """The pressure is unreadable: the brake is off, said once."""
         if not cls._brake_sensor_warned:
             cls._brake_sensor_warned = True
             logger.warning(
-                f"[{cls.__name__}] {sensor} unreadable ({unavailable}); the memory brake is off"
+                f"[{cls.__name__}] Memory pressure unreadable "
+                f"({unavailable}); the memory brake is off"
             )
 
     @classmethod

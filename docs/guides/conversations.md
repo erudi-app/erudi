@@ -656,13 +656,14 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    working set readable only after the load, a request the child did not apply, an unreadable
    base footprint or model facts) stays at its spawn window, and no `bound` notice can show for it.
 
-   **Under memory pressure, the memory brake acts first** (Apple Silicon and the CPU engine; see
+   **Under memory pressure, the memory brake acts first.** It samples its engine's signal at the
+   start and the end of every turn and every minute while the model is idle, never during an
+   answer. On Apple Silicon and the CPU engine that signal is the computer's memory pressure (see
    [Engines](../dev/architecture/engines.md#the-memory-brake-mlx) and
-   [the CPU brake](../dev/architecture/engines.md#the-memory-brake-cpu). On the CUDA engine only
-   a Windows spill of the model out of the card's memory drives it, the same way:
-   [the CUDA brake](../dev/architecture/engines.md#the-memory-brake-cuda)). It samples the
-   computer's memory pressure at the start and the end of every turn and every minute while the
-   model is idle, never during an answer. When it shrinks the working window, the next turn
+   [the CPU brake](../dev/architecture/engines.md#the-memory-brake-cpu)). On the CUDA engine it
+   is the model spilling out of the card's memory into system memory, which only Windows does:
+   the computer's memory pressure never drives it, and on Linux it never acts (see
+   [the CUDA brake](../dev/architecture/engines.md#the-memory-brake-cuda)). When it shrinks the working window, the next turn
    compacts earlier, and the end of the turn carries `memory_warning` with `reason: "pressure"`;
    when the pressure comes from other apps (this conversation uses little), `reason:
    "pressure_external"`. Either takes precedence over the `bound` projection above, which is then

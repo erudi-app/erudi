@@ -60,6 +60,18 @@ The Linux CUDA leg reuses `backend/backend.spec`.
 
 ## Local builds
 
+**The version.** `frontend/package.json` keeps the last version committed to it;
+only `release.yml` stamps the tag (`npm version <tag> --no-git-tag-version
+--allow-same-version`) before electron-builder runs. Every local build therefore
+carries the committed version everywhere the app shows one (the installer name,
+Settings, the Diagnostics page), whatever the platform. To build a candidate
+under a release's version, stamp it first and leave the stamp uncommitted:
+
+```bash
+cd frontend
+npm version 1.1.3 --no-git-tag-version --allow-same-version
+```
+
 ### macOS (Apple Silicon)
 
 ```bash
@@ -121,23 +133,12 @@ toolchain lives elsewhere, or `vswhere` lost its instance state (kept under
 $env:ERUDI_VCVARSALL = "D:\VS\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
 ```
 
-**The version.** `frontend/package.json` keeps the last version committed to it;
-only `release.yml` stamps the tag (`npm version <tag> --no-git-tag-version
---allow-same-version`) before electron-builder runs. A local build therefore
-carries the committed version everywhere the app shows one (the installer name,
-Settings, the Diagnostics page). To build a candidate under a release's version,
-stamp it first and leave the stamp uncommitted:
-
-```powershell
-cd frontend
-npm version 1.1.3 --no-git-tag-version --allow-same-version
-```
-
 **The CUDA update channel.** The release's `win-cuda` leg passes
 `-c.publish.channel=cuda` and a `-cuda` artifact name to electron-builder (see
-[below](#ci-release-pipeline)); CI runs it in bash. From PowerShell, quote each
+[below](#ci-release-pipeline)); CI runs it in bash. From PowerShell, quote every
 `-c.` argument: unquoted, PowerShell splits `-c.publish.channel=cuda` at the dot
-and electron-builder reads `-c` as a config file path.
+and electron-builder reads `-c` as a config file path. Single quotes also keep
+`${productName}`, `${version}` and `${ext}` literal for electron-builder.
 
 ```powershell
 cd frontend
@@ -252,8 +253,10 @@ DLLs. Real hardware in the QA pass is the first thing that runs either.
 The CUDA legs inject `-c.publish.channel=cuda` (plus a distinct artifact name)
 so the GPU builds feed a separate `cuda` auto-update channel while the CPU
 builds feed the default `latest` channel. The electron-builder step runs in bash
-(git-bash on Windows), so the arguments go through unquoted; from PowerShell they
-need quotes (see [Windows (CUDA)](#windows-cuda)). macOS signing and notarization happen
+(git-bash on Windows): `-c.publish.channel=cuda` goes through as is, and the
+artifact name's value is single-quoted so bash keeps `${productName}` literal for
+electron-builder. From PowerShell every `-c.` argument needs quotes (see
+[Windows (CUDA)](#windows-cuda)). macOS signing and notarization happen
 on the `mac-arm` leg only.
 
 ### Draft, QA, promote

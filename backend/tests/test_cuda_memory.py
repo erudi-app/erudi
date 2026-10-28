@@ -7,7 +7,7 @@ minus the weights, the compute intercept and the CUDA context, divided by the
 per-token cost (KV + the compute slope). It classifies the placement llama.cpp's
 fit chose after load (a floor of what is certainly on the device against the
 measured bytes), derives a child's healthy Shared GPU memory from its window,
-and turns the VRAM spill above it into the inputs of
+and turns the VRAM spill above the child's baseline into the inputs of
 ``memory_brake.llama_step``. Nothing here touches NVML, PDH or a GPU: every
 number is passed in, so these tables run on every CI leg.
 """
@@ -391,16 +391,29 @@ def test_the_offloaded_line_is_parsed_when_present(tail, expected):
     assert cm.placement_from_tail(tail) == expected
 
 
-def test_the_fa_disabled_warn_is_found_and_the_fit_warn_is_not():
-    disabled = "llama_context: Flash Attention not supported, set to disabled\n"
-    fit = (
-        "common_fit_params: failed to fit params to free device memory: "
-        "n_gpu_layers already set by user\n"
-    )
-    assert cm.fa_disabled_in(disabled) is True
-    assert cm.fa_disabled_in(fit) is False
-    assert cm.fa_disabled_in("llama_context: Flash Attention enabled\n") is False
-    assert cm.fa_disabled_in(None) is False
+FA_ENABLED = "llama_context: Flash Attention enabled\n"
+FA_DISABLED = "llama_context: Flash Attention not supported, set to disabled\n"
+FIT_WARN = (
+    "common_fit_params: failed to fit params to free device memory: "
+    "n_gpu_layers already set by user\n"
+)
+
+
+@pytest.mark.parametrize(
+    "tail, expected",
+    [
+        (FA_ENABLED, True),
+        (FA_DISABLED, False),
+        # fit's probe pass creates a context too: the last line is the child's.
+        (FA_DISABLED + FA_ENABLED, True),
+        (FA_ENABLED + FA_DISABLED, False),
+        (FIT_WARN, None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_the_flash_attention_line_says_what_llama_cpp_did(tail, expected):
+    assert cm.flash_attention_in(tail) is expected
 
 
 def test_the_device_check_limit_is_the_margin_over_the_prediction():

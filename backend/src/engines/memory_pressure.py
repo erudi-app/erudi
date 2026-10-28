@@ -13,8 +13,9 @@ every OS; a provider chosen once per process on ``sys.platform`` gives them:
 * ``effective_total_ram_bytes()``: the physical RAM the window budget and the
   shares are computed on.
 * ``read_vram(pid, healthy_bytes=...)``: a CUDA child's GPU memory -- its
-  dedicated VRAM and its shared GPU memory, which above the child's healthy
-  level (``healthy_bytes``) is the spill -- on Windows only: WDDM satisfies an
+  dedicated VRAM and its raw shared GPU memory (the CUDA engine counts the
+  spill above the child's baseline, at most its healthy level, the
+  ``healthy_bytes`` the QA seam uses) -- on Windows only: WDDM satisfies an
   allocation that does not fit from system RAM (the driver's sysmem
   fallback), very slowly and silently. Linux has no spill by design (a
   ``cudaMalloc`` that does not fit fails: nothing to react to), macOS no CUDA.
@@ -117,7 +118,8 @@ WIN_COMMIT_WARN_FRACTION = 0.85
 WIN_COMMIT_CRITICAL_FRACTION = 0.93
 
 _FORCED_LEVELS = {"warning": LEVEL_WARNING, "critical": LEVEL_CRITICAL}
-# The spill above the child's healthy level a forced VRAM tier stands for.
+# The spill above the child's baseline a forced VRAM tier stands for (the
+# forced reading puts the baseline at the healthy level).
 _FORCED_SPILL_TIERS = {
     "vram-warning": CUDA_SPILL_WARNING_BYTES,
     "vram-critical": CUDA_SPILL_CRITICAL_BYTES,
@@ -139,10 +141,12 @@ class PressureReading:
 @dataclass(frozen=True)
 class VramReading:
     """One reading of a CUDA child's GPU memory (Windows WDDM): its bytes in
-    dedicated VRAM and in shared GPU memory (system RAM -- the spill), both
-    gauges. ``unavailable`` says why they are None."""
+    dedicated VRAM and in shared GPU memory (system RAM), both gauges, raw.
+    A healthy child already holds some shared memory (its pinned host
+    buffers); the spill is what lies above its baseline, which the CUDA
+    engine counts. ``unavailable`` says why they are None."""
 
-    spill_bytes: Optional[int]
+    shared_bytes: Optional[int]
     dedicated_bytes: Optional[int]
     unavailable: Optional[str] = None
 
@@ -593,8 +597,9 @@ class _WindowsProvider(_NullProvider):
         return _pdh_counter_array(pdh, dedicated), _pdh_counter_array(pdh, shared)
 
     def vram(self, pid: int) -> VramReading:
-        """Our child's dedicated VRAM and its shared GPU memory -- the bytes
-        WDDM spilled into system RAM -- on the adapter holding most of its
+        """Our child's dedicated VRAM and its shared GPU memory -- its pinned
+        host buffers plus whatever WDDM spilled into system RAM -- on the
+        adapter holding most of its
         dedicated memory (the discrete GPU on an Optimus laptop), chosen at
         the child's first read and kept for it. PDH denied or absent:
         unavailable with the reason, logged by the CUDA engine (its memory

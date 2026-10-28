@@ -6,8 +6,8 @@ HTTP, NVML, PDH and RAM sensors all faked).
 load it classifies the placement fit chose -- ``offloaded N/M`` when the line
 reaches the drainer, the per-pid device bytes otherwise -- and a partial child
 runs brake-off. On Windows ``brake_point`` reads the WDDM spill gauge alone --
-the Shared GPU memory above the child's healthy level, derived from its window
--- into ``memory_brake.llama_step`` (unchanged) and executes it: a respawn
+the Shared GPU memory above the child's baseline, its reading at load bounded
+by the healthy level of its window -- into ``memory_brake.llama_step`` (unchanged) and executes it: a respawn
 reuses the live handle's window facts folded with the cap, re-reads no VRAM
 and pins every layer (``-ngl -2``). RAM pressure never drives it, and no RAM
 sensor is read on the CUDA path. On Linux, which has no spill, the brake reads
@@ -34,7 +34,7 @@ from src.engines import memory_brake as mb
 from src.engines.base_engine import BaseEngine
 from src.engines.cuda_compatibility import classify_cuda_failure
 from src.engines.cuda_engine import CUDA_Engine
-from src.engines.gguf_memory import TensorBytes, shape_from_fields
+from src.engines.gguf_memory import TensorBytes, kv_bytes_per_token, shape_from_fields
 from src.engines.memory_brake import BrakeOutcome, BrakeState, llama_padded
 from src.engines.memory_pressure import PressureReading, VramReading
 from src.engines.working_window import MIN_KV_BOUND_TOKENS
@@ -164,6 +164,7 @@ class _World:
         self.spawns = []
         self.children = {}
         self.probe_fail = []
+        self.props_fail = False
         self.reads = 0
         self.anonymous_reads = 0
         self.total_ram_reads = 0
@@ -276,6 +277,8 @@ class _World:
         )
 
         def _get(url, timeout=None, headers=None):
+            if world.props_fail:
+                raise base_mod.requests.ConnectionError("props down")
             port = int(url.split(":")[-1].split("/")[0])
             spawn = [s for s in world.spawns if s["port"] == port][-1]
             return _Resp(
@@ -442,6 +445,64 @@ def test_the_same_reading_with_flash_attention_on_is_above_the_healthy_level(win
     assert handle["spill_baseline"] == _healthy(W)
     assert len(_records(caplog, "Shared GPU memory", logging.WARNING)) == 1
     assert windows.healthy_seen == [_healthy(W)]
+
+
+# A model the CUDA Flash-Attention kernels are not proven for (head size 192).
+NOT_PROVEN = shape_from_fields(
+    {**QWEN3_FIELDS, "context_length": 8192, "key_length": 192, "value_length": 192}
+)
+FA_ENABLED_LINE = "llama_context: Flash Attention enabled\n"
+FA_DISABLED_LINE = "llama_context: Flash Attention not supported, set to disabled\n"
+
+
+@pytest.mark.parametrize(
+    "proven, tail, fa_on",
+    [
+        (False, FA_ENABLED_LINE, True),
+        (True, FA_DISABLED_LINE, False),
+        (True, "", True),
+        (False, "", False),
+    ],
+)
+def test_fa_on_is_what_llama_cpp_logged_else_the_proof(windows, proven, tail, fa_on):
+    """The healthy slope follows what llama.cpp did at context creation (its
+    ``Flash Attention enabled`` INFO or its ``not supported`` WARN); with
+    neither line in the tail, the static proof decides."""
+    shape = _trained_at(8192) if proven else NOT_PROVEN
+    windows.inputs = (shape, WEIGHTS)
+    windows.kv = kv_bytes_per_token(shape)
+    windows.tail = tail
+    handle = _load(windows)
+    assert handle["fa_proven"] is proven
+    assert handle["fa_on"] is fa_on
+    assert windows.healthy_seen == [_healthy(8192, fa_on=fa_on)]
+
+
+@pytest.mark.parametrize("world_name", ["windows", "linux"])
+def test_an_unknown_window_loads_the_model_brake_off(request, monkeypatch, caplog, world_name):
+    """``ERUDI_CTX=0`` passes ``-c 0`` (llama-server picks the window) and
+    ``/props`` fails: the window is unknown. The model loads -- never a
+    raise -- and runs brake-off."""
+    world = request.getfixturevalue(world_name)
+    monkeypatch.setenv("ERUDI_CTX", "0")
+    world.props_fail = True
+    world.level = mb.LEVEL_CRITICAL
+    with caplog.at_level(logging.DEBUG, logger="erudi"):
+        handle = _load(world)
+        assert CUDA_Engine.brake_point("turn_start", llm_id=7) == BrakeOutcome()
+    assert handle["context_tokens"] is None
+    assert handle["window_sized"] is False
+    assert "spill_baseline" not in handle
+    assert len(_records(caplog, "window is unknown", logging.INFO)) == 1
+    assert not _records(caplog, "Placement check failed")
+    assert world.ram_sensor_reads() == 0
+
+
+def test_the_linux_load_stamps_no_spill_state(linux):
+    handle = _load(linux)
+    assert handle["window_sized"] is True
+    assert "fa_on" not in handle
+    assert "spill_baseline" not in handle
 
 
 def test_a_load_without_a_spill_reading_stamps_the_healthy_level(windows, caplog):
@@ -626,6 +687,23 @@ def test_a_spill_seen_by_a_respawn_seed_is_an_info(windows, caplog):
     assert records and all(r.levelno == logging.INFO for r in records)
 
 
+def test_a_respawned_child_restamps_its_baseline_on_its_new_window(windows):
+    """A ``-ngl -2`` respawn is a new child on a smaller window: its healthy
+    level -- and so its baseline and the seam's reading -- is the new
+    window's, not the old one's."""
+    handle = _load(windows)
+    assert handle["spill_baseline"] == 0
+    windows.spill = 2 * GIB
+    assert CUDA_Engine.brake_point("turn_start", llm_id=7).action == "shrink+respawn"
+    new = CUDA_Engine._model
+    new_window = int(W * mb.SHRINK_FACTOR)
+    assert new is not handle
+    assert new["context_tokens"] == new_window
+    assert _healthy(new_window) < _healthy(W)
+    assert new["spill_baseline"] == min(2 * GIB, _healthy(new_window)) == _healthy(new_window)
+    assert windows.healthy_seen[-1] == _healthy(new_window)
+
+
 def test_two_idle_criticals_unload(windows, caplog):
     _load(windows)
     windows.spill = 2 * GIB
@@ -734,6 +812,27 @@ class _DeniedPdh(memory_pressure._WindowsProvider):
 
     def _pdh_gpu_process_memory(self):
         raise OSError("PdhAddEnglishCounterW status 0xc0000bb8")
+
+
+def test_each_unreadable_episode_of_the_spill_gauge_is_one_warning(windows, caplog):
+    """A transient failure does not spend the process's only WARNING: a
+    successful reading re-arms it, so each failure episode says so once."""
+    _load(windows)
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        windows.vram_unavailable = "no GPU Process Memory instance for pid"
+        for _ in range(3):
+            assert CUDA_Engine.brake_point("turn_start", llm_id=7) == BrakeOutcome()
+        assert len(_records(caplog, "GPU spill gauge unreadable", logging.WARNING)) == 1
+        windows.vram_unavailable = None
+        assert CUDA_Engine.brake_point("turn_start", llm_id=7) == BrakeOutcome()
+        windows.vram_unavailable = "PDH GPU Process Memory unreadable (OSError)"
+        for _ in range(2):
+            assert CUDA_Engine.brake_point("turn_start", llm_id=7) == BrakeOutcome()
+    warnings = _records(caplog, "GPU spill gauge unreadable", logging.WARNING)
+    assert len(warnings) == 2
+    assert all(
+        "the memory brake is off while it stays unreadable" in r.getMessage() for r in warnings
+    )
 
 
 def test_an_unreadable_spill_gauge_is_one_warning_and_the_brake_off(windows, monkeypatch, caplog):

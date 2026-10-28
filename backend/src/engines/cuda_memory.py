@@ -43,12 +43,13 @@ bytes, with a one-layer threshold net of the uncounted extras. llama.cpp's own
 drainer.
 
 The brake's only signal is the Windows spill: the child's ``\\GPU Process
-Memory`` Shared Usage above its healthy level. A healthy child already holds
+Memory`` Shared Usage above its baseline. A healthy child already holds
 Shared GPU memory -- its pinned host buffers, a fixed part plus the CUDA_Host
 compute buffer that grows with the window (:func:`healthy_shared_bytes`) --
-so the baseline the spill is counted from is derived from the window, and
-:func:`spill_signals` turns what lies above it into the brake's level and
-damage. Linux has no spill (an allocation that does not fit fails) and so no
+so the baseline the spill is counted from is the child's reading at load
+bounded by that healthy level (the level itself when the load reading is
+missing), and :func:`spill_signals` turns what lies above the baseline into
+the brake's level and damage. Linux has no spill (an allocation that does not fit fails) and so no
 brake signal.
 
 Every constant below that is not measured on the pinned build is INFERRED:
@@ -121,7 +122,10 @@ CUDA_PREDICTION_MARGIN = 1.1
 CUDA_PREDICTION_SLACK_BYTES = 256 * _MIB
 
 _OFFLOADED_RE = re.compile(r"offloaded (\d+)/(\d+) layers to GPU")
-# llama-context.cpp:548 (b10883): the Flash Attention probe's WARN.
+# llama-context.cpp:546-551 (b10883): what the Flash Attention probe did at
+# context creation, "%s: %s enabled" (INFO) or "... not supported, set to
+# disabled" (WARN).
+_FA_ENABLED = "Flash Attention enabled"
 _FA_DISABLED = "Flash Attention not supported, set to disabled"
 
 
@@ -435,9 +439,18 @@ def windows_device_bytes(*, dedicated_bytes: int, shared_bytes: int, healthy_byt
     return dedicated_bytes + max(0, shared_bytes - healthy_bytes)
 
 
-def fa_disabled_in(tail: Optional[str]) -> bool:
-    """llama.cpp disabled Flash Attention at context creation (its WARN)."""
-    return bool(tail) and _FA_DISABLED in tail
+def flash_attention_in(tail: Optional[str]) -> Optional[bool]:
+    """What llama.cpp's Flash Attention probe did at context creation, from
+    the child's output: True (its ``enabled`` INFO), False (its ``not
+    supported`` WARN), None when neither line is there (an explicit ``-fa``
+    prints none, a quiet verbosity may drop the INFO). fit's probe pass
+    creates a context too: the last line is the child's."""
+    if not tail:
+        return None
+    enabled, disabled = tail.rfind(_FA_ENABLED), tail.rfind(_FA_DISABLED)
+    if enabled == disabled == -1:
+        return None
+    return enabled > disabled
 
 
 def device_check_limit_bytes(*, static_device_bytes: int, weights_bytes: int) -> int:
