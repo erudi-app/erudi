@@ -16,6 +16,11 @@
 # Usage (run from erudi\ or erudi\backend\):
 #   .\scripts\dev\backend\build-llamacpp-cuda-win.ps1
 #
+# Visual Studio is found through vswhere (under ${env:ProgramFiles(x86)}, else
+# on PATH). Set ERUDI_VCVARSALL to the full path of vcvarsall.bat to skip
+# vswhere, e.g. when the toolchain lives on another drive:
+#   $env:ERUDI_VCVARSALL = "D:\VS\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
+#
 # Output:
 #   backend\artifacts\llama-cpp\cuda\bin\llama-server.exe
 
@@ -118,21 +123,41 @@ Write-OK "nvcc         : $NvccVersion"
 
 Write-Step "Detecting Visual Studio (C++ build tools) and bootstrapping MSVC environment..."
 
-$VsWhere = "C:\Program Files (x86)\Microsoft Visual Studio\Installer\vswhere.exe"
 $VcVarsAll = $null
 
-if (Test-Path $VsWhere) {
-    $VsInstallPath = & $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>&1
-    if ($VsInstallPath) {
-        $candidate = Join-Path $VsInstallPath "VC\Auxiliary\Build\vcvarsall.bat"
-        if (Test-Path $candidate) { $VcVarsAll = $candidate }
+if ($env:ERUDI_VCVARSALL) {
+    # An explicit vcvarsall.bat wins: a toolchain on another drive, or a machine
+    # whose vswhere instance state (kept under ProgramData) is gone.
+    if (-not (Test-Path $env:ERUDI_VCVARSALL)) {
+        Write-Fail "ERUDI_VCVARSALL points to a file that does not exist: $env:ERUDI_VCVARSALL"
+    }
+    $VcVarsAll = $env:ERUDI_VCVARSALL
+} else {
+    # vswhere ships with the Visual Studio Installer under Program Files (x86),
+    # wherever that folder lives; else one on PATH.
+    $VsWhere = $null
+    if (${env:ProgramFiles(x86)}) {
+        $candidate = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+        if (Test-Path $candidate) { $VsWhere = $candidate }
+    }
+    if (-not $VsWhere) {
+        $VsWhereCmd = Get-Command vswhere.exe -ErrorAction SilentlyContinue
+        if ($VsWhereCmd) { $VsWhere = $VsWhereCmd.Source }
+    }
+    if ($VsWhere) {
+        $VsInstallPath = & $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>&1
+        if ($VsInstallPath) {
+            $candidate = Join-Path $VsInstallPath "VC\Auxiliary\Build\vcvarsall.bat"
+            if (Test-Path $candidate) { $VcVarsAll = $candidate }
+        }
     }
 }
 
 if (-not $VcVarsAll) {
     Write-Fail (
         "vcvarsall.bat not found. Install Visual Studio 2019/2022 with the `n" +
-        "'Desktop development with C++' workload, or open a VS Developer prompt and re-run."
+        "'Desktop development with C++' workload, open a VS Developer prompt and re-run, `n" +
+        "or set ERUDI_VCVARSALL to the full path of vcvarsall.bat."
     )
 }
 

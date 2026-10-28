@@ -378,7 +378,7 @@ def test_a_child_whose_window_was_not_sized_is_never_sampled(monkeypatch):
     law's unload branch can never run on a fallback-shaped child."""
     calls = []
     monkeypatch.setattr(memory_pressure, "read_pressure", lambda: calls.append(1))
-    monkeypatch.setattr(memory_pressure, "read_vram", lambda pid: calls.append(2))
+    monkeypatch.setattr(memory_pressure, "read_vram", lambda pid, **kw: calls.append(2))
     proc = SimpleNamespace(poll=lambda: None)
     monkeypatch.setattr(CUDA_Engine, "_model", {"proc": proc, "window_sized": False, "pid": 1})
     monkeypatch.setattr(CUDA_Engine, "_model_id", 7)

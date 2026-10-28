@@ -621,7 +621,8 @@ class BaseChatServerEngine(BaseEngine):
     # Cleared by any successful spawn, by an idle-timeout reap and at
     # shutdown (``cleanup``); expires after ``memory_brake.BRAKE_RELOAD_TTL_S``.
     _brake_reload: ClassVar[Optional[Dict[str, Any]]] = None
-    # The pressure sensor was found unreadable: the brake is off, said once.
+    # The pressure sensor was found unreadable: the brake is off, said once
+    # (on CUDA once per failure episode: a successful spill reading re-arms it).
     _brake_sensor_warned: ClassVar[bool] = False
     _pressure_task: ClassVar[Optional["asyncio.Task"]] = None
     # Seconds between idle samples. A class attribute so tests run it at speed.

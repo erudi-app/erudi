@@ -546,8 +546,10 @@ the same model with a smaller window — at once under critical pressure, after 
 minutes of user idle under warning — or unloads it; the turn that re-reads the
 conversation shows the same reload state. The actions are bounded per pressure episode;
 see [Engines](dev/architecture/engines.md#the-memory-brake-mlx) and
-[the CPU brake](dev/architecture/engines.md#the-memory-brake-cpu). The CUDA engine has
-none.
+[the CPU brake](dev/architecture/engines.md#the-memory-brake-cpu). On the CUDA engine the
+system's memory pressure does not drive the brake: only a Windows spill of the model out
+of the card's memory into system memory does, with the same restart or unload, and on
+Linux it never acts (see [the CUDA brake](dev/architecture/engines.md#the-memory-brake-cuda)).
 
 ### Streaming
 

@@ -65,10 +65,13 @@ Inference (llama.cpp compiled with CUDA, a llama-server subprocess):
       the layers (-ngl -1, "auto" while fit is on) with Erudi's margin
       (-fitt). When the floor window does not fit or the GGUF cannot be
       modelled, no -c: fit sizes the window and places the layers.
-    - After load the placement is classified (full or partial offload); a
-      full-offload child carries a memory brake fusing the WDDM spill gauge
-      (Windows) with the RAM sensors (memory_brake.llama_step); a partial or
-      fit-sized child runs brake-off.
+    - After load the placement is classified (full or partial offload); on
+      Windows a full-offload child carries a memory brake driven by the WDDM
+      spill gauge alone -- its Shared GPU memory above its baseline, the
+      reading at load bounded by the healthy level of its window
+      (memory_brake.llama_step); RAM pressure never drives it. On
+      Linux, which has no spill, the brake has no signal and never acts. A
+      partial or fit-sized child runs brake-off.
     - One GPU, pinned by UUID (CUDA_VISIBLE_DEVICES), never over a value the
       user set.
 
@@ -663,25 +666,46 @@ class CUDA_Engine(BaseLlamaCppEngine):
         KV off the device) runs brake-off. A full child is seeded, its spill
         baseline stamped and its device bytes checked against the window
         budget; the Flash-Attention WARN is looked for in the child's
-        output. Degrades, never raises."""
+        output.
+
+        A sized child whose window is still unknown after the read
+        (``ERUDI_CTX=0`` lets llama-server pick it, and ``/props`` failed:
+        its one WARNING is already written) runs brake-off, ONE INFO: every
+        rule of the brake is a function of the window. On Windows, whether
+        Flash Attention runs is stamped before the device is read -- what
+        llama.cpp logged at context creation, else the static proof -- since
+        the healthy Shared GPU memory the device bytes and the spill baseline
+        are counted from depends on it; Linux has no spill, so neither is
+        stamped there. Degrades, never raises."""
         cls._read_props(handle)
         drainer = cls._output_drainer_for(handle.get("proc"))
         tail = drainer.tail(max_chars=_LOAD_TAIL_CHARS) if drainer is not None else None
-        device_bytes = spill_bytes = None
+        if handle.get("window_sized") and handle.get("context_tokens") is None:
+            handle["window_sized"] = False
+            logger.info(
+                f"[{cls.__name__}] The allocated window is unknown; the memory brake is off "
+                f"for this child (port {handle.get('port')})"
+            )
+        windows = cls._host_is_windows()
+        if windows:
+            logged = cuda_memory.flash_attention_in(tail)
+            handle["fa_on"] = bool(handle.get("fa_proven")) if logged is None else logged
+        device_bytes = shared_bytes = None
         if handle.get("window_sized"):
             try:
-                device_bytes, spill_bytes = cls._measure_device(handle)
+                device_bytes, shared_bytes = cls._measure_device(handle)
                 cls._classify_placement(handle, tail, device_bytes)
             except Exception as exc:
                 # The model is loaded and serves: an unreadable placement is
-                # assumed full, the brake keeps its spill and RAM evidence.
+                # assumed full, the brake keeps its spill evidence.
                 logger.warning(
                     f"[{cls.__name__}] Placement check failed ({type(exc).__name__}); "
                     f"assuming a full offload (port {handle.get('port')})"
                 )
         if handle.get("window_sized"):
             cls._llama_seed(handle)
-            cls._stamp_spill_baseline(handle, spill_bytes)
+            if windows:
+                cls._stamp_spill_baseline(handle, shared_bytes)
         else:
             # Brake-off: the child forgets an unload's record like any spawn.
             cls._brake_reload = None
@@ -696,20 +720,32 @@ class CUDA_Engine(BaseLlamaCppEngine):
 
     @classmethod
     def _measure_device(cls, handle: Dict[str, Any]) -> Tuple[Optional[int], Optional[int]]:
-        """The child's device bytes and its raw spill reading: Windows
-        counts its dedicated VRAM plus its spill above the healthy baseline
-        (PDH; NVML has no per-process memory under WDDM), Linux reads NVML's
-        process list (and has no spill)."""
+        """The child's device bytes and its raw Shared GPU memory reading:
+        Windows counts its dedicated VRAM plus its shared memory above the
+        healthy level of its window (PDH; NVML has no per-process memory
+        under WDDM), Linux reads NVML's process list (and has no spill)."""
         pid = handle.get("pid")
         if not cls._host_is_windows():
             return memory_pressure.child_vram_bytes(pid, cls._read_vram_info().processes), None
-        vram = memory_pressure.read_vram(pid)
-        if vram.dedicated_bytes is None or vram.spill_bytes is None:
-            return None, vram.spill_bytes
+        healthy = cls._healthy_shared_bytes(handle)
+        vram = memory_pressure.read_vram(pid, healthy_bytes=healthy)
+        if vram.dedicated_bytes is None or vram.shared_bytes is None:
+            return None, vram.shared_bytes
         device = cuda_memory.windows_device_bytes(
-            dedicated_bytes=vram.dedicated_bytes, shared_bytes=vram.spill_bytes
+            dedicated_bytes=vram.dedicated_bytes,
+            shared_bytes=vram.shared_bytes,
+            healthy_bytes=healthy,
         )
-        return device, vram.spill_bytes
+        return device, vram.shared_bytes
+
+    @staticmethod
+    def _healthy_shared_bytes(handle: Dict[str, Any]) -> int:
+        """The Shared GPU memory the loaded child holds when healthy: the
+        fixed part plus the host slope of its window, Flash Attention on or
+        off (``fa_on``, stamped at load)."""
+        return cuda_memory.healthy_shared_bytes(
+            handle["context_tokens"], fa_on=bool(handle.get("fa_on"))
+        )
 
     @classmethod
     def _classify_placement(
@@ -763,20 +799,24 @@ class CUDA_Engine(BaseLlamaCppEngine):
             )
 
     @classmethod
-    def _stamp_spill_baseline(cls, handle: Dict[str, Any], spill_bytes: Optional[int]) -> None:
-        """The child's healthy Shared GPU memory, bounded by
-        ``CUDA_SPILL_BASELINE_BYTES``: every later reading counts the spill
-        above it. A reading above the constant is spill already present --
-        a WARNING at a load (the budget was too large or the GPU crowded),
-        an INFO after a brake respawn (expected under spill pressure)."""
-        baseline = cuda_memory.CUDA_SPILL_BASELINE_BYTES
-        handle["spill_baseline"] = min(spill_bytes or 0, baseline)
-        if spill_bytes is None or spill_bytes <= baseline:
+    def _stamp_spill_baseline(cls, handle: Dict[str, Any], shared_bytes: Optional[int]) -> None:
+        """The child's spill baseline: its Shared GPU memory at load,
+        bounded by the healthy level of its window
+        (``cuda_memory.healthy_shared_bytes``) -- that level itself when the
+        load reading is missing, never 0: every later reading counts the
+        spill above it. A load reading above the healthy level is spill
+        already present -- a WARNING at a load (the budget was too large or
+        the GPU crowded), an INFO after a brake respawn (expected under spill
+        pressure)."""
+        healthy = cls._healthy_shared_bytes(handle)
+        handle["spill_baseline"] = healthy if shared_bytes is None else min(shared_bytes, healthy)
+        if shared_bytes is None or shared_bytes <= healthy:
             return
         respawned = bool(handle.get("brake_respawn"))
         (logger.info if respawned else logger.warning)(
-            f"[{cls.__name__}] Shared GPU memory above the healthy baseline at load: "
-            f"spill_mib={spill_bytes // _MIB}, baseline_mib={baseline // _MIB}; "
+            f"[{cls.__name__}] Shared GPU memory above the healthy level at load: "
+            f"shared_mib={shared_bytes // _MIB}, healthy_mib={healthy // _MIB} "
+            f"(window={handle.get('context_tokens')}, flash_attention={handle.get('fa_on')}); "
             + (
                 "expected after a brake respawn under spill pressure"
                 if respawned
@@ -820,7 +860,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
         """The window was sized on the Flash-Attention slope, yet llama.cpp
         disabled FA at context creation (its WARN in the child's output):
         ONE WARNING -- the compute buffer is larger than planned."""
-        if handle.get("fa_proven") and cuda_memory.fa_disabled_in(tail):
+        if handle.get("fa_proven") and cuda_memory.flash_attention_in(tail) is False:
             logger.warning(
                 f"[{cls.__name__}] llama-server disabled Flash Attention for this model: the "
                 f"window was sized on the Flash-Attention compute slope, its compute buffer "
@@ -831,65 +871,60 @@ class CUDA_Engine(BaseLlamaCppEngine):
 
     @classmethod
     def _llama_read_signals(cls, handle: Dict[str, Any]) -> Optional[LlamaSignals]:
-        """The RAM sensors fused with the VRAM spill gauge
-        (``cuda_memory.fuse_signals``): no early return on the RAM level --
-        a readable spill keeps the brake on. The spill is read on Windows
-        only: on Linux an allocation that does not fit fails instead of
-        spilling, so the brake there sees the RAM alone -- it informs
-        (``external``) or unloads, and never shrinks the window."""
-        reading = memory_pressure.read_pressure()
-        total_ram = memory_pressure.effective_total_ram_bytes()
-        pid = handle.get("pid")
-        host = memory_pressure.child_anonymous_bytes(pid)
-        current, last = reading.damage_total_bytes, handle.get("damage_last")
-        vram = (
-            memory_pressure.read_vram(pid)
-            if cls._host_is_windows()
-            else memory_pressure.VramReading(None, None, unavailable="no spill on this OS")
-        )
-        baseline = handle.get("spill_baseline") or 0
-        spill = max(0, vram.spill_bytes - baseline) if vram.spill_bytes is not None else None
+        """The Windows spill gauge in the law's terms, and nothing else: the
+        Shared GPU memory above the child's baseline is the level (and, at
+        warning or worse, the damage), the window's KV over the VRAM the
+        share a smaller ``-c`` returns, the child's dedicated + shared bytes
+        over the VRAM its footprint. No RAM sensor is read: on a full
+        offload the KV and the compute buffer are on the card, so RAM
+        pressure is not the child's to relieve. None -- the brake off for
+        this sample -- when the gauge is unreadable: ONE WARNING per failure
+        episode, re-armed by the next reading that succeeds (a transient
+        failure must not use up the only one). Reached on Windows only
+        (``brake_point``)."""
+        healthy = cls._healthy_shared_bytes(handle)
+        vram = memory_pressure.read_vram(handle.get("pid"), healthy_bytes=healthy)
+        if vram.shared_bytes is None:
+            if not cls._brake_sensor_warned:
+                cls._brake_sensor_warned = True
+                logger.warning(
+                    f"[{cls.__name__}] GPU spill gauge unreadable ({vram.unavailable}); "
+                    f"the memory brake is off while it stays unreadable"
+                )
+            return None
+        cls._brake_sensor_warned = False
+        signals = cuda_memory.spill_signals(max(0, vram.shared_bytes - handle["spill_baseline"]))
         device = (
-            vram.dedicated_bytes + vram.spill_bytes
-            if vram.dedicated_bytes is not None and vram.spill_bytes is not None
-            else None
+            vram.dedicated_bytes + vram.shared_bytes if vram.dedicated_bytes is not None else None
         )
         vram_total = handle.get("vram_total_bytes")
         window, kv = handle.get("context_tokens"), handle.get("kv_token_bytes")
-        fused = cuda_memory.fuse_signals(
-            ram_level=reading.level,
-            ram_damage_delta=(
-                max(0, current - last) if current is not None and last is not None else None
-            ),
-            ram_damage_available=current is not None,
-            spill_above_baseline=spill,
-            spill_available=spill is not None,
-            kv_vram_share=window * kv / vram_total if window and kv and vram_total else None,
-            ram_child_share=host / total_ram if host is not None and total_ram else None,
-            vram_child_share=device / vram_total if device is not None and vram_total else None,
-        )
-        if fused.level is None:
-            cls._llama_warn_sensor_off(reading.unavailable)
-            return None
         return LlamaSignals(
-            level=fused.level,
-            damage_bytes=fused.damage_bytes,
-            damage_available=fused.damage_available,
-            kv_share=fused.kv_share,
-            footprint_share=fused.footprint_share,
-            footprint_bytes=device if fused.dominant == cuda_memory.DOMINANT_VRAM else host,
-            ram_damage_total=current,
+            level=signals.level,
+            damage_bytes=signals.damage_bytes,
+            damage_available=signals.damage_available,
+            kv_share=window * kv / vram_total if window and kv and vram_total else None,
+            footprint_share=device / vram_total if device is not None and vram_total else None,
+            footprint_bytes=device,
+            ram_damage_total=None,
         )
 
     @classmethod
     def brake_point(cls, point: str, *, llm_id: Any = None) -> BrakeOutcome:
         """Take the brake's sample at ``point`` and execute its decision --
-        only on a child whose window Erudi sized and that loaded in full: a
-        fit-sized or partial child is never sampled (nothing for the law's
-        unload to act on either). Never raises: a failure is ONE WARNING
-        with the exception's class name, and the sample is lost."""
+        on Windows only, and only on a child whose window Erudi sized and
+        that loaded in full: a fit-sized or partial child is never sampled
+        (nothing for the law's unload to act on either). Off Windows there
+        is no spill, so no signal: nothing is read and nothing acts (the idle
+        monitor still ticks; its samples return here). Never raises: a
+        failure is ONE WARNING with the exception's class name, and the
+        sample is lost."""
         handle = cls._model
-        if not isinstance(handle, dict) or not handle.get("window_sized"):
+        if (
+            not cls._host_is_windows()
+            or not isinstance(handle, dict)
+            or not handle.get("window_sized")
+        ):
             return BrakeOutcome()
         try:
             return cls._llama_brake_point(point, llm_id)

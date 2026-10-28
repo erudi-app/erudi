@@ -12,11 +12,15 @@ every OS; a provider chosen once per process on ``sys.platform`` gives them:
   and the post-load check.
 * ``effective_total_ram_bytes()``: the physical RAM the window budget and the
   shares are computed on.
-* ``read_vram(pid)``: a CUDA child's GPU memory -- its dedicated VRAM and the
-  bytes spilled into shared GPU memory -- on Windows only: WDDM satisfies an
+* ``read_vram(pid, healthy_bytes=...)``: a CUDA child's GPU memory -- its
+  dedicated VRAM and its raw shared GPU memory (the CUDA engine counts the
+  spill above the child's baseline, at most its healthy level, the
+  ``healthy_bytes`` the QA seam uses) -- on Windows only: WDDM satisfies an
   allocation that does not fit from system RAM (the driver's sysmem
   fallback), very slowly and silently. Linux has no spill by design (a
   ``cudaMalloc`` that does not fit fails: nothing to react to), macOS no CUDA.
+  This is the CUDA brake's only sensor: the CUDA engine reads none of the
+  RAM ones.
 * ``child_vram_bytes(pid, processes)``: the device bytes NVML attributes to
   the child in the process list the CUDA engine read (Linux; WDDM reports
   none).
@@ -48,7 +52,8 @@ Providers:
   (``memory_info().private``). GPU memory: PDH's ``\\GPU Process
   Memory(pid_<pid>_luid_..._phys_<n>)\\Dedicated Usage`` and ``Shared Usage``
   (gauges, English names), on the adapter holding most of the child's
-  dedicated memory.
+  dedicated memory; when PDH refuses them the reading says why and the CUDA
+  engine writes the one WARNING (its memory brake is then off).
 
 Every threshold for Linux and Windows is a starting value, to be calibrated
 on real machines. Nothing native is loaded at import: the Windows and macOS
@@ -61,12 +66,17 @@ here, so on the llama.cpp engines only (the MLX brake reads
 * ``warning|critical`` force the RAM level AND the damage evidence of every
   ``read_pressure`` -- each read advances a synthetic counter by
   ``LLAMA_WARNING_DAMAGE_MIN_BYTES`` -- so the CPU engine's shrink and idle
-  respawn can be exercised on a calm machine (on a full-offload CUDA child,
-  RAM pressure is ``external``: it informs, or unloads, never shrinks);
-* ``vram-warning|vram-critical`` force the spill of every ``read_vram`` to the
-  healthy baseline plus the tier's threshold (the dedicated VRAM stays the
-  real one), so the CUDA engine's spill shrink and ``-ngl -2`` respawn can be
-  exercised on a calm Windows machine; the RAM reading is left alone.
+  respawn can be exercised on a calm machine. The CUDA engine never reads
+  the RAM, so on CUDA they do nothing;
+* ``vram-warning|vram-critical`` force the shared GPU memory of every
+  ``read_vram`` to the ``healthy_bytes`` the caller passes -- the child's
+  healthy level, derived from its window -- plus the tier's threshold (the
+  dedicated VRAM stays the real one). The CUDA engine stamps the child's
+  baseline at that healthy level, so the spill above it is exactly the tier
+  at any window, and the spill shrink and ``-ngl -2`` respawn can be
+  exercised on a calm Windows machine. The forced reading sits above the
+  healthy level at load, so the load's WARNING shows under the seam too; the
+  RAM reading is left alone.
 """
 
 from __future__ import annotations
@@ -83,11 +93,7 @@ from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 import psutil
 
 from src.core.logging import logger
-from src.engines.cuda_memory import (
-    CUDA_SPILL_BASELINE_BYTES,
-    CUDA_SPILL_CRITICAL_BYTES,
-    CUDA_SPILL_WARNING_BYTES,
-)
+from src.engines.cuda_memory import CUDA_SPILL_CRITICAL_BYTES, CUDA_SPILL_WARNING_BYTES
 from src.engines.memory_brake import (
     LEVEL_CALM,
     LEVEL_CRITICAL,
@@ -112,11 +118,11 @@ WIN_COMMIT_WARN_FRACTION = 0.85
 WIN_COMMIT_CRITICAL_FRACTION = 0.93
 
 _FORCED_LEVELS = {"warning": LEVEL_WARNING, "critical": LEVEL_CRITICAL}
-# The spill reading a forced VRAM tier stands for: once the child's baseline is
-# stamped (at most ``CUDA_SPILL_BASELINE_BYTES``), the gauge sits at the tier.
-_FORCED_SPILL_BYTES = {
-    "vram-warning": CUDA_SPILL_BASELINE_BYTES + CUDA_SPILL_WARNING_BYTES,
-    "vram-critical": CUDA_SPILL_BASELINE_BYTES + CUDA_SPILL_CRITICAL_BYTES,
+# The spill above the child's baseline a forced VRAM tier stands for (the
+# forced reading puts the baseline at the healthy level).
+_FORCED_SPILL_TIERS = {
+    "vram-warning": CUDA_SPILL_WARNING_BYTES,
+    "vram-critical": CUDA_SPILL_CRITICAL_BYTES,
 }
 _FORCED_DAMAGE_BYTES = 0
 _FORCE_WARNED = False
@@ -135,10 +141,12 @@ class PressureReading:
 @dataclass(frozen=True)
 class VramReading:
     """One reading of a CUDA child's GPU memory (Windows WDDM): its bytes in
-    dedicated VRAM and in shared GPU memory (system RAM -- the spill), both
-    gauges. ``unavailable`` says why they are None."""
+    dedicated VRAM and in shared GPU memory (system RAM), both gauges, raw.
+    A healthy child already holds some shared memory (its pinned host
+    buffers); the spill is what lies above its baseline, which the CUDA
+    engine counts. ``unavailable`` says why they are None."""
 
-    spill_bytes: Optional[int]
+    shared_bytes: Optional[int]
     dedicated_bytes: Optional[int]
     unavailable: Optional[str] = None
 
@@ -452,7 +460,6 @@ class _WindowsProvider(_NullProvider):
         self._pdh: Any = None
         self._pdh_warned = False
         self._gpu_pdh: Any = None
-        self._gpu_warned = False
         # (pid, luid): the adapter a child's CUDA memory lives on, chosen at
         # its first read.
         self._gpu_luid: Optional[Tuple[int, str]] = None
@@ -590,22 +597,18 @@ class _WindowsProvider(_NullProvider):
         return _pdh_counter_array(pdh, dedicated), _pdh_counter_array(pdh, shared)
 
     def vram(self, pid: int) -> VramReading:
-        """Our child's dedicated VRAM and its shared GPU memory -- the bytes
-        WDDM spilled into system RAM -- on the adapter holding most of its
+        """Our child's dedicated VRAM and its shared GPU memory -- its pinned
+        host buffers plus whatever WDDM spilled into system RAM -- on the
+        adapter holding most of its
         dedicated memory (the discrete GPU on an Optimus laptop), chosen at
         the child's first read and kept for it. PDH denied or absent:
-        unavailable, ONE WARNING per process."""
+        unavailable with the reason, logged by the CUDA engine (its memory
+        brake is then off: one WARNING there)."""
         try:
             dedicated, shared = self._pdh_gpu_process_memory()
         except Exception as exc:
-            if not self._gpu_warned:
-                # Degraded once per process: the RAM brake and the window
-                # sized at spawn stand without the spill gauge.
-                self._gpu_warned = True
-                logger.warning(
-                    f"GPU process memory unavailable (PDH, {type(exc).__name__}); spill "
-                    f"detection off; the RAM brake and the spawn sizing stand"
-                )
+            # Not logged here: the reason travels in the reading, and the CUDA
+            # engine writes the one WARNING where the brake turns off.
             return VramReading(
                 None, None, unavailable=f"PDH GPU Process Memory unreadable ({type(exc).__name__})"
             )
@@ -649,7 +652,7 @@ def _forced() -> str:
 def _forced_level() -> Optional[int]:
     global _FORCE_WARNED
     raw = _forced()
-    if not raw or raw in _FORCED_SPILL_BYTES:
+    if not raw or raw in _FORCED_SPILL_TIERS:
         return None
     level = _FORCED_LEVELS.get(raw)
     if level is None and not _FORCE_WARNED:
@@ -696,20 +699,21 @@ def effective_total_ram_bytes() -> Optional[int]:
     return _guarded(lambda: _provider().total_ram_bytes())
 
 
-def read_vram(pid: Optional[int]) -> VramReading:
-    """The CUDA child's spill and dedicated VRAM now (Windows only; the
-    other providers answer unavailable), the spill forced by the QA seam's
-    VRAM values. Never raises."""
+def read_vram(pid: Optional[int], *, healthy_bytes: int) -> VramReading:
+    """The CUDA child's shared GPU memory and dedicated VRAM now (Windows
+    only; the other providers answer unavailable). Under the QA seam's VRAM
+    values the shared memory reads ``healthy_bytes`` -- the child's healthy
+    level -- plus the tier's threshold. Never raises."""
     if not pid:
         return VramReading(None, None, unavailable="no child")
     try:
         reading = _provider().vram(pid)
     except Exception as exc:
         reading = VramReading(None, None, unavailable=f"{type(exc).__name__}")
-    forced = _FORCED_SPILL_BYTES.get(_forced())
-    if forced is None:
+    tier = _FORCED_SPILL_TIERS.get(_forced())
+    if tier is None:
         return reading
-    return VramReading(forced, reading.dedicated_bytes)
+    return VramReading(healthy_bytes + tier, reading.dedicated_bytes)
 
 
 def child_vram_bytes(

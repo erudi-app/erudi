@@ -208,7 +208,7 @@ if (-not $CudaBin) {
     Write-Host "  You only need it to COMPILE llama-server. Running Erudi needs a driver only." -ForegroundColor Yellow
     Write-Host ""
 } else {
-    Write-OK "CUDA toolkit found: $CudaBin"
+    Write-Success "CUDA toolkit found: $CudaBin"
 
     # Check if CUDA bin is on system PATH
     $pathEntries = [System.Environment]::GetEnvironmentVariable("PATH", "Machine") -split ";"
@@ -222,7 +222,7 @@ if (-not $CudaBin) {
         Write-Host "    [System.Environment]::SetEnvironmentVariable('PATH', `$env:PATH + ';$CudaBin', 'Machine')" -ForegroundColor Yellow
         Write-Host ""
     } else {
-        Write-OK "CUDA bin is on system PATH"
+        Write-Success "CUDA bin is on system PATH"
     }
 }
 
@@ -238,7 +238,7 @@ if ($currentDir -eq "backend") {
 }
 
 if (Test-Path $llamaServerPath) {
-    Write-OK "llama-server.exe already built at: $llamaServerPath"
+    Write-Success "llama-server.exe already built at: $llamaServerPath"
     Write-Host "  To rebuild, run: $buildScript"
 } else {
     Write-Host ""
@@ -254,7 +254,7 @@ if (Test-Path $llamaServerPath) {
             if ($LASTEXITCODE -ne 0) {
                 Write-Host "[WARNING] Build failed. You can retry manually: $buildScript" -ForegroundColor Yellow
             } else {
-                Write-OK "llama.cpp CUDA build completed successfully."
+                Write-Success "llama.cpp CUDA build completed successfully."
             }
         } else {
             Write-Host ""

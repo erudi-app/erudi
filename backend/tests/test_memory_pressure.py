@@ -11,8 +11,9 @@ parsing and the tiering run here on text fixtures and fake natives, on every
 CI leg; the native calls themselves run on their own OS only.
 
 The VRAM half (``read_vram``) reads the child's ``\\GPU Process Memory``
-Shared Usage on Windows -- WDDM spills an overflowing CUDA allocation into
-system RAM, and that gauge is the spill -- and is unavailable on Linux by
+Shared Usage on Windows, raw -- the child's pinned host buffers plus what
+WDDM spilled of an overflowing CUDA allocation into system RAM; the CUDA
+engine counts the spill above the child's baseline -- and is unavailable on Linux by
 design (a hard cliff: nothing to react to). ``child_vram_bytes`` filters the
 NVML process list the CUDA engine passes in.
 """
@@ -480,7 +481,7 @@ def test_windows_vram_matches_the_exact_pid_prefix():
     )
     reading = provider.vram(12)
     assert reading.dedicated_bytes == 4 * GIB
-    assert reading.spill_bytes == 300 * MIB
+    assert reading.shared_bytes == 300 * MIB
     assert reading.unavailable is None
 
 
@@ -493,13 +494,13 @@ def test_windows_vram_keeps_the_adapter_with_the_largest_dedicated_usage():
     )
     first = provider.vram(7)
     assert first.dedicated_bytes == 6 * GIB
-    assert first.spill_bytes == 100 * MIB
+    assert first.shared_bytes == 100 * MIB
     # Later the iGPU's dedicated grows past the dGPU's: the luid is kept.
     provider.dedicated[f"pid_7_{LUID_I}_phys_0"] = 8 * GIB
     provider.shared[f"pid_7_{LUID_D}_phys_0"] = 700 * MIB
     second = provider.vram(7)
     assert second.dedicated_bytes == 6 * GIB
-    assert second.spill_bytes == 700 * MIB
+    assert second.shared_bytes == 700 * MIB
 
 
 def test_windows_vram_counters_are_gauges():
@@ -507,34 +508,34 @@ def test_windows_vram_counters_are_gauges():
         dedicated={f"pid_7_{LUID_D}_phys_0": 6 * GIB},
         shared={f"pid_7_{LUID_D}_phys_0": 900 * MIB},
     )
-    assert provider.vram(7).spill_bytes == 900 * MIB
+    assert provider.vram(7).shared_bytes == 900 * MIB
     provider.shared[f"pid_7_{LUID_D}_phys_0"] = 200 * MIB
-    assert provider.vram(7).spill_bytes == 200 * MIB
+    assert provider.vram(7).shared_bytes == 200 * MIB
 
 
 def test_windows_vram_without_an_instance_for_the_pid_is_unavailable():
     provider = _FakeWindowsGpu(dedicated={f"pid_8_{LUID_D}_phys_0": GIB})
     reading = provider.vram(7)
-    assert reading.spill_bytes is None and reading.dedicated_bytes is None
+    assert reading.shared_bytes is None and reading.dedicated_bytes is None
     assert "pid 7" in reading.unavailable
 
 
-def test_windows_vram_denied_is_unavailable_and_one_warning(caplog):
+def test_windows_vram_denied_is_unavailable_with_its_reason_and_logs_nothing(caplog):
+    """The reason travels in the reading; the CUDA engine, the one place
+    that knows the memory brake is then off, writes the one WARNING."""
     provider = _FakeWindowsGpu(denied=True)
     with caplog.at_level(logging.WARNING, logger="erudi"):
         first = provider.vram(7)
         second = provider.vram(7)
-    assert first.spill_bytes is None and second.spill_bytes is None
-    assert "OSError" in first.unavailable
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "spill detection off" in warnings[0].getMessage()
+    assert first.shared_bytes is None and second.shared_bytes is None
+    assert "PDH GPU Process Memory unreadable (OSError)" == first.unavailable
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_linux_vram_is_unavailable_by_design(tmp_path, monkeypatch):
     provider, *_ = _linux(tmp_path, monkeypatch)
     reading = provider.vram(42)
-    assert reading.spill_bytes is None
+    assert reading.shared_bytes is None
     assert reading.unavailable == "hard cliff: nothing to react to"
 
 
@@ -546,10 +547,10 @@ def test_read_vram_delegates_and_never_raises(monkeypatch):
             raise RuntimeError("boom")
 
     monkeypatch.setattr(mp, "_PROVIDER", _Broken())
-    reading = mp.read_vram(7)
-    assert reading.spill_bytes is None
+    reading = mp.read_vram(7, healthy_bytes=128 * MIB)
+    assert reading.shared_bytes is None
     assert "RuntimeError" in reading.unavailable
-    assert mp.read_vram(None).unavailable
+    assert mp.read_vram(None, healthy_bytes=128 * MIB).unavailable
 
 
 @pytest.mark.parametrize(
@@ -652,7 +653,8 @@ def test_a_refused_counter_closes_its_query_and_is_never_reopened(monkeypatch, c
         second = provider.vram(7)
     assert first.unavailable and second.unavailable
     assert pdh.calls == ["open", "add", "close"]
-    assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
+    # The CUDA engine writes the one WARNING (the memory brake is off).
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_a_refused_paging_counter_closes_its_query_and_is_never_reopened(monkeypatch, caplog):
@@ -685,7 +687,7 @@ class _CalmGpu:
         return mp.PressureReading(level=1, damage_total_bytes=7)
 
     def vram(self, pid):
-        return mp.VramReading(spill_bytes=0, dedicated_bytes=6 * GIB)
+        return mp.VramReading(shared_bytes=0, dedicated_bytes=6 * GIB)
 
 
 @pytest.mark.parametrize(
@@ -695,17 +697,21 @@ class _CalmGpu:
         ("vram-critical", cuda_memory.CUDA_SPILL_CRITICAL_BYTES),
     ],
 )
-def test_the_vram_seam_forces_a_spill_and_leaves_the_ram_alone(monkeypatch, caplog, forced, above):
-    """The spill read is the healthy baseline plus the tier's threshold:
-    once the baseline is stamped, the gauge sits exactly at the tier, and
+@pytest.mark.parametrize("healthy", [132 * MIB, 384 * MIB])
+def test_the_vram_seam_forces_a_spill_and_leaves_the_ram_alone(
+    monkeypatch, caplog, forced, above, healthy
+):
+    """The spill read is the child's healthy level (the caller's, derived
+    from its window) plus the tier's threshold: once the baseline is
+    stamped at the healthy level, the gauge sits exactly at the tier, and
     it is the damage evidence too. The dedicated VRAM stays the real one;
     the RAM reading is the provider's, with no warning."""
     monkeypatch.setattr(mp, "_PROVIDER", _CalmGpu())
     monkeypatch.setenv("ERUDI_FORCE_MEMORY_PRESSURE", forced)
     with caplog.at_level(logging.WARNING, logger="erudi"):
-        reading = mp.read_vram(7)
+        reading = mp.read_vram(7, healthy_bytes=healthy)
         assert mp.read_pressure() == mp.PressureReading(level=1, damage_total_bytes=7)
-    assert reading.spill_bytes == cuda_memory.CUDA_SPILL_BASELINE_BYTES + above
+    assert reading.shared_bytes == healthy + above
     assert reading.dedicated_bytes == 6 * GIB
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
@@ -714,10 +720,12 @@ def test_the_vram_seam_forces_a_spill_and_leaves_the_ram_alone(monkeypatch, capl
 def test_the_ram_seam_does_not_reach_the_vram_reading(monkeypatch, forced):
     monkeypatch.setattr(mp, "_PROVIDER", _CalmGpu())
     monkeypatch.setenv("ERUDI_FORCE_MEMORY_PRESSURE", forced)
-    assert mp.read_vram(7) == mp.VramReading(spill_bytes=0, dedicated_bytes=6 * GIB)
+    assert mp.read_vram(7, healthy_bytes=128 * MIB) == mp.VramReading(
+        shared_bytes=0, dedicated_bytes=6 * GIB
+    )
 
 
 @pytest.mark.skipif(sys.platform != "win32", reason="the native Windows calls")
 def test_windows_native_vram_never_raises():
     reading = mp._WindowsProvider().vram(1)
-    assert reading.spill_bytes is None or reading.spill_bytes >= 0
+    assert reading.shared_bytes is None or reading.shared_bytes >= 0
