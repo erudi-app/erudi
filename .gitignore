@@ -49,6 +49,7 @@ Thumbs.db
 
 # Documentation build artifacts
 site/
+pages-redirects/
 reports/
 
 # Python cache

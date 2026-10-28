@@ -19,10 +19,10 @@ import { createLogger } from "../utils/logger";
 
 const log = createLogger("SettingsPage");
 
-// The privacy page lives in the documentation site so every claim on it can
-// point at the code that backs it. The window-open handler in main.js routes
-// target="_blank" links to the system browser.
-export const PRIVACY_PAGE_URL = "https://erudi-app.github.io/erudi/privacy/";
+// The privacy page lives in the documentation, published on www.erudi.app, so
+// every claim on it can point at the code that backs it. The window-open
+// handler in main.js routes target="_blank" links to the system browser.
+export const PRIVACY_PAGE_URL = "https://www.erudi.app/open-source/desktop/docs/privacy";
 
 /**
  * Whether the Inference engine card belongs on this machine (#511).

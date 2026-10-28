@@ -461,7 +461,9 @@ describe("SettingsPage", () => {
     renderPage();
     expect(await screen.findByText("What leaves your machine")).toBeTruthy();
     const link = screen.getByRole("link", { name: "Read the page" });
-    expect(link.getAttribute("href")).toBe("https://erudi-app.github.io/erudi/privacy/");
+    expect(link.getAttribute("href")).toBe(
+      "https://www.erudi.app/open-source/desktop/docs/privacy"
+    );
     expect(link.getAttribute("target")).toBe("_blank");
     expect(link.getAttribute("rel")).toBe("noreferrer");
   });

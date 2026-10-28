@@ -8,7 +8,7 @@ Erudi is a desktop app that downloads open-source language models, runs them on 
 
 [![Latest release](https://img.shields.io/github/v/release/erudi-app/erudi?include_prereleases&label=release)](https://github.com/erudi-app/erudi/releases)
 [![License: MIT](https://img.shields.io/badge/license-MIT-green.svg)](LICENSE)
-[![Documentation](https://img.shields.io/badge/docs-erudi--app.github.io-1f7a5a)](https://erudi-app.github.io/erudi/)
+[![Documentation](https://img.shields.io/badge/docs-erudi.app-1f7a5a)](https://www.erudi.app/open-source/desktop/docs)
 
 ![Chatting with Qwen3 4B in Erudi — the model's reasoning streams into a collapsible strip above the answer](docs/assets/screenshots/chat-reasoning.png)
 
@@ -20,7 +20,7 @@ Erudi is a desktop app that downloads open-source language models, runs them on 
 - **No account, no telemetry, no crash reporter.** The backend listens on `127.0.0.1` only; nothing on your network can reach it.
 - **Two requests you did not ask for, neither carrying your data**: an update check against this repository's releases, which you can turn off in Settings, and a fetch of a model's generation defaults after you download it. Everything else — model downloads, Hugging Face search, the optional web search (off by default) — happens when you press the button.
 
-Every request, when it happens and the code behind it: **[What leaves your machine →](https://erudi-app.github.io/erudi/privacy/)**
+Every request, when it happens and the code behind it: **[What leaves your machine →](https://www.erudi.app/open-source/desktop/docs/privacy)**
 
 ## What it does
 
@@ -46,7 +46,7 @@ Every request, when it happens and the code behind it: **[What leaves your machi
 ## Install
 
 1. **[Download](https://github.com/erudi-app/erudi/releases)** the installer for your platform — a notarized `.dmg` for macOS (Apple Silicon, macOS 14+), a `Setup.exe` for Windows, an `.AppImage` for Linux. Windows and Linux each ship two builds: take the plain one unless you have an NVIDIA GPU, in which case take the `cuda` one. Nothing else to install — the inference engine and everything it needs are inside the installer.
-   The `cuda` build needs a card of compute capability 5.0 or newer (Maxwell, 2014, and up) and a recent NVIDIA driver: the 570 family for cards up to the RTX 20 series and for the H100, which run from the build's PTX, and any 12.0-era driver (525+) for the RTX 30, 40 and 50 series, which have native code in it. Erudi checks both at launch and offers to run on the processor instead when your card or driver falls short — it never switches on its own. The [hardware guide](https://erudi-app.github.io/erudi/guides/hardware/) has the per-generation table.
+   The `cuda` build needs a card of compute capability 5.0 or newer (Maxwell, 2014, and up) and a recent NVIDIA driver: the 570 family for cards up to the RTX 20 series and for the H100, which run from the build's PTX, and any 12.0-era driver (525+) for the RTX 30, 40 and 50 series, which have native code in it. Erudi checks both at launch and offers to run on the processor instead when your card or driver falls short — it never switches on its own. The [hardware guide](https://www.erudi.app/open-source/desktop/docs/guides/hardware) has the per-generation table.
 2. Open it. The first launch prepares the embedded database and the model catalog; it takes a few seconds.
 3. Pick a model marked **Runs easily** or **Ideal fit** and press Download. Once it is on disk, you can unplug the network and keep working.
 
@@ -92,7 +92,7 @@ Most local-AI tools are either a runtime you drive from a terminal, or a web int
 > driver, and everyone else needs nothing at all. Which driver depends on the card —
 > 570+ for anything that runs from the build's PTX, 525+ for the RTX 30/40/50 series,
 > which have native code in it. The
-> [hardware guide](https://erudi-app.github.io/erudi/guides/hardware/) has the table, and
+> [hardware guide](https://www.erudi.app/open-source/desktop/docs/guides/hardware) has the table, and
 > the app checks it at launch.
 
 ### 1. Clone the repository
