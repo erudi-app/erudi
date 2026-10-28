@@ -130,5 +130,11 @@ describe("MarkdownRenderer math support (#303)", () => {
     expect(container.querySelector(".katex-display")).toBeTruthy();
     expect(container.querySelector(".katex-error")).toBeNull();
     expect(container.querySelector(".katex-html")).toBeTruthy();
+    // KaTeX 0.18 prefixed its layout classes (base -> katex-base). The HTML
+    // must come from the same KaTeX as the imported katex.min.css: a nested
+    // older copy under rehype-katex renders `base`, which that CSS no longer
+    // styles (the package.json override keeps a single copy).
+    expect(container.querySelector(".katex-base")).toBeTruthy();
+    expect(container.querySelector(".base")).toBeNull();
   });
 });
