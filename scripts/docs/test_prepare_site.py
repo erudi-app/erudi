@@ -147,6 +147,12 @@ class RewriteUrlTest(unittest.TestCase):
     def test_root_path_with_trailing_slash_is_cleaned(self):
         self.assertEqual(self.rewrite(f"{BASE}/"), BASE)
 
+    def test_srcset_candidates_are_rewritten(self):
+        self.assertEqual(
+            ps.rewrite_srcset("../a.png 1x, ../../b.png 2x", self.page_dir, SITE_URL),
+            f"{BASE}/guides/a.png 1x, {BASE}/b.png 2x",
+        )
+
     def test_query_is_kept(self):
         self.assertEqual(self.rewrite("../llms/?q=a#b"), f"{BASE}/guides/llms?q=a#b")
 
@@ -194,6 +200,25 @@ class RewriteSiteTest(unittest.TestCase):
         self.assertEqual(
             config["search"], f"{BASE}/assets/javascripts/workers/search.1234abcd.min.js"
         )
+
+    def test_other_url_attributes(self):
+        path = self.root / "guides/llms/index.html"
+        path.write_text(
+            path.read_text(encoding="utf-8").replace(
+                "</body>",
+                '<img srcset="../../assets/screenshots/download.png 2x">'
+                '<svg><use xlink:href="../../assets/screenshots/download.png#i"></use></svg>'
+                '<video poster="../../assets/screenshots/download.png"></video></body>',
+            ),
+            encoding="utf-8",
+        )
+        ps.rewrite_site(self.root, SITE_URL)
+        html = self.read("guides/llms/index.html")
+        shot = f"{BASE}/assets/screenshots/download.png"
+        self.assertIn(f'srcset="{shot} 2x"', html)
+        self.assertIn(f'xlink:href="{shot}#i"', html)
+        self.assertIn(f'poster="{shot}"', html)
+        self.assertEqual(ps.check_site(self.root, SITE_URL), [])
 
     def test_home_page(self):
         html = self.read("index.html")
@@ -274,6 +299,26 @@ class CheckSiteTest(unittest.TestCase):
     def test_former_host(self):
         self.add_link("index.html", '<a href="https://erudi-app.github.io/erudi/privacy/">x</a>')
         self.assertProblem("erudi-app.github.io")
+
+    def test_relative_url_in_other_attributes(self):
+        self.add_link("index.html", '<img srcset="assets/screenshots/download.png 2x">')
+        self.assertProblem("relative URL")
+
+    def test_relative_url_in_a_style(self):
+        self.add_link("index.html", '<div style="background:url(../x.png)"></div>')
+        self.assertProblem("url(../x.png)")
+
+    def test_relative_storage_scope(self):
+        self.add_link("index.html", '<script>a=new URL("../..",location)</script>')
+        self.assertProblem("storage scope")
+
+    def test_search_worker_outside_the_docs(self):
+        path = self.root / "index.html"
+        text = path.read_text(encoding="utf-8")
+        path.write_text(
+            text.replace(f'"search":"{BASE}/assets', '"search":"/elsewhere'), encoding="utf-8"
+        )
+        self.assertProblem("search worker")
 
     def test_missing_search_index(self):
         (self.root / "search.json").unlink()

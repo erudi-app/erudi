@@ -30,8 +30,12 @@ from html.parser import HTMLParser
 from pathlib import Path
 from urllib.parse import urljoin, urlsplit
 
-# Attributes holding a URL in the theme's output.
-URL_ATTRIBUTE = re.compile(r'(\s(?:href|src)=")([^"]*)(")')
+# Attributes holding one URL (srcset holds several: SRCSET_ATTRIBUTE).
+URL_ATTRIBUTE = re.compile(r'(\s(?:href|src|xlink:href|poster)=")([^"]*)(")')
+SRCSET_ATTRIBUTE = re.compile(r'(\ssrcset=")([^"]*)(")')
+URL_NAMES = ("href", "src", "xlink:href", "poster")
+# A relative url(...) in an inline style would resolve one level too high.
+RELATIVE_CSS_URL = re.compile(r"""url\(\s*['"]?(?![a-zA-Z][a-zA-Z0-9+.-]*:|/|#|data:)[^)'"]+""")
 # Scope of the theme's local storage keys, resolved against `location`.
 SCOPE_SCRIPT = re.compile(r'(new URL\(")([^"]*)(",location\))')
 CONFIG_SCRIPT = re.compile(
@@ -110,6 +114,17 @@ def page_url(rel_file: str, site_url: str) -> str:
     return origin + clean_path(f"{base_path}/{rel_file}", base_path)
 
 
+def rewrite_srcset(value: str, page_dir: str, site_url: str) -> str:
+    """srcset: each candidate "<url> <descriptor>" rewritten like a single URL."""
+    candidates = []
+    for candidate in value.split(","):
+        parts = candidate.strip().split(None, 1)
+        if parts:
+            parts[0] = rewrite_url(parts[0], page_dir, site_url)
+            candidates.append(" ".join(parts))
+    return ", ".join(candidates)
+
+
 def rewrite_html(text: str, page_dir: str, site_url: str) -> str:
     def url(match: re.Match) -> str:
         return match.group(1) + rewrite_url(match.group(2), page_dir, site_url) + match.group(3)
@@ -130,7 +145,11 @@ def rewrite_html(text: str, page_dir: str, site_url: str) -> str:
             + match.group(3)
         )
 
+    def srcset(match: re.Match) -> str:
+        return match.group(1) + rewrite_srcset(match.group(2), page_dir, site_url) + match.group(3)
+
     text = URL_ATTRIBUTE.sub(url, text)
+    text = SRCSET_ATTRIBUTE.sub(srcset, text)
     text = SCOPE_SCRIPT.sub(scope, text)
     text = CONFIG_SCRIPT.sub(config, text)
     return text.replace(SOURCE_FACTS, "")
@@ -172,14 +191,19 @@ class _Links(HTMLParser):
         super().__init__(convert_charrefs=True)
         self.urls: list[str] = []
         self.canonicals: list[str] = []
+        self.styles: list[str] = []
         self.config: str | None = None
         self._in_config = False
 
     def handle_starttag(self, tag, attrs):
         attributes = dict(attrs)
-        for name in ("href", "src"):
+        for name in URL_NAMES:
             if attributes.get(name) is not None:
                 self.urls.append(attributes[name])
+        for candidate in (attributes.get("srcset") or "").split(","):
+            if candidate.strip():
+                self.urls.append(candidate.split()[0])
+        self.styles.append(attributes.get("style") or "")
         if tag == "link" and attributes.get("rel") == "canonical":
             self.canonicals.append(attributes.get("href") or "")
         self._in_config = tag == "script" and attributes.get("id") == "__config"
@@ -227,6 +251,14 @@ def check_site(site_dir: Path, site_url: str) -> list[str]:
                 problems.append(f"{rel}: references {needle}")
         parser = _Links()
         parser.feed(text)
+        for style in parser.styles:
+            for found in RELATIVE_CSS_URL.findall(style):
+                problems.append(f"{rel}: relative {found.strip()}) in a style attribute")
+        for match in SCOPE_SCRIPT.finditer(text):
+            if not match.group(2).startswith(base_path + "/"):
+                problems.append(
+                    f"{rel}: storage scope new URL({match.group(2)!r}) is not {base_path}/"
+                )
         if parser.canonicals != [page_url(rel, site_url)]:
             problems.append(
                 f"{rel}: canonical {parser.canonicals} instead of {page_url(rel, site_url)}"
@@ -252,9 +284,11 @@ def check_site(site_dir: Path, site_url: str) -> list[str]:
                 problems.append(
                     f"{rel}: __config base {config.get('base')!r} instead of {base_path!r}"
                 )
-            problems += _check_path(
-                site_dir, f"{rel} (search worker)", config.get("search", ""), base_path
-            )
+            worker = config.get("search") or ""
+            if not worker.startswith(base_path + "/"):
+                problems.append(f"{rel}: search worker {worker!r} outside {base_path}/")
+            else:
+                problems += _check_path(site_dir, f"{rel} (search worker)", worker, base_path)
     index = site_dir / "search.json"
     if not index.is_file():
         problems.append("search.json: missing, the search would find nothing")
