@@ -1,4 +1,4 @@
-"""The CUDA window, its placement and the brake's fused signals -- pure.
+"""The CUDA window, its placement and the brake's spill signals -- pure.
 
 The CUDA engine sizes the window it passes as ``-c`` for a FULL offload,
 from the GGUF header (``gguf_memory``) and the selected GPU's memory, read
@@ -22,9 +22,10 @@ Erudi fixes the window (an explicit ``-c`` is never changed by fit) and
 hands fit its margin (``-fitt CUDA_FIT_TARGET_MIB``); fit fixes the layers
 (``-ngl -1``, "auto" while fit is on), measuring the real free memory -- an
 optimistic estimate yields a PARTIAL offload instead of a dead child. Under a
-full offload the RAM ceiling does not bind the window: the KV and the compute
-buffer live on the device, the host keeps clean mapped file pages and pinned
-buffers; RAM pressure still reaches the CUDA child through the fused sensors.
+full offload the RAM neither binds the window nor drives the brake: the KV and
+the compute buffer live on the device, the host keeps clean mapped file pages,
+the fixed CUDA runtime and pinned buffers (the CUDA_Host compute buffer, about
+1 KiB per token), so a smaller ``-c`` or an unload frees almost no RAM.
 
 The compute slope is the Flash-Attention KQ mask (1 KiB per token at the
 default ``n_ubatch`` 512) when FA is PROVEN for the model -- the static mirror
@@ -40,6 +41,15 @@ layer pattern is readable, excluded otherwise) -- against the measured device
 bytes, with a one-layer threshold net of the uncounted extras. llama.cpp's own
 ``offloaded N/M layers to GPU`` line decides instead when it reaches the
 drainer.
+
+The brake's only signal is the Windows spill: the child's ``\\GPU Process
+Memory`` Shared Usage above its healthy level. A healthy child already holds
+Shared GPU memory -- its pinned host buffers, a fixed part plus the CUDA_Host
+compute buffer that grows with the window (:func:`healthy_shared_bytes`) --
+so the baseline the spill is counted from is derived from the window, and
+:func:`spill_signals` turns what lies above it into the brake's level and
+damage. Linux has no spill (an allocation that does not fit fails) and so no
+brake signal.
 
 Every constant below that is not measured on the pinned build is INFERRED:
 QA calibrates it on a Windows CUDA machine and a Linux+NVIDIA one.
@@ -89,9 +99,17 @@ _NON_FA_SCORE_BYTES = 4
 # dispatch on with equal K and V head sizes (192 and 320 need GQA conditions
 # this predicate does not prove). A llama.cpp bump re-reads this set.
 CUDA_FA_HEAD_DIMS = frozenset({40, 64, 72, 80, 96, 112, 128, 256})
-# The Shared GPU memory of a healthy child (pinned host buffers), the floor of
-# the spill baseline (INFERRED; QA K.4).
-CUDA_SPILL_BASELINE_BYTES = 128 * _MIB
+# The Shared GPU memory of a healthy full-offload child (WDDM's view of its
+# pinned host buffers): a fixed part plus the CUDA_Host compute buffer, which
+# grows with the window. #661 measured 90 MiB at 8192 tokens (0.5B), 106 at
+# 4096 (27B) and 130 at 40960 (4B) -- fixed parts of 78-99 MiB -- so the fixed
+# part keeps a margin over the largest.
+CUDA_SHARED_FIXED_BYTES = 128 * _MIB
+# The CUDA_Host compute buffer per window token (#661, b10883): 11.51 MiB at
+# 8192 and 35.51 at 32768 with Flash Attention (1 KiB per token), 20.01 MiB at
+# 8192 with ``-fa off`` (about 2 KiB per token).
+CUDA_SHARED_PER_TOKEN_FA_BYTES = 1024
+CUDA_SHARED_PER_TOKEN_NON_FA_BYTES = 2048
 # Spill tiers over the baseline (INFERRED).
 CUDA_SPILL_WARNING_BYTES = 256 * _MIB
 CUDA_SPILL_CRITICAL_BYTES = 1024 * _MIB
@@ -101,9 +119,6 @@ CUDA_CLASSIFY_TOLERANCE_BYTES = 64 * _MIB
 # slack, is one WARNING.
 CUDA_PREDICTION_MARGIN = 1.1
 CUDA_PREDICTION_SLACK_BYTES = 256 * _MIB
-
-DOMINANT_RAM = "ram"
-DOMINANT_VRAM = "vram"
 
 _OFFLOADED_RE = re.compile(r"offloaded (\d+)/(\d+) layers to GPU")
 # llama-context.cpp:548 (b10883): the Flash Attention probe's WARN.
@@ -404,11 +419,20 @@ def placement_from_tail(tail: Optional[str]) -> Optional[Tuple[int, int]]:
     return int(offloaded), int(total)
 
 
-def windows_device_bytes(*, dedicated_bytes: int, shared_bytes: int) -> int:
+def healthy_shared_bytes(window: int, *, fa_on: bool) -> int:
+    """The Shared GPU memory a healthy full-offload child of ``window``
+    tokens holds on Windows: the fixed part plus the CUDA_Host compute
+    buffer, whose slope doubles when Flash Attention is off."""
+    slope = CUDA_SHARED_PER_TOKEN_FA_BYTES if fa_on else CUDA_SHARED_PER_TOKEN_NON_FA_BYTES
+    return CUDA_SHARED_FIXED_BYTES + window * slope
+
+
+def windows_device_bytes(*, dedicated_bytes: int, shared_bytes: int, healthy_bytes: int) -> int:
     """A WDDM child's device-side bytes: its dedicated VRAM plus what it
-    spilled to shared memory above a healthy baseline, so a spill at load
-    does not read as a partial offload."""
-    return dedicated_bytes + max(0, shared_bytes - CUDA_SPILL_BASELINE_BYTES)
+    spilled to shared memory above its healthy level
+    (:func:`healthy_shared_bytes`), so a spill at load does not read as a
+    partial offload."""
+    return dedicated_bytes + max(0, shared_bytes - healthy_bytes)
 
 
 def fa_disabled_in(tail: Optional[str]) -> bool:
@@ -452,9 +476,9 @@ def visible_devices(
 # ===================== the brake's signals =====================
 
 
-def spill_level(spill_bytes: Optional[int]) -> int:
-    """The VRAM level of a spill above the baseline (calm when unknown)."""
-    if spill_bytes is None or spill_bytes < CUDA_SPILL_WARNING_BYTES:
+def spill_level(spill_bytes: int) -> int:
+    """The VRAM level of a spill above the baseline."""
+    if spill_bytes < CUDA_SPILL_WARNING_BYTES:
         return LEVEL_CALM
     if spill_bytes < CUDA_SPILL_CRITICAL_BYTES:
         return LEVEL_WARNING
@@ -462,67 +486,25 @@ def spill_level(spill_bytes: Optional[int]) -> int:
 
 
 @dataclass(frozen=True)
-class FusedSignals:
-    """What ``memory_brake.llama_step`` sees of a full-offload CUDA child."""
+class SpillSignals:
+    """The level and the damage evidence ``memory_brake.llama_step`` sees of
+    a full-offload CUDA child: the spill gauge alone."""
 
-    level: Optional[int]
+    level: int
     damage_bytes: Optional[int]
     damage_available: bool
-    kv_share: Optional[float]
-    footprint_share: Optional[float]
-    dominant: str
 
 
-def fuse_signals(
-    *,
-    ram_level: Optional[int],
-    ram_damage_delta: Optional[int],
-    ram_damage_available: bool,
-    spill_above_baseline: Optional[int],
-    spill_available: bool,
-    kv_vram_share: Optional[float],
-    ram_child_share: Optional[float],
-    vram_child_share: Optional[float],
-) -> FusedSignals:
-    """The RAM sensors and the spill gauge as one sample. The level is the
-    max of both; the resource at that level picks the attribution (VRAM on
-    a tie -- its lever, the window, is ours):
-
-    * VRAM (a spill at warning or worse): the window's KV over the VRAM is
-      the share a smaller ``-c`` returns, the child's dedicated + shared
-      bytes over the VRAM its footprint, and the spill itself the damage --
-      our bytes in system RAM paying the PCIe bus on every token;
-    * RAM: the CPU semantics with a KV share of 0 (the KV is on the device:
-      a smaller ``-c`` frees no RAM, the law says ``external``), the child's
-      host anonymous memory its footprint, the paging delta the damage.
-
-    A calm spill is never damage (a stable small spill would otherwise
-    count as a paging burst at every turn end). An unreadable RAM level does
-    not disable a readable spill; both unreadable is no level."""
-    vram_level = spill_level(spill_above_baseline) if spill_available else None
-    if ram_level is None and vram_level is None:
-        level = None
-    else:
-        level = max(ram_level or LEVEL_CALM, vram_level or LEVEL_CALM)
-    vram_dominant = vram_level is not None and (
-        (vram_level >= LEVEL_WARNING and vram_level >= (ram_level or LEVEL_CALM))
-        or ram_level is None
-    )
-    if vram_dominant:
-        warned = vram_level >= LEVEL_WARNING
-        return FusedSignals(
-            level=level,
-            damage_bytes=spill_above_baseline if warned else None,
-            damage_available=warned,
-            kv_share=kv_vram_share,
-            footprint_share=vram_child_share,
-            dominant=DOMINANT_VRAM,
-        )
-    return FusedSignals(
+def spill_signals(spill_above_baseline: int) -> SpillSignals:
+    """The spill above the child's baseline as the brake's level and
+    damage. A spill at warning or worse is its own damage -- our bytes in
+    system RAM paying the PCIe bus on every token. A calm spill is never
+    damage: a stable small spill would otherwise count as a paging burst
+    at every turn end."""
+    level = spill_level(spill_above_baseline)
+    warned = level >= LEVEL_WARNING
+    return SpillSignals(
         level=level,
-        damage_bytes=ram_damage_delta,
-        damage_available=ram_damage_available,
-        kv_share=0.0,
-        footprint_share=ram_child_share,
-        dominant=DOMINANT_RAM,
+        damage_bytes=spill_above_baseline if warned else None,
+        damage_available=warned,
     )

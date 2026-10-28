@@ -658,7 +658,9 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
 
    **Under memory pressure, the memory brake acts first** (Apple Silicon and the CPU engine; see
    [Engines](../dev/architecture/engines.md#the-memory-brake-mlx) and
-   [the CPU brake](../dev/architecture/engines.md#the-memory-brake-cpu)). It samples the
+   [the CPU brake](../dev/architecture/engines.md#the-memory-brake-cpu). On the CUDA engine only
+   a Windows spill of the model out of the card's memory drives it, the same way:
+   [the CUDA brake](../dev/architecture/engines.md#the-memory-brake-cuda)). It samples the
    computer's memory pressure at the start and the end of every turn and every minute while the
    model is idle, never during an answer. When it shrinks the working window, the next turn
    compacts earlier, and the end of the turn carries `memory_warning` with `reason: "pressure"`;

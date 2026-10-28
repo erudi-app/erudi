@@ -95,10 +95,11 @@ class LlamaSignals:
     damage_available: bool
     kv_share: Optional[float]
     footprint_share: Optional[float]
-    # What the brake's log line quotes (the child's bytes in the dominant
-    # resource).
+    # What the brake's log line quotes (the child's bytes in the resource the
+    # engine's sensors read: RAM on CPU, the GPU on CUDA).
     footprint_bytes: Optional[int]
-    # The RAM's cumulative paging counter (``damage_last`` tracks it).
+    # The RAM's cumulative paging counter (``damage_last`` tracks it); None
+    # on CUDA, whose damage is the spill gauge itself, read whole.
     ram_damage_total: Optional[int]
 
 
@@ -570,8 +571,9 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         An engine with a memory brake (CPU) first seeds the child's brake --
         the episode an unload of the same model carried, else the cap and
         faulty window remembered for its alias, else a fresh state -- and
-        after the read stamps its memory bound and checks its anonymous
-        memory against the window budget (`_llama_check_footprint`).
+        its first paging reading, and after the read stamps its memory bound
+        and checks its anonymous memory against the window budget
+        (`_llama_check_footprint`).
         CUDA overrides this hook to classify the placement first (see
         `CUDA_Engine`); MLX overrides it too -- its window is a preflight
         bound stamped at spawn, there is nothing to read back (see
@@ -580,6 +582,7 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         braked = cls._brake_bound()
         if braked:
             cls._llama_seed(handle)
+            handle["damage_last"] = memory_pressure.read_pressure().damage_total_bytes
         cls._read_props(handle)
         if braked:
             handle["memory_bound_tokens"] = (
@@ -769,7 +772,9 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
     #   with the cap the brake remembers for the alias, and passes it as `-c`;
     #   the CUDA engine sizes it against the GPU's memory (`cuda_memory`).
     # * The sensors: `_llama_read_signals` reads them into the law's terms --
-    #   the RAM's on CPU; on CUDA the RAM's fused with the VRAM spill.
+    #   the RAM's on CPU; on CUDA the Windows VRAM spill alone (no RAM sensor:
+    #   a full offload holds almost nothing a smaller window or an unload
+    #   would give back to the RAM), and nothing at all on Linux.
     # * The brake (`memory_brake.llama_step`) samples at the start of a turn,
     #   its end and idle (the shared monitor), under the generation lock:
     #   - respawn: the same model restarts in place with `-c = min(budget
@@ -853,8 +858,10 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
     def _llama_seed(cls, handle: Dict[str, Any]) -> None:
         """The new child's brake -- the episode an unload of the same model
         carried, else its remembered cap and faulty window, else a fresh
-        state -- and its first paging reading. A successful spawn forgets the
-        unload's record, whichever model it loads."""
+        state. No sensor is read here: the CPU engine takes its first paging
+        reading beside it, the CUDA engine stamps its spill baseline. A
+        successful spawn forgets the unload's record, whichever model it
+        loads."""
         state = cls._carried_brake(handle)
         if state is None:
             entry = cls._window_memory_entry(handle.get("alias"))
@@ -865,7 +872,6 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
             )
         handle["brake"] = state
         cls._brake_reload = None
-        handle["damage_last"] = memory_pressure.read_pressure().damage_total_bytes
 
     @classmethod
     def _llama_check_footprint(cls, handle: Dict[str, Any]) -> None:
@@ -956,13 +962,14 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         return cls.loaded_child_for(llm_id) and bool(cls._model.get("brake_respawned"))
 
     @classmethod
-    def _llama_warn_sensor_off(cls, unavailable: Optional[str]) -> None:
-        """The pressure is unreadable: the brake is off, said once."""
+    def _llama_warn_sensor_off(
+        cls, unavailable: Optional[str], *, sensor: str = "Memory pressure"
+    ) -> None:
+        """The brake's ``sensor`` is unreadable: the brake is off, said once."""
         if not cls._brake_sensor_warned:
             cls._brake_sensor_warned = True
             logger.warning(
-                f"[{cls.__name__}] Memory pressure unreadable "
-                f"({unavailable}); the memory brake is off"
+                f"[{cls.__name__}] {sensor} unreadable ({unavailable}); the memory brake is off"
             )
 
     @classmethod
@@ -971,7 +978,7 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         since the previous sample, the window's KV and the child's anonymous
         memory over the RAM. None -- the brake off for this sample, ONE
         WARNING per process -- when the level is unreadable. CUDA overrides
-        it to fuse the VRAM spill in."""
+        it with the VRAM spill gauge alone."""
         reading = memory_pressure.read_pressure()
         if reading.level is None:
             cls._llama_warn_sensor_off(reading.unavailable)

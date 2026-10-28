@@ -374,7 +374,7 @@ class TestReadVramInfo:
         assert memory_pressure.child_vram_bytes(1, CUDA_Engine._read_vram_info().processes) is None
         # The host's own GPU counters are never read here: the null provider.
         monkeypatch.setattr(memory_pressure, "_PROVIDER", memory_pressure._NullProvider())
-        assert memory_pressure.read_vram(1).spill_bytes is None
+        assert memory_pressure.read_vram(1, healthy_bytes=0).spill_bytes is None
 
 
 # =====================================================================

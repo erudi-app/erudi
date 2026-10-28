@@ -16,7 +16,8 @@ BaseEngine
         ├── CPU_Engine           (Popen + llama-server CPU, -ngl 0, ports 27200-27299;
         │                         sizes -c itself, binds the llama.cpp memory brake)
         └── CUDA_Engine          (Popen + llama-server CUDA, -ngl -1 with fit, 27200-27299;
-                                  sizes -c against the VRAM, binds the brake on a full offload)
+                                  sizes -c against the VRAM, binds the brake, which only a
+                                  Windows VRAM spill drives on a full offload)
 ```
 
 Concrete engines implement only the four hooks that are genuinely backend-specific:
@@ -384,8 +385,8 @@ MLX brake's safe points, pacing, episodes, unload and notices, and replaces the 
 and the useful-shrink test with a **respawn in place**. The law is
 `memory_brake.llama_step`; `BaseLlamaCppEngine._llama_brake_point` executes it and
 `CPU_Engine` binds it (`brake_point`, `begin_memory_window`, `memory_bound_tokens`, the
-respawn-aware `brake_reload_pending`). `CUDA_Engine` binds the same law over its own
-sensors ([below](#the-memory-brake-cuda)).
+respawn-aware `brake_reload_pending`). `CUDA_Engine` binds the same law over the Windows
+VRAM spill alone ([below](#the-memory-brake-cuda)).
 
 **Sensors** (`src/engines/memory_pressure.py`, one provider per OS; every Linux and
 Windows threshold is a starting value to calibrate on real machines):
@@ -399,9 +400,9 @@ Windows threshold is a starting value to calibrate on real machines):
 An unreadable level turns the brake off with one WARNING naming why; a missing paging
 counter (PDH denied) is one WARNING too, and the level then decides alone.
 `ERUDI_FORCE_MEMORY_PRESSURE=warning|critical` (QA only) forces the level and paging
-evidence on every RAM sample of both llama.cpp engines (on CUDA a full-offload child
-reads RAM pressure as `external`; the seam's `vram-warning|vram-critical` values force
-the spill instead: see [below](#the-memory-brake-cuda)).
+evidence on every RAM sample, which only the CPU engine takes (the CUDA engine reads no
+RAM sensor, so these values do nothing there; its seam values are
+`vram-warning|vram-critical`: see [below](#the-memory-brake-cuda)).
 
 **The rules**, per pressure episode:
 
@@ -505,15 +506,15 @@ engine's (`gguf_memory`). The window is passed with `-ngl -1 -fitt 1024`.
   disabled` WARN in the child's output, scanned after the probe) one WARNING says the
   window was sized on the wrong slope.
 - **The RAM ceiling does not bind** a full offload: the KV and the compute buffer live on
-  the device, the host keeps clean mapped file pages and pinned buffers. RAM pressure
-  still reaches the child through the brake's sensors.
+  the device, the host keeps clean mapped file pages, the fixed CUDA runtime and pinned
+  buffers. RAM pressure does not drive its brake either ([below](#the-memory-brake-cuda)).
 - **`ERUDI_VRAM_OVERRIDE_GB`** (QA only) stands in for the free VRAM of the sizing; the
   total is then the larger of the override and the real total. It never invents a GPU (NVML
   failed or saw none: it is ignored), and an empty value is unset.
 - Every CUDA constant that is not measured on the pinned build (the CUDA context, the
-  compute terms, the margins, the spill tiers and baseline, the classification
-  tolerance) is a starting value calibrated in QA on a Windows CUDA
-  machine and a Linux+NVIDIA one.
+  compute terms, the margins, the spill tiers, the classification tolerance) is a
+  starting value calibrated in QA on a Windows CUDA machine and a Linux+NVIDIA one. The
+  healthy Shared GPU memory level is derived from #661's Windows measurements.
 
 **Division of labour with fit.** Erudi fixes the window: fit never changes an explicit
 `-c`, and the brake's cap, the window memory, `/context` and the compaction threshold all
@@ -538,8 +539,8 @@ of respawns is deterministic and never reads the free VRAM a game left; it never
 to the fallback shape. A fresh sizing — and a fresh free reading — happens only at a
 load: a reap's reload, a swap back, the reload after an unload. On Linux the window is
 sized at spawn and never resized while the child runs: there is no spill to react to,
-and RAM pressure on a full-offload child is not the window's (below), so the brake there
-informs or unloads.
+and RAM pressure does not drive the CUDA brake (below), so the brake there has no signal
+and never acts.
 
 **One GPU.** The child sees one GPU, pinned by its NVML UUID
 (`CUDA_VISIBLE_DEVICES=GPU-<uuid>`), immune to ordering differences between NVML and the
@@ -558,8 +559,9 @@ classifies what fit did. "Partial" means some KV is not on the device — layers
 that is what breaks the VRAM attribution. llama.cpp's own `offloaded N/M layers to GPU`
 line decides when it reaches the child's output (it is an INFO line, hidden at the
 default verbosity). Otherwise the child's device bytes — NVML's per-process memory on
-Linux, `Dedicated + (Shared − 128 MiB)` on Windows, so a spill at load does not read as
-partial — are compared with a floor of what a full offload certainly holds: the weights
+Linux, `Dedicated + (Shared − the healthy level)` on Windows (the level is defined
+[below](#the-memory-brake-cuda)), so a spill at load does not read as partial — are
+compared with a floor of what a full offload certainly holds: the weights
 without `token_embd.weight` (the input embedding stays on the CPU) and without the MoE
 expert tensors, plus the KV the child really allocates (for a sliding-window model the
 exact mix of full and sliding layers when the GGUF carries the layer pattern, nothing
@@ -582,50 +584,65 @@ projector. The CPU engine's host-memory check is skipped for a child with GPU la
 ### The memory brake (CUDA)
 
 `CUDA_Engine` binds the CPU engine's hooks and runs the same law,
-`memory_brake.llama_step`, unchanged; `_llama_read_signals` fuses two sensors into its
-inputs (`cuda_memory.fuse_signals`):
+`memory_brake.llama_step`, unchanged, over one sensor: the Windows VRAM spill. RAM
+pressure never drives it — no shrink, no respawn, no unload, no notice — and the CUDA
+path reads no RAM sensor (`read_pressure`, the child's anonymous memory, the machine's
+RAM), neither at load nor at any sample. On a full offload the weights are mapped and
+evictable, the KV and the compute buffer are on the card, and the host keeps the fixed
+CUDA runtime and about 1 KiB of pinned buffer per window token: a smaller window or an
+unload gives almost nothing back to the RAM. (Under WDDM the child's private commit even
+counts its GPU allocations — #661 read 9053 MiB for a child holding 8383 MiB of
+dedicated VRAM — so it is no measure of what an unload would free.)
 
-- **The RAM half** is the CPU engine's (`memory_pressure.read_pressure`, the paging
-  counter, the child's anonymous memory).
-- **The VRAM half** is the spill. On Windows, WDDM satisfies an allocation that does not
-  fit from system RAM (the driver's "CUDA Sysmem Fallback Policy", on by default since
-  driver 536.40): the child keeps running, very slowly. NVML has no per-process memory
-  under WDDM, so `memory_pressure.read_vram` reads PDH's
-  `\GPU Process Memory(pid_<pid>_luid_..._phys_<n>)\Shared Usage` and `Dedicated Usage`
-  (English names, gauges) on the adapter holding most of the child's dedicated memory —
-  the discrete GPU on an Optimus laptop. The spill is the Shared Usage above the child's
-  baseline (its reading right after load, bounded by 128 MiB; a reading above 128 MiB is
-  one WARNING at a load and an INFO after a brake respawn). Warning at 256 MiB of spill,
-  critical at 1 GiB. PDH denied is one WARNING: spill detection is off, the RAM brake and
-  the window sized at spawn stand. On Linux there is no spill: an allocation that does
-  not fit fails, so the window is sized to fit, the engine never reads a spill there, and
-  the brake sees the RAM half alone.
+**The spill.** On Windows, WDDM satisfies an allocation that does not fit from system RAM
+(the driver's "CUDA Sysmem Fallback Policy", on by default since driver 536.40): the
+child keeps running, very slowly. NVML has no per-process memory under WDDM, so
+`memory_pressure.read_vram` reads PDH's
+`\GPU Process Memory(pid_<pid>_luid_..._phys_<n>)\Shared Usage` and `Dedicated Usage`
+(English names, gauges) on the adapter holding most of the child's dedicated memory —
+the discrete GPU on an Optimus laptop.
 
-The level is the higher of the two; the resource at that level decides the attribution
-(VRAM on a tie: its lever, the window, is ours):
+A healthy child already holds Shared GPU memory: its pinned host buffers, a fixed part
+plus the `CUDA_Host` compute buffer, which grows with the window. Its **healthy level**
+(`cuda_memory.healthy_shared_bytes`) is `128 MiB + window × 1 KiB` with Flash Attention,
+`128 MiB + window × 2 KiB` without (Flash Attention runs when it is proven for the model
+and llama.cpp did not disable it at load; the engine stamps that on the handle). #661
+measured 90 MiB at 8192 tokens, 106 MiB at 4096 and 130 MiB at 40960 — fixed parts of
+78-99 MiB — and a `CUDA_Host` compute buffer of 11.51 MiB at 8192 tokens with Flash
+Attention against 20.01 MiB with `-fa off`. The child's **baseline** is its reading right
+after load, bounded by the healthy level — the healthy level itself when there is no
+reading, never 0. A load reading above the healthy level is one WARNING at a load (the
+budget was too large or the card crowded) and an INFO after a brake respawn. The spill
+is the Shared Usage above the baseline: warning at 256 MiB, critical at 1 GiB
+(`cuda_memory.spill_signals`).
 
-| Dominant | KV share | Footprint share | Damage |
+| Level | KV share | Footprint share | Damage |
 |---|---|---|---|
-| VRAM (spill at warning or worse) | window × KV per token / VRAM | the child's dedicated + shared / VRAM | the spill itself: our bytes in system RAM pay the PCIe bus on every token |
-| RAM | 0: the KV is on the device, a smaller `-c` frees no RAM, so the notice is `external` and the window never moves | the child's anonymous memory / RAM | the paging since the previous sample |
+| The spill's tier | window × KV per token / VRAM | the child's dedicated + shared / VRAM | at warning or worse, the spill itself: our bytes in system RAM pay the PCIe bus on every token |
 
 A calm spill is never damage (a stable small spill would otherwise count as a paging
-burst at every turn end). An unreadable RAM level does not turn the brake off while the
-spill reads. Under RAM pressure a full-offload child can still be unloaded after two idle
-criticals when its host share passes the 5 % gate: the unload frees its host commit (the
-CUDA runtime, cuBLAS workspaces, pinned buffers).
+burst at every turn end). An unreadable gauge (PDH refused, no instance for the child) is
+one WARNING per process, "GPU spill gauge unreadable (...); the memory brake is off", and
+no sample acts.
+
+**Linux** has no spill: an allocation that does not fit fails, so the window is sized to
+fit at spawn. With RAM pressure out, the brake has no signal there: `brake_point`
+returns before any sensor is read, so nothing ever acts and no `Memory brake` line is
+written. The idle monitor still ticks; its samples return at once.
 
 **The QA seam** (`ERUDI_FORCE_MEMORY_PRESSURE`, never set in normal use): `warning` and
-`critical` force the RAM half, so on a full-offload child they draw the `external` notice
-and, under `critical` while the user is away, can drive the unload — never a shrink.
-`vram-warning` and `vram-critical` force the spill reading of `read_vram` to the healthy
-baseline plus the tier's threshold (256 MiB or 1 GiB above it; the dedicated VRAM stays
-the real one), so on Windows the spill path runs deterministically on a calm machine:
-a shrink at the turn end and a `-ngl -2` respawn once the user is away (warning), or a
-shrink and a respawn at the next turn boundary (critical), with the `acted` notice and
-the reload state. The forced spill is also seen at load (the spill-at-load WARNING, and
-possibly the device check's). On Linux the engine never reads the spill, so the VRAM
-values do nothing there.
+`critical` act inside the RAM reading, which the CUDA engine never takes, so they do
+nothing on CUDA. `vram-warning` and `vram-critical` force the Shared Usage `read_vram`
+returns to the healthy level the engine passes (`healthy_bytes`, derived from the
+child's window) plus the tier's threshold (256 MiB or 1 GiB; the dedicated VRAM stays
+the real one). The baseline is stamped at that healthy level, so the spill sits exactly
+at the tier at any window, and on Windows the spill path runs deterministically on a calm
+machine: a shrink at the turn end and a `-ngl -2` respawn once the user is away
+(warning), or a shrink and a respawn at the next turn boundary (critical), with the
+`acted` notice and the reload state; at the 4096 floor no shrink is possible and two idle
+criticals unload. The forced reading is also seen at load (the WARNING above the healthy
+level, and possibly the device check's). On Linux the brake reads nothing, so the VRAM
+values do nothing there either.
 
 A child whose window Erudi did not size (the fallback shape) or that loaded partly on the
 GPU is never sampled: `brake_point` returns before any sensor is read, so nothing — not
@@ -729,7 +746,7 @@ the memory brake's idle samples every 60 seconds under the same lock (see
 [The memory brake (MLX)](#the-memory-brake-mlx), [(CPU)](#the-memory-brake-cpu) and
 [(CUDA)](#the-memory-brake-cuda)); it starts for an engine that overrides `brake_point`, and
 on CUDA a child whose window Erudi did not size, or that loaded partly on the GPU, is never
-sampled.
+sampled, nor is any child off Windows.
 
 ## Embeddings
 

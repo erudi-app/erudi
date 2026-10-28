@@ -1,4 +1,4 @@
-"""The CUDA window, its placement classification and the fused brake signals
+"""The CUDA window, its placement classification and the spill brake signals
 (pure parts).
 
 ``src.engines.cuda_memory`` sizes the window the CUDA engine passes as ``-c``
@@ -6,9 +6,10 @@ for a FULL offload: ``min(0.9 x VRAM total, VRAM free at load) - margin``,
 minus the weights, the compute intercept and the CUDA context, divided by the
 per-token cost (KV + the compute slope). It classifies the placement llama.cpp's
 fit chose after load (a floor of what is certainly on the device against the
-measured bytes) and fuses the VRAM spill gauge with the RAM sensors into the
-inputs of ``memory_brake.llama_step``. Nothing here touches NVML, PDH or a
-GPU: every number is passed in, so these tables run on every CI leg.
+measured bytes), derives a child's healthy Shared GPU memory from its window,
+and turns the VRAM spill above it into the inputs of
+``memory_brake.llama_step``. Nothing here touches NVML, PDH or a GPU: every
+number is passed in, so these tables run on every CI leg.
 """
 
 from __future__ import annotations
@@ -376,19 +377,6 @@ def test_moe_with_every_expert_spilled_is_full():
     assert cm.placement_partial(predicted_bytes=naive, block_count=48, measured_bytes=measured)
 
 
-def test_windows_measures_dedicated_plus_the_spill_over_the_baseline():
-    assert cm.windows_device_bytes(dedicated_bytes=6 * GIB, shared_bytes=GIB) == (
-        6 * GIB + GIB - cm.CUDA_SPILL_BASELINE_BYTES
-    )
-    assert cm.windows_device_bytes(dedicated_bytes=6 * GIB, shared_bytes=64 * MIB) == 6 * GIB
-    # A spill at load does not read as partial.
-    predicted = _floor(weights=4 * GIB, kv=3 * GIB)
-    measured = cm.windows_device_bytes(dedicated_bytes=5 * GIB, shared_bytes=2 * GIB + 200 * MIB)
-    assert not cm.placement_partial(
-        predicted_bytes=predicted, block_count=28, measured_bytes=measured
-    )
-
-
 @pytest.mark.parametrize(
     "tail, expected",
     [
@@ -449,13 +437,65 @@ def test_a_user_cuda_visible_devices_restricts_the_selection(visible, ids):
     assert (None if chosen is None else [d["id"] for d in chosen]) == ids
 
 
-# ===================== the spill tiers and the fusion =====================
+# ===================== the healthy Shared level and the spill signals =====================
+
+
+@pytest.mark.parametrize(
+    "window, measured_mib",
+    # #661: Shared Usage of healthy raw llama-server children, Flash Attention
+    # on (typeperf): 0.5B at 8192, 27B at 4096, 4B at 40960.
+    [(8192, 90), (4096, 106), (40_960, 130)],
+)
+def test_the_661_healthy_readings_stay_under_the_healthy_level(window, measured_mib):
+    assert measured_mib * MIB < cm.healthy_shared_bytes(window, fa_on=True)
+
+
+def test_the_healthy_level_is_the_fixed_part_plus_the_host_slope():
+    fixed = cm.CUDA_SHARED_FIXED_BYTES
+    assert fixed == 128 * MIB
+    assert cm.healthy_shared_bytes(8192, fa_on=True) == fixed + 8192 * 1024
+    assert cm.healthy_shared_bytes(8192, fa_on=False) == fixed + 8192 * 2048
+    # #661: the CUDA_Host compute buffer grows by 24 MiB from 8192 to 32768
+    # tokens with FA (11.51 -> 35.51 MiB), and -fa off adds 8.5 MiB at 8192
+    # (20.01 MiB): the FA slope is 1 KiB per token, the non-FA one about 2.
+    fa_growth = cm.healthy_shared_bytes(32_768, fa_on=True) - cm.healthy_shared_bytes(
+        8192, fa_on=True
+    )
+    assert fa_growth == 24 * MIB
+
+
+def test_windows_measures_dedicated_plus_the_shared_above_the_healthy_level():
+    healthy = cm.healthy_shared_bytes(40_960, fa_on=True)
+    assert cm.windows_device_bytes(
+        dedicated_bytes=6 * GIB, shared_bytes=GIB, healthy_bytes=healthy
+    ) == (6 * GIB + GIB - healthy)
+    assert (
+        cm.windows_device_bytes(
+            dedicated_bytes=6 * GIB, shared_bytes=130 * MIB, healthy_bytes=healthy
+        )
+        == 6 * GIB
+    )
+    # A 262144-token window's healthy Shared memory is not device memory.
+    long_healthy = cm.healthy_shared_bytes(262_144, fa_on=True)
+    assert (
+        cm.windows_device_bytes(
+            dedicated_bytes=6 * GIB, shared_bytes=380 * MIB, healthy_bytes=long_healthy
+        )
+        == 6 * GIB
+    )
+    # A spill at load does not read as partial.
+    predicted = _floor(weights=4 * GIB, kv=3 * GIB)
+    measured = cm.windows_device_bytes(
+        dedicated_bytes=5 * GIB, shared_bytes=2 * GIB + 200 * MIB, healthy_bytes=healthy
+    )
+    assert not cm.placement_partial(
+        predicted_bytes=predicted, block_count=28, measured_bytes=measured
+    )
 
 
 @pytest.mark.parametrize(
     "spill, level",
     [
-        (None, mb.LEVEL_CALM),
         (0, mb.LEVEL_CALM),
         (255 * MIB, mb.LEVEL_CALM),
         (256 * MIB, mb.LEVEL_WARNING),
@@ -467,132 +507,39 @@ def test_the_spill_tiers(spill, level):
     assert cm.spill_level(spill) == level
 
 
-def _fuse(**over):
-    args = dict(
-        ram_level=mb.LEVEL_CALM,
-        ram_damage_delta=0,
-        ram_damage_available=True,
-        spill_above_baseline=0,
-        spill_available=True,
-        kv_vram_share=0.30,
-        ram_child_share=0.02,
-        vram_child_share=0.60,
+def test_a_spill_at_warning_or_worse_is_the_level_and_the_damage():
+    warning = cm.spill_signals(300 * MIB)
+    assert warning == cm.SpillSignals(
+        level=mb.LEVEL_WARNING, damage_bytes=300 * MIB, damage_available=True
     )
-    args.update(over)
-    return cm.fuse_signals(**args)
-
-
-def test_a_spill_at_warning_is_vram_dominant_and_its_gauge_is_the_damage():
-    fused = _fuse(spill_above_baseline=300 * MIB)
-    assert fused.level == mb.LEVEL_WARNING
-    assert fused.dominant == "vram"
-    assert fused.kv_share == 0.30
-    assert fused.footprint_share == 0.60
-    assert fused.damage_bytes == 300 * MIB
-    assert fused.damage_available is True
-    assert _fuse(spill_above_baseline=2 * GIB).level == mb.LEVEL_CRITICAL
+    critical = cm.spill_signals(2 * GIB)
+    assert critical.level == mb.LEVEL_CRITICAL
+    assert critical.damage_bytes == 2 * GIB
 
 
 def test_a_calm_spill_contributes_no_damage_at_turn_end():
     """M5: a stable 100 MiB spill must not promote a warning through the
     swap-burst rule at every turn end."""
-    fused = _fuse(spill_above_baseline=100 * MIB)
-    assert fused.level == mb.LEVEL_CALM
-    assert fused.damage_bytes == 0
+    signals = cm.spill_signals(100 * MIB)
+    assert signals == cm.SpillSignals(
+        level=mb.LEVEL_CALM, damage_bytes=None, damage_available=False
+    )
     decision = mb.llama_step(
         mb.BrakeState(),
         mb.Sample(
             point=mb.POINT_TURN_END,
             now=1000.0,
-            level=fused.level,
-            damage_bytes=fused.damage_bytes,
-            damage_available=fused.damage_available,
+            level=signals.level,
+            damage_bytes=signals.damage_bytes,
+            damage_available=signals.damage_available,
         ),
         mb.Context(
             window=40_960,
             ceiling=None,
             static_window=40_960,
-            footprint_share=fused.footprint_share,
-            kv_share=fused.kv_share,
+            footprint_share=0.60,
+            kv_share=0.30,
         ),
     )
     assert decision.level == mb.LEVEL_CALM
     assert decision.state.in_episode is False
-
-
-def test_ram_pressure_on_a_full_offload_child_is_external():
-    fused = _fuse(ram_level=mb.LEVEL_WARNING, ram_damage_delta=64 * MIB)
-    assert fused.dominant == "ram"
-    assert fused.kv_share == 0.0
-    assert fused.footprint_share == 0.02
-    assert fused.damage_bytes == 64 * MIB
-    decision = mb.llama_step(
-        mb.BrakeState(),
-        mb.Sample(
-            point=mb.POINT_TURN_END,
-            now=1000.0,
-            level=fused.level,
-            damage_bytes=fused.damage_bytes,
-            damage_available=fused.damage_available,
-        ),
-        mb.Context(
-            window=40_960,
-            ceiling=None,
-            static_window=40_960,
-            footprint_share=fused.footprint_share,
-            kv_share=fused.kv_share,
-        ),
-    )
-    assert decision.cap_change is None
-    assert decision.state.notice == mb.NOTICE_EXTERNAL
-
-
-def test_a_ram_critical_idle_may_unload_a_full_offload_child():
-    """M6: the unload frees the child's host commit; the law's own gate
-    (UNLOAD_MIN_SHARE on the measured host share) decides."""
-    fused = _fuse(ram_level=mb.LEVEL_CRITICAL, ram_child_share=0.08)
-    state = mb.BrakeState()
-    context = mb.Context(
-        window=40_960,
-        ceiling=None,
-        static_window=40_960,
-        footprint_share=fused.footprint_share,
-        kv_share=fused.kv_share,
-    )
-    unload = None
-    for now in (1000.0, 1000.0 + mb.BRAKE_IDLE_INTERVAL_S):
-        decision = mb.llama_step(
-            state,
-            mb.Sample(point=mb.POINT_IDLE, now=now, level=fused.level, last_used=0.0),
-            context,
-        )
-        state, unload = decision.state, decision.unload
-    assert unload is True
-
-
-def test_an_unreadable_ram_level_does_not_disable_a_readable_spill():
-    fused = _fuse(ram_level=None, ram_damage_available=False, spill_above_baseline=300 * MIB)
-    assert fused.level == mb.LEVEL_WARNING
-    assert fused.dominant == "vram"
-    calm = _fuse(ram_level=None, ram_damage_available=False, spill_above_baseline=0)
-    assert calm.level == mb.LEVEL_CALM
-
-
-def test_both_unreadable_is_no_level():
-    fused = _fuse(ram_level=None, spill_above_baseline=None, spill_available=False)
-    assert fused.level is None
-
-
-def test_a_tie_goes_to_vram_and_a_higher_ram_level_to_ram():
-    tie = _fuse(ram_level=mb.LEVEL_WARNING, spill_above_baseline=300 * MIB)
-    assert tie.dominant == "vram"
-    assert tie.level == mb.LEVEL_WARNING
-    ram = _fuse(ram_level=mb.LEVEL_CRITICAL, spill_above_baseline=300 * MIB)
-    assert ram.dominant == "ram"
-    assert ram.level == mb.LEVEL_CRITICAL
-
-
-def test_an_unavailable_spill_is_calm_on_the_vram_side():
-    fused = _fuse(spill_above_baseline=None, spill_available=False)
-    assert fused.level == mb.LEVEL_CALM
-    assert fused.dominant == "ram"
