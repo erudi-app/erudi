@@ -44,10 +44,14 @@ on:
       - "backend/src/**"
       - "scripts/docs/**"
       - ".github/workflows/docs.yml"
+  # backend/src too: the API reference is rendered from its docstrings, and a
+  # path mkdocstrings no longer finds must fail the pull request, not the
+  # publication on main.
   pull_request:
     paths:
       - "docs/**"
       - "mkdocs.yml"
+      - "backend/src/**"
       - "scripts/docs/**"
       - ".github/workflows/docs.yml"
   workflow_dispatch:
