@@ -120,4 +120,15 @@ describe("MarkdownRenderer math support (#303)", () => {
     expect(container.textContent).toContain("212,75\u202F$");
     expect(container.textContent).toContain("500\u202F$");
   });
+
+  it("renders inline and display math together with no KaTeX error", () => {
+    const { container } = renderMarkdown(
+      "Inline $x^2$ then display:\n\n$$\n\\int_0^1 x\\,dx\n$$\n\nDone."
+    );
+
+    expect(container.querySelectorAll(".katex").length).toBeGreaterThanOrEqual(2);
+    expect(container.querySelector(".katex-display")).toBeTruthy();
+    expect(container.querySelector(".katex-error")).toBeNull();
+    expect(container.querySelector(".katex-html")).toBeTruthy();
+  });
 });
