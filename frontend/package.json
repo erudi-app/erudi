@@ -64,7 +64,7 @@
     "vitest": "^4.1.9",
     "wait-on": "^8.0.5",
     "webpack": "^5.112.0",
-    "webpack-cli": "^7.2.3",
+    "webpack-cli": "^7.3.0",
     "webpack-dev-server": "^5.2.6"
   },
   "dependencies": {
@@ -76,7 +76,7 @@
     "electron-squirrel-startup": "^1.0.1",
     "electron-updater": "^6.8.9",
     "framer-motion": "^12.43.0",
-    "i18next": "^26.4.7",
+    "i18next": "^26.5.12",
     "katex": "^0.19.0",
     "lucide-react": "^0.507.0",
     "prop-types": "^15.8.1",
