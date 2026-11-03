@@ -42,15 +42,13 @@ const AUTO_EXPAND_MS = 2000;
 const COMPLETED_DISMISS_MS = 4000;
 const CANCELLED_DISMISS_MS = 2500;
 
-// The value outside a provider: no download, and nothing to cancel. The engine
-// switch reads it from the dialogs mounted next to the routes and from pages
-// rendered without the provider (tests), so it must never be undefined.
+// The value outside a provider: no download, and nothing to cancel -- what the
+// engine switch reads (`useEngineSwitch`), from pages rendered without the
+// provider (tests). Nothing else: starting a download needs the provider, so
+// `open` is absent rather than a silent no-op.
 export const DownloadModalContext = createContext({
-  open: () => {},
   isDownloading: false,
   cancelDownload: async () => {},
-  completionCount: 0,
-  lastCompletedAt: null,
 });
 
 export function DownloadModalProvider({ children }) {
@@ -87,6 +85,11 @@ export function DownloadModalProvider({ children }) {
   // The job the poll is allowed to act on. Cleared on cancel so a poll reply
   // already in flight cannot resurrect a job the backend has just dropped.
   const activeJobRef = useRef(null);
+  // The start POST while it is on the wire (no job id yet), and whether a
+  // cancel arrived during it: the job the backend is creating must then be
+  // cancelled as soon as its id is known, and never polled.
+  const startRef = useRef(null);
+  const cancelRequestedRef = useRef(false);
 
   useEffect(
     () => () => {
@@ -195,6 +198,9 @@ export function DownloadModalProvider({ children }) {
 
         if (isTerminal) {
           clearInterval(intervalRef.current);
+          // Concluded once: a second reply for this job (the explicit check a
+          // refused cancel makes, racing a tick) is ignored above.
+          activeJobRef.current = null;
           setIsDownloading(false);
           if (data.status === "completed") {
             setCompletionCount((c) => c + 1);
@@ -235,6 +241,35 @@ export function DownloadModalProvider({ children }) {
     [t, scheduleDismiss, settleCancelled, revealPanel]
   );
 
+  // POST the cancel for `id`. "cancelled" when acknowledged; "ended" when the
+  // backend refuses because the job is no longer running (400 STATE_CONFLICT:
+  // already completed, failed or cancelled; 422 "Download ended - cannot be
+  // cancelled": the transfer finished between two polls); "failed" otherwise,
+  // recorded here.
+  const requestCancel = useCallback(
+    async (id) => {
+      try {
+        const response = await tracedFetch(`${API_BASE_URL}/llms/downloads/${id}/cancel`, {
+          method: "POST",
+        });
+        if (response.ok) {
+          log.log(`Download cancelled for job ${id}`);
+          return "cancelled";
+        }
+        if (response.status === 400 || response.status === 422) {
+          log.log(`Download job ${id} had already ended when the cancel arrived`);
+          return "ended";
+        }
+        throw new Error(`Server responded with ${response.status}: ${response.statusText}`);
+      } catch (error) {
+        log.error("Failed to cancel download:", error);
+        setErrorMessage(t("downloads:errors.cancelFailed", { detail: error.message }));
+        return "failed";
+      }
+    },
+    [t]
+  );
+
   const handleConfirm = useCallback(async () => {
     setIsConfirmOpen(false);
     clearTimeout(dismissTimerRef.current);
@@ -250,6 +285,11 @@ export function DownloadModalProvider({ children }) {
     clearTimeout(expandTimerRef.current);
     expandTimerRef.current = setTimeout(() => setIsCollapsed(false), AUTO_EXPAND_MS);
 
+    cancelRequestedRef.current = false;
+    let startSettled;
+    startRef.current = new Promise((resolve) => {
+      startSettled = resolve;
+    });
     try {
       // Catalog models download by id; HF live-search hits have no id, so they
       // download by repo link via the dedicated endpoint (#122). Either way the
@@ -277,6 +317,14 @@ export function DownloadModalProvider({ children }) {
       }
       const job = await res.json();
 
+      if (cancelRequestedRef.current) {
+        // Cancelled while the start was on the wire: the widget has already
+        // settled as cancelled. Cancel the job the backend just created, and
+        // never poll it (an engine switch is about to restart the backend).
+        await requestCancel(job.id);
+        return;
+      }
+
       // Keep the job id around for cancellation.
       setJobId(job.id);
       activeJobRef.current = job.id;
@@ -286,36 +334,45 @@ export function DownloadModalProvider({ children }) {
         checkDownloadStatus(job.id);
       }, POLL_INTERVAL_MS);
     } catch (err) {
+      if (cancelRequestedRef.current) {
+        // A start that failed after the user cancelled it left nothing to
+        // cancel; reporting it would contradict the "cancelled" on screen.
+        return;
+      }
       log.error("Download start error:", err);
       const errorMsg = err.message || err.toString() || t("downloads:errors.unexpected");
       setErrorMessage(errorMsg);
       revealPanel();
       setIsDownloading(false);
       callbacksRef.current.onError?.(errorMsg);
+    } finally {
+      startRef.current = null;
+      startSettled();
     }
-  }, [model, checkDownloadStatus, t, revealPanel]);
+  }, [model, checkDownloadStatus, t, revealPanel, requestCancel]);
 
   const cancelDownload = useCallback(async () => {
     if (!jobId) {
-      // No job id yet: nothing to tell the backend, settle locally.
+      // No job id yet: settle locally at once. When the start is still on the
+      // wire, wait for it: it cancels the job it creates (see handleConfirm),
+      // so a caller about to restart the backend (the engine switch) does so
+      // only once that job is gone.
       settleCancelled();
       callbacksRef.current.onError?.(DOWNLOAD_CANCELLED);
+      if (startRef.current) {
+        cancelRequestedRef.current = true;
+        await startRef.current;
+      }
       return;
     }
 
-    try {
-      const response = await tracedFetch(`${API_BASE_URL}/llms/downloads/${jobId}/cancel`, {
-        method: "POST",
-      });
-
-      if (!response.ok) {
-        throw new Error(`Server responded with ${response.status}: ${response.statusText}`);
-      }
-
-      log.log(`Download cancelled for job ${jobId}`);
-    } catch (error) {
-      log.error("Failed to cancel download:", error);
-      setErrorMessage(t("downloads:errors.cancelFailed", { detail: error.message }));
+    const outcome = await requestCancel(jobId);
+    if (outcome === "ended") {
+      // Nothing was cancelled: the job ended on its own between two polls.
+      // Let its status conclude it (a completed model is counted and shown as
+      // such) rather than claim a cancel the backend refused.
+      await checkDownloadStatus(jobId);
+      return;
     }
 
     // The backend drops the job on acknowledgement: one more status poll would
@@ -324,7 +381,7 @@ export function DownloadModalProvider({ children }) {
     // user is never left with a widget they cannot get rid of.
     settleCancelled();
     callbacksRef.current.onError?.(DOWNLOAD_CANCELLED);
-  }, [jobId, t, settleCancelled]);
+  }, [jobId, settleCancelled, requestCancel, checkDownloadStatus]);
 
   // What the widget renders, derived from the raw job state above. Bytes and
   // speed come from the status reply's `total_bytes` and `time_left`: the
