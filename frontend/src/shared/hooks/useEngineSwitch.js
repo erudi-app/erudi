@@ -1,11 +1,20 @@
 import { useCallback, useEffect, useRef, useState } from "react";
+import { useDownloadModal } from "../../contexts/DownloadModalContext";
 import { createLogger } from "../../utils/logger";
 
 const log = createLogger("EngineSwitch");
 
 /**
  * Switching the inference engine: persist the preference, then restart the
- * backend, because the engine is chosen once per boot.
+ * backend, because the engine is chosen once per boot. Shared by the Settings
+ * card and the graphics-card dialog (`EngineFailureModal`).
+ *
+ * The restart kills a model download in progress, which the next boot marks
+ * as interrupted and deletes. So while one runs, `requestSwitch` does not
+ * switch: it raises `confirming` and waits. `confirm()` cancels the download
+ * through the download widget's own path (no failed poll, the widget reads
+ * "cancelled"), then switches; `dismiss()` changes nothing. A download that
+ * finished while the question was open is not cancelled.
  *
  * `persist(next)` writes `inference_backend` and rejects when it did not; the
  * caller owns the record of that failure (it knows which request it made).
@@ -16,19 +25,29 @@ const log = createLogger("EngineSwitch");
  * without the Electron bridge's event channel, `pending` ends with the
  * restart call.
  *
- * `pending` is raised before the preference is written and drops on every way
- * the switch can end: the preference not saved, no bridge to restart through,
- * the restart refused, or the re-read settled (success or failure).
+ * `pending` is raised before anything is cancelled or written and drops on
+ * every way the switch can end: the preference not saved, no bridge to
+ * restart through, the restart refused, or the re-read settled (success or
+ * failure).
  *
- * `switchTo(next)` resolves to the outcome: `"not-saved"`, `"saved"` (no
- * bridge: the choice applies at the next launch), `"restart-failed"` (saved,
- * applies at the next launch) or `"restarted"`.
+ * `requestSwitch(next)` resolves to the outcome: `"declined"` (the user kept
+ * the download), `"not-saved"`, `"saved"` (no bridge: the choice applies at
+ * the next launch), `"restart-failed"` (saved, applies at the next launch) or
+ * `"restarted"`.
  */
 export function useEngineSwitch({ persist, settled } = {}) {
+  const { isDownloading, cancelDownload } = useDownloadModal();
   const [pending, setPending] = useState(false);
+  const [confirmingNext, setConfirmingNext] = useState(null);
   const latestSettled = useRef(settled);
   const baseline = useRef(settled);
   const waiting = useRef(false);
+  const downloading = useRef(isDownloading);
+  const answer = useRef(null);
+
+  useEffect(() => {
+    downloading.current = isDownloading;
+  }, [isDownloading]);
 
   useEffect(() => {
     latestSettled.current = settled;
@@ -39,10 +58,15 @@ export function useEngineSwitch({ persist, settled } = {}) {
   }, [settled]);
 
   const switchTo = useCallback(
-    async (next) => {
+    async (next, { cancelDownloadFirst = false } = {}) => {
       setPending(true);
       waiting.current = false;
       baseline.current = latestSettled.current;
+      // Read at confirmation time, not when the question was asked: a download
+      // that has finished since has nothing left to cancel.
+      if (cancelDownloadFirst && downloading.current) {
+        await cancelDownload();
+      }
       try {
         await persist(next);
       } catch {
@@ -80,8 +104,42 @@ export function useEngineSwitch({ persist, settled } = {}) {
       }
       return "restarted";
     },
-    [persist, settled]
+    [persist, settled, cancelDownload]
   );
 
-  return { pending, switchTo };
+  const requestSwitch = useCallback(
+    (next) => {
+      if (!downloading.current) return switchTo(next);
+      setConfirmingNext(next);
+      return new Promise((resolve) => {
+        answer.current = resolve;
+      });
+    },
+    [switchTo]
+  );
+
+  const confirm = useCallback(async () => {
+    const next = confirmingNext;
+    const resolve = answer.current;
+    answer.current = null;
+    setConfirmingNext(null);
+    const outcome = await switchTo(next, { cancelDownloadFirst: true });
+    resolve?.(outcome);
+    return outcome;
+  }, [confirmingNext, switchTo]);
+
+  const dismiss = useCallback(() => {
+    const resolve = answer.current;
+    answer.current = null;
+    setConfirmingNext(null);
+    resolve?.("declined");
+  }, []);
+
+  return {
+    pending,
+    confirming: confirmingNext !== null,
+    requestSwitch,
+    confirm,
+    dismiss,
+  };
 }

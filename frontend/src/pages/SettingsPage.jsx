@@ -5,6 +5,7 @@ import Sidebar from "../components/Sidebar";
 import SettingsCard from "../components/SettingsCard";
 import ToggleSwitch from "../components/ToggleSwitch";
 import UpdatesCard from "../components/UpdatesCard";
+import EngineSwitchConfirmation from "../components/modals/EngineSwitchConfirmation";
 import { useUserSettings, useAppStartupInfo } from "../shared/hooks/api";
 import { useEngineSwitch } from "../shared/hooks/useEngineSwitch";
 import { setAppLanguage } from "../i18n";
@@ -137,8 +138,10 @@ export default function SettingsPage() {
 
   const handleInferenceBackendChange = (event) => {
     // A failed write is recorded by `useUserSettings`, a failed restart by the
-    // switch hook; the page has nothing to add to either.
-    engineSwitch.switchTo(event.target.value);
+    // switch hook; the page has nothing to add to either. During a download
+    // the hook asks first (`EngineSwitchConfirmation` below); the select stays
+    // on the saved value until the switch goes through.
+    engineSwitch.requestSwitch(event.target.value);
   };
 
   const handleLanguageChange = async (event) => {
@@ -261,6 +264,12 @@ export default function SettingsPage() {
               }
             />
           )}
+
+          <EngineSwitchConfirmation
+            isOpen={engineSwitch.confirming}
+            onConfirm={engineSwitch.confirm}
+            onCancel={engineSwitch.dismiss}
+          />
 
           <SettingsCard
             icon={<Languages className="w-5 h-5 text-[var(--fit-good)]" />}

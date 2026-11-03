@@ -3,10 +3,12 @@ import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, fireEvent, cleanup, waitFor, act } from "@testing-library/react";
 import EngineFailureModal from "./EngineFailureModal.jsx";
+import { DownloadModalContext } from "../../contexts/DownloadModalContext";
 import { apiClient } from "../../services/api/client";
 
 vi.mock("../../services/api/client", () => ({
   apiClient: { put: vi.fn() },
+  tracedFetch: vi.fn(),
 }));
 
 const STARTUP_NOTICE = {
@@ -187,5 +189,81 @@ describe("EngineFailureModal", () => {
     expect(screen.getByLabelText("Diagnostics to copy").value).toContain(
       "CUDA error: out of memory"
     );
+  });
+});
+
+/**
+ * Switching to processor mode restarts the backend, which would kill a download
+ * in progress. The dialog asks first, as a step of its own (no second modal on
+ * top of it), and on confirmation cancels the download before switching.
+ */
+describe("EngineFailureModal — switching during a download", () => {
+  let order;
+  let download;
+
+  beforeEach(() => {
+    order = [];
+    apiClient.put.mockImplementation(async () => {
+      order.push("put");
+      return { inference_backend: "cpu" };
+    });
+    window.backendAPI.restartBackend = vi.fn(async () => {
+      order.push("restart");
+    });
+    download = {
+      open: vi.fn(),
+      isDownloading: true,
+      completionCount: 0,
+      lastCompletedAt: null,
+      cancelDownload: vi.fn(async () => {
+        order.push("cancel");
+      }),
+    };
+  });
+
+  const renderWithDownload = (onDismiss) =>
+    render(
+      <DownloadModalContext.Provider value={download}>
+        <EngineFailureModal notice={STARTUP_NOTICE} onDismiss={onDismiss} />
+      </DownloadModalContext.Provider>
+    );
+
+  it("asks inside the same dialog and changes nothing yet", async () => {
+    const onDismiss = vi.fn();
+    renderWithDownload(onDismiss);
+
+    fireEvent.click(screen.getByRole("button", { name: /switch to processor mode/i }));
+
+    const dialogs = await screen.findAllByRole("dialog");
+    expect(dialogs).toHaveLength(1);
+    expect(dialogs[0].getAttribute("aria-label")).toBe("A download is in progress");
+    expect(dialogs[0].textContent).toMatch(/cancels the model download in progress/);
+    expect(order).toEqual([]);
+    expect(onDismiss).not.toHaveBeenCalled();
+  });
+
+  it("on confirmation cancels the download, then saves, restarts and closes", async () => {
+    const onDismiss = vi.fn();
+    renderWithDownload(onDismiss);
+
+    fireEvent.click(screen.getByRole("button", { name: /switch to processor mode/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel the download and switch" }));
+
+    await waitFor(() => expect(order).toEqual(["cancel", "put", "restart"]));
+    expect(apiClient.put).toHaveBeenCalledWith("/user_settings/", { inference_backend: "cpu" });
+    await waitFor(() => expect(onDismiss).toHaveBeenCalledTimes(1));
+  });
+
+  it("goes back to the dialog, with nothing changed, when the user keeps downloading", async () => {
+    const onDismiss = vi.fn();
+    renderWithDownload(onDismiss);
+
+    fireEvent.click(screen.getByRole("button", { name: /switch to processor mode/i }));
+    fireEvent.click(await screen.findByRole("button", { name: "Keep downloading" }));
+
+    expect(await screen.findByRole("button", { name: /switch to processor mode/i })).toBeTruthy();
+    expect(screen.getByRole("dialog").getAttribute("aria-label")).toMatch(/driver is too old/i);
+    expect(order).toEqual([]);
+    expect(onDismiss).not.toHaveBeenCalled();
   });
 });

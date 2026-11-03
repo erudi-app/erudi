@@ -312,8 +312,9 @@ No. One backend is selected per session by the detection cascade.
 Partly, and only on a machine running the CUDA engine (or one already pinned back from
 it) — Settings → Inference engine offers `Automatic` (the hardware decides) and
 `Processor only`, which pins the CPU engine on a machine that would otherwise use its
-NVIDIA GPU and leaves the card untouched. Erudi restarts its engine to apply the change.
-macOS has no such setting: the
+NVIDIA GPU and leaves the card untouched. Erudi restarts its engine to apply the change;
+while a model download is in progress it asks first, because the restart cancels the
+download, which then starts over from the beginning. macOS has no such setting: the
 Apple silicon engine is the only one there, so the choice would do nothing. There is no
 way to force the GPU on hardware where it was not detected, and no way to pick MLX or
 CUDA specifically. `ERUDI_FORCE_CPU=1` remains the developer override and wins over the

@@ -42,7 +42,16 @@ const AUTO_EXPAND_MS = 2000;
 const COMPLETED_DISMISS_MS = 4000;
 const CANCELLED_DISMISS_MS = 2500;
 
-const DownloadModalContext = createContext();
+// The value outside a provider: no download, and nothing to cancel. The engine
+// switch reads it from the dialogs mounted next to the routes and from pages
+// rendered without the provider (tests), so it must never be undefined.
+export const DownloadModalContext = createContext({
+  open: () => {},
+  isDownloading: false,
+  cancelDownload: async () => {},
+  completionCount: 0,
+  lastCompletedAt: null,
+});
 
 export function DownloadModalProvider({ children }) {
   const { t } = useTranslation();
@@ -208,6 +217,12 @@ export function DownloadModalProvider({ children }) {
           }
         }
       } catch (err) {
+        if (activeJobRef.current !== id) {
+          // The job was cancelled while this poll was on the wire (the engine
+          // switch then restarts the backend under it): its failure says
+          // nothing about a download the user still has.
+          return;
+        }
         log.error(`Status check failed for download job ${id}; polling stopped`, err);
         clearInterval(intervalRef.current);
         setIsDownloading(false);
@@ -328,6 +343,9 @@ export function DownloadModalProvider({ children }) {
       value={{
         open,
         isDownloading,
+        // The widget's Cancel, also used by the engine switch: the restart it
+        // needs would otherwise kill the download mid-transfer.
+        cancelDownload,
         completionCount,
         lastCompletedAt,
       }}

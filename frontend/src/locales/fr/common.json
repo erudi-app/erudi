@@ -77,5 +77,11 @@
     "downloading": "Téléchargement de <v>v{{version}}</v>… <pct>{{percent}}</pct>",
     "ready": "<v>v{{version}}</v> prête — <install>redémarrer pour installer</install>",
     "dismiss": "Ignorer la notification de mise à jour"
+  },
+  "engineSwitch": {
+    "downloadTitle": "Un téléchargement est en cours",
+    "downloadBody": "Changer de moteur d'inférence redémarre le moteur d'Erudi, ce qui annule le téléchargement du modèle en cours. Il faudra le relancer depuis le début.",
+    "cancelAndSwitch": "Annuler le téléchargement et changer",
+    "keepDownloading": "Continuer le téléchargement"
   }
 }

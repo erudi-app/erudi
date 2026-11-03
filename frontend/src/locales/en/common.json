@@ -77,5 +77,11 @@
     "downloading": "Downloading <v>v{{version}}</v>… <pct>{{percent}}</pct>",
     "ready": "<v>v{{version}}</v> ready — <install>restart to install</install>",
     "dismiss": "Dismiss update notification"
+  },
+  "engineSwitch": {
+    "downloadTitle": "A download is in progress",
+    "downloadBody": "Changing the inference engine restarts Erudi's engine, which cancels the model download in progress. You will have to start it again from the beginning.",
+    "cancelAndSwitch": "Cancel the download and switch",
+    "keepDownloading": "Keep downloading"
   }
 }

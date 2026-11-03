@@ -25,6 +25,7 @@ vi.mock("../components/Sidebar", () => ({
 }));
 
 import SettingsPage from "./SettingsPage";
+import { DownloadModalContext } from "../contexts/DownloadModalContext";
 import i18n from "../i18n";
 
 function renderPage() {
@@ -32,6 +33,16 @@ function renderPage() {
     <MemoryRouter initialEntries={["/erudi/settings"]}>
       <SettingsPage />
     </MemoryRouter>
+  );
+}
+
+function pageWithDownload(download) {
+  return (
+    <DownloadModalContext.Provider value={download}>
+      <MemoryRouter initialEntries={["/erudi/settings"]}>
+        <SettingsPage />
+      </MemoryRouter>
+    </DownloadModalContext.Provider>
   );
 }
 
@@ -204,5 +215,104 @@ describe("SettingsPage — switching the inference engine", () => {
 
     await waitFor(() => expect(startupGets()).toHaveLength(2));
     await waitFor(() => expect(select.disabled).toBe(false));
+  });
+});
+
+/**
+ * The restart kills a download in progress, which then comes back "interrupted"
+ * and has to start over. While one runs, switching asks first, names that
+ * consequence, and on confirmation cancels the download cleanly before the
+ * switch.
+ */
+describe("SettingsPage — switching the engine during a download", () => {
+  let order;
+  let download;
+
+  beforeEach(() => {
+    order = [];
+    appStartup = { backend_type: "cuda" };
+    routeGets(settingsWith("auto"));
+    putMock.mockImplementation(async () => {
+      order.push("put");
+      return settingsWith("cpu");
+    });
+    installBridge({
+      restartBackend: vi.fn(async () => {
+        order.push("restart");
+        return { ok: true };
+      }),
+    });
+    download = {
+      open: vi.fn(),
+      isDownloading: true,
+      completionCount: 0,
+      lastCompletedAt: null,
+      cancelDownload: vi.fn(async () => {
+        order.push("cancel");
+      }),
+    };
+  });
+
+  const askForCpu = async () => {
+    const select = await screen.findByLabelText("Inference engine");
+    await waitFor(() => expect(select.disabled).toBe(false));
+    fireEvent.change(select, { target: { value: "cpu" } });
+    return select;
+  };
+
+  it("asks first, naming the cancelled download, and changes nothing yet", async () => {
+    render(pageWithDownload(download));
+    const select = await askForCpu();
+
+    const dialog = await screen.findByRole("dialog", { name: "A download is in progress" });
+    expect(dialog.textContent).toMatch(/cancels the model download in progress/);
+    expect(dialog.textContent).toMatch(/start it again from the beginning/);
+    expect(putMock).not.toHaveBeenCalled();
+    expect(window.backendAPI.restartBackend).not.toHaveBeenCalled();
+    expect(download.cancelDownload).not.toHaveBeenCalled();
+    expect(select.value).toBe("auto");
+  });
+
+  it("on confirmation cancels the download, then saves and restarts", async () => {
+    render(pageWithDownload(download));
+    await askForCpu();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Cancel the download and switch" }));
+
+    await waitFor(() => expect(order).toEqual(["cancel", "put", "restart"]));
+    expect(putMock).toHaveBeenCalledWith("/user_settings/", { inference_backend: "cpu" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+
+  it("keeps everything as it was when the user keeps downloading", async () => {
+    render(pageWithDownload(download));
+    const select = await askForCpu();
+
+    fireEvent.click(await screen.findByRole("button", { name: "Keep downloading" }));
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(order).toEqual([]);
+    expect(select.value).toBe("auto");
+    expect(select.disabled).toBe(false);
+  });
+
+  it("does not cancel a download that finished while the question was open", async () => {
+    const { rerender } = render(pageWithDownload(download));
+    await askForCpu();
+    await screen.findByRole("dialog", { name: "A download is in progress" });
+
+    rerender(pageWithDownload({ ...download, isDownloading: false }));
+    fireEvent.click(screen.getByRole("button", { name: "Cancel the download and switch" }));
+
+    await waitFor(() => expect(order).toEqual(["put", "restart"]));
+    expect(download.cancelDownload).not.toHaveBeenCalled();
+  });
+
+  it("switches straight away when no download is running", async () => {
+    render(pageWithDownload({ ...download, isDownloading: false }));
+    await askForCpu();
+
+    await waitFor(() => expect(order).toEqual(["put", "restart"]));
+    expect(screen.queryByRole("dialog")).toBeNull();
   });
 });

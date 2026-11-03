@@ -47,6 +47,7 @@ function Consumer() {
   return (
     <>
       <button onClick={() => ctx.open(currentModel, { onComplete, onError })}>OPEN</button>
+      <button onClick={() => ctx.cancelDownload()}>CANCEL_FROM_APP</button>
       <span data-testid="downloading">{String(ctx.isDownloading)}</span>
       <span data-testid="completions">{String(ctx.completionCount)}</span>
       <span data-testid="lastCompleted">{ctx.lastCompletedAt === null ? "null" : "set"}</span>
@@ -296,6 +297,83 @@ describe("DownloadModalContext user cancel", () => {
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith(DOWNLOAD_CANCELLED);
     expect(onComplete).not.toHaveBeenCalled();
+  });
+});
+
+// Switching the inference engine restarts the backend, which would kill a
+// running download and leave it "interrupted" at the next boot. The engine
+// switch cancels it first, through the same path as the widget's Cancel.
+describe("DownloadModalContext cancel from elsewhere in the app", () => {
+  it("cancels the running job through the endpoint and settles as cancelled", async () => {
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status: "running", progress: 10, time_left: 60 }),
+    });
+    renderProvider();
+    await startAndPollOnce();
+    expect(val("downloading")).toBe("true");
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("CANCEL_FROM_APP"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const cancel = tracedFetchMock.mock.calls.find(
+      ([u, o]) => o?.method === "POST" && String(u).endsWith("/cancel")
+    );
+    expect(String(cancel[0])).toMatch(/\/llms\/downloads\/job1\/cancel$/);
+    expect(val("downloading")).toBe("false");
+    expect(screen.getByText("Download cancelled")).toBeTruthy();
+    expect(onError).toHaveBeenCalledWith(DOWNLOAD_CANCELLED);
+  });
+
+  it("does not turn a status poll already in flight into a failure", async () => {
+    // The backend goes down right after the cancel (the engine restart): the
+    // poll that was on the wire fails, and must be ignored, not reported.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let failPoll;
+    renderProvider();
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status: "running", progress: 10, time_left: 60 }),
+    });
+    await startAndPollOnce();
+    statusResponder = () =>
+      new Promise((_resolve, reject) => {
+        failPoll = () => reject(new TypeError("Failed to fetch"));
+      });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000); // a second poll, left pending
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("CANCEL_FROM_APP"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      failPoll();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(screen.getByText("Download cancelled")).toBeTruthy();
+    expect(screen.queryByText(/An error occured during download/)).toBeNull();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(DOWNLOAD_CANCELLED);
+    expect(errors.mock.calls.map((c) => String(c[0])).join("\n")).not.toMatch(/Status check/);
+    errors.mockRestore();
+  });
+});
+
+describe("DownloadModalContext without a provider", () => {
+  it("reports no download and offers a harmless cancel", async () => {
+    const seen = {};
+    function Probe() {
+      Object.assign(seen, useDownloadModal());
+      return null;
+    }
+    render(<Probe />);
+    expect(seen.isDownloading).toBe(false);
+    await expect(seen.cancelDownload()).resolves.toBeUndefined();
   });
 });
 

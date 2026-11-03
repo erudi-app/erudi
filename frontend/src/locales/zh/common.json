@@ -77,5 +77,11 @@
     "downloading": "正在下载 <v>v{{version}}</v>… <pct>{{percent}}</pct>",
     "ready": "<v>v{{version}}</v> 已就绪 — <install>重启以安装</install>",
     "dismiss": "关闭更新通知"
+  },
+  "engineSwitch": {
+    "downloadTitle": "正在下载",
+    "downloadBody": "更换推理引擎会重启 Erudi 的引擎，并取消正在进行的模型下载。之后需要从头重新开始下载。",
+    "cancelAndSwitch": "取消下载并切换",
+    "keepDownloading": "继续下载"
   }
 }

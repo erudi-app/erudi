@@ -17,6 +17,8 @@ vi.mock("./components/UpdateBanner", () => ({ default: () => null }));
 vi.mock("./components/InteractionLogger", () => ({ default: () => null }));
 vi.mock("./contexts/DownloadModalContext", () => ({
   DownloadModalProvider: ({ children }) => <>{children}</>,
+  // Read by the engine dialog's switch (no download in these tests).
+  useDownloadModal: () => ({ isDownloading: false, cancelDownload: async () => {} }),
 }));
 vi.mock("./contexts/KnowledgeBaseContext", () => ({
   KnowledgeBaseProvider: ({ children }) => <>{children}</>,
