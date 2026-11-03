@@ -717,16 +717,18 @@ paged the child back in). While a contention holds, a light task
 (`CUDA_Engine._contention_tick`, every 10 s, under the generation lock, never during a
 turn) samples the gauge alone — never `brake_point(idle)`, whose samples count toward
 an unload — so its end is seen between turns. The reading is cached on the handle
-(`gpu_contention`: `active`, `evicted_bytes`, `device_free_bytes`, `read_at`); a missing
-reading (a respawned child has no PDH instance for about 6 s, NVML fails) leaves it
-unchanged, silently, and each transition is one INFO line, `GPU contention
+(`gpu_contention`: `active`, `evicted_bytes`, `device_free_bytes`, `read_at`) and a brake
+respawn carries it to the new child, on the same pinned GPU, until that child's first
+reading replaces it; a missing reading (a respawned child has no PDH instance for about
+6 s, NVML fails) leaves it unchanged, silently, and each transition is one INFO line, `GPU contention
 started|ended: evicted_mib=..., device_free_mib=...`. It never acts on the child.
 
 A stateful turn end turns an active contention into `memory_warning` with
 `reason: "gpu_contention"`, again at every turn while it lasts; a brake notice
 (`pressure`, `pressure_external`) comes first, and `bound` is not evaluated after it.
-`GET /erudi/hardware/gpu_contention/status` returns the cached reading (`active: false`
-and no numbers on every other engine and OS and without a live child); it never reads a
+`GET /erudi/hardware/gpu_contention/status` returns the cached reading (`active: null`,
+unknown, and no numbers on every other engine and OS and without a live child: only a
+reading with `active: false` drops the notice); it never reads a
 sensor or takes the generation lock, and its `/status` suffix keeps its access line at
 DEBUG. The conversation page polls it only while it shows that notice.
 

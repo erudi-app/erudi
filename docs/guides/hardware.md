@@ -233,7 +233,9 @@ Returns whether another app is taking the graphics card's memory from the loaded
 (`active`), with the model's evicted bytes, the card's free bytes and when they were read:
 the CUDA engine's last cached reading on Windows (see
 [the eviction gauge](../dev/architecture/engines.md#the-memory-brake-cuda)). Every other
-engine and OS, and a machine with no model loaded, answer `active: false` with no numbers.
+engine and OS, a machine with no model loaded, and a model the engine just restarted and
+has not read yet answer `active: null` (unknown) with no numbers; only `active: false`
+says the contention is over.
 It never reads a sensor itself; the conversation page polls it only while it shows the
 `gpu_contention` notice.
 

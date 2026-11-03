@@ -421,22 +421,37 @@ class TestGpuContentionStatus:
         assert resp.status_code == 200
         assert resp.json() == _ContendedEngine.state
 
-    async def test_an_engine_without_a_contention_state_is_not_contended(self, monkeypatch):
-        """CPU, MLX, Linux CUDA, no child loaded: nothing squeezes a card."""
+    async def test_an_engine_without_a_contention_state_is_unknown(self, monkeypatch):
+        """CPU, MLX, Linux CUDA, no child loaded, a respawned child not read
+        yet: no reading says neither contended nor over (``active: null``),
+        so the conversation page keeps a notice it shows."""
         monkeypatch.setattr(config, "LLM_Engine", BaseEngine)
         resp = await _get_status(_status_app())
         assert resp.json() == {
-            "active": False,
+            "active": None,
             "evicted_bytes": None,
             "device_free_bytes": None,
             "read_at": None,
         }
 
-    async def test_the_real_cuda_engine_without_a_child_is_not_contended(self, monkeypatch):
+    async def test_no_engine_is_unknown(self, monkeypatch):
+        monkeypatch.setattr(config, "LLM_Engine", None)
+        resp = await _get_status(_status_app())
+        assert resp.json()["active"] is None
+
+    async def test_the_real_cuda_engine_without_a_child_is_unknown(self, monkeypatch):
         from src.engines.cuda_engine import CUDA_Engine
 
         monkeypatch.setattr(config, "LLM_Engine", CUDA_Engine)
         monkeypatch.setattr(CUDA_Engine, "_model", None)
+        resp = await _get_status(_status_app())
+        assert resp.json()["active"] is None
+
+    async def test_a_reading_that_contention_ended_is_false(self, monkeypatch):
+        """Only a reading says the contention is over."""
+        ended = {**_ContendedEngine.state, "active": False}
+        monkeypatch.setattr(_ContendedEngine, "state", ended)
+        monkeypatch.setattr(config, "LLM_Engine", _ContendedEngine)
         resp = await _get_status(_status_app())
         assert resp.json()["active"] is False
 

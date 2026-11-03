@@ -161,8 +161,9 @@ export default function ConversationPage() {
   // The `gpu_contention` notice says another app is taking the graphics card
   // NOW: while it shows, the cached contention state is polled about every
   // 10 s (a setTimeout chain), and the notice drops once the contention
-  // ended. The chain pauses while a turn runs -- its end re-evaluates the
-  // notice -- and a failed poll keeps the notice. The clear is functional
+  // ended (`active === false`; `null`, no reading, is not an end). The chain
+  // pauses while a turn runs -- its end re-evaluates the notice -- and a
+  // failed poll keeps the notice. The clear is functional
   // and touches a gpu_contention notice only, never a warning of another
   // reason that replaced it meanwhile.
   const contentionShown = memoryWarning?.reason === "gpu_contention";

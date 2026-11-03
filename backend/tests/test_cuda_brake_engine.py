@@ -1145,6 +1145,45 @@ def test_contention_is_sampled_after_the_brakes_decision_on_the_live_child(windo
     assert new["gpu_contention"]["active"] is True
 
 
+def test_a_brake_respawn_keeps_the_contention_until_the_new_child_reads(windows, monkeypatch):
+    """The respawned child sits on the same pinned GPU, and its PDH
+    instance appears seconds after the spawn: until its first reading, the
+    contention the old child saw goes on (the notice and the monitor follow
+    it); that first reading replaces it."""
+    from src.domains.hardware.services import gpu_contention_status
+    from src.core import config
+
+    handle = _load(windows)
+    _squeeze(windows)
+    CUDA_Engine.brake_point("idle")
+    assert _contention() is True
+    old_pid = handle["pid"]
+    real_read_vram = memory_pressure.read_vram
+
+    def _new_child_not_listed_yet(pid, *, healthy_bytes):
+        if pid != old_pid:
+            return VramReading(
+                None, None, unavailable=f"no GPU Process Memory instance for pid {pid}"
+            )
+        return real_read_vram(pid, healthy_bytes=healthy_bytes)
+
+    monkeypatch.setattr(memory_pressure, "read_vram", _new_child_not_listed_yet)
+    windows.spill = 2 * GIB
+    assert CUDA_Engine.brake_point("turn_start", llm_id=7).action == "shrink+respawn"
+    new = CUDA_Engine._model
+    assert new is not handle
+    assert _contention() is True
+    monkeypatch.setattr(config, "LLM_Engine", CUDA_Engine)
+    assert gpu_contention_status().active is True
+    # The new child's first reading replaces the carried one.
+    monkeypatch.setattr(memory_pressure, "read_vram", real_read_vram)
+    windows.spill = 0
+    _squeeze(windows, evicted=0, free=9430 * MIB)
+    CUDA_Engine.brake_point("idle")
+    assert _contention() is False
+    assert CUDA_Engine._model is new
+
+
 def test_contention_at_turn_start_samples_only_the_child_the_turn_uses(windows):
     _load(windows)
     _squeeze(windows)

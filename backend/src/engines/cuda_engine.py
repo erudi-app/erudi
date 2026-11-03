@@ -1122,6 +1122,25 @@ class CUDA_Engine(BaseLlamaCppEngine):
             logger.warning(f"[{cls.__name__}] GPU contention sample failed ({type(exc).__name__})")
 
     @classmethod
+    def _llama_brake_respawn(
+        cls,
+        handle: Dict[str, Any],
+        decision: "memory_brake.Decision",
+        point: str,
+        footprint: Optional[int],
+    ) -> bool:
+        """The shared respawn, plus the eviction gauge's last reading carried
+        to the new child: it sits on the same pinned GPU, and its PDH
+        instance appears seconds after the spawn -- until its first reading
+        replaces the carried one, the contention goes on (the notice and
+        the contention monitor keep following it)."""
+        respawned = super()._llama_brake_respawn(handle, decision, point, footprint)
+        state = handle.get("gpu_contention")
+        if respawned and isinstance(state, dict) and isinstance(cls._model, dict):
+            cls._model["gpu_contention"] = dict(state)
+        return respawned
+
+    @classmethod
     def gpu_contention_state(cls) -> Optional[Dict[str, Any]]:
         """The loaded, live child's last eviction-gauge reading, cached:
         never a fresh read (the status endpoint and the turn end read it

@@ -10,7 +10,7 @@ import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-libra
 //  - while that notice shows, and only then, the page polls
 //    `GET /hardware/gpu_contention/status` about every 10 s (a setTimeout
 //    chain, paused while a turn runs) and drops the notice once `active` is
-//    false; a failed poll keeps it;
+//    false; a failed poll, or `active: null` (no reading), keeps it;
 //  - the poll only ever clears a gpu_contention notice: a warning of another
 //    reason that replaced it stays.
 
@@ -221,6 +221,28 @@ describe("ConversationPage gpu contention notice", () => {
     await elapse(POLL_MS);
     expect(statusCalls()).toHaveLength(2);
     expect(screen.getByRole("alert").textContent).toBe(CONTENTION);
+  });
+
+  it("keeps the notice and keeps polling while the status is unknown (active: null)", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await contendedTurn(turn);
+    await screen.findByRole("alert");
+
+    // No reading (a model the engine just restarted, not read yet) is not
+    // the end of the contention.
+    statusMock.mockImplementation(async () => ({ active: null }));
+    await elapse(POLL_MS);
+    await elapse(POLL_MS);
+    expect(statusCalls()).toHaveLength(2);
+    expect(screen.getByRole("alert").textContent).toBe(CONTENTION);
+
+    statusMock.mockImplementation(async () => ({ active: false }));
+    await elapse(POLL_MS);
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
   });
 
   it("does not poll while a turn runs", async () => {

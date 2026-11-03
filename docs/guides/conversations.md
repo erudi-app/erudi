@@ -676,7 +676,8 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    end carry `memory_warning` with `reason: "gpu_contention"` for as long as it lasts — after a
    brake notice, before `bound`, which is then not evaluated. While the renderer shows that
    notice, and no turn runs, it polls `GET /hardware/gpu_contention/status` about every 10 s and
-   drops the notice once `active` is false; a failed poll keeps it.
+   drops the notice once `active` is false; a failed poll, or `active: null` (no reading),
+   keeps it.
    When the brake unloaded the model while the user was away, the next turn first sends
    `memory_reload` (without `reason`; after the idle timeout's own unload it carries
    `reason: "idle"` and the copy names the pause instead of memory) and the renderer shows a reload state in the pending answer until the model

@@ -264,7 +264,8 @@ async def get_gpu_contention_status():
     """Whether another app is taking the graphics card from the loaded model.
 
     The conversation page polls it (about every 10 s) only while it shows the
-    ``gpu_contention`` notice, and drops the notice once ``active`` is false.
+    ``gpu_contention`` notice, and drops the notice once ``active`` is false
+    (``null``, no reading, keeps it).
     It returns the CUDA engine's last cached reading -- taken at a turn start,
     by the idle monitor, and every 10 s while a contention lasts -- and never
     reads a sensor or waits for the generation lock itself. The ``/status``

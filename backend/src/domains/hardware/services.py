@@ -149,12 +149,14 @@ def recommended_param_range(profile: HardwareProfile) -> tuple[float, float]:
 def gpu_contention_status() -> GpuContentionStatus:
     """Whether another app is taking the graphics card from the loaded
     model: the engine's cached reading (``gpu_contention_state``), never a
-    fresh one, so it never waits for a generation. Not contended without a
-    reading (every engine but CUDA on Windows, no model loaded)."""
+    fresh one, so it never waits for a generation. Unknown (``active``
+    None) without a reading -- every engine but CUDA on Windows, no model
+    loaded, a respawned child not read yet: only a reading says a
+    contention is over."""
     engine = config.LLM_Engine
     state = engine.gpu_contention_state() if engine is not None else None
     if not state:
-        return GpuContentionStatus(active=False)
+        return GpuContentionStatus(active=None)
     return GpuContentionStatus(**state)
 
 
