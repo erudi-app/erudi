@@ -284,6 +284,23 @@ describe("SettingsPage — switching the engine during a download", () => {
     await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
   });
 
+  it("switches once when the confirmation is clicked twice", async () => {
+    // The dialog stays in the DOM through its exit animation, still holding
+    // the confirmation it was rendered with.
+    render(pageWithDownload(download));
+    await askForCpu();
+
+    const confirm = await screen.findByRole("button", { name: "Cancel the download and switch" });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+
+    await waitFor(() => expect(order).toEqual(["cancel", "put", "restart"]));
+    await act(async () => {});
+    expect(order).toEqual(["cancel", "put", "restart"]);
+    expect(download.cancelDownload).toHaveBeenCalledTimes(1);
+    expect(window.backendAPI.restartBackend).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps everything as it was when the user keeps downloading", async () => {
     render(pageWithDownload(download));
     const select = await askForCpu();

@@ -18,6 +18,7 @@ const { classifyStderrLine } = require("./utils/backendStderr");
 const { shouldRetrySpawn } = require("./utils/backendRetry");
 const { buildBackendSpawnOptions, buildBackendEnv } = require("./utils/backendSpawn");
 const { gracefulShutdown } = require("./utils/backendShutdown");
+const { singleFlight } = require("./utils/singleFlight");
 const { readAppLogTailResult } = require("./utils/appLogTail");
 const { describeProcessGone, formatMainRecord } = require("./utils/mainLog");
 const { createBackendStartTracker, requestStop } = require("./utils/backendStartTracker");
@@ -930,18 +931,24 @@ ipcMain.on("renderer-log", (_event, entry) => {
     // Logging must never crash the main process.
   }
 });
-ipcMain.handle("backend:restart", async () => {
-  log("Renderer requested a backend restart.");
-  // Graceful first (stop_postgres releases the data-dir locks) so the respawn
-  // isn't racing an orphaned postmaster; killBackend is the hard fallback (#216).
-  requestStop(backendProcess);
-  await gracefulShutdown(backendProcess, { killFn: killBackend });
-  backendProcess = null;
-  backendIsReady = false;
-  resolvedPort = null;
-  startBackendSupervised();
-  return { ok: true };
-});
+// Single-flight: a restart requested while one is stopping the backend gets
+// that restart's answer instead of spawning a second backend, which would
+// fight the first over the embedded PostgreSQL data directory.
+ipcMain.handle(
+  "backend:restart",
+  singleFlight(async () => {
+    log("Renderer requested a backend restart.");
+    // Graceful first (stop_postgres releases the data-dir locks) so the respawn
+    // isn't racing an orphaned postmaster; killBackend is the hard fallback (#216).
+    requestStop(backendProcess);
+    await gracefulShutdown(backendProcess, { killFn: killBackend });
+    backendProcess = null;
+    backendIsReady = false;
+    resolvedPort = null;
+    startBackendSupervised();
+    return { ok: true };
+  })
+);
 
 // Renderer -> main: the interface language changed (or was resolved at boot).
 ipcMain.on("language:set", (_event, code) => {

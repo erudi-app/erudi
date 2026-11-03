@@ -14,7 +14,9 @@ const log = createLogger("EngineSwitch");
  * switch: it raises `confirming` and waits. `confirm()` cancels the download
  * through the download widget's own path (no failed poll, the widget reads
  * "cancelled"), then switches; `dismiss()` changes nothing. A download that
- * finished while the question was open is not cancelled.
+ * finished while the question was open is not cancelled. One switch runs at a
+ * time: a request made during one joins it, and a confirmation with no
+ * question waiting (a second click on a dialog fading out) does nothing.
  *
  * `persist(next)` writes `inference_backend` and rejects when it did not; the
  * caller owns the record of that failure (it knows which request it made).
@@ -44,6 +46,7 @@ export function useEngineSwitch({ persist, settled } = {}) {
   const waiting = useRef(false);
   const downloading = useRef(isDownloading);
   const answer = useRef(null);
+  const inFlight = useRef(null);
 
   useEffect(() => {
     downloading.current = isDownloading;
@@ -57,7 +60,7 @@ export function useEngineSwitch({ persist, settled } = {}) {
     }
   }, [settled]);
 
-  const switchTo = useCallback(
+  const runSwitch = useCallback(
     async (next, { cancelDownloadFirst = false } = {}) => {
       setPending(true);
       waiting.current = false;
@@ -107,9 +110,26 @@ export function useEngineSwitch({ persist, settled } = {}) {
     [persist, settled, cancelDownload]
   );
 
+  // One switch at a time: a request made while one runs (a second click
+  // before the first re-render) joins it rather than cancelling, saving and
+  // restarting a second time.
+  const switchTo = useCallback(
+    (next, options) => {
+      if (inFlight.current) return inFlight.current;
+      const run = runSwitch(next, options).finally(() => {
+        inFlight.current = null;
+      });
+      inFlight.current = run;
+      return run;
+    },
+    [runSwitch]
+  );
+
   const requestSwitch = useCallback(
     (next) => {
-      if (!downloading.current) return switchTo(next);
+      if (!downloading.current || inFlight.current) return switchTo(next);
+      // A question already open is replaced; its caller hears "declined".
+      answer.current?.("declined");
       setConfirmingNext(next);
       return new Promise((resolve) => {
         answer.current = resolve;
@@ -119,8 +139,11 @@ export function useEngineSwitch({ persist, settled } = {}) {
   );
 
   const confirm = useCallback(async () => {
-    const next = confirmingNext;
     const resolve = answer.current;
+    // Already answered: a second click on a dialog that is still fading out
+    // calls the confirmation it was rendered with.
+    if (!resolve) return undefined;
+    const next = confirmingNext;
     answer.current = null;
     setConfirmingNext(null);
     const outcome = await switchTo(next, { cancelDownloadFirst: true });

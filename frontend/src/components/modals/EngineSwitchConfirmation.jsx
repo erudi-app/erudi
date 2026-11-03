@@ -1,4 +1,4 @@
-import React, { useId } from "react";
+import React, { useId, useState } from "react";
 import PropTypes from "prop-types";
 import { motion, AnimatePresence } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -15,6 +15,14 @@ import { useTranslation } from "react-i18next";
  */
 export function EngineSwitchConfirmationContent({ titleId, onConfirm, onCancel }) {
   const { t } = useTranslation();
+  // The question is answered once. The dialog stays mounted through its exit
+  // animation, so without this a second click would answer it again.
+  const [answered, setAnswered] = useState(false);
+  const answer = (callback) => () => {
+    if (answered) return;
+    setAnswered(true);
+    callback();
+  };
   return (
     <>
       <h2 id={titleId} className="text-xl font-semibold tracking-tight text-[#F2F7F4] mb-2">
@@ -24,14 +32,16 @@ export function EngineSwitchConfirmationContent({ titleId, onConfirm, onCancel }
       <div className="flex flex-wrap items-center justify-end gap-3">
         <button
           type="button"
-          onClick={onCancel}
+          onClick={answer(onCancel)}
+          disabled={answered}
           className="rounded-full px-5 py-2 text-sm font-semibold bg-white/10 hover:bg-white/15 text-gray-100 border border-white/20 transition active:scale-95"
         >
           {t("common:engineSwitch.keepDownloading")}
         </button>
         <button
           type="button"
-          onClick={onConfirm}
+          onClick={answer(onConfirm)}
+          disabled={answered}
           className="rounded-full px-5 py-2 text-sm font-semibold bg-emerald-500 hover:bg-emerald-600 text-[#0f2f25] border border-white/20 shadow transition active:scale-95"
         >
           {t("common:engineSwitch.cancelAndSwitch")}
@@ -55,7 +65,9 @@ export default function EngineSwitchConfirmation({ isOpen, onConfirm, onCancel }
         <motion.div
           initial={{ opacity: 0 }}
           animate={{ opacity: 1 }}
-          exit={{ opacity: 0 }}
+          // Fading out, the dialog takes no more clicks (pointer-events is
+          // not animated: framer-motion applies it as the exit starts).
+          exit={{ opacity: 0, pointerEvents: "none" }}
           transition={{ duration: 0.2 }}
           role="dialog"
           aria-modal={true}
