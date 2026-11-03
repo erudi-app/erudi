@@ -1373,6 +1373,43 @@ async def test_the_contention_monitor_runs_on_windows_only(monkeypatch, os_name,
     assert CUDA_Engine._pressure_task is None
 
 
+async def test_a_stop_cancelled_while_it_waits_still_stops_the_pressure_monitor(monkeypatch):
+    """The stop is cancelled while it waits for the contention monitor (a
+    shielded sample still in flight): the memory pressure monitor is
+    cancelled all the same, and the cancellation goes on up."""
+    import asyncio
+
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+    monkeypatch.setattr(CUDA_Engine, "_pressure_task", None)
+    monkeypatch.setattr(CUDA_Engine, "_contention_task", None)
+    CUDA_Engine.start_pressure_task()
+    pressure = CUDA_Engine._pressure_task
+    CUDA_Engine._contention_task.cancel()
+    release = asyncio.Event()
+
+    async def _sample_in_flight():
+        try:
+            await asyncio.sleep(3600)
+        except asyncio.CancelledError:
+            await release.wait()
+            raise
+
+    contention = asyncio.create_task(_sample_in_flight())
+    await asyncio.sleep(0)
+    monkeypatch.setattr(CUDA_Engine, "_contention_task", contention)
+    stopper = asyncio.create_task(CUDA_Engine.stop_pressure_task())
+    for _ in range(3):
+        await asyncio.sleep(0)
+    assert not stopper.done()
+    stopper.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await stopper
+    assert contention.done()
+    assert pressure.done()
+    assert CUDA_Engine._pressure_task is None
+    assert CUDA_Engine._contention_task is None
+
+
 # ===================== fit's margin on Windows =====================
 
 

@@ -1193,18 +1193,22 @@ class CUDA_Engine(BaseLlamaCppEngine):
     @classmethod
     async def stop_pressure_task(cls) -> None:
         """Cancel both monitors and wait for them (a sample in flight
-        finishes first: it is shielded)."""
+        finishes first: it is shielded). The memory pressure monitor is
+        stopped even when this stop is cancelled while it waits for the
+        contention monitor; the cancellation then goes on up."""
         task, cls._contention_task = cls._contention_task, None
-        if task is not None:
-            task.cancel()
-            try:
-                await task
-            except asyncio.CancelledError:
-                current = asyncio.current_task()
-                if current is not None and current.cancelling():
-                    raise
-            logger.info("Stopped GPU contention monitor")
-        await super().stop_pressure_task()
+        try:
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
+                logger.info("Stopped GPU contention monitor")
+        finally:
+            await super().stop_pressure_task()
 
     @classmethod
     def memory_bound_tokens(cls) -> Optional[int]:
