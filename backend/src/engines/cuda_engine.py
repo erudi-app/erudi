@@ -1063,9 +1063,10 @@ class CUDA_Engine(BaseLlamaCppEngine):
         was pinned to (``cuda_memory.gpu_contention``). Windows only; a child
         with no pinned GPU (several visible GPUs, NVML unreadable at load, no
         GPU) is not read. A missing reading -- no PDH instance yet (a
-        respawned child appears about 6 s after the stop), NVML failing --
-        leaves the state unchanged, silently; a Windows without the Total
-        Committed counter is said once (INFO) and detects nothing. Each
+        respawned child appears about 6 s after the stop), a failed
+        collection, NVML failing -- leaves the state unchanged, silently; a
+        Windows whose PDH refuses the Total Committed counter is said once
+        (INFO) and detects nothing. Each
         transition is ONE INFO. Never an action on the child; never raises
         (an unexpected failure is ONE WARNING and the sample is lost)."""
         handle = cls._model
@@ -1081,7 +1082,9 @@ class CUDA_Engine(BaseLlamaCppEngine):
             if vram.dedicated_bytes is None or vram.shared_bytes is None:
                 return
             if vram.committed_bytes is None:
-                if not cls._committed_gauge_missing_logged:
+                # A transient miss (a failed collection, no instance for the
+                # child yet) is a missing reading like any other: silent.
+                if vram.committed_refused and not cls._committed_gauge_missing_logged:
                     cls._committed_gauge_missing_logged = True
                     logger.info(
                         f"[{cls.__name__}] GPU Total Committed counter unavailable for the "

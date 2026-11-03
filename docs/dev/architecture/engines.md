@@ -700,8 +700,9 @@ rise (#661 saw it fall) — and pages it back in for every token: answers slow d
 to ten times and no brake line is written. The evicted part is resident nowhere, so it
 is the child's `\GPU Process Memory(...)\Total Committed` minus its `Dedicated Usage +
 Shared Usage`, read from the same PDH query as a third, optional counter (a Windows
-without it reads Dedicated and Shared as before, says once at INFO that the eviction
-goes unnoticed, and detects nothing). #661 measured that gap at exactly 0 on every
+whose PDH refuses it reads Dedicated and Shared as before, says once at INFO that the
+eviction goes unnoticed, and detects nothing; a collection that misses it — a failed
+read, no instance for the child yet — is a missing reading like any other, silent). #661 measured that gap at exactly 0 on every
 sample of a healthy child — full and partial offloads, across a respawn — and at 0.7
 to 6.3 GiB under a 10 GiB hog. **Contention** (`cuda_memory.gpu_contention`) is at
 least 256 MiB evicted (`CUDA_EVICTED_MIN_BYTES`) *and* NVML's free memory on the GPU

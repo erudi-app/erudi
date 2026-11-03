@@ -177,6 +177,9 @@ class _World:
         # and the NVML free reads by UUID (the contention rule's other term).
         self.evicted = 0
         self.committed_available = True
+        # A transient miss of the counter (a failed collection, no instance
+        # for the child yet), as opposed to PDH refusing it.
+        self.committed_missed = False
         self.device_free_unreadable = False
         self.free_reads = []
         self.cuda_free = None
@@ -215,12 +218,12 @@ class _World:
             if world.vram_unavailable:
                 return VramReading(None, None, unavailable=world.vram_unavailable)
             total = world.device_bytes(pid)
+            readable = world.committed_available and not world.committed_missed
             return VramReading(
                 world.spill,
                 max(0, total - world.spill),
-                committed_bytes=(
-                    max(total, world.spill) + world.evicted if world.committed_available else None
-                ),
+                committed_bytes=max(total, world.spill) + world.evicted if readable else None,
+                committed_refused=not world.committed_available,
             )
 
         monkeypatch.setattr(memory_pressure, "read_vram", _read_vram)
@@ -1243,6 +1246,29 @@ def test_a_windows_without_total_committed_says_so_once_and_detects_nothing(wind
     assert record.levelno == logging.INFO
     # The spill gauge is intact: no brake WARNING.
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_transient_committed_miss_is_a_silent_missing_reading(windows, caplog):
+    """A failed collection of the counter, or no instance of it for the
+    child yet, is not a Windows without it: no INFO, the state unchanged,
+    and a later refusal is still said once."""
+    _load(windows)
+    _squeeze(windows)
+    CUDA_Engine.brake_point("idle")
+    before = dict(CUDA_Engine.gpu_contention_state())
+    caplog.clear()
+    windows.committed_missed = True
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        CUDA_Engine.brake_point("idle")
+        CUDA_Engine.brake_point("idle")
+    assert CUDA_Engine.gpu_contention_state() == before
+    assert not _records(caplog, "Total Committed")
+    windows.committed_missed = False
+    windows.committed_available = False
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        CUDA_Engine.brake_point("idle")
+    (record,) = _records(caplog, "Total Committed")
+    assert record.levelno == logging.INFO
 
 
 def test_contention_never_acts_on_the_child(windows):

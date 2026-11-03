@@ -562,10 +562,15 @@ def test_windows_vram_without_the_total_committed_counter_keeps_the_spill_gauge(
         committed=None,
     )
     reading = provider.vram(7)
-    assert reading == mp.VramReading(900 * MIB, 6 * GIB, committed_bytes=None)
+    assert reading == mp.VramReading(
+        900 * MIB, 6 * GIB, committed_bytes=None, committed_refused=True
+    )
 
 
-def test_windows_vram_without_a_committed_instance_for_the_pid_is_no_committed():
+def test_windows_vram_without_a_committed_instance_for_the_pid_is_a_transient_miss():
+    """The counter is there, but not yet an instance of it for the child (a
+    respawned child appears seconds after the spawn): a missing reading,
+    not a refusal."""
     provider = _FakeWindowsGpu(
         dedicated={f"pid_7_{LUID_D}_phys_0": 6 * GIB},
         shared={f"pid_7_{LUID_D}_phys_0": 0},
@@ -573,6 +578,7 @@ def test_windows_vram_without_a_committed_instance_for_the_pid_is_no_committed()
     )
     reading = provider.vram(7)
     assert reading.committed_bytes is None
+    assert reading.committed_refused is False
     assert reading.dedicated_bytes == 6 * GIB
 
 
@@ -621,8 +627,10 @@ class _FakePdh:
     wildcard counters, an instance list that may grow between the sizing
     call and the read (``grow`` times), or a refused counter."""
 
-    def __init__(self, items=None, *, add_status=0, grow=0, refused=(), by_path=None):
+    def __init__(self, items=None, *, add_status=0, grow=0, refused=(), by_path=None, failing=()):
         self.items = dict(items or {})
+        # Counter paths whose array read fails (a transient PDH error).
+        self.failing = set(failing)
         self.add_status = add_status
         self.grow = grow
         # Counter paths PDH refuses (the others are added), and per-path
@@ -662,6 +670,9 @@ class _FakePdh:
         return 0
 
     def PdhGetFormattedCounterArrayW(self, counter, fmt, size, count, buffer):
+        index = getattr(counter, "value", None)
+        if index and index <= len(self.paths) and self.paths[index - 1] in self.failing:
+            return 0xC0000BC6
         items = self._items_of(counter)
         item = ctypes.sizeof(mp._PdhFmtCounterValueItem)
         if buffer is None:
@@ -731,10 +742,36 @@ def test_a_refused_total_committed_counter_keeps_the_spill_gauge(monkeypatch, ca
     with caplog.at_level(logging.WARNING, logger="erudi"):
         first = provider.vram(7)
         second = provider.vram(7)
-    assert first == second == mp.VramReading(900 * MIB, 6 * GIB, committed_bytes=None)
+    assert (
+        first
+        == second
+        == mp.VramReading(900 * MIB, 6 * GIB, committed_bytes=None, committed_refused=True)
+    )
     assert "close" not in pdh.calls
     assert pdh.calls.count("add") == 3
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_a_failed_read_of_the_total_committed_counter_is_a_transient_miss(monkeypatch):
+    """One collection whose ``Total Committed`` array fails to read: no
+    eviction gauge this time, but no refusal either, and the spill gauge
+    reads."""
+    instance = f"pid_7_{LUID_D}_phys_0"
+    pdh = _FakePdh(
+        by_path={
+            mp._WindowsProvider._GPU_DEDICATED: {instance: 6 * GIB},
+            mp._WindowsProvider._GPU_SHARED: {instance: 900 * MIB},
+            mp._WindowsProvider._GPU_COMMITTED: {instance: 9 * GIB},
+        },
+        failing={mp._WindowsProvider._GPU_COMMITTED},
+    )
+    provider = _native_windows(monkeypatch, pdh)
+    reading = provider.vram(7)
+    assert reading == mp.VramReading(
+        900 * MIB, 6 * GIB, committed_bytes=None, committed_refused=False
+    )
+    pdh.failing.clear()
+    assert provider.vram(7).committed_bytes == 9 * GIB
 
 
 def test_an_instance_list_that_grows_between_the_calls_is_read_again(monkeypatch):

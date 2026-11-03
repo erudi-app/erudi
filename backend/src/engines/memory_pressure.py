@@ -164,13 +164,16 @@ class VramReading:
     buffers); the spill is what lies above its baseline, which the CUDA
     engine counts. ``unavailable`` says why they are None.
     ``committed_bytes`` is the child's Total Committed GPU memory, resident
-    or not (the eviction gauge's term); None when this Windows has no such
-    counter or no instance of it for the child, the other two intact."""
+    or not (the eviction gauge's term); None, the other two intact, when
+    PDH refused the counter on this Windows (``committed_refused``: it
+    never comes) or when this collection missed it -- a failed read, no
+    instance of it for the child yet (a transient miss)."""
 
     shared_bytes: Optional[int]
     dedicated_bytes: Optional[int]
     unavailable: Optional[str] = None
     committed_bytes: Optional[int] = None
+    committed_refused: bool = False
 
 
 def _psutil_total() -> Optional[int]:
@@ -598,8 +601,9 @@ class _WindowsProvider(_NullProvider):
         collection, so a child spawned later is seen. A query whose Dedicated
         or Shared counter PDH refused is closed and never reopened (the
         refusal is remembered). ``Total Committed`` is optional: PDH refusing
-        it, or a failed read of it, gives None for it alone -- the spill
-        gauge keeps reading."""
+        it gives None for it alone, at every collection -- the spill gauge
+        keeps reading; a failed read of it gives no instance this time (a
+        transient miss)."""
         pdh = ctypes.windll.pdh
         if self._gpu_pdh is False:
             raise OSError("GPU Process Memory counters refused earlier")
@@ -631,9 +635,10 @@ class _WindowsProvider(_NullProvider):
             try:
                 committed_values = _pdh_counter_array(pdh, committed)
             except OSError:
-                # This collection has no eviction gauge; the spill gauge's
-                # two counters below are read all the same.
-                committed_values = None
+                # This collection has no eviction gauge (a transient miss,
+                # not a refusal); the spill gauge's two counters below are
+                # read all the same.
+                committed_values = {}
         return (
             _pdh_counter_array(pdh, dedicated),
             _pdh_counter_array(pdh, shared),
@@ -648,8 +653,9 @@ class _WindowsProvider(_NullProvider):
         the child's first read and kept for it. PDH denied or absent:
         unavailable with the reason, logged by the CUDA engine (its memory
         brake is then off: one WARNING there). The Total Committed of the
-        same adapter rides along, None without the counter or an instance of
-        it for the child."""
+        same adapter rides along: None with ``committed_refused`` when PDH
+        refused the counter, None alone without an instance of it for the
+        child in this collection."""
         try:
             dedicated, shared, committed = self._pdh_gpu_process_memory()
         except Exception as exc:
@@ -673,6 +679,7 @@ class _WindowsProvider(_NullProvider):
             spill_by_luid.get(luid, 0),
             by_luid.get(luid, 0),
             committed_bytes=committed_by_luid.get(luid),
+            committed_refused=committed is None,
         )
 
 
@@ -783,7 +790,10 @@ def read_vram(pid: Optional[int], *, healthy_bytes: int) -> VramReading:
     if tier is None:
         return reading
     return VramReading(
-        healthy_bytes + tier, reading.dedicated_bytes, committed_bytes=reading.committed_bytes
+        healthy_bytes + tier,
+        reading.dedicated_bytes,
+        committed_bytes=reading.committed_bytes,
+        committed_refused=reading.committed_refused,
     )
 
 
