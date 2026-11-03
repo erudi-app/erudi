@@ -41,13 +41,18 @@ class TestFindLlamaServer:
         binary = _touch(install / exe)
         assert CPU_Engine._find_llama_server(install) == binary
 
-    def test_falls_back_to_other_flavour(self, tmp_path, monkeypatch):
+    def test_falls_back_to_other_flavour(self, tmp_path, monkeypatch, caplog):
         exe = "llama-server.exe" if os.name == "nt" else "llama-server"
         monkeypatch.setattr(base_mod, "ROOT_DIR", tmp_path)
         cuda_binary = _touch(tmp_path / "artifacts" / "llama-cpp" / "cuda" / "bin" / exe)
         empty_cpu = tmp_path / "artifacts" / "llama-cpp" / "cpu" / "bin"
         empty_cpu.mkdir(parents=True)
-        assert CPU_Engine._find_llama_server(empty_cpu) == cuda_binary
+        # Same capture as the both-flavours test below, so its "no WARNING"
+        # is proven able to see one.
+        with caplog.at_level(logging.WARNING, logger="erudi"):
+            assert CPU_Engine._find_llama_server(empty_cpu) == cuda_binary
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("falling back to the cuda build" in m for m in warnings), warnings
 
     @pytest.mark.parametrize("engine,flavour", [(CPU_Engine, "cpu"), (CUDA_Engine, "cuda")])
     def test_each_engine_runs_its_own_flavour_when_both_ship(
