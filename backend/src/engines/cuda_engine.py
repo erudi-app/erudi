@@ -688,7 +688,9 @@ class CUDA_Engine(BaseLlamaCppEngine):
             if visible and any(entry.strip().isdigit() for entry in visible.split(",")):
                 logger.debug(
                     f"[{cls.__name__}] CUDA_VISIBLE_DEVICES={visible}: integer entries are "
-                    f"taken as NVML indexes (CUDA's order may differ)"
+                    f"taken as NVML indexes (CUDA's order may differ), so the CUDA0 that "
+                    f"llama-server --list-devices reports for fit's margin may be another "
+                    f"card than the one NVML sized"
                 )
             candidates = cuda_memory.visible_devices(devices, visible)
             if candidates is None:
