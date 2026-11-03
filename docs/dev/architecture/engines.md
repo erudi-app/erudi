@@ -564,8 +564,8 @@ the card's real free memory.
 |---|---|---|
 | Sized load | `-c W -ngl -1 -fitt 1024` | On (`window_sized`), pending the placement below |
 | Brake respawn (Windows only: a spill is what drives it) | `-c min(static window, max(4096, cap)) -ngl -2 -fitt 1024`: nothing re-read; fit cannot change an explicit `-ngl` and keeps every layer on the device, where WDDM spills instead of failing | On, its state carried |
-| `ERUDI_CTX` pinned | `-c ERUDI_CTX -ngl -1 -fitt 1024`; on Windows `-fitt 1024 + (CUDA free − NVML free)` | Sampled, never resized; off (one INFO) when the allocated window stays unknown (`ERUDI_CTX=0` lets llama-server pick it, and `/props` failed) |
-| Floor unfit, MLA, GGUF unreadable | No `-c`, `-ngl -1 -fitt 1024`, on Windows `-fitt 1024 + (CUDA free − NVML free)`: fit sizes the window and places the layers (one WARNING) | Off (`window_sized=False`): never sampled |
+| `ERUDI_CTX` pinned | `-c ERUDI_CTX -ngl -1 -fitt 1024`; on Windows `-fitt 1024 + max(0, CUDA free − NVML free)` | Sampled, never resized; off (one INFO) when the allocated window stays unknown (`ERUDI_CTX=0` lets llama-server pick it, and `/props` failed) |
+| Floor unfit, MLA, GGUF unreadable | No `-c`, `-ngl -1 -fitt 1024`, on Windows `-fitt 1024 + max(0, CUDA free − NVML free)`: fit sizes the window and places the layers (one WARNING) | Off (`window_sized=False`): never sampled |
 | NVML unreadable | No `-c`, `-ngl -1 -fitt 1024`: fit sizes the window and places the layers on its own figures (one WARNING) | Off |
 | The user's `CUDA_VISIBLE_DEVICES` names several GPUs | No `-c`, `-ngl -1 -fitt 1024`: llama.cpp splits the layers across the cards, which a one-card sizing and measurement cannot model (one INFO) | Off |
 | NVML sees no GPU | No `-c`, `-ngl 0` (one WARNING) | Off |
