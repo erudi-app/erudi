@@ -10,7 +10,8 @@ Erudi detects the machine at startup and routes inference to the best available 
 - **Apple Silicon (M1/M2/M3/M4)**: the **MLX** backend, running `mlx_vlm.server` on
   unified memory
 - **NVIDIA GPUs**: the **CUDA** backend, running the CUDA build of `llama-server`
-- **CPU fallback**: the CPU build of `llama-server`, on Windows and Linux
+- **CPU fallback**: the CPU build of `llama-server`, on Windows and Linux. The NVIDIA
+  installers ship it beside the CUDA build, for the processor setting below
 
 ## How detection works
 
@@ -39,7 +40,10 @@ Priority: MLX > CUDA > CPU
 earliest point where the column is guaranteed to exist — and replaces `CUDA_Engine` with
 `CPU_Engine` when it says `cpu`. Both engines carry `FORMAT_TAG = "gguf"`, so the catalog
 reconciled a moment earlier under CUDA is identical under CPU; the swap changes what runs
-the model, not what the app offers. The preference is inert on Apple Silicon, so the
+the model, not what the app offers. `CPU_Engine` runs the CPU build of `llama-server`,
+which the NVIDIA installers ship beside the CUDA one: it loads no NVIDIA library, and its
+child is started with `CUDA_VISIBLE_DEVICES=-1`, so it reserves no memory on the card and
+needs no working driver. The preference is inert on Apple Silicon, so the
 Settings page shows the **Inference engine** card only on a machine currently running the
 CUDA engine, or one already pinned to the processor from CUDA — never on Apple Silicon,
 whatever the stored value. It is read once per boot, so changing it in Settings restarts
@@ -308,7 +312,9 @@ No. One backend is selected per session by the detection cascade.
 Partly, and only on a machine running the CUDA engine (or one already pinned back from
 it) — Settings → Inference engine offers `Automatic` (the hardware decides) and
 `Processor only`, which pins the CPU engine on a machine that would otherwise use its
-NVIDIA GPU. Erudi restarts its engine to apply the change. macOS has no such setting: the
+NVIDIA GPU and leaves the card untouched. Erudi restarts its engine to apply the change;
+while a model download is in progress it asks first, because the restart cancels the
+download, which then starts over from the beginning. macOS has no such setting: the
 Apple silicon engine is the only one there, so the choice would do nothing. There is no
 way to force the GPU on hardware where it was not detected, and no way to pick MLX or
 CUDA specifically. `ERUDI_FORCE_CPU=1` remains the developer override and wins over the

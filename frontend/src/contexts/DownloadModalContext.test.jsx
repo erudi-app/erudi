@@ -42,11 +42,16 @@ const onComplete = vi.fn();
 const onError = vi.fn();
 let currentModel;
 
+// The latest context value, for tests that await a call (cancelDownload).
+let seenContext;
+
 function Consumer() {
   const ctx = useDownloadModal();
+  seenContext = ctx;
   return (
     <>
       <button onClick={() => ctx.open(currentModel, { onComplete, onError })}>OPEN</button>
+      <button onClick={() => ctx.cancelDownload()}>CANCEL_FROM_APP</button>
       <span data-testid="downloading">{String(ctx.isDownloading)}</span>
       <span data-testid="completions">{String(ctx.completionCount)}</span>
       <span data-testid="lastCompleted">{ctx.lastCompletedAt === null ? "null" : "set"}</span>
@@ -296,6 +301,177 @@ describe("DownloadModalContext user cancel", () => {
     expect(onError).toHaveBeenCalledTimes(1);
     expect(onError).toHaveBeenCalledWith(DOWNLOAD_CANCELLED);
     expect(onComplete).not.toHaveBeenCalled();
+  });
+});
+
+// Switching the inference engine restarts the backend, which would kill a
+// running download and leave it "interrupted" at the next boot. The engine
+// switch cancels it first, through the same path as the widget's Cancel.
+describe("DownloadModalContext cancel from elsewhere in the app", () => {
+  it("cancels the running job through the endpoint and settles as cancelled", async () => {
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status: "running", progress: 10, time_left: 60 }),
+    });
+    renderProvider();
+    await startAndPollOnce();
+    expect(val("downloading")).toBe("true");
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("CANCEL_FROM_APP"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    const cancel = tracedFetchMock.mock.calls.find(
+      ([u, o]) => o?.method === "POST" && String(u).endsWith("/cancel")
+    );
+    expect(String(cancel[0])).toMatch(/\/llms\/downloads\/job1\/cancel$/);
+    expect(val("downloading")).toBe("false");
+    expect(screen.getByText("Download cancelled")).toBeTruthy();
+    expect(onError).toHaveBeenCalledWith(DOWNLOAD_CANCELLED);
+  });
+
+  it("does not turn a status poll already in flight into a failure", async () => {
+    // The backend goes down right after the cancel (the engine restart): the
+    // poll that was on the wire fails, and must be ignored, not reported.
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    let failPoll;
+    renderProvider();
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status: "running", progress: 10, time_left: 60 }),
+    });
+    await startAndPollOnce();
+    statusResponder = () =>
+      new Promise((_resolve, reject) => {
+        failPoll = () => reject(new TypeError("Failed to fetch"));
+      });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000); // a second poll, left pending
+    });
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("CANCEL_FROM_APP"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      failPoll();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(screen.getByText("Download cancelled")).toBeTruthy();
+    expect(screen.queryByText(/An error occured during download/)).toBeNull();
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(DOWNLOAD_CANCELLED);
+    expect(errors.mock.calls.map((c) => String(c[0])).join("\n")).not.toMatch(/Status check/);
+    errors.mockRestore();
+  });
+});
+
+describe("DownloadModalContext without a provider", () => {
+  it("reports no download and offers a harmless cancel", async () => {
+    const seen = {};
+    function Probe() {
+      Object.assign(seen, useDownloadModal());
+      return null;
+    }
+    render(<Probe />);
+    expect(seen.isDownloading).toBe(false);
+    await expect(seen.cancelDownload()).resolves.toBeUndefined();
+    // Starting a download needs the provider: no silent no-op stands in.
+    expect(seen.open).toBeUndefined();
+  });
+});
+
+describe("DownloadModalContext cancel while the download is starting", () => {
+  it("cancels the job on the backend once its start answers, and never polls it", async () => {
+    // The engine switch can cancel before the start POST has returned a job
+    // id. Settling locally alone would let the POST start a poll against the
+    // backend the switch is about to restart.
+    let answerStart;
+    postResponder = () =>
+      new Promise((resolve) => {
+        answerStart = () => resolve({ ok: true, json: async () => ({ id: "job1" }) });
+      });
+    renderProvider();
+    await act(async () => {
+      fireEvent.click(screen.getByText("OPEN"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("CONFIRM"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    let cancelled = false;
+    let pendingCancel;
+    await act(async () => {
+      pendingCancel = seenContext.cancelDownload().then(() => {
+        cancelled = true;
+      });
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // Not done yet: the job the backend is creating still has to be cancelled.
+    expect(cancelled).toBe(false);
+
+    await act(async () => {
+      answerStart();
+      await pendingCancel;
+      await vi.advanceTimersByTimeAsync(3 * 2000);
+    });
+
+    const cancel = tracedFetchMock.mock.calls.find(
+      ([u, o]) => o?.method === "POST" && String(u).endsWith("/cancel")
+    );
+    expect(String(cancel?.[0])).toMatch(/\/llms\/downloads\/job1\/cancel$/);
+    expect(statusCalls()).toHaveLength(0);
+    expect(cancelled).toBe(true);
+    expect(val("downloading")).toBe("false");
+    expect(screen.getByText("Download cancelled")).toBeTruthy();
+  });
+});
+
+describe("DownloadModalContext cancel of a download that has just finished", () => {
+  it("lets the job conclude as completed instead of showing a cancel", async () => {
+    // Between two polls the transfer ended: the backend refuses the cancel
+    // ("Download ended - cannot be cancelled", 422). The model is there; the
+    // widget must say so, not "cancelled" with a cancel failure.
+    let finished = false;
+    statusResponder = () => ({
+      ok: true,
+      json: async () =>
+        finished
+          ? { status: "completed", progress: 100, time_left: 0 }
+          : { status: "running", progress: 90, time_left: 5 },
+    });
+    cancelResponder = () => ({
+      ok: false,
+      status: 422,
+      statusText: "Unprocessable Entity",
+      json: async () => ({
+        success: false,
+        error: {
+          type: "INVALID_INPUT",
+          message: "Download ended - cannot be cancelled, please delete the model",
+        },
+      }),
+    });
+    const errors = vi.spyOn(console, "error").mockImplementation(() => {});
+    renderProvider();
+    await startAndPollOnce();
+
+    finished = true;
+    await act(async () => {
+      await seenContext.cancelDownload();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+
+    expect(val("completions")).toBe("1");
+    expect(val("downloading")).toBe("false");
+    expect(onComplete).toHaveBeenCalledTimes(1);
+    expect(onError).not.toHaveBeenCalled();
+    expect(screen.queryByText("Download cancelled")).toBeNull();
+    expect(screen.queryByText(/Failed to cancel download/)).toBeNull();
+    errors.mockRestore();
   });
 });
 

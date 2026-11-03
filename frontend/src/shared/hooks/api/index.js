@@ -135,33 +135,66 @@ export function useConversations() {
 }
 
 /**
- * Custom hook for hardware app startup info
- * @returns {Object} { startupInfo, loading, error }
+ * Custom hook for hardware app startup info.
+ *
+ * `backend_type` names the engine that RUNS, so the info goes stale when the
+ * backend restarts on another engine (the Inference engine setting). The hook
+ * fetches again each time the main process reports the backend ready and
+ * healthy (`backend_ready` only, not run.py's raw `ready` that main.js relays
+ * before its health check; through `window.backendAPI.onBackendEvent`, absent
+ * outside Electron, so no re-read there) and counts those re-reads once they
+ * settle, success or failure, in `refetchesAfterReady`.
+ *
+ * App.jsx subscribed to the same events first (it mounts before any page), so
+ * by the time this listener runs on a `backend_ready` the API client already
+ * points at the restarted backend's port.
+ *
+ * @returns {Object} { startupInfo, loading, error, refetch, refetchesAfterReady }
  */
 export function useAppStartupInfo() {
   const [startupInfo, setStartupInfo] = useState(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
+  const [refetchesAfterReady, setRefetchesAfterReady] = useState(0);
 
-  useEffect(() => {
-    const fetchStartupInfo = async () => {
-      try {
-        setLoading(true);
-        const data = await apiClient.get("/hardware/app_startup");
-        setStartupInfo(data);
-        setError(null);
-      } catch (err) {
-        log.error("Failed to fetch app startup info", err);
-        setError(err);
-      } finally {
-        setLoading(false);
-      }
-    };
-
-    fetchStartupInfo();
+  const refetch = useCallback(async () => {
+    try {
+      setLoading(true);
+      const data = await apiClient.get("/hardware/app_startup");
+      setStartupInfo(data);
+      setError(null);
+    } catch (err) {
+      log.error("Failed to fetch app startup info", err);
+      setError(err);
+    } finally {
+      setLoading(false);
+    }
   }, []);
 
-  return { startupInfo, loading, error };
+  useEffect(() => {
+    refetch();
+  }, [refetch]);
+
+  useEffect(() => {
+    const subscribe = window.backendAPI?.onBackendEvent;
+    if (typeof subscribe !== "function") return undefined;
+    let active = true;
+    const unsubscribe = subscribe((evt) => {
+      // `backend_ready` only: main.js sends it once the backend answers its
+      // health check, after relaying run.py's own `ready` (which App.jsx also
+      // accepts). Reacting to both would read the engine twice per restart.
+      if (evt?.event !== "backend_ready") return;
+      refetch().then(() => {
+        if (active) setRefetchesAfterReady((n) => n + 1);
+      });
+    });
+    return () => {
+      active = false;
+      if (typeof unsubscribe === "function") unsubscribe();
+    };
+  }, [refetch]);
+
+  return { startupInfo, loading, error, refetch, refetchesAfterReady };
 }
 
 /**

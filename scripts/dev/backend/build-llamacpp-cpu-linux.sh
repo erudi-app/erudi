@@ -3,8 +3,9 @@
 #
 # Goal:
 # - Build llama.cpp for Linux, CPU-only backend (no CUDA).
-# - Produces the llama-server used by CPU_Engine on Linux machines without an
-#   NVIDIA GPU (and as the runtime fallback for the CUDA build).
+# - Produces the llama-server that CPU_Engine runs: in the CPU AppImage, and in
+#   the CUDA AppImage beside the CUDA build (the "Processor only" setting), where
+#   it needs no NVIDIA driver and touches no GPU.
 #
 # Output: backend/artifacts/llama-cpp/cpu/bin/llama-server
 #

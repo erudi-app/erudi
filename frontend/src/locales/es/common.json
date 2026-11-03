@@ -77,5 +77,11 @@
     "downloading": "Descargando <v>v{{version}}</v>… <pct>{{percent}}</pct>",
     "ready": "<v>v{{version}}</v> lista — <install>reiniciar para instalar</install>",
     "dismiss": "Descartar la notificación de actualización"
+  },
+  "engineSwitch": {
+    "downloadTitle": "Hay una descarga en curso",
+    "downloadBody": "Cambiar el motor de inferencia reinicia el motor de Erudi, lo que cancela la descarga del modelo en curso. Tendrás que empezarla de nuevo desde el principio.",
+    "cancelAndSwitch": "Cancelar la descarga y cambiar",
+    "keepDownloading": "Seguir descargando"
   }
 }

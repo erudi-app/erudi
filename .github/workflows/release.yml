@@ -2,13 +2,15 @@ name: Release
 
 # Auto-release on a vX.Y.Z tag: each matrix leg builds its PyInstaller backend
 # (native runner — PyInstaller can't cross-compile), compiles the inference binary
-# it needs (Windows: llama-server from the llama.cpp submodule; macOS: none, MLX is
-# pip), then electron-builder packages, signs (macOS), and publishes to the SAME
-# GitHub Release (draft). Windows ships TWO auto-update channels on the one release:
-# `latest` (the CPU build, universal — runs on every machine) and `cuda` (the GPU
-# build). Each installed app follows the channel baked into its app-update.yml at
-# build time, so a user picks cpu-vs-cuda once at download and then auto-updates
-# within that channel. CI starts the bundled CPU inference binary but can run no
+# it needs (Windows/Linux: llama-server from the llama.cpp submodule, both the CPU
+# and the CUDA flavour on the cuda legs; macOS: none, MLX is pip), then
+# electron-builder packages, signs (macOS), and publishes to the SAME GitHub
+# Release (draft). Windows and Linux each ship TWO auto-update channels on the one
+# release: `latest` (the CPU build, universal — runs on every machine) and `cuda`
+# (the GPU build). Each installed app follows the channel baked into its
+# app-update.yml at build time, so a user picks cpu-vs-cuda once at download and
+# then auto-updates within that channel. On every Windows and Linux leg, the cuda
+# legs included, CI starts the bundled CPU inference binary, but it can run no
 # inference (no GPU runner, and the CUDA binaries need an NVIDIA driver to load at
 # all), so a tag publishes a DRAFT that is QA'd on real hardware before promotion
 # (release.yml only builds + publishes the draft — see docs/dev/release-qa-checklist.md).
@@ -143,8 +145,9 @@ jobs:
           pip install pyinstaller
 
       # ── Windows/Linux: compile llama-server from the submodule. The variant-aware
-      #    spec then bundles artifacts/llama-cpp/<cpu|cuda>/bin into the frozen
-      #    backend. mac is MLX, so it has no llama-server step.
+      #    spec then bundles artifacts/llama-cpp/cpu/bin (cpu legs) or both
+      #    cuda/bin and cpu/bin (cuda legs) into the frozen backend. mac is
+      #    MLX, so it has no llama-server step.
       - name: Build llama-server (Windows inference binary)
         if: runner.os == 'Windows'
         shell: pwsh
@@ -153,6 +156,21 @@ jobs:
       - name: Build llama-server (Linux inference binary)
         if: runner.os == 'Linux'
         run: bash scripts/dev/backend/build-llamacpp-${{ matrix.llama_build }}-linux.sh
+
+      # The CUDA installers also ship the CPU llama-server: the processor
+      # engine ("Processor only" in Settings) runs it, because the CUDA build
+      # initialises the card even with -ngl 0 and does not start at all
+      # without an NVIDIA driver. backend.spec refuses to build the CUDA
+      # variant without both flavours. Compiled here, in the same leg and from
+      # the same checkout, rather than handed over from the cpu legs.
+      - name: Build the CPU llama-server too (Windows CUDA leg)
+        if: matrix.llama_build == 'cuda' && runner.os == 'Windows'
+        shell: pwsh
+        run: ./scripts/dev/backend/build-llamacpp-cpu-win.ps1
+
+      - name: Build the CPU llama-server too (Linux CUDA leg)
+        if: matrix.llama_build == 'cuda' && runner.os == 'Linux'
+        run: bash scripts/dev/backend/build-llamacpp-cpu-linux.sh
 
       - name: Build backend bundle
         run: pyinstaller backend/${{ matrix.spec }} --distpath backend/dist
@@ -180,27 +198,65 @@ jobs:
           else
             exe="llama-server"
           fi
-          found=$(find backend/dist -type f -name "$exe" -print -quit)
-          if [ -z "$found" ]; then
-            echo "::error::$exe is missing from the frozen backend. The $LLAMA_FLAVOUR build produced no inference engine; refusing to package."
-            find backend/dist -maxdepth 4 -type d -name "llama-cpp" -exec ls -R {} + || true
+          # Each flavour is looked up at its own explicit path. A CUDA bundle
+          # carries two servers (cuda/bin for CUDA_Engine, cpu/bin for the
+          # processor engine), and a bare search by name would be satisfied
+          # by either one.
+          locate() {
+            local matches count
+            matches=$(find backend/dist -type f -path "*/artifacts/llama-cpp/$1/bin/$exe")
+            count=$(printf '%s' "$matches" | grep -c . || true)
+            if [ "$count" -ne 1 ]; then
+              echo "::error::Expected exactly one $exe under artifacts/llama-cpp/$1/bin in the frozen backend, found $count. The $LLAMA_FLAVOUR build would ship without the $1 inference engine; refusing to package." >&2
+              find backend/dist -type d -name "llama-cpp" -exec ls -R {} + >&2 || true
+              return 1
+            fi
+            printf '%s\n' "$matches"
+          }
+          cpu_exe=$(locate cpu)
+          cpu_dir=$(dirname "$cpu_exe")
+          echo "Found the CPU inference binary: $cpu_exe"
+          if [ "$LLAMA_FLAVOUR" = "cuda" ]; then
+            cuda_exe=$(locate cuda)
+            echo "Found the CUDA inference binary: $cuda_exe"
+          elif [ -n "$(find backend/dist -type d -path '*/artifacts/llama-cpp/cuda' -print)" ]; then
+            # The CPU spec ships the CPU flavour alone: a CUDA copy here is the
+            # freeze picking up the wrong flavour.
+            echo "::error::The $LLAMA_FLAVOUR bundle carries a llama-cpp/cuda/bin directory; the CPU installers must not ship the CUDA build."
             exit 1
           fi
-          echo "Found inference binary: $found"
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            # The MSVC C++ runtime ships beside each server (#144), so it loads
+            # on a machine without the VC++ redistributable.
+            for dll in vcruntime140.dll vcruntime140_1.dll msvcp140.dll; do
+              if [ ! -f "$cpu_dir/$dll" ]; then
+                echo "::error::$dll is missing next to the CPU llama-server.exe; it would not start on a machine without the VC++ redistributable."
+                ls -la "$cpu_dir"
+                exit 1
+              fi
+            done
+            # A CPU folder holding the CUDA runtime is the CUDA build copied
+            # into the wrong flavour's directory.
+            if [ -f "$cpu_dir/cudart64_12.dll" ]; then
+              echo "::error::cudart64_12.dll sits next to the CPU llama-server.exe: llama-cpp/cpu/bin holds the CUDA build."
+              ls -la "$cpu_dir"
+              exit 1
+            fi
+          fi
           # The Windows CUDA bundle carries its own CUDA runtime so a user needs
           # only an NVIDIA driver, never the toolkit. If those DLLs go missing
           # the installer still builds and then fails to start the engine on
           # every machine, so treat their absence as a release blocker too.
           if [ "${RUNNER_OS}" = "Windows" ] && [ "$LLAMA_FLAVOUR" = "cuda" ]; then
-            bindir=$(dirname "$found")
+            cuda_dir=$(dirname "$cuda_exe")
             for dll in cudart64_12.dll cublas64_12.dll cublasLt64_12.dll; do
-              if [ ! -f "$bindir/$dll" ]; then
-                echo "::error::$dll is missing next to llama-server.exe; the CUDA build would require the user to install the CUDA toolkit."
-                ls -la "$bindir"
+              if [ ! -f "$cuda_dir/$dll" ]; then
+                echo "::error::$dll is missing next to the CUDA llama-server.exe; the CUDA build would require the user to install the CUDA toolkit."
+                ls -la "$cuda_dir"
                 exit 1
               fi
             done
-            echo "CUDA runtime DLLs present next to the server."
+            echo "CUDA runtime DLLs present next to the CUDA server."
           fi
           # Presence is not startability: `find` matches a filename, and would
           # be just as happy with a truncated file, a wrong-architecture build,
@@ -209,64 +265,65 @@ jobs:
           # and calls exit(0) inside the argument parser, before
           # llama_backend_init() -- it loads no model and needs no accelerator.
           #
-          # Only the CPU flavours can be started here. ggml compiles its VMM
-          # path in by default (GGML_CUDA_NO_VMM is OFF), so a CUDA build links
-          # the CUDA driver library -- libcuda.so.1 on Linux, nvcuda.dll on
-          # Windows -- which ships with the NVIDIA driver rather than the
-          # toolkit. These runners have no driver, so the loader would fail
-          # before main() reads argv, and no choice of argument avoids that.
-          # Linux CUDA gets the next-strongest claim instead: resolve the
-          # bundled copy's dependencies without running it. Windows CUDA has no
-          # equivalent tool here and keeps the DLL adjacency check above. Either
-          # way a CUDA binary is first RUN by release QA on real hardware
-          # (docs/dev/release-qa-checklist.md).
-          if [ "$LLAMA_FLAVOUR" = "cpu" ]; then
-            # Same trap as the exe name above, from the other direction: not
-            # `if ! out=$("$found" --version)`, because inside that `if` $? is
-            # the status of the negation rather than of the binary. Capture it
-            # on the || branch, which `set -e` also leaves alone.
-            status=0
-            out=$("$found" --version 2>&1) || status=$?
-            echo "$out"
-            if [ "$status" -ne 0 ]; then
-              echo "::error::$found is bundled but does not start: --version exited $status. Packaging it would ship an app that loads a model and then fails at the first message."
-              exit 1
-            fi
-            # Exit 0 alone is not enough. An empty file with the executable bit
-            # set is run by the shell as an empty script and exits 0, so require
-            # the build header llama.cpp actually prints ("version: <version>
-            # (build <n>, commit <sha>)", on stderr) before calling this a
-            # working binary.
-            if ! echo "$out" | grep -q "^version: "; then
-              echo "::error::$found exited 0 but printed no llama.cpp build header, so the bundled file is not a working llama-server."
-              exit 1
-            fi
-            echo "The bundled inference binary starts."
-          elif [ "${RUNNER_OS}" = "Linux" ]; then
+          # The CPU copy is started on every leg, the CUDA legs included: it
+          # links no NVIDIA library. The CUDA copy cannot be started here.
+          # ggml compiles its VMM path in by default (GGML_CUDA_NO_VMM is OFF),
+          # so a CUDA build links the CUDA driver library -- libcuda.so.1 on
+          # Linux, nvcuda.dll on Windows -- which ships with the NVIDIA driver
+          # rather than the toolkit. These runners have no driver, so the
+          # loader would fail before main() reads argv, and no choice of
+          # argument avoids that. Linux CUDA gets the next-strongest claim
+          # instead: resolve the bundled copy's dependencies without running
+          # it. Windows CUDA has no equivalent tool here and keeps the DLL
+          # adjacency check above. Either way a CUDA binary is first RUN by
+          # release QA on real hardware (docs/dev/release-qa-checklist.md).
+          #
+          # Same trap as the exe name above, from the other direction: not
+          # `if ! out=$("$cpu_exe" --version)`, because inside that `if` $? is
+          # the status of the negation rather than of the binary. Capture it on
+          # the || branch, which `set -e` also leaves alone.
+          status=0
+          out=$("$cpu_exe" --version 2>&1) || status=$?
+          echo "$out"
+          if [ "$status" -ne 0 ]; then
+            echo "::error::$cpu_exe is bundled but does not start: --version exited $status. Packaging it would ship an app that loads a model and then fails at the first message."
+            exit 1
+          fi
+          # Exit 0 alone is not enough. An empty file with the executable bit
+          # set is run by the shell as an empty script and exits 0, so require
+          # the build header llama.cpp actually prints ("version: <version>
+          # (build <n>, commit <sha>)", on stderr) before calling this a
+          # working binary.
+          if ! echo "$out" | grep -q "^version: "; then
+            echo "::error::$cpu_exe exited 0 but printed no llama.cpp build header, so the bundled file is not a working llama-server."
+            exit 1
+          fi
+          echo "The bundled CPU inference binary starts."
+          if [ "$LLAMA_FLAVOUR" = "cuda" ] && [ "${RUNNER_OS}" = "Linux" ]; then
             # The CUDA binary cannot be started, but its dependencies can still
             # be resolved without running it -- and this is the copy where that
             # matters most. PyInstaller walked a tree and wrote the file into a
             # new one; if the freeze lost a library the server needs, nothing
             # else in the pipeline would notice. The DLL adjacency check above
-            # is Windows-only (#449), and the --version branch skips the CUDA
-            # legs, so this is the only claim the Linux CUDA bundle gets.
+            # is Windows-only (#449), so this is the only claim the Linux CUDA
+            # copy gets.
             status=0
-            deps=$(ldd "$found" 2>&1) || status=$?
+            deps=$(ldd "$cuda_exe" 2>&1) || status=$?
             echo "$deps"
             if [ "$status" -ne 0 ]; then
-              echo "::error::ldd could not read $found (exit $status): the bundled file is not a usable dynamic executable for this architecture."
+              echo "::error::ldd could not read $cuda_exe (exit $status): the bundled file is not a usable dynamic executable for this architecture."
               exit 1
             fi
             # grep exits 1 when it matches nothing, which is the passing case.
             missing=$(echo "$deps" | grep "not found" | grep -v "libcuda\.so\.1") || missing=""
             if [ -n "$missing" ]; then
-              echo "::error::$found has unresolved dependencies beyond the NVIDIA driver library. Packaging it would ship an app whose inference engine cannot load:"
+              echo "::error::$cuda_exe has unresolved dependencies beyond the NVIDIA driver library. Packaging it would ship an app whose inference engine cannot load:"
               echo "$missing"
               exit 1
             fi
-            echo "Every dependency of the bundled binary resolves except libcuda.so.1, which comes from the NVIDIA driver."
-          else
-            echo "CUDA build on ${RUNNER_OS}: not started here, because it links nvcuda.dll from the NVIDIA driver and this runner has none. The DLL check above is the claim this leg makes; release QA on real hardware is what runs it."
+            echo "Every dependency of the bundled CUDA binary resolves except libcuda.so.1, which comes from the NVIDIA driver."
+          elif [ "$LLAMA_FLAVOUR" = "cuda" ]; then
+            echo "CUDA build on ${RUNNER_OS}: not started here, because it links nvcuda.dll from the NVIDIA driver and this runner has none. The DLL check above is the claim this leg makes for it; release QA on real hardware is what runs it."
           fi
 
       # ── Frontend: webpack build → electron-builder package + sign + publish ──

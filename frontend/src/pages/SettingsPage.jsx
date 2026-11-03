@@ -1,11 +1,13 @@
-import React from "react";
+import React, { useCallback } from "react";
 import { Brain, Cpu, Globe, Languages, RefreshCw, ScrollText, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
 import SettingsCard from "../components/SettingsCard";
 import ToggleSwitch from "../components/ToggleSwitch";
 import UpdatesCard from "../components/UpdatesCard";
+import EngineSwitchConfirmation from "../components/modals/EngineSwitchConfirmation";
 import { useUserSettings, useAppStartupInfo } from "../shared/hooks/api";
+import { useEngineSwitch } from "../shared/hooks/useEngineSwitch";
 import { setAppLanguage } from "../i18n";
 import { LANGUAGE_NAMES, SUPPORTED_LANGUAGES } from "../i18n/languages";
 import { notifyAutoUpdatePreference } from "../utils/autoUpdate";
@@ -15,9 +17,6 @@ import {
   DEFAULT_COMPACTION_THRESHOLD,
   formatCompactionThreshold,
 } from "../utils/compactionThreshold";
-import { createLogger } from "../utils/logger";
-
-const log = createLogger("SettingsPage");
 
 // The privacy page lives in the documentation, published on www.erudi.app, so
 // every claim on it can point at the code that backs it. The window-open
@@ -63,23 +62,35 @@ export function showsInferenceEngineSetting(backendType, inferenceBackend) {
  * appears on a machine currently running the CUDA engine, or one pinned back
  * to the processor from CUDA (see `showsInferenceEngineSetting`, #511) --
  * elsewhere the setting is a no-op the backend ignores, so it stays hidden.
- * The language applies immediately through i18next and is persisted with the
+ * Once a switch starts, the card stays, its select locked, until the restarted
+ * backend has been re-read (`useEngineSwitch`): the running engine it is shown
+ * for is stale until then. The language applies immediately through i18next and is persisted with the
  * other settings.
  */
 export default function SettingsPage() {
   const { t, i18n } = useTranslation();
   const { settings, loading, updateSettings } = useUserSettings();
-  const { startupInfo } = useAppStartupInfo();
+  const { startupInfo, refetchesAfterReady } = useAppStartupInfo();
+  const persistInferenceBackend = useCallback(
+    (next) => updateSettings({ inference_backend: next }),
+    [updateSettings]
+  );
+  // The card's visibility follows the RUNNING engine, which is stale from the
+  // switch until the restarted backend has been re-read: `pending` keeps the
+  // card (and locks its select) for that whole window.
+  const engineSwitch = useEngineSwitch({
+    persist: persistInferenceBackend,
+    settled: refetchesAfterReady,
+  });
   const webSearchEnabled = settings?.web_search_enabled ?? false;
   const autoUpdateEnabled = settings?.auto_update_enabled ?? true;
   const reasoningEffort = settings?.default_reasoning_effort ?? DEFAULT_REASONING_EFFORT;
   const compactionThreshold =
     settings?.default_compaction_threshold ?? DEFAULT_COMPACTION_THRESHOLD;
   const inferenceBackend = settings?.inference_backend ?? "auto";
-  const showInferenceEngineSetting = showsInferenceEngineSetting(
-    startupInfo?.backend_type,
-    inferenceBackend
-  );
+  const showInferenceEngineSetting =
+    engineSwitch.pending ||
+    showsInferenceEngineSetting(startupInfo?.backend_type, inferenceBackend);
 
   // A failed settings write has exactly one owner: `useUserSettings` logs it
   // where the request is made, with the payload and the error. These handlers
@@ -125,25 +136,12 @@ export default function SettingsPage() {
     notifyAutoUpdatePreference(next);
   };
 
-  const handleInferenceBackendChange = async (event) => {
-    const next = event.target.value;
-    try {
-      await updateSettings({ inference_backend: next });
-    } catch {
-      // Already recorded by the hook. Restarting for a preference that was
-      // not saved would only lose the user's conversation state.
-      return;
-    }
-    try {
-      // The engine is chosen once per boot, so the new preference only takes
-      // effect after the backend comes back up.
-      await window.backendAPI?.restartBackend?.();
-    } catch (error) {
-      // A distinct failure with a distinct consequence: the choice IS saved,
-      // and it applies at the next launch. Reporting it as a failed setting
-      // sent people looking for a defect in the wrong place.
-      log.error("The inference engine was saved but the backend did not restart", error);
-    }
+  const handleInferenceBackendChange = (event) => {
+    // A failed write is recorded by `useUserSettings`, a failed restart by the
+    // switch hook; the page has nothing to add to either. During a download
+    // the hook asks first (`EngineSwitchConfirmation` below); the select stays
+    // on the saved value until the switch goes through.
+    engineSwitch.requestSwitch(event.target.value);
   };
 
   const handleLanguageChange = async (event) => {
@@ -257,7 +255,7 @@ export default function SettingsPage() {
                   aria-label={t("settings:inferenceBackend.selectLabel")}
                   value={inferenceBackend}
                   onChange={handleInferenceBackendChange}
-                  disabled={loading}
+                  disabled={loading || engineSwitch.pending}
                   className="text-[13px] rounded-lg border border-[var(--line)] bg-[var(--canvas)] text-[var(--ink)] px-3 py-1.5 focus:outline-none focus:border-[var(--fit-good)] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
                 >
                   <option value="auto">{t("settings:inferenceBackend.auto")}</option>
@@ -266,6 +264,12 @@ export default function SettingsPage() {
               }
             />
           )}
+
+          <EngineSwitchConfirmation
+            isOpen={engineSwitch.confirming}
+            onConfirm={engineSwitch.confirm}
+            onCancel={engineSwitch.dismiss}
+          />
 
           <SettingsCard
             icon={<Languages className="w-5 h-5 text-[var(--fit-good)]" />}

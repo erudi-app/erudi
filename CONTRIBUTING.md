@@ -356,8 +356,12 @@ next to the server, which is what lets a user run the build with only a driver
 installed. On a release tag, `release.yml` applies the same three checks to the
 copy PyInstaller froze into `backend/dist` — a separate claim, because the freeze
 copies the file into a new tree and can pick up the wrong flavour, drop a sibling
-runtime library, or lose the executable bit. Neither workflow runs inference; the
-release QA pass on real hardware is the first thing that does.
+runtime library, or lose the executable bit. The CUDA installers carry the CPU
+build as well, for the processor engine: `release.yml` compiles it on the CUDA
+legs, checks each copy at its own path, starts the CPU copy there too, and refuses
+a CPU folder that holds the CUDA runtime. `llamacpp-build.yml` compiles all four
+builds that ship (CPU and CUDA, Linux and Windows). Neither workflow runs
+inference; the release QA pass on real hardware is the first thing that does.
 
 Then:
 

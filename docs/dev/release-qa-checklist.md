@@ -92,13 +92,25 @@ then stays on that channel. So QA must, per release:
 - [ ] Cross-channel sanity: the CUDA draft is **not** offered to a CPU install,
       and vice versa (each follows only its own `*.yml`).
 
-> The Windows binaries are compiled in CI from the `llama.cpp` submodule. CI
-> starts the bundled CPU `llama-server` (`--version`, which prints llama.cpp's
-> build header and exits without loading a model) but **runs no inference**, and
-> it cannot start the CUDA one at all: that build links the NVIDIA driver library
-> `nvcuda.dll`, which is absent from a GPU-less runner, so the loader fails before
-> the program runs. Real Windows hardware QA here is the only validation of the
-> inference path.
+> The Windows binaries are compiled in CI from the `llama.cpp` submodule. The CUDA
+> installer carries two of them: the CUDA build for the GPU engine and the CPU
+> build for **Processor only**. CI starts the bundled CPU `llama-server` on both
+> Windows legs (`--version`, which prints llama.cpp's build header and exits
+> without loading a model) but **runs no inference**, and it cannot start the CUDA
+> one at all: that build links the NVIDIA driver library `nvcuda.dll`, which is
+> absent from a GPU-less runner, so the loader fails before the program runs. Real
+> Windows hardware QA here is the only validation of the inference path.
+>
+> - [ ] CUDA installer, **Processor only**: the child's command line
+>       (`(Get-CimInstance Win32_Process -Filter "Name='llama-server.exe'").CommandLine`)
+>       runs `...\artifacts\llama-cpp\cpu\bin\llama-server.exe`, `backend.log` has no
+>       `falling back to the cuda build` WARNING, and the child holds 0 MiB of
+>       dedicated GPU memory.
+> - [ ] Linux CUDA AppImage, **Processor only**: the same check on a Linux + NVIDIA
+>       machine. `ps -o args= -C llama-server` shows the child running
+>       `.../artifacts/llama-cpp/cpu/bin/llama-server`, `backend.log` has no
+>       `falling back to the cuda build` WARNING, and `nvidia-smi` lists no
+>       `llama-server` process.
 
 ## Promote
 

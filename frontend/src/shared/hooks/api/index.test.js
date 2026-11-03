@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
-import { describe, it, expect, vi, beforeEach } from "vitest";
-import { renderHook, waitFor } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { renderHook, waitFor, act } from "@testing-library/react";
 
 vi.mock("../../../services/api/client", () => ({
   apiClient: { get: vi.fn() },
@@ -180,7 +180,12 @@ describe("useAppStartupInfo", () => {
     apiClient.get.mockResolvedValueOnce(info);
 
     const { result } = renderHook(() => useAppStartupInfo());
-    expect(result.current).toEqual({ startupInfo: null, loading: true, error: null });
+    expect(result.current).toMatchObject({
+      startupInfo: null,
+      loading: true,
+      error: null,
+      refetchesAfterReady: 0,
+    });
 
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(apiClient.get).toHaveBeenCalledWith("/hardware/app_startup");
@@ -196,6 +201,90 @@ describe("useAppStartupInfo", () => {
     await waitFor(() => expect(result.current.loading).toBe(false));
     expect(result.current.error).toBe(failure);
     expect(result.current.startupInfo).toBeNull();
+  });
+});
+
+/**
+ * The startup info names the engine that RUNS, so it goes stale the moment the
+ * backend restarts on another engine (the Inference engine setting). The hook
+ * re-reads it when the main process says the restarted backend is ready.
+ */
+describe("useAppStartupInfo — after a backend restart", () => {
+  let listeners;
+  let unsubscribe;
+
+  beforeEach(() => {
+    listeners = [];
+    unsubscribe = vi.fn();
+    window.backendAPI = {
+      onBackendEvent: vi.fn((cb) => {
+        listeners.push(cb);
+        return unsubscribe;
+      }),
+    };
+  });
+
+  afterEach(() => {
+    delete window.backendAPI;
+  });
+
+  const emit = (evt) => act(() => listeners.forEach((cb) => cb(evt)));
+
+  it("fetches again on backend_ready and exposes the fresh engine", async () => {
+    apiClient.get
+      .mockResolvedValueOnce({ backend_type: "cpu" })
+      .mockResolvedValueOnce({ backend_type: "cuda" });
+
+    const { result } = renderHook(() => useAppStartupInfo());
+    await waitFor(() => expect(result.current.startupInfo).toEqual({ backend_type: "cpu" }));
+
+    emit({ event: "backend_ready", port: 27183 });
+
+    await waitFor(() => expect(result.current.startupInfo).toEqual({ backend_type: "cuda" }));
+    expect(apiClient.get).toHaveBeenCalledTimes(2);
+    expect(apiClient.get).toHaveBeenNthCalledWith(2, "/hardware/app_startup");
+    expect(result.current.refetchesAfterReady).toBe(1);
+  });
+
+  it("ignores the other lifecycle events", async () => {
+    apiClient.get.mockResolvedValue({ backend_type: "cuda" });
+
+    const { result } = renderHook(() => useAppStartupInfo());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    emit({ event: "starting", first_run: false });
+    emit({ event: "phase", phase: "database" });
+    // run.py's own `ready`, relayed raw by main.js before its health check:
+    // main.js then sends `backend_ready`, the one this hook acts on, so
+    // reacting to both would read the engine twice per restart.
+    emit({ event: "ready", port: 27183 });
+
+    expect(apiClient.get).toHaveBeenCalledTimes(1);
+    expect(result.current.refetchesAfterReady).toBe(0);
+  });
+
+  it("counts a failed re-read as settled, with the error exposed", async () => {
+    const failure = new Error("still booting");
+    apiClient.get.mockResolvedValueOnce({ backend_type: "cuda" }).mockRejectedValueOnce(failure);
+
+    const { result } = renderHook(() => useAppStartupInfo());
+    await waitFor(() => expect(result.current.loading).toBe(false));
+
+    emit({ event: "backend_ready", port: 27183 });
+
+    await waitFor(() => expect(result.current.refetchesAfterReady).toBe(1));
+    expect(result.current.error).toBe(failure);
+  });
+
+  it("unsubscribes from the backend events on unmount", async () => {
+    apiClient.get.mockResolvedValue({ backend_type: "cuda" });
+
+    const { unmount } = renderHook(() => useAppStartupInfo());
+    await waitFor(() => expect(window.backendAPI.onBackendEvent).toHaveBeenCalledTimes(1));
+
+    unmount();
+
+    expect(unsubscribe).toHaveBeenCalledTimes(1);
   });
 });
 

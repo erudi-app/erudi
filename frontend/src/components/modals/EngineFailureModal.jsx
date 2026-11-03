@@ -5,14 +5,18 @@ import { AlertTriangle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { apiClient } from "../../services/api/client";
 import ReportProblem from "../ReportProblem";
+import { EngineSwitchConfirmationContent } from "./EngineSwitchConfirmation";
+import { useEngineSwitch } from "../../shared/hooks/useEngineSwitch";
 import { describeEngineFailure } from "../../utils/engineNotice";
 import { buildPrefill } from "../../utils/diagnosticsReport";
 import { createLogger } from "../../utils/logger";
 
 const log = createLogger("EngineFailureModal");
 
-// The processor build of Erudi avoids the graphics card altogether, for someone
-// who would rather reinstall than carry a setting.
+// The processor build of Erudi has no GPU code at all, for someone who would
+// rather reinstall than carry a setting. Processor mode in this build avoids the
+// card too: it runs the CPU llama-server the GPU installers ship beside the CUDA
+// one, with every GPU hidden from it.
 export const RELEASES_URL = "https://github.com/erudi-app/erudi/releases/latest";
 
 /**
@@ -25,13 +29,27 @@ export const RELEASES_URL = "https://github.com/erudi-app/erudi/releases/latest"
  *
  * Nothing here is automatic. The processor fallback is offered, and applying it
  * writes `inference_backend: "cpu"` then restarts the backend, because the
- * engine is chosen once per boot. "Not now" persists nothing: the condition is
+ * engine is chosen once per boot (`useEngineSwitch`). While a model download
+ * is in progress the dialog first asks, as a step of its own, whether to cancel
+ * it: the restart would kill it. "Not now" persists nothing: the condition is
  * real and the dialog is expected to come back.
  */
 export default function EngineFailureModal({ notice, onDismiss }) {
   const { t } = useTranslation();
-  const [switching, setSwitching] = useState(false);
   const [switchFailed, setSwitchFailed] = useState(false);
+  const persistCpu = useCallback(async (next) => {
+    try {
+      await apiClient.put("/user_settings/", { inference_backend: next });
+    } catch (error) {
+      log.error("Failed to persist the processor-mode preference", error);
+      throw error;
+    }
+  }, []);
+  // The engine is a process-level singleton read once per boot: the switch
+  // saves the preference and restarts the backend, asking first when a
+  // download would be cancelled by the restart.
+  const engineSwitch = useEngineSwitch({ persist: persistCpu });
+  const switching = engineSwitch.pending;
   const [appInfo, setAppInfo] = useState(null);
   const described = describeEngineFailure(notice);
 
@@ -84,28 +102,17 @@ export default function EngineFailureModal({ notice, onDismiss }) {
   }, [described, gpuName, computeCapability]);
 
   const handleSwitchToCpu = useCallback(async () => {
-    setSwitching(true);
     setSwitchFailed(false);
-    try {
-      await apiClient.put("/user_settings/", { inference_backend: "cpu" });
-    } catch (error) {
+    const outcome = await engineSwitch.requestSwitch("cpu");
+    if (outcome === "declined") return;
+    if (outcome === "not-saved") {
       // The preference did not persist, so restarting would come back on the
       // GPU and look like the switch silently failed. Say so instead.
-      log.error("Failed to persist the processor-mode preference", error);
-      setSwitching(false);
       setSwitchFailed(true);
       return;
     }
-    // The engine is a process-level singleton read once per boot: only a
-    // restart makes the new preference take effect.
-    try {
-      await window.backendAPI?.restartBackend?.();
-    } catch (error) {
-      log.error("Failed to restart the backend after switching to processor mode", error);
-    }
-    setSwitching(false);
     onDismiss();
-  }, [onDismiss]);
+  }, [engineSwitch, onDismiss]);
 
   const facts = described
     ? [
@@ -126,7 +133,9 @@ export default function EngineFailureModal({ notice, onDismiss }) {
           transition={{ duration: 0.2 }}
           role="dialog"
           aria-modal={true}
-          aria-label={described.title}
+          aria-label={
+            engineSwitch.confirming ? t("common:engineSwitch.downloadTitle") : described.title
+          }
           className="fixed inset-0 bg-black/60 backdrop-blur-sm flex items-center justify-center z-[9999] p-4"
         >
           <motion.div
@@ -145,81 +154,94 @@ export default function EngineFailureModal({ notice, onDismiss }) {
               ].join(" ")}
             >
               <div className="relative z-10 p-6">
-                <div className="flex items-start gap-3 mb-4">
-                  <div className="w-8 h-8 shrink-0 rounded-lg bg-amber-500/20 flex items-center justify-center">
-                    <AlertTriangle className="w-4 h-4 text-amber-400" />
-                  </div>
-                  <h2 className="text-xl font-semibold tracking-tight text-[#F2F7F4]">
-                    {described.title}
-                  </h2>
-                </div>
+                {/* A download in progress: the question is a step of this
+                    dialog, not a second modal stacked over it. */}
+                {engineSwitch.confirming ? (
+                  <EngineSwitchConfirmationContent
+                    onConfirm={engineSwitch.confirm}
+                    onCancel={engineSwitch.dismiss}
+                  />
+                ) : (
+                  <>
+                    <div className="flex items-start gap-3 mb-4">
+                      <div className="w-8 h-8 shrink-0 rounded-lg bg-amber-500/20 flex items-center justify-center">
+                        <AlertTriangle className="w-4 h-4 text-amber-400" />
+                      </div>
+                      <h2 className="text-xl font-semibold tracking-tight text-[#F2F7F4]">
+                        {described.title}
+                      </h2>
+                    </div>
 
-                <p className="text-[13px] leading-relaxed text-[#cfd8d4]">{described.detail}</p>
-                <p className="text-[13px] leading-relaxed text-[#9fb0aa] mt-2">{described.hint}</p>
-
-                {facts.length > 0 && (
-                  <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
-                    <p className="text-[11px] uppercase tracking-wide text-[#8aa39b] mb-2">
-                      {t("errors:engine.modal.facts")}
+                    <p className="text-[13px] leading-relaxed text-[#cfd8d4]">{described.detail}</p>
+                    <p className="text-[13px] leading-relaxed text-[#9fb0aa] mt-2">
+                      {described.hint}
                     </p>
-                    <dl className="space-y-1">
-                      {facts.map(([label, value]) => (
-                        <div key={label} className="flex justify-between gap-4 text-[12px]">
-                          <dt className="text-[#9fb0aa]">{label}</dt>
-                          <dd className="text-[#e6efeb] font-mono">{value}</dd>
-                        </div>
-                      ))}
-                    </dl>
-                  </div>
-                )}
 
-                {/* The app has one report block, shared with the Diagnostics
+                    {facts.length > 0 && (
+                      <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-3">
+                        <p className="text-[11px] uppercase tracking-wide text-[#8aa39b] mb-2">
+                          {t("errors:engine.modal.facts")}
+                        </p>
+                        <dl className="space-y-1">
+                          {facts.map(([label, value]) => (
+                            <div key={label} className="flex justify-between gap-4 text-[12px]">
+                              <dt className="text-[#9fb0aa]">{label}</dt>
+                              <dd className="text-[#e6efeb] font-mono">{value}</dd>
+                            </div>
+                          ))}
+                        </dl>
+                      </div>
+                    )}
+
+                    {/* The app has one report block, shared with the Diagnostics
                     page and the renderer error screen, so what a reporter is
                     asked to send never depends on which dialog they reached. */}
-                <div className="mt-4">
-                  <ReportProblem diagnostics={diagnostics} prefill={prefill} />
-                </div>
+                    <div className="mt-4">
+                      <ReportProblem diagnostics={diagnostics} prefill={prefill} />
+                    </div>
 
-                {switchFailed && (
-                  <p className="mt-4 text-[12px] text-red-300">
-                    {t("errors:engine.modal.switchFailed")}
-                  </p>
+                    {switchFailed && (
+                      <p className="mt-4 text-[12px] text-red-300">
+                        {t("errors:engine.modal.switchFailed")}
+                      </p>
+                    )}
+
+                    <div className="mt-5 flex flex-wrap items-center gap-3">
+                      <button
+                        type="button"
+                        onClick={handleSwitchToCpu}
+                        disabled={switching}
+                        className="px-4 py-2 rounded-lg text-[13px] font-medium bg-[#34d399] text-[#02130e] transition-opacity hover:opacity-90 disabled:opacity-60"
+                      >
+                        {switching
+                          ? t("errors:engine.modal.switching")
+                          : t("errors:engine.modal.switchToCpu")}
+                      </button>
+                      <button
+                        type="button"
+                        onClick={onDismiss}
+                        className="px-4 py-2 rounded-lg text-[13px] font-medium border border-white/15 text-[#e6efeb] transition-colors hover:border-white/30"
+                      >
+                        {t("errors:engine.modal.notNow")}
+                      </button>
+                    </div>
+                    <p className="mt-2.5 text-[12px] text-[#8aa39b]">
+                      {t("errors:engine.modal.switchNote")}
+                    </p>
+
+                    <p className="mt-3 text-[12px] text-[#8aa39b]">
+                      {t("errors:engine.modal.cpuInstallerNote")}{" "}
+                      <a
+                        href={RELEASES_URL}
+                        target="_blank"
+                        rel="noreferrer"
+                        className="text-[#e6efeb] hover:text-white underline underline-offset-2"
+                      >
+                        {t("errors:engine.modal.cpuInstaller")}
+                      </a>
+                    </p>
+                  </>
                 )}
-
-                <div className="mt-5 flex flex-wrap items-center gap-3">
-                  <button
-                    type="button"
-                    onClick={handleSwitchToCpu}
-                    disabled={switching}
-                    className="px-4 py-2 rounded-lg text-[13px] font-medium bg-[#34d399] text-[#02130e] transition-opacity hover:opacity-90 disabled:opacity-60"
-                  >
-                    {switching
-                      ? t("errors:engine.modal.switching")
-                      : t("errors:engine.modal.switchToCpu")}
-                  </button>
-                  <button
-                    type="button"
-                    onClick={onDismiss}
-                    className="px-4 py-2 rounded-lg text-[13px] font-medium border border-white/15 text-[#e6efeb] transition-colors hover:border-white/30"
-                  >
-                    {t("errors:engine.modal.notNow")}
-                  </button>
-                </div>
-                <p className="mt-2.5 text-[12px] text-[#8aa39b]">
-                  {t("errors:engine.modal.switchNote")}
-                </p>
-
-                <p className="mt-3 text-[12px] text-[#8aa39b]">
-                  {t("errors:engine.modal.cpuInstallerNote")}{" "}
-                  <a
-                    href={RELEASES_URL}
-                    target="_blank"
-                    rel="noreferrer"
-                    className="text-[#e6efeb] hover:text-white underline underline-offset-2"
-                  >
-                    {t("errors:engine.modal.cpuInstaller")}
-                  </a>
-                </p>
               </div>
             </div>
           </motion.div>

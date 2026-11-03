@@ -128,15 +128,18 @@ def test_backend_spec_fails_the_build_when_the_inference_binary_is_missing():
     The spec used to only `warnings.warn` when the artifact directory was
     absent, so a silently failed llama build would still produce a bundle and
     still publish. Nothing downstream checked, so the defect would surface as
-    "the app does nothing" on a user's machine. The spec must raise instead.
+    "the app does nothing" on a user's machine. The collection helper raises
+    (tests/test_pyi_llama_artifacts.py); the spec must hand it the opt-out
+    rather than swallow the error.
     """
     spec = _read("backend.spec")
     assert "warnings.warn" not in spec, "a missing inference binary must fail the build, not warn"
-    assert "RuntimeError" in spec
+    assert "collect_llama_artifacts(" in spec
     # The boot-only smoke build legitimately has no llama-server, so there is
     # one explicit, named opt-out - and it has to be spelled out in the
     # workflow that uses it rather than being the default.
     assert "ERUDI_ALLOW_MISSING_INFERENCE_BINARY" in spec
+    assert "except RuntimeError" not in spec
 
 
 @pytest.mark.unit
@@ -162,13 +165,72 @@ def test_release_asserts_the_bundle_actually_contains_the_binary():
 
 
 @pytest.mark.unit
-def test_backend_spec_bundles_variant_llama_server():
-    # The Windows llama-server bundle must follow the build variant so the cpu
-    # spec ships artifacts/llama-cpp/cpu/bin and the (default) cuda spec ships
-    # .../cuda/bin — NOT a hardcoded cuda-only path. Both flavours are compiled
-    # in CI from the llama.cpp submodule before PyInstaller runs (see release.yml).
+def test_backend_spec_bundles_the_llama_artifacts_through_the_helper():
+    # What ships is decided by pyi_llama_artifacts.collect_llama_artifacts (unit
+    # tested on every OS): the spec passes it the build variant and appends its
+    # output -- datas before Analysis, the runtime libraries verbatim after the
+    # torch-CUDA strip. No flavour path is hardcoded in the spec.
     spec = _read("backend.spec")
+    assert "from pyi_llama_artifacts import collect_llama_artifacts" in spec
     assert "ERUDI_BUILD_VARIANT" in spec
-    assert "_llama_flavour" in spec
-    # the previous hardcoded cuda-only data path must be gone
+    assert ".runtime_files" in spec
     assert '"llama-cpp" / "cuda" / "bin"' not in spec
+    assert '"llama-cpp" / "cpu" / "bin"' not in spec
+    # The runtime libraries are appended after the strip, never ridden in datas.
+    strip = spec.index("_cuda_fragments")
+    append = spec.index('a.datas.append((_name, _src, "DATA"))')
+    assert append > strip
+
+
+def _release_steps():
+    import yaml  # a transformers dependency, installed on every leg
+
+    root = _BACKEND.parent
+    workflow = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    return workflow["jobs"]["build"]["steps"]
+
+
+def _step(steps, name):
+    (step,) = [s for s in steps if s.get("name") == name]
+    return step
+
+
+@pytest.mark.unit
+def test_release_compiles_the_cpu_flavour_on_the_cuda_legs():
+    """The CUDA installers ship the CPU llama-server for the processor engine.
+
+    Its compile is a separate step gated on the CUDA legs, after the CUDA
+    compile and before PyInstaller, one per OS.
+    """
+    steps = _release_steps()
+    names = [s.get("name") for s in steps]
+    win = _step(steps, "Build the CPU llama-server too (Windows CUDA leg)")
+    linux = _step(steps, "Build the CPU llama-server too (Linux CUDA leg)")
+    assert win["if"] == "matrix.llama_build == 'cuda' && runner.os == 'Windows'"
+    assert win["run"].strip() == "./scripts/dev/backend/build-llamacpp-cpu-win.ps1"
+    assert linux["if"] == "matrix.llama_build == 'cuda' && runner.os == 'Linux'"
+    assert linux["run"].strip() == "bash scripts/dev/backend/build-llamacpp-cpu-linux.sh"
+    bundle = names.index("Build backend bundle")
+    for step, primary in (
+        (win, "Build llama-server (Windows inference binary)"),
+        (linux, "Build llama-server (Linux inference binary)"),
+    ):
+        assert names.index(primary) < names.index(step["name"]) < bundle
+
+
+@pytest.mark.unit
+def test_release_verifies_both_flavours_in_the_cuda_bundle():
+    """The Verify step checks each flavour at its explicit path.
+
+    A single `find -print -quit` would be satisfied by either copy; the CPU
+    copy is started with --version on every leg (it needs no driver), and must
+    not carry the CUDA runtime (a CPU binary that loads cudart is the CUDA
+    build in the wrong folder).
+    """
+    run = _step(_release_steps(), "Verify the bundled inference binary")["run"]
+    assert "-print -quit" not in run
+    assert "llama-cpp/cpu/bin" in run
+    assert "llama-cpp/cuda/bin" in run
+    assert '"$cpu_exe" --version' in run
+    assert "cudart64_12.dll" in run
+    assert 'if [ -f "$cpu_dir/cudart64_12.dll" ]' in run

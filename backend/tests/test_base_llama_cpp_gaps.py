@@ -41,13 +41,32 @@ class TestFindLlamaServer:
         binary = _touch(install / exe)
         assert CPU_Engine._find_llama_server(install) == binary
 
-    def test_falls_back_to_other_flavour(self, tmp_path, monkeypatch):
+    def test_falls_back_to_other_flavour(self, tmp_path, monkeypatch, caplog):
         exe = "llama-server.exe" if os.name == "nt" else "llama-server"
         monkeypatch.setattr(base_mod, "ROOT_DIR", tmp_path)
         cuda_binary = _touch(tmp_path / "artifacts" / "llama-cpp" / "cuda" / "bin" / exe)
         empty_cpu = tmp_path / "artifacts" / "llama-cpp" / "cpu" / "bin"
         empty_cpu.mkdir(parents=True)
-        assert CPU_Engine._find_llama_server(empty_cpu) == cuda_binary
+        # Same capture as the both-flavours test below, so its "no WARNING"
+        # is proven able to see one.
+        with caplog.at_level(logging.WARNING, logger="erudi"):
+            assert CPU_Engine._find_llama_server(empty_cpu) == cuda_binary
+        warnings = [r.getMessage() for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("falling back to the cuda build" in m for m in warnings), warnings
+
+    @pytest.mark.parametrize("engine,flavour", [(CPU_Engine, "cpu"), (CUDA_Engine, "cuda")])
+    def test_each_engine_runs_its_own_flavour_when_both_ship(
+        self, tmp_path, monkeypatch, caplog, engine, flavour
+    ):
+        """The CUDA installer ships both builds: no fallback, no WARNING."""
+        exe = "llama-server.exe" if os.name == "nt" else "llama-server"
+        monkeypatch.setattr(base_mod, "ROOT_DIR", tmp_path)
+        for f in ("cpu", "cuda"):
+            _touch(tmp_path / "artifacts" / "llama-cpp" / f / "bin" / exe)
+        with caplog.at_level(logging.WARNING, logger="erudi"):
+            found = engine._find_llama_server()
+        assert found == tmp_path / "artifacts" / "llama-cpp" / flavour / "bin" / exe
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
 
     def test_missing_everywhere_raises(self, tmp_path, monkeypatch):
         monkeypatch.setattr(base_mod, "ROOT_DIR", tmp_path)
@@ -236,9 +255,59 @@ class TestSpawnChild:
         assert "--mmproj" in argv
         assert argv[argv.index("--mmproj") + 1].endswith("mmproj-model.gguf")
 
-    def test_default_spawn_env_inherits_parent(self):
+    def test_cpu_spawn_env_inherits_the_parent_and_hides_every_gpu(self):
         env = CPU_Engine._build_spawn_env()
-        assert env == os.environ.copy()
+        expected = os.environ.copy()
+        expected["CUDA_VISIBLE_DEVICES"] = "-1"
+        assert env == expected
+
+
+# =====================================================================
+# UNIT - the processor engine never initialises CUDA (#661)
+# =====================================================================
+
+
+@pytest.mark.unit
+class TestCpuChildSeesNoGpu:
+    """`CUDA_VISIBLE_DEVICES=-1` in the CPU child's environment, and only there.
+
+    The CUDA installer ships the CPU llama-server for the processor engine,
+    and `_find_llama_server` can still fall back to the CUDA build (a dev tree
+    with one flavour). `-ngl 0` does not stop the CUDA build from initialising
+    the card, which costs VRAM; `-1` masks every device, so even that fallback
+    allocates none. The mask lives in the child's env: the backend's own
+    environment, and the CUDA engine's pin, are untouched.
+    """
+
+    UUID = "GPU-12345678-1234-1234-1234-123456789abc"
+
+    def test_the_popen_env_of_the_cpu_child_masks_every_device(self, tmp_path, monkeypatch):
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        _handle, captured = _spawn_cpu_child(tmp_path, monkeypatch, with_mmproj=False)
+        assert captured["kwargs"]["env"]["CUDA_VISIBLE_DEVICES"] == "-1"
+        assert "CUDA_VISIBLE_DEVICES" not in os.environ
+
+    def test_a_user_value_is_overwritten_on_the_cpu_side_only(self, tmp_path, monkeypatch):
+        monkeypatch.setenv("CUDA_VISIBLE_DEVICES", "0")
+        _handle, captured = _spawn_cpu_child(tmp_path, monkeypatch, with_mmproj=False)
+        assert captured["kwargs"]["env"]["CUDA_VISIBLE_DEVICES"] == "-1"
+        assert os.environ["CUDA_VISIBLE_DEVICES"] == "0"
+
+    def test_the_cuda_env_keeps_its_uuid_pin_after_a_cpu_spawn(self, tmp_path, monkeypatch):
+        """The engine swap (auto <-> cpu) spawns both in one backend process:
+        the CPU mask must not leak into the next CUDA child."""
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        _spawn_cpu_child(tmp_path, monkeypatch, with_mmproj=False)
+        with patch.object(CUDA_Engine, "_resolve_cuda_bin_dir", return_value=None):
+            env = CUDA_Engine._build_spawn_env(gpu_uuid=self.UUID)
+        assert env["CUDA_VISIBLE_DEVICES"] == self.UUID
+
+    def test_the_cuda_env_never_masks_the_gpus(self, monkeypatch):
+        monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+        with patch.object(CUDA_Engine, "_resolve_cuda_bin_dir", return_value=None):
+            assert CUDA_Engine._build_spawn_env().get("CUDA_VISIBLE_DEVICES") != "-1"
+            pinned = CUDA_Engine._build_spawn_env(gpu_uuid=self.UUID)
+        assert pinned["CUDA_VISIBLE_DEVICES"] == self.UUID
 
 
 # =====================================================================

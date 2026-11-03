@@ -3,7 +3,8 @@
 # Full build pipeline for Erudi on Windows with CUDA.
 #
 # Steps:
-#   1. Verify prerequisites (Python venv, llama-cpp binaries, Node/npm)
+#   1. Verify prerequisites (Python venv, the CUDA and the CPU llama-server
+#      with their runtime DLLs, Node/npm)
 #   2. Install PyInstaller into the backend venv (if missing)
 #   3. Generate icon.ico from icon.png (if missing)
 #   4. Run PyInstaller with backend.spec  → backend/dist/backend/
@@ -35,6 +36,9 @@ $FrontendBackend = Join-Path $FrontendRoot "backend"
 $IconPng      = Join-Path $FrontendRoot "assets\icons\icon.png"
 $IconIco      = Join-Path $FrontendRoot "assets\icons\icon.ico"
 $LlamaServer  = Join-Path $BackendRoot "artifacts\llama-cpp\cuda\bin\llama-server.exe"
+# The CUDA installer ships the CPU build too: CPU_Engine ("Processor only")
+# runs it, with no NVIDIA library loaded (backend.spec requires both).
+$LlamaServerCpu = Join-Path $BackendRoot "artifacts\llama-cpp\cpu\bin\llama-server.exe"
 
 Write-Step "Erudi Windows CUDA build"
 Write-Host "  Repo root : $RepoRoot"
@@ -53,6 +57,11 @@ if (-not (Test-Path $LlamaServer)) {
     Write-Fail "llama-server.exe not found at $LlamaServer.`nRun: .\scripts\dev\backend\build-llamacpp-cuda-win.ps1"
 }
 Write-OK "llama-server.exe found"
+
+if (-not (Test-Path $LlamaServerCpu)) {
+    Write-Fail "CPU llama-server.exe not found at $LlamaServerCpu.`nThe CUDA installer ships it for the processor engine.`nRun: .\scripts\dev\backend\build-llamacpp-cpu-win.ps1"
+}
+Write-OK "CPU llama-server.exe found"
 
 # The runtime DLLs llama-server.exe links against have to sit beside it, because
 # the Windows loader searches the exe's own directory first and an end user has
@@ -78,6 +87,24 @@ if ($MissingRuntimeDlls.Count -gt 0) {
                 "Re-run: .\scripts\dev\backend\build-llamacpp-cuda-win.ps1")
 }
 Write-OK "llama-server runtime DLLs bundled ($($RequiredRuntimeDlls.Count) checked)"
+
+# The CPU build carries the MSVC C++ runtime beside it (#144) and never the
+# CUDA runtime: a cudart in cpu\bin means the CUDA build was copied there.
+$LlamaCpuBinDir = Split-Path $LlamaServerCpu -Parent
+$RequiredCpuDlls = @("vcruntime140.dll", "vcruntime140_1.dll", "msvcp140.dll")
+$MissingCpuDlls = @($RequiredCpuDlls | Where-Object {
+    -not (Test-Path (Join-Path $LlamaCpuBinDir $_))
+})
+if ($MissingCpuDlls.Count -gt 0) {
+    Write-Fail ("Runtime DLLs missing next to the CPU llama-server.exe: {0}`n" -f ($MissingCpuDlls -join ", ") +
+                "It would not start on a machine without the VC++ redistributable.`n" +
+                "Re-run: .\scripts\dev\backend\build-llamacpp-cpu-win.ps1")
+}
+if (Test-Path (Join-Path $LlamaCpuBinDir "cudart64_12.dll")) {
+    Write-Fail ("cudart64_12.dll found in $LlamaCpuBinDir`: that folder holds a CUDA build.`n" +
+                "Re-run: .\scripts\dev\backend\build-llamacpp-cpu-win.ps1")
+}
+Write-OK "CPU llama-server runtime DLLs bundled ($($RequiredCpuDlls.Count) checked)"
 
 if (-not (Test-Path $BackendSpec)) {
     Write-Fail "backend.spec not found at $BackendSpec."

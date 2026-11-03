@@ -2,20 +2,27 @@
 #
 # Goal:
 # - Build llama.cpp for Windows, CPU-only backend (no CUDA).
-# - Produces the llama-server.exe used by CPU_Engine on Windows machines without
-#   an NVIDIA GPU. (The CUDA build also runs CPU inference, so this is the
-#   universal/fallback binary; see BaseLlamaCppEngine._find_llama_server.)
+# - Produces the llama-server.exe that CPU_Engine runs: in the CPU installer,
+#   and in the CUDA installer beside the CUDA build (the "Processor only"
+#   setting), where it needs no NVIDIA driver and touches no GPU. Building the
+#   CUDA installer therefore needs this script AND build-llamacpp-cuda-win.ps1.
 #
 # Prerequisites:
-# - Visual Studio 2022 with the "Desktop development with C++" workload.
-#   GitHub `windows-latest` runners ship this, so no vcvarsall bootstrap is
-#   needed: the "Visual Studio 17 2022" CMake generator finds MSVC on its own.
+# - Visual Studio 2019 or 2022 with the "Desktop development with C++" workload
+#   (Build Tools are enough), including "C++ CMake tools for Windows", which
+#   provides Ninja.
 # - Python + cmake. Taken from the dev venv (backend\venv\Scripts) if present,
 #   else from PATH (CI installs cmake via pip into the system Python).
 # - The llama-cpp submodule populated: git submodule update --init --recursive.
 #
 # Usage (run from erudi\ or erudi\backend\):
 #   .\scripts\dev\backend\build-llamacpp-cpu-win.ps1
+#
+# Visual Studio is found the same way as by build-llamacpp-cuda-win.ps1:
+# through vswhere (under ${env:ProgramFiles(x86)}, else on PATH). Set
+# ERUDI_VCVARSALL to the full path of vcvarsall.bat to skip vswhere, e.g. when
+# the toolchain lives on another drive:
+#   $env:ERUDI_VCVARSALL = "D:\VS\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
 #
 # Output:
 #   backend\artifacts\llama-cpp\cpu\bin\llama-server.exe
@@ -72,6 +79,85 @@ if (-not $VenvCmake) {
 if (-not $VenvCmake) { Write-Fail "cmake still not found after pip install." }
 Write-OK "cmake: $((& $VenvCmake --version 2>&1 | Select-Object -First 1))"
 
+# -------- Visual Studio detection + MSVC environment bootstrap --------
+# Same bootstrap as build-llamacpp-cuda-win.ps1: vcvarsall.bat's environment
+# is loaded into this session and the build runs with Ninja, so a machine whose
+# Visual Studio the CMake VS generator cannot locate (a toolchain on another
+# drive, or vswhere's instance state lost to a Windows reinstall) still builds
+# once ERUDI_VCVARSALL points at vcvarsall.bat.
+Write-Step "Detecting Visual Studio (C++ build tools) and bootstrapping MSVC environment..."
+
+$VcVarsAll = $null
+
+if ($env:ERUDI_VCVARSALL) {
+    # An explicit vcvarsall.bat wins: a toolchain on another drive, or a machine
+    # whose vswhere instance state (kept under ProgramData) is gone.
+    if (-not (Test-Path $env:ERUDI_VCVARSALL)) {
+        Write-Fail "ERUDI_VCVARSALL points to a file that does not exist: $env:ERUDI_VCVARSALL"
+    }
+    $VcVarsAll = $env:ERUDI_VCVARSALL
+} else {
+    # vswhere ships with the Visual Studio Installer under Program Files (x86),
+    # wherever that folder lives; else one on PATH.
+    $VsWhere = $null
+    if (${env:ProgramFiles(x86)}) {
+        $candidate = Join-Path ${env:ProgramFiles(x86)} "Microsoft Visual Studio\Installer\vswhere.exe"
+        if (Test-Path $candidate) { $VsWhere = $candidate }
+    }
+    if (-not $VsWhere) {
+        $VsWhereCmd = Get-Command vswhere.exe -ErrorAction SilentlyContinue
+        if ($VsWhereCmd) { $VsWhere = $VsWhereCmd.Source }
+    }
+    if ($VsWhere) {
+        $VsInstallPath = & $VsWhere -latest -products * -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>&1
+        if ($VsInstallPath) {
+            $candidate = Join-Path $VsInstallPath "VC\Auxiliary\Build\vcvarsall.bat"
+            if (Test-Path $candidate) { $VcVarsAll = $candidate }
+        }
+    }
+}
+
+if (-not $VcVarsAll) {
+    Write-Fail (
+        "vcvarsall.bat not found. Install Visual Studio 2019/2022 with the `n" +
+        "'Desktop development with C++' workload, open a VS Developer prompt and re-run, `n" +
+        "or set ERUDI_VCVARSALL to the full path of vcvarsall.bat."
+    )
+}
+
+Write-OK "Found vcvarsall.bat: $VcVarsAll"
+Write-Step "Bootstrapping MSVC x64 environment into current session..."
+
+# Capture env vars set by vcvarsall.bat and apply them to this PowerShell session
+$tmpEnvFile = [System.IO.Path]::GetTempFileName()
+try {
+    cmd /c "`"$VcVarsAll`" x64 > nul 2>&1 && set" | Set-Content $tmpEnvFile
+    Get-Content $tmpEnvFile | ForEach-Object {
+        if ($_ -match '^([^=]+)=(.*)$') {
+            [System.Environment]::SetEnvironmentVariable($matches[1], $matches[2], 'Process')
+        }
+    }
+} finally {
+    Remove-Item $tmpEnvFile -Force -ErrorAction SilentlyContinue
+}
+
+# Verify cl.exe is now in PATH
+$ClExe = Get-Command cl.exe -ErrorAction SilentlyContinue
+if (-not $ClExe) {
+    Write-Fail "cl.exe not found in PATH after vcvarsall bootstrap. Check VS installation."
+}
+Write-OK "MSVC cl.exe: $($ClExe.Source)"
+
+# Verify ninja is available (ships with VS Build Tools)
+$NinjaExe = Get-Command ninja -ErrorAction SilentlyContinue
+if (-not $NinjaExe) {
+    Write-Fail (
+        "ninja not found in PATH after vcvarsall bootstrap.`n" +
+        "Ensure 'C++ CMake tools for Windows' is installed in VS Build Tools."
+    )
+}
+Write-OK "Ninja: $($NinjaExe.Source)"
+
 # -------- clean previous output (non-interactive: CI runners start fresh) --------
 if ((Test-Path $BuildDir) -or (Test-Path $InstallDir)) {
     Write-Step "Removing previous build output..."
@@ -83,14 +169,12 @@ New-Item -ItemType Directory -Force -Path $BuildDir   | Out-Null
 New-Item -ItemType Directory -Force -Path $InstallDir | Out-Null
 
 # -------- cmake configure (CPU-only) --------
-# The Visual Studio generator finds and configures MSVC itself, so (unlike the
-# CUDA build) we do NOT need the Ninja + vcvarsall bootstrap.
+# Ninja with the MSVC environment bootstrapped above (x64), as for the CUDA build.
 Write-Host ""
 Write-Step "Configuring llama.cpp (CPU-only backend)..."
 
 $CmakeArgs = @(
-    "-G", "Visual Studio 17 2022",
-    "-A", "x64",
+    "-G", "Ninja",
     "-S", $SrcDir,
     "-B", $BuildDir,
     "-DCMAKE_BUILD_TYPE=Release",

@@ -51,6 +51,13 @@ jobs:
             script: bash scripts/dev/backend/build-llamacpp-cpu-linux.sh
             binary: backend/artifacts/llama-cpp/cpu/bin/llama-server
             cuda: false
+          # The Windows CPU build ships in both Windows installers (the CUDA
+          # one carries it for the processor engine).
+          - os: windows-2022
+            label: win-cpu
+            script: ./scripts/dev/backend/build-llamacpp-cpu-win.ps1
+            binary: backend/artifacts/llama-cpp/cpu/bin/llama-server.exe
+            cuda: false
     runs-on: ${{ matrix.os }}
     defaults:
       run:
