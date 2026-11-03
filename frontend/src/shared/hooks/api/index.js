@@ -1,7 +1,6 @@
 import { useState, useEffect, useCallback } from "react";
 import { apiClient } from "../../../services/api/client";
 import { createLogger } from "../../../utils/logger";
-import { isBackendReady } from "../../../utils/backendStatus";
 
 const log = createLogger("APIHooks");
 
@@ -140,8 +139,9 @@ export function useConversations() {
  *
  * `backend_type` names the engine that RUNS, so the info goes stale when the
  * backend restarts on another engine (the Inference engine setting). The hook
- * fetches again each time the main process reports the backend ready
- * (`backend_ready`, through `window.backendAPI.onBackendEvent`; no bridge
+ * fetches again each time the main process reports the backend ready and
+ * healthy (`backend_ready` only, not run.py's raw `ready` that main.js relays
+ * before its health check; through `window.backendAPI.onBackendEvent`, absent
  * outside Electron, so no re-read there) and counts those re-reads once they
  * settle, success or failure, in `refetchesAfterReady`.
  *
@@ -180,7 +180,10 @@ export function useAppStartupInfo() {
     if (typeof subscribe !== "function") return undefined;
     let active = true;
     const unsubscribe = subscribe((evt) => {
-      if (!isBackendReady(evt)) return;
+      // `backend_ready` only: main.js sends it once the backend answers its
+      // health check, after relaying run.py's own `ready` (which App.jsx also
+      // accepts). Reacting to both would read the engine twice per restart.
+      if (evt?.event !== "backend_ready") return;
       refetch().then(() => {
         if (active) setRefetchesAfterReady((n) => n + 1);
       });

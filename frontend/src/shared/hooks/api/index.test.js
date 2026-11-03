@@ -254,6 +254,10 @@ describe("useAppStartupInfo — after a backend restart", () => {
 
     emit({ event: "starting", first_run: false });
     emit({ event: "phase", phase: "database" });
+    // run.py's own `ready`, relayed raw by main.js before its health check:
+    // main.js then sends `backend_ready`, the one this hook acts on, so
+    // reacting to both would read the engine twice per restart.
+    emit({ event: "ready", port: 27183 });
 
     expect(apiClient.get).toHaveBeenCalledTimes(1);
     expect(result.current.refetchesAfterReady).toBe(0);
