@@ -2,9 +2,10 @@
 """
 Erudi Backend - PyInstaller spec (cross-platform: Windows CUDA / macOS Apple Silicon)
 
-Windows output:
-    backend/dist/backend/backend.exe
-    backend/dist/backend/artifacts/llama-cpp/cuda/bin/   <- llama-server.exe etc.
+Windows / Linux output (CUDA variant; backend-cpu.spec ships cpu/bin alone):
+    backend/dist/backend/backend[.exe]
+    backend/dist/backend/artifacts/llama-cpp/cuda/bin/   <- llama-server for CUDA_Engine
+    backend/dist/backend/artifacts/llama-cpp/cpu/bin/    <- llama-server for CPU_Engine
 
 macOS output:
     backend/dist/backend/backend            <- spawned by Electron main.js
@@ -112,74 +113,49 @@ else:
     binaries += tmp_ret[1]
 
 # ── llama.cpp inference artifacts (Windows + Linux — llama.cpp engines) ────────
-# Bundle the llama-server binary that matches THIS build variant: the cpu spec
-# (backend-cpu.spec sets ERUDI_BUILD_VARIANT=cpu) ships artifacts/llama-cpp/cpu/bin,
-# the standalone (CUDA) spec ships artifacts/llama-cpp/cuda/bin. The same two specs
-# serve both Windows and Linux — only the binary name differs (.exe on Windows).
-# mac is MLX (backend-mac-silicon.spec), so it never reaches here. Both flavours are
-# compiled in CI from the llama.cpp submodule before PyInstaller runs (release.yml).
-# If the binary is absent (e.g. the boot-only merge smoke does not compile it) the
-# build still succeeds — inference simply has no server until a real release bundles
-# it. The CUDA binary also runs CPU inference, so a driverless machine falls back
-# (see BaseLlamaCppEngine._find_llama_server).
-# Runtime DLLs shipped beside llama-server, appended to the TOC after Analysis
-# (see below): empty on mac and whenever the server is absent.
-_llama_runtime_dlls = []
-if IS_WIN or IS_LINUX:
-    _llama_flavour = os.environ.get("ERUDI_BUILD_VARIANT", "cuda")
-    _os_tag = "win" if IS_WIN else "linux"
-    _exe_suffix = ".exe" if IS_WIN else ""
-    llama_bin = spec_root / "artifacts" / "llama-cpp" / _llama_flavour / "bin"
-    _server = llama_bin / f"llama-server{_exe_suffix}"
-    if _server.exists():
-        _dest = f"artifacts/llama-cpp/{_llama_flavour}/bin"
-        # Only the inference server ships. The HF -> GGUF conversion toolchain
-        # (convert_hf_to_gguf.py, llama.cpp's Python gguf tree, the quantizer
-        # binary) was removed with #408: the app downloads pre-built quants only.
-        datas.append((str(_server), _dest))
-        # Ship any runtime DLLs placed beside the server: the Windows CPU build
-        # copies the MSVC C++ runtime here so llama-server.exe loads on machines
-        # without the VC++ redistributable (#144), and the CUDA build adds
-        # cudart/cublas/cublasLt so the user needs only a driver. No-op on
-        # Linux (.so).
-        #
-        # NOT appended to `datas`: PyInstaller reclassifies PE files found in
-        # `datas` as binaries, so these land in `a.binaries` — where the
-        # Windows torch-CUDA strip below removes every name matching
-        # "cublaslt", taking the inference runtime's cublasLt64_12.dll with
-        # torch's. The two DLLs that shipped anyway (cudart, cublas) match no
-        # strip fragment and were also re-collected by the import scan of
-        # llama-server.exe. These files are opaque cargo for the subprocess,
-        # not link targets of the frozen app: they are appended to `a.datas`
-        # AFTER Analysis and after the strip, which copies them verbatim and
-        # keeps them out of both mechanisms. The release workflow's "Verify
-        # the bundled inference binary" step guards the outcome.
-        _llama_runtime_dlls = [
-            (f"{_dest}/{_f.name}", str(_f)) for _f in sorted(llama_bin.glob("*.dll"))
-        ]
-    elif os.environ.get("ERUDI_ALLOW_MISSING_INFERENCE_BINARY"):
-        # The boot-only merge gate builds the app to prove the backend reaches
-        # `ready`; it never compiles llama.cpp, and inference is out of its
-        # scope. That build opts out explicitly, in the workflow.
-        print(
-            f"[backend.spec] llama-server absent from {llama_bin} - continuing "
-            f"because ERUDI_ALLOW_MISSING_INFERENCE_BINARY is set. The bundle "
-            f"produced here CANNOT run inference and must not be released."
-        )
-    else:
-        # A bundle without this binary is an app that loads a model and then
-        # fails at the first message, and nothing downstream would have caught
-        # it: electron-builder packages whatever it is given, and the release
-        # publishes whatever it packaged. Fail here, where the cause is still
-        # legible.
-        raise RuntimeError(
-            f"llama-server not found at {_server}. The frozen backend would "
-            f"ship without an inference engine. Compile it first:\n"
-            f"    scripts/dev/backend/build-llamacpp-{_llama_flavour}-{_os_tag}"
-            f"{'.ps1' if IS_WIN else '.sh'}\n"
-            f"Set ERUDI_ALLOW_MISSING_INFERENCE_BINARY=1 only for a build that "
-            f"is never released (the boot-only smoke gate)."
-        )
+# What ships follows the build variant, decided in pyi_llama_artifacts (unit
+# tested on every CI leg): the cpu spec (backend-cpu.spec sets
+# ERUDI_BUILD_VARIANT=cpu) ships artifacts/llama-cpp/cpu/bin; the standalone
+# (CUDA) spec ships BOTH cuda/bin and cpu/bin, because CUDA_Engine runs the
+# CUDA build and the processor engine (the "Processor only" setting) runs the
+# CPU build, which needs no NVIDIA driver and touches no GPU. The same two specs
+# serve Windows and Linux; mac is MLX (backend-mac-silicon.spec) and bundles
+# nothing here. Every flavour is compiled from the llama.cpp submodule before
+# PyInstaller runs (release.yml). A missing flavour fails the build, naming its
+# build script, unless the boot-only merge smoke opts out with
+# ERUDI_ALLOW_MISSING_INFERENCE_BINARY (it never compiles llama.cpp; inference
+# is out of its scope).
+#
+# The runtime DLLs beside each server (MSVC C++ runtime, plus cudart/cublas/
+# cublasLt for CUDA) are NOT appended to `datas`: PyInstaller reclassifies PE
+# files found in `datas` as binaries, so these land in `a.binaries` — where the
+# Windows torch-CUDA strip below removes every name matching "cublaslt", taking
+# the inference runtime's cublasLt64_12.dll with torch's. These files are opaque
+# cargo for the subprocess, not link targets of the frozen app: they are appended
+# to `a.datas` AFTER Analysis and after the strip (`_llama_runtime_dlls`, below),
+# which copies them verbatim and keeps them out of both mechanisms. The release
+# workflow's "Verify the bundled inference binary" step guards the outcome.
+#
+# PyInstaller runs a spec through exec() and does not put its directory on
+# sys.path, so the helper beside it is reached explicitly.
+if str(spec_root) not in sys.path:
+    sys.path.insert(0, str(spec_root))
+from pyi_llama_artifacts import collect_llama_artifacts
+
+_llama = collect_llama_artifacts(
+    variant=os.environ.get("ERUDI_BUILD_VARIANT", "cuda"),
+    root=spec_root,
+    os_tag="win" if IS_WIN else "linux" if IS_LINUX else "mac",
+    allow_missing=bool(os.environ.get("ERUDI_ALLOW_MISSING_INFERENCE_BINARY")),
+)
+datas += _llama.datas
+_llama_runtime_dlls = _llama.runtime_files
+for _absent in _llama.skipped:
+    print(
+        f"[backend.spec] llama-server absent at {_absent} - continuing because "
+        f"ERUDI_ALLOW_MISSING_INFERENCE_BINARY is set. The bundle produced here "
+        f"CANNOT run inference and must not be released."
+    )
 
 # ── Analysis ──────────────────────────────────────────────────────────────────
 _hidden_common = [

@@ -93,9 +93,10 @@ class CPU_Engine(BaseLlamaCppEngine):
 
     Inherits the subprocess + SSE lifecycle from BaseChatServerEngine and the
     llama-cpp specifics (Popen, GGUF picking, llama-server location) from
-    BaseLlamaCppEngine. CPU-specific here: `_build_spawn_argv`, the window
-    it sizes itself (`_prepare_spawn_context`), the memory brake's bindings,
-    and class attrs.
+    BaseLlamaCppEngine. CPU-specific here: `_build_spawn_argv`, the child's
+    environment that hides every GPU (`_build_spawn_env`), the window it
+    sizes itself (`_prepare_spawn_context`), the memory brake's bindings, and
+    class attrs.
 
     Notes:
       * "model" is a dict handle for the running server (pid, port, alias, base_url)
@@ -239,6 +240,22 @@ class CPU_Engine(BaseLlamaCppEngine):
             "--jinja",
         ]
         return argv
+
+    @classmethod
+    def _build_spawn_env(cls, **_ctx: Any) -> Dict[str, str]:
+        """The parent environment with every GPU hidden: ``CUDA_VISIBLE_DEVICES=-1``.
+
+        The processor engine must never touch a graphics card. It runs the CPU
+        build of llama-server, which the CUDA installers ship beside the CUDA
+        one; when ``_find_llama_server`` falls back to the CUDA build (a dev
+        tree with only that flavour compiled), ``-ngl 0`` would still let it
+        initialise CUDA and reserve VRAM on the card (#661). ``-1`` masks
+        every device, whatever the user set: the mask is this child's alone,
+        the backend's own environment is left untouched.
+        """
+        env = os.environ.copy()
+        env["CUDA_VISIBLE_DEVICES"] = "-1"
+        return env
 
     @classmethod
     def get_hardware_info(cls) -> Dict[str, Any]:

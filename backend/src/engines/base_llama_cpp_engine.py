@@ -19,7 +19,7 @@ Subclasses choose:
 - `_build_spawn_argv` (CPU forces `-ngl 0`; CUDA passes the `-ngl` and the
   fit margin its spawn context chose)
 - `_build_spawn_env` (CUDA prepends the CUDA toolkit to `PATH` and pins the
-  selected GPU)
+  selected GPU; CPU hides every GPU with `CUDA_VISIBLE_DEVICES=-1`)
 - `_tokenizer_provider` (just for the placeholder dict)
 """
 
@@ -253,10 +253,14 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
     def _find_llama_server(cls, install_dir: Optional[Path] = None) -> Path:
         """Return the absolute path of the `llama-server` binary, or raise.
 
-        Tries the configured flavour first, then falls back to the other
-        flavour (a CUDA-built artifact runs CPU inference fine; the CPU
-        artifact would just refuse to use the GPU). This preserves the
-        existing fallback behaviour from cpu_engine.py.
+        Tries the configured flavour first, then falls back to the other one,
+        with a WARNING. The installers ship every flavour their engines run
+        (the CUDA installers carry both the CUDA and the CPU build), so the
+        fallback is a development safety net: a tree where only one flavour
+        was compiled. A CUDA-built artifact runs CPU inference (the CPU
+        engine's child hides every GPU from it, see
+        `CPU_Engine._build_spawn_env`); the CPU artifact just never uses the
+        GPU.
         """
         install = install_dir or cls._default_install_dir()
         exe = "llama-server.exe" if os.name == "nt" else "llama-server"
@@ -1183,6 +1187,6 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         """Per-spawn environment, given the spawn context. Default: inherit
         the parent env unchanged. CUDA overrides to prepend the CUDA toolkit
         bin to `PATH` so the runtime DLLs resolve, and to pin the GPU it
-        selected.
+        selected; CPU overrides to hide every GPU.
         """
         return os.environ.copy()

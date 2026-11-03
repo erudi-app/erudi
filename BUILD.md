@@ -56,6 +56,13 @@ dependency.
 
 The Linux CUDA leg reuses `backend/backend.spec`.
 
+Which `llama-server` builds a spec bundles is decided by
+`backend/pyi_llama_artifacts.py`, unit-tested in `tests/test_pyi_llama_artifacts.py`:
+`backend-cpu.spec` ships `artifacts/llama-cpp/cpu/bin`, and `backend.spec` ships **both**
+`cuda/bin` and `cpu/bin`. The CUDA engine runs the CUDA build; "Processor only" in
+Settings runs the CPU build, which loads no NVIDIA library and starts without a driver.
+A missing build fails the freeze, naming the script that compiles it.
+
 ---
 
 ## Local builds
@@ -122,16 +129,28 @@ Same shape: prerequisites, PyInstaller with `backend.spec`, copy to
 `frontend\backend\`, then `npm run dist:win`. The NSIS installer lands in
 `frontend\dist\`.
 
-The script expects `llama-server.exe` already built by
-`.\scripts\dev\backend\build-llamacpp-cuda-win.ps1`, which finds Visual Studio
-through `vswhere` — under `${env:ProgramFiles(x86)}`, else on `PATH`. When the
-toolchain lives elsewhere, or `vswhere` lost its instance state (kept under
-`ProgramData`, emptied by a Windows reinstall), point the build at
-`vcvarsall.bat` directly; this is checked first:
+The installer carries two builds of `llama-server.exe`, and the script expects
+both already compiled, each with its runtime DLLs beside it:
+
+```powershell
+.\scripts\dev\backend\build-llamacpp-cuda-win.ps1   # artifacts\llama-cpp\cuda\bin
+.\scripts\dev\backend\build-llamacpp-cpu-win.ps1    # artifacts\llama-cpp\cpu\bin
+```
+
+Both scripts find Visual Studio through `vswhere` — under
+`${env:ProgramFiles(x86)}`, else on `PATH` — and build with Ninja in the MSVC
+environment of `vcvarsall.bat`. When the toolchain lives elsewhere, or `vswhere`
+lost its instance state (kept under `ProgramData`, emptied by a Windows
+reinstall), point both builds at `vcvarsall.bat` directly; this is checked first:
 
 ```powershell
 $env:ERUDI_VCVARSALL = "D:\VS\2022\BuildTools\VC\Auxiliary\Build\vcvarsall.bat"
 ```
+
+A development setup does not need the CPU build: `setup-win-cuda.ps1` compiles
+the CUDA one only, and "Processor only" then runs the CUDA build with every GPU
+hidden from it (`CUDA_VISIBLE_DEVICES=-1`), logging a WARNING that it fell back
+to the other flavour.
 
 **The CUDA update channel.** The release's `win-cuda` leg passes
 `-c.publish.channel=cuda` and a `-cuda` artifact name to electron-builder (see
@@ -228,21 +247,26 @@ resolved by the backend itself in `src/launcher/runtime_paths.py`.
 |---|---|---|---|---|
 | `mac-arm` | `macos-14` | `mac-silicon-prod.txt` | `backend-mac-silicon.spec` | — (MLX) |
 | `win-cpu` | `windows-2022` | `win-cpu-prod.txt` | `backend-cpu.spec` | cpu |
-| `win-cuda` | `windows-2022` | `win-cuda-prod.txt` | `backend.spec` | cuda |
+| `win-cuda` | `windows-2022` | `win-cuda-prod.txt` | `backend.spec` | cuda + cpu |
 | `linux-cpu` | `ubuntu-22.04` | `linux-cpu-prod.txt` | `backend-cpu.spec` | cpu |
-| `linux-cuda` | `ubuntu-22.04` | `linux-cuda-prod.txt` | `backend.spec` | cuda |
+| `linux-cuda` | `ubuntu-22.04` | `linux-cuda-prod.txt` | `backend.spec` | cuda + cpu |
 
 Each leg: checks out with submodules, sets up Python 3.12 and Node 20, compiles
-`llama-server` from the submodule (Windows/Linux only), runs
+`llama-server` from the submodule (Windows/Linux only; the CUDA legs compile the
+CPU build too, in the same job), runs
 `pyinstaller backend/<spec> --distpath backend/dist`, verifies the frozen tree,
 then `npm ci`, `npm version <tag>` and `npm run release:<platform>`.
 
-The verification step locates `llama-server` inside `backend/dist` and, on the CPU
-legs, starts it with `--version` — which prints llama.cpp's build header and exits
-0 from the argument parser, without loading a model. A filename alone would match
-a truncated file or a wrong-architecture build; starting it proves the copy
-PyInstaller made is a loadable executable whose libraries resolve. The CUDA legs
-are not started: ggml links the NVIDIA driver library (`libcuda.so.1` /
+The verification step locates each bundled `llama-server` inside `backend/dist` at
+its own path (`artifacts/llama-cpp/cpu/bin`, plus `cuda/bin` on the CUDA legs) and
+starts the CPU copy, on every leg, with `--version` — which prints llama.cpp's build
+header and exits 0 from the argument parser, without loading a model. A filename
+alone would match a truncated file or a wrong-architecture build; starting it
+proves the copy PyInstaller made is a loadable executable whose libraries resolve.
+On Windows the CPU copy must also have the MSVC runtime beside it and no CUDA
+runtime (a `cudart64_12.dll` there means the CUDA build landed in the CPU folder),
+and a CPU leg must carry no `cuda/bin` at all. The CUDA copies are not started:
+ggml links the NVIDIA driver library (`libcuda.so.1` /
 `nvcuda.dll`, shipped with the driver rather than the toolkit), so the loader
 fails before `main()` on a driverless runner. Linux CUDA is checked with `ldd`
 instead — every dependency of the bundled binary must resolve except that driver

@@ -32,7 +32,8 @@ Concrete engines implement only the four hooks that are genuinely backend-specif
 
 The llama.cpp subclasses additionally implement `_build_spawn_argv` and
 `_build_spawn_env` (CUDA prepends the CUDA toolkit `bin/` to `PATH` so the runtime DLLs
-resolve, and pins the GPU it sized the window on with `CUDA_VISIBLE_DEVICES`).
+resolve, and pins the GPU it sized the window on with `CUDA_VISIBLE_DEVICES`; CPU hides
+every GPU with `CUDA_VISIBLE_DEVICES=-1`).
 
 `multiprocessing.Process` is required for MLX because a PyInstaller frozen build has no
 Python interpreter at `sys.executable` to pass `-m` to; `mp.spawn` (configured in
@@ -742,9 +743,18 @@ until a later load.
 **fit's probe pass** (a no-alloc model and context build) runs on every spawn, brake
 respawns included; it counts against the respawn's 30 s probe bound.
 
-`BaseLlamaCppEngine._find_llama_server` tries the configured flavour first and falls back
-to the other one: a CUDA-built artifact runs CPU inference fine, whereas the CPU artifact
-simply will not use the GPU.
+`BaseLlamaCppEngine._find_llama_server` looks for the engine's own flavour,
+`artifacts/llama-cpp/cpu/bin` for `CPU_Engine` and `cuda/bin` for `CUDA_Engine`. The
+installers ship every flavour their engines run: the CUDA installers (Windows and Linux)
+carry both builds, so "Processor only" runs the CPU build, which loads no NVIDIA library.
+When the engine's flavour is absent, the lookup falls back to the other one with a WARNING
+(`llama-server not found at ...; falling back to the <flavour> build at ...`). That is a
+development safety net, for a tree where only one flavour was compiled
+(`setup-win-cuda.ps1` builds the CUDA one alone): a CUDA-built artifact runs CPU
+inference, whereas the CPU artifact simply will not use the GPU. `CPU_Engine` starts its
+child with `CUDA_VISIBLE_DEVICES=-1` (`_build_spawn_env`), whatever the user set, so even
+that fallback initialises no device and reserves no VRAM; the mask is the child's alone,
+and `CUDA_Engine` keeps its own pin.
 
 When the model path is a directory, `BaseLlamaCppEngine` picks the GGUF file by quant
 preference — `q4_k_m` > `q4_0` > `q5_k_m` > `q8_0` > `f16`, then the smallest remaining

@@ -11,8 +11,10 @@ import { createLogger } from "../../utils/logger";
 
 const log = createLogger("EngineFailureModal");
 
-// The processor build of Erudi avoids the graphics card altogether, for someone
-// who would rather reinstall than carry a setting.
+// The processor build of Erudi has no GPU code at all, for someone who would
+// rather reinstall than carry a setting. Processor mode in this build avoids the
+// card too: it runs the CPU llama-server the GPU installers ship beside the CUDA
+// one, with every GPU hidden from it.
 export const RELEASES_URL = "https://github.com/erudi-app/erudi/releases/latest";
 
 /**

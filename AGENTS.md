@@ -9,7 +9,7 @@ Desktop app that runs open-source LLMs locally. Two processes:
 - **Backend** — Python **3.12** FastAPI server (3.12 is required: `pgserver` only ships wheels up to cp312), launched by `backend/run.py`, listens on `127.0.0.1:27182` by default. Routes are mounted under the `/erudi` prefix.
 - **Frontend** — Electron + React + Tailwind, packaged with electron-builder. In production the main process spawns the bundled PyInstaller backend executable; in dev it expects the backend to be running already.
 
-Hardware backend is selected at startup by `BaseEngine.get_engine()` (`backend/src/engines/base_engine.py`): `MLX_Engine` on macOS ARM, `CUDA_Engine` on Linux/Windows with NVIDIA, `CPU_Engine` otherwise. Set `ERUDI_FORCE_CPU=1` to bypass GPU detection. Detection is not final: after the migrations the lifespan applies `user_settings.inference_backend` (`auto` / `cpu`), swapping `CUDA_Engine` for `CPU_Engine` when the user pinned the processor — safe because both carry `FORMAT_TAG = "gguf"` — and then runs a CUDA pre-flight (`src/engines/cuda_compatibility.py`) that emits an `engine_notice` event when the GPU or its driver is below what the bundled CUDA build needs. The fallback is proposed, never applied automatically; `ERUDI_FORCE_CPU` wins over the setting. Every environment variable the backend reads is listed in `backend/.env.example` (the only secret is `HF_TOKEN`, read from the environment at runtime and never embedded in a build); `tests/test_env_example.py` fails on any new `os.getenv` that is not listed there.
+Hardware backend is selected at startup by `BaseEngine.get_engine()` (`backend/src/engines/base_engine.py`): `MLX_Engine` on macOS ARM, `CUDA_Engine` on Linux/Windows with NVIDIA, `CPU_Engine` otherwise. Set `ERUDI_FORCE_CPU=1` to bypass GPU detection. Detection is not final: after the migrations the lifespan applies `user_settings.inference_backend` (`auto` / `cpu`), swapping `CUDA_Engine` for `CPU_Engine` when the user pinned the processor — safe because both carry `FORMAT_TAG = "gguf"`, and the CUDA installers ship the CPU `llama-server` beside the CUDA one, run with `CUDA_VISIBLE_DEVICES=-1` so it touches no GPU — and then runs a CUDA pre-flight (`src/engines/cuda_compatibility.py`) that emits an `engine_notice` event when the GPU or its driver is below what the bundled CUDA build needs. The fallback is proposed, never applied automatically; `ERUDI_FORCE_CPU` wins over the setting. Every environment variable the backend reads is listed in `backend/.env.example` (the only secret is `HF_TOKEN`, read from the environment at runtime and never embedded in a build); `tests/test_env_example.py` fails on any new `os.getenv` that is not listed there.
 
 **All three engines follow the same pattern**: they spawn an OpenAI-compatible HTTP server in a child process and talk to it over `http://127.0.0.1:<port>/v1/chat/completions` (SSE). The shared lifecycle (port pick, two-stage `/health` + chat-ping probe, SSE byte-buffer parser, atexit storage with proper unregister-on-swap, last-used stamp for the idle cleanup, kwarg translation) lives in `BaseChatServerEngine`. `BaseLlamaCppEngine` sits between it and the CPU/CUDA concretes to factor what's specific to the `llama-server` binary (Popen lifecycle, GGUF picker, install-dir resolution, `repetition_penalty → repeat_penalty` kwarg rename). Concrete subclasses implement four small hooks: `_spawn_child` (CPU/CUDA via `subprocess.Popen`, MLX via `multiprocessing.Process(target=run_mlx_vlm_server, ...)` because PyInstaller frozen builds have no Python interpreter at `sys.executable` to pass `-m` to), `_terminate_process`, `_proc_is_alive`, and `_resolve_model_artifact`.
 
@@ -169,7 +169,8 @@ Not a gate, but worth knowing: **`llamacpp-build.yml`** compiles the inference
 binary, and is the only thing in CI that does. It is path-filtered to pull
 requests touching `scripts/dev/backend/build-llamacpp-*` or the llama.cpp
 submodule. Change a compile flag anywhere else and nothing verifies it before a
-release tag. It also starts what it compiles: the CPU binary is run with
+release tag. Its four legs are the four builds that ship: CPU and CUDA, on Linux
+and Windows. It also starts what it compiles: the CPU binary is run with
 `--version`, which prints llama.cpp's build header and exits 0 from the argument
 parser without loading a model. The CUDA binary cannot be started on a runner —
 ggml links the NVIDIA driver library (`libcuda.so.1` / `nvcuda.dll`, shipped with
@@ -178,7 +179,10 @@ leg checks instead that every dependency but that one resolves; the Windows CUDA
 leg checks the CUDA runtime DLLs landed beside the server. `release.yml` applies
 the same three checks to the copy PyInstaller froze into `backend/dist`, which is
 a separate claim: the freeze copies the file into a new tree and can pick up the
-wrong flavour, drop a sibling library, or lose the executable bit. Neither runs
+wrong flavour, drop a sibling library, or lose the executable bit. The CUDA legs
+of `release.yml` compile and bundle the CPU flavour too (the processor engine runs
+it), and check each copy at its own path: the CPU copy is started there as well,
+and must not carry the CUDA runtime. Neither runs
 inference; only the release QA pass on real hardware does.
 
 ## Logs
