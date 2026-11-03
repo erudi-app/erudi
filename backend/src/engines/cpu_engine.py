@@ -120,18 +120,16 @@ class CPU_Engine(BaseLlamaCppEngine):
         brake_cap: Optional[int] = None,
         respawn_from: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, Any]:
-        """Resolve the per-spawn CPU context: thread count, the fixed
-        `gpu_layers=0` (CPU-only inference), and the window: `ERUDI_CTX`
-        verbatim when the user pinned one, else the window Erudi sizes from
-        the GGUF and the machine's RAM, folded with the memory brake's cap --
-        ``brake_cap`` for a brake respawn, else the one remembered for
-        ``alias`` (`ctx_size=None` -- llama-server's own fit -- when the GGUF
-        cannot be read). A respawn re-sizes like a load (the RAM budget is
-        deterministic): ``respawn_from`` is not read."""
-        ctx: Dict[str, Any] = {
-            "threads": max(1, os.cpu_count() or 1),
-            "gpu_layers": 0,
-        }
+        """Resolve the per-spawn CPU context: the fixed `gpu_layers=0`
+        (CPU-only inference) and the window: `ERUDI_CTX` verbatim when the
+        user pinned one, else the window Erudi sizes from the GGUF and the
+        machine's RAM, folded with the memory brake's cap -- ``brake_cap``
+        for a brake respawn, else the one remembered for ``alias``
+        (`ctx_size=None` -- llama-server's own fit -- when the GGUF cannot be
+        read). A respawn re-sizes like a load (the RAM budget is
+        deterministic): ``respawn_from`` is not read. No thread count: see
+        ``_build_spawn_argv``."""
+        ctx: Dict[str, Any] = {"gpu_layers": 0}
         pinned = cls.max_context_tokens()
         if pinned is not None:
             ctx.update(ctx_size=pinned, window_pinned=True)
@@ -182,11 +180,19 @@ class CPU_Engine(BaseLlamaCppEngine):
         alias: str,
         port: int,
         ctx_size: Optional[int] = None,
-        threads: int = 1,
         gpu_layers: int = 0,
         **_ignored: Any,
     ) -> List[Any]:
-        """CPU CLI for llama-server: forces `-ngl 0`, native threads.
+        """CPU CLI for llama-server: forces `-ngl 0`.
+
+        No ``--threads``: llama-server's own default
+        (``common_cpu_get_num_math``) counts the physical cores -- only the
+        performance cores of a hybrid CPU on Linux and macOS -- where every
+        logical CPU (SMT
+        included) stalled the thread barrier as soon as another app wanted a
+        slice (#661: 0.66 tok/s at 16 threads on an 8C/16T Ryzen, 17.3 at
+        8). A user's ``LLAMA_ARG_THREADS`` reaches the child through the
+        inherited environment and overrides it.
 
         ``-c`` is the window ``_prepare_spawn_context`` chose (the RAM budget's
         window, the brake's cap, or ``ERUDI_CTX``); llama-server honours an
@@ -228,8 +234,6 @@ class CPU_Engine(BaseLlamaCppEngine):
         if ctx_size is not None:
             argv += ["-c", str(ctx_size)]
         argv += [
-            "--threads",
-            str(threads),
             "-ngl",
             str(gpu_layers),
             "--jinja",

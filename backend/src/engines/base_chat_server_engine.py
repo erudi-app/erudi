@@ -77,8 +77,8 @@ class BaseChatServerEngine(BaseEngine):
         """Spawn the OpenAI-compat child and return the handle dict.
 
         The handle MUST contain at least: `pid`, `proc`, `port`, `base_url`,
-        `alias`, `model_path`. Extra keys (e.g., `threads`, `gpu_layers`) are
-        allowed and preserved.
+        `alias`, `model_path`. Extra keys (e.g., `gpu_layers`, `ctx_size`)
+        are allowed and preserved.
 
         Implementations may receive subclass-specific context via `**ctx`
         (populated by `_prepare_spawn_context`). For example, CUDA injects

@@ -222,7 +222,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
 
         ``-ngl -1`` is "auto" while fit is on (llama.cpp ``common.h:473``);
         at the model level any negative value offloads every layer."""
-        ctx: Dict[str, Any] = {"threads": max(1, os.cpu_count() or 1)}
+        ctx: Dict[str, Any] = {}
         cls._oom_retryable = False
         if (
             respawn_from is not None
@@ -546,7 +546,6 @@ class CUDA_Engine(BaseLlamaCppEngine):
         alias: str,
         port: int,
         ctx_size: Optional[int] = None,
-        threads: int = 1,
         gpu_layers: int = -1,
         fit_target_mib: int = cuda_memory.CUDA_FIT_TARGET_MIB,
         **_ignored: Any,
@@ -564,6 +563,10 @@ class CUDA_Engine(BaseLlamaCppEngine):
         pins fit's per-device margin: ``CUDA_FIT_TARGET_MIB``, plus what
         CUDA overstates of the free memory on a Windows spawn whose layers
         fit places (``fit_target_mib``, ``_correct_fit_margin``).
+
+        No ``--threads``: llama-server's own default (the physical cores)
+        drives the layers fit leaves on the processor, like the CPU engine
+        (``CPU_Engine._build_spawn_argv``).
 
         ``--jinja`` enables the model's own chat template and with it
         OpenAI-style function calling (the agent's calculator tool) —
@@ -596,8 +599,6 @@ class CUDA_Engine(BaseLlamaCppEngine):
         if ctx_size is not None:
             argv += ["-c", str(ctx_size)]
         argv += [
-            "--threads",
-            str(threads),
             "-ngl",
             str(gpu_layers),
             "-fitt",

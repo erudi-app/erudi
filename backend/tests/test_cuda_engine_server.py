@@ -159,7 +159,7 @@ class TestSpawnContextAndArgv:
         assert ctx["ctx_size"] == 40_960
         assert ctx["gpu_layers"] == -1
         assert ctx["window_sized"] is True
-        assert ctx["threads"] >= 1
+        assert "threads" not in ctx
         assert ctx["trained_context_tokens"] == ctx["static_window_tokens"] == 40_960
         assert ctx["kv_token_bytes"] == 114_688
         assert ctx["weights_bytes"] == WEIGHTS
@@ -306,7 +306,6 @@ class TestSpawnContextAndArgv:
             alias="erudi-9",
             port=8456,
             ctx_size=4096,
-            threads=4,
             gpu_layers=-1,
         )
         joined = " ".join(str(x) for x in argv)
@@ -318,7 +317,6 @@ class TestSpawnContextAndArgv:
         assert "--port 8456" in joined
         assert "--alias erudi-9" in joined
         assert "-c 4096" in joined
-        assert "--threads 4" in joined
         assert "-ngl -1" in joined
         assert "-fitt 1024" in joined
 
@@ -326,7 +324,52 @@ class TestSpawnContextAndArgv:
         """No window (the fallback shape) -> no ``-c``: llama-server's fit
         (ON by default in the pinned b10883) resolves the window and the
         layers at load."""
-        assert "-c" not in _argv(ctx_size=None, threads=4, gpu_layers=-1)
+        assert "-c" not in _argv(ctx_size=None, gpu_layers=-1)
+
+    @pytest.mark.parametrize(
+        "case", ["sized", "floor", "pinned", "no_gpu", "brake_respawn", "windows_floor"]
+    )
+    def test_no_spawn_passes_a_thread_count(self, gpu, monkeypatch, case):
+        """#661: ``--threads`` = every logical CPU collapsed generation on an
+        8C/16T Ryzen (0.66 tok/s against 17.3 at 8): the CPU half of a
+        partial offload ran with it too. llama-server's own default
+        (``common_cpu_get_num_math``: the physical cores)
+        applies on every spawn, load and respawn alike."""
+        respawn_from = None
+        if case == "floor":
+            gpu.inputs = (QWEN3, int(7.5 * GIB))
+            gpu.device = _device(total=8 * GIB, free=int(6.5 * GIB))
+        elif case == "pinned":
+            monkeypatch.setenv("ERUDI_CTX", "8192")
+        elif case == "no_gpu":
+            gpu.device = cuda_memory.DeviceMemory(
+                index=None, uuid=None, total_bytes=0, free_bytes=0
+            )
+        elif case == "brake_respawn":
+            monkeypatch.setattr(gguf_memory, "read_shape", lambda path: QWEN3)
+            respawn_from = {
+                "alias": "erudi-9",
+                "window_sized": True,
+                "static_window_tokens": 40_960,
+                "weights_bytes": WEIGHTS,
+                "vram_total_bytes": 16 * GIB,
+                "device_budget_bytes": 8 * GIB,
+                "gpu_uuid": UUID,
+            }
+        elif case == "windows_floor":
+            monkeypatch.setattr(platform, "system", lambda: "Windows")
+            gpu.inputs = (QWEN3, int(7.5 * GIB))
+            gpu.device = _device(total=8 * GIB, free=int(6.5 * GIB))
+            gpu.list_output = "  CUDA0: NVIDIA (8192 MiB, 7900 MiB free)\n"
+        ctx = CUDA_Engine._prepare_spawn_context(
+            Path("/m.gguf"),
+            "erudi-9",
+            brake_cap=30_720 if respawn_from else None,
+            respawn_from=respawn_from,
+        )
+        argv = _argv(**ctx)
+        assert "threads" not in ctx
+        assert "--threads" not in argv and "-t" not in argv
 
     def test_build_spawn_argv_keeps_native_reasoning_extraction_on(self):
         """#554: no ``--reasoning-format`` override. llama-server's default

@@ -110,6 +110,18 @@ The single slot is why the first message of a conversation requests its title *b
 chat turn (`ConversationPage.jsx`): a title run after the turn would overwrite the
 conversation's KV in the slot and the second message would re-read the whole conversation.
 
+## llama-server threads
+
+Neither llama.cpp engine passes `--threads`, on a load or a brake respawn: llama-server's
+own default (`common_cpu_get_num_math` in `common/common.cpp`) counts the physical cores —
+on Windows through `GetLogicalProcessorInformationEx`, the performance cores only on a
+hybrid Intel CPU under Linux, the P-cores on macOS — and drives the CPU engine and the
+layers fit leaves on the processor on CUDA. Every logical CPU (SMT included) stalls
+llama.cpp's thread barrier as soon as another app wants a slice: #661 measured 0.66
+tokens/s at 16 threads on an 8-core / 16-thread Ryzen 7 7700 with a browser and two
+launchers idle, against 17.3 at 8. A user who sets `LLAMA_ARG_THREADS` in the
+environment Erudi starts from overrides the default: the child inherits it.
+
 ## Context windows
 
 Two numbers describe "the window", and they must never be confused:

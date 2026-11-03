@@ -55,12 +55,11 @@ from src.core.subprocess_flags import hidden_console_creationflags
 LLAMA_RESPAWN_PROBE_TIMEOUT_S = 30.0
 
 # The spawn-context items `_spawn_child` keeps on the handle: observability
-# (threads, GPU layers, the window passed) and the window facts the memory
-# brake and the post-load checks read back (the CUDA ones: the device budget,
-# the placement classification's terms, the pinned GPU, and whether a brake
+# (GPU layers, the window passed) and the window facts the memory brake and
+# the post-load checks read back (the CUDA ones: the device budget, the
+# placement classification's terms, the pinned GPU, and whether a brake
 # respawn spawned the child).
 PRESERVED_SPAWN_KEYS = (
-    "threads",
     "gpu_layers",
     "ctx_size",
     "window_pinned",
@@ -755,8 +754,8 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
             "api_key": api_key,
         }
         # Preserve subclass-relevant context items in the handle: observability
-        # (how many threads / GPU layers, which window) and the window facts the
-        # memory brake reads back (`PRESERVED_SPAWN_KEYS`).
+        # (how many GPU layers, which window) and the window facts the memory
+        # brake reads back (`PRESERVED_SPAWN_KEYS`).
         for k in PRESERVED_SPAWN_KEYS:
             if k in ctx:
                 handle[k] = ctx[k]
