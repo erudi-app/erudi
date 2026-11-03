@@ -64,7 +64,10 @@ Inference (llama.cpp compiled with CUDA, a llama-server subprocess):
       the selected GPU's memory at load (cuda_memory); llama.cpp's fit places
       the layers (-ngl -1, "auto" while fit is on) with Erudi's margin
       (-fitt). When the floor window does not fit or the GGUF cannot be
-      modelled, no -c: fit sizes the window and places the layers.
+      modelled, no -c: fit sizes the window and places the layers. On
+      Windows, wherever fit places the layers without a window Erudi sized,
+      the margin adds what CUDA overstates of the free memory against NVML
+      (llama-server --list-devices, run in the child's environment).
     - After load the placement is classified (full or partial offload); on
       Windows a full-offload child carries a memory brake driven by the WDDM
       spill gauge alone -- its Shared GPU memory above its baseline, the
@@ -72,6 +75,10 @@ Inference (llama.cpp compiled with CUDA, a llama-server subprocess):
       (memory_brake.llama_step); RAM pressure never drives it. On
       Linux, which has no spill, the brake has no signal and never acts. A
       partial or fit-sized child runs brake-off.
+    - On Windows an eviction gauge (Total Committed above the resident
+      bytes, against NVML's free memory) says when another app takes the
+      card from any child pinned to one GPU: the amber gpu_contention
+      notice, never an action.
     - One GPU, pinned by UUID (CUDA_VISIBLE_DEVICES), never over a value the
       user set.
 
@@ -82,14 +89,18 @@ Note:
     - Thread-safe through BaseEngine._lock
 """
 
+import asyncio
 import dataclasses
 import os
-import time  # used by hardware methods
+import subprocess
+import time
 import platform
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from pathlib import Path
 
-from src.engines import cuda_memory, gguf_memory, memory_pressure
+from src.core.subprocess_flags import hidden_console_creationflags
+from src.engines import cuda_memory, gguf_memory, memory_brake, memory_pressure
+from src.engines.base_engine import _log_monitor_death, run_reset_shielded
 from src.engines.base_llama_cpp_engine import BaseLlamaCppEngine, LlamaSignals
 from src.engines.cpu_brand import get_cpu_brand
 from src.engines.cuda_compatibility import format_cuda_version
@@ -102,6 +113,9 @@ _MIB = 1024**2
 # How much of the child's output the post-load checks scan (the offload line,
 # the Flash-Attention WARN).
 _LOAD_TAIL_CHARS = 20000
+# The bound on ``llama-server --list-devices`` before a Windows spawn whose
+# layers fit places (it initializes CUDA and exits; QA measures it).
+LIST_DEVICES_TIMEOUT_S = 10.0
 
 
 class CUDA_Engine(BaseLlamaCppEngine):
@@ -200,9 +214,15 @@ class CUDA_Engine(BaseLlamaCppEngine):
           model): no ``-c``, ``-ngl -1``, the brake off, ONE INFO;
         * NVML sees no GPU: no ``-c``, ``-ngl 0``, the brake off.
 
+        On Windows, where fit places the layers on one GPU without a window
+        Erudi sized for a full offload -- ``ERUDI_CTX`` pinned, the floor
+        that does not fit, a GGUF not modelled or not read -- fit's margin
+        also takes away what CUDA overstates of the free memory
+        (``fit_target_mib``, ``_correct_fit_margin``).
+
         ``-ngl -1`` is "auto" while fit is on (llama.cpp ``common.h:473``);
         at the model level any negative value offloads every layer."""
-        ctx: Dict[str, Any] = {"threads": max(1, os.cpu_count() or 1)}
+        ctx: Dict[str, Any] = {}
         cls._oom_retryable = False
         if (
             respawn_from is not None
@@ -270,9 +290,11 @@ class CUDA_Engine(BaseLlamaCppEngine):
                         window, **cls._load_facts(model_path, inputs[0], mmproj is not None)
                     )
                 )
+            cls._correct_fit_margin(ctx, device)
             return ctx
         if inputs is None:
             ctx.update(ctx_size=None, window_sized=False)
+            cls._correct_fit_margin(ctx, device)
             return ctx
         shape, weights = inputs
         if brake_cap is None:
@@ -301,6 +323,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
                 f"places the layers; the memory brake is off"
             )
             ctx.update(ctx_size=None, window_sized=False)
+            cls._correct_fit_margin(ctx, device)
             return ctx
         logger.info(
             f"[{cls.__name__}] Window sized at spawn: window={window.window}, "
@@ -361,6 +384,71 @@ class CUDA_Engine(BaseLlamaCppEngine):
             "tok_embd_bytes": tensors.tok_embd_bytes if tensors else None,
             "exps_bytes": tensors.exps_bytes if tensors else None,
         }
+
+    @classmethod
+    def _correct_fit_margin(cls, ctx: Dict[str, Any], device: cuda_memory.DeviceMemory) -> None:
+        """On Windows, hand fit a margin that takes away what CUDA
+        overstates of the free memory (``ctx["fit_target_mib"]``, passed as
+        ``-fitt``). Under WDDM ``cudaMemGetInfo`` -- fit's free memory --
+        reports the process's budget whatever another app holds (#661:
+        15172 MiB beside a 10.85 GiB hog, NVML 3561), so fit placed every
+        layer and a full window on a crowded card and the child thrashed.
+        The CUDA figure is ``llama-server --list-devices`` run just before
+        the spawn, with the same binary and the child's exact environment
+        (its pinned GPU, its PATH); NVML's is the free memory the spawn
+        context was sized against. ONE INFO with both and the margin. When
+        the CUDA figure cannot be read (the run fails, times out or prints
+        no CUDA0 line) the margin assumes the most CUDA can report, the
+        card's total: ONE WARNING. Linux reads the card's real free memory:
+        nothing to correct."""
+        if not cls._host_is_windows():
+            return
+        nvml_free_mib = device.free_bytes // _MIB
+        try:
+            argv = [str(cls._find_llama_server(cls._default_install_dir())), "--list-devices"]
+            output = cls._run_list_devices(argv, cls._build_spawn_env(**ctx))
+            listed = cuda_memory.list_devices_memory_mib(output)
+            reason = None if listed is not None else "no CUDA0 line"
+        except Exception as exc:
+            listed, reason = None, type(exc).__name__
+        if listed is None:
+            total_mib = device.total_bytes // _MIB
+            margin = cuda_memory.fit_target_mib(
+                cuda_free_mib=total_mib, nvml_free_mib=nvml_free_mib
+            )
+            logger.warning(
+                f"[{cls.__name__}] CUDA's free memory unreadable (llama-server --list-devices: "
+                f"{reason}); fit's margin assumes the whole card is reported free: "
+                f"vram_total_mib={total_mib}, nvml_free_mib={nvml_free_mib}, "
+                f"fit_target_mib={margin}"
+            )
+        else:
+            margin = cuda_memory.fit_target_mib(
+                cuda_free_mib=listed[1], nvml_free_mib=nvml_free_mib
+            )
+            logger.info(
+                f"[{cls.__name__}] fit's margin set from the free memory CUDA reports: "
+                f"cuda_free_mib={listed[1]}, nvml_free_mib={nvml_free_mib}, "
+                f"fit_target_mib={margin}"
+            )
+        ctx["fit_target_mib"] = margin
+
+    @staticmethod
+    def _run_list_devices(argv: List[str], env: Dict[str, str]) -> str:
+        """``llama-server --list-devices``'s output (both streams): it prints
+        each device's memory as ``cudaMemGetInfo`` reports it and exits, no
+        model loaded. Bounded by ``LIST_DEVICES_TIMEOUT_S``; raises when the
+        binary cannot run or the bound passes."""
+        result = subprocess.run(
+            argv,
+            env=env,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=LIST_DEVICES_TIMEOUT_S,
+            creationflags=hidden_console_creationflags(),
+        )
+        return (result.stdout or "") + (result.stderr or "")
 
     @classmethod
     def _respawn_context(
@@ -458,8 +546,8 @@ class CUDA_Engine(BaseLlamaCppEngine):
         alias: str,
         port: int,
         ctx_size: Optional[int] = None,
-        threads: int = 1,
         gpu_layers: int = -1,
+        fit_target_mib: int = cuda_memory.CUDA_FIT_TARGET_MIB,
         **_ignored: Any,
     ) -> List[Any]:
         """CUDA CLI for llama-server: the window and the layers the spawn
@@ -472,8 +560,13 @@ class CUDA_Engine(BaseLlamaCppEngine):
         load; ``_read_server_properties`` reads the allocated value back
         after the probe. ``-ngl`` is ``-1`` (auto: fit places the layers),
         ``-2`` (all: a Windows brake respawn) or ``0`` (no GPU). ``-fitt``
-        pins fit's per-device margin to ``CUDA_FIT_TARGET_MIB`` on every
-        spawn.
+        pins fit's per-device margin: ``CUDA_FIT_TARGET_MIB``, plus what
+        CUDA overstates of the free memory on a Windows spawn whose layers
+        fit places (``fit_target_mib``, ``_correct_fit_margin``).
+
+        No ``--threads``: llama-server's own default (the physical cores)
+        drives the layers fit leaves on the processor, like the CPU engine
+        (``CPU_Engine._build_spawn_argv``).
 
         ``--jinja`` enables the model's own chat template and with it
         OpenAI-style function calling (the agent's calculator tool) —
@@ -506,12 +599,10 @@ class CUDA_Engine(BaseLlamaCppEngine):
         if ctx_size is not None:
             argv += ["-c", str(ctx_size)]
         argv += [
-            "--threads",
-            str(threads),
             "-ngl",
             str(gpu_layers),
             "-fitt",
-            str(cuda_memory.CUDA_FIT_TARGET_MIB),
+            str(fit_target_mib),
             "--jinja",
         ]
         return argv
@@ -597,7 +688,9 @@ class CUDA_Engine(BaseLlamaCppEngine):
             if visible and any(entry.strip().isdigit() for entry in visible.split(",")):
                 logger.debug(
                     f"[{cls.__name__}] CUDA_VISIBLE_DEVICES={visible}: integer entries are "
-                    f"taken as NVML indexes (CUDA's order may differ)"
+                    f"taken as NVML indexes (CUDA's order may differ), so the CUDA0 that "
+                    f"llama-server --list-devices reports for fit's margin may be another "
+                    f"card than the one NVML sized"
                 )
             candidates = cuda_memory.visible_devices(devices, visible)
             if candidates is None:
@@ -914,26 +1007,213 @@ class CUDA_Engine(BaseLlamaCppEngine):
         """Take the brake's sample at ``point`` and execute its decision --
         on Windows only, and only on a child whose window Erudi sized and
         that loaded in full: a fit-sized or partial child is never sampled
-        (nothing for the law's unload to act on either). Off Windows there
-        is no spill, so no signal: nothing is read and nothing acts (the idle
-        monitor still ticks; its samples return here). Never raises: a
-        failure is ONE WARNING with the exception's class name, and the
-        sample is lost."""
+        by the brake (nothing for the law's unload to act on either). Then,
+        at a turn start (for the child that turn uses) and at idle, the
+        eviction gauge samples the live child -- the one the brake's
+        decision left, brake-off children included (``_sample_gpu_contention``);
+        never at a turn end, which follows a generation that just paged the
+        child back in. Off Windows there is no spill and no eviction, so no
+        signal: nothing is read and nothing acts (the idle monitor still
+        ticks; its samples return here). Never raises: a failure is ONE
+        WARNING with the exception's class name, and the sample is lost."""
         handle = cls._model
-        if (
-            not cls._host_is_windows()
-            or not isinstance(handle, dict)
-            or not handle.get("window_sized")
+        if not cls._host_is_windows() or not isinstance(handle, dict):
+            return BrakeOutcome()
+        outcome = BrakeOutcome()
+        if handle.get("window_sized"):
+            try:
+                outcome = cls._llama_brake_point(point, llm_id)
+            except Exception as exc:
+                logger.warning(
+                    f"[{cls.__name__}] Memory brake sample failed ({type(exc).__name__}): "
+                    f"point={point}"
+                )
+        if point == memory_brake.POINT_IDLE or (
+            point == memory_brake.POINT_TURN_START and cls.loaded_child_for(llm_id)
         ):
-            return BrakeOutcome()
+            cls._sample_gpu_contention()
+        return outcome
+
+    # ---------- the eviction gauge: another app takes the card (Windows) ----------
+
+    # Seconds between the contention-only samples while a contention lasts
+    # (the conversation page polls the cached state at the same pace).
+    _contention_interval_s: ClassVar[float] = 10.0
+    _contention_task: ClassVar[Optional["asyncio.Task"]] = None
+    # A Windows without the Total Committed counter was said once.
+    _committed_gauge_missing_logged: ClassVar[bool] = False
+
+    @classmethod
+    def _read_device_free(cls, uuid: str) -> Optional[int]:
+        """NVML's free bytes of the GPU ``uuid`` now, or None when NVML
+        cannot say (the caller keeps its state: unknown is not free)."""
         try:
-            return cls._llama_brake_point(point, llm_id)
-        except Exception as exc:
-            logger.warning(
-                f"[{cls.__name__}] Memory brake sample failed ({type(exc).__name__}): "
-                f"point={point}"
+            import pynvml as nv
+
+            nv.nvmlInit()
+            device = nv.nvmlDeviceGetHandleByUUID(uuid.encode("ascii"))
+            return int(cls._nvml_memory(nv, device).free)
+        except Exception:
+            # Unknown, not zero: a missing reading leaves the state as it is.
+            return None
+
+    @classmethod
+    def _sample_gpu_contention(cls) -> None:
+        """Read the eviction gauge of the loaded child and keep the result on
+        its handle (``gpu_contention``): its Total Committed GPU memory above
+        its resident bytes (PDH), against NVML's free memory on the GPU it
+        was pinned to (``cuda_memory.gpu_contention``). Windows only; a child
+        with no pinned GPU (several visible GPUs, NVML unreadable at load, no
+        GPU) is not read. A missing reading -- no PDH instance yet (a
+        respawned child appears about 6 s after the stop), a failed
+        collection, NVML failing -- leaves the state unchanged, silently; a
+        Windows whose PDH refuses the Total Committed counter is said once
+        (INFO) and detects nothing. Each
+        transition is ONE INFO. Never an action on the child; never raises
+        (an unexpected failure is ONE WARNING and the sample is lost)."""
+        handle = cls._model
+        try:
+            if (
+                not isinstance(handle, dict)
+                or not handle.get("gpu_uuid")
+                or not cls._proc_is_alive(handle.get("proc"))
+            ):
+                return
+            # The raw Shared Usage is the term; the healthy level plays no part.
+            vram = memory_pressure.read_vram(handle.get("pid"), healthy_bytes=0)
+            if vram.dedicated_bytes is None or vram.shared_bytes is None:
+                return
+            if vram.committed_bytes is None:
+                # A transient miss (a failed collection, no instance for the
+                # child yet) is a missing reading like any other: silent.
+                if vram.committed_refused and not cls._committed_gauge_missing_logged:
+                    cls._committed_gauge_missing_logged = True
+                    logger.info(
+                        f"[{cls.__name__}] GPU Total Committed counter unavailable for the "
+                        f"child; another app taking the graphics card goes unnoticed "
+                        f"(port {handle.get('port')})"
+                    )
+                return
+            free = (
+                0
+                if memory_pressure.contention_forced()
+                else cls._read_device_free(handle["gpu_uuid"])
             )
-            return BrakeOutcome()
+            contention = cuda_memory.gpu_contention(
+                committed_bytes=vram.committed_bytes,
+                dedicated_bytes=vram.dedicated_bytes,
+                shared_bytes=vram.shared_bytes,
+                device_free_bytes=free,
+            )
+            if contention is None:
+                return
+            previous = handle.get("gpu_contention")
+            was_active = isinstance(previous, dict) and bool(previous.get("active"))
+            handle["gpu_contention"] = {
+                "active": contention.active,
+                "evicted_bytes": contention.evicted_bytes,
+                "device_free_bytes": contention.device_free_bytes,
+                "read_at": time.time(),
+            }
+            if contention.active != was_active:
+                logger.info(
+                    f"[{cls.__name__}] GPU contention "
+                    f"{'started' if contention.active else 'ended'}: "
+                    f"evicted_mib={contention.evicted_bytes // _MIB}, "
+                    f"device_free_mib={contention.device_free_bytes // _MIB} "
+                    f"(port {handle.get('port')})"
+                )
+        except Exception as exc:
+            logger.warning(f"[{cls.__name__}] GPU contention sample failed ({type(exc).__name__})")
+
+    @classmethod
+    def _llama_brake_respawn(
+        cls,
+        handle: Dict[str, Any],
+        decision: "memory_brake.Decision",
+        point: str,
+        footprint: Optional[int],
+    ) -> bool:
+        """The shared respawn, plus the eviction gauge's last reading carried
+        to the new child: it sits on the same pinned GPU, and its PDH
+        instance appears seconds after the spawn -- until its first reading
+        replaces the carried one, the contention goes on (the notice and
+        the contention monitor keep following it)."""
+        respawned = super()._llama_brake_respawn(handle, decision, point, footprint)
+        state = handle.get("gpu_contention")
+        if respawned and isinstance(state, dict) and isinstance(cls._model, dict):
+            cls._model["gpu_contention"] = dict(state)
+        return respawned
+
+    @classmethod
+    def gpu_contention_state(cls) -> Optional[Dict[str, Any]]:
+        """The loaded, live child's last eviction-gauge reading, cached:
+        never a fresh read (the status endpoint and the turn end read it
+        without the generation lock). None without one."""
+        handle = cls._model
+        if not isinstance(handle, dict) or not cls._proc_is_alive(handle.get("proc")):
+            return None
+        state = handle.get("gpu_contention")
+        return dict(state) if isinstance(state, dict) else None
+
+    @classmethod
+    async def _contention_tick(cls) -> None:
+        """While a contention lasts, one contention-only sample under the
+        generation lock (never during a turn), shielded like a brake sample
+        -- never ``brake_point``, whose idle samples count toward an unload.
+        Nothing is taken or read otherwise."""
+        state = cls.gpu_contention_state()
+        if not (state and state.get("active")):
+            return
+        async with cls._acquire_generation_lock():
+            state = cls.gpu_contention_state()
+            if state and state.get("active"):
+                await run_reset_shielded(cls._sample_gpu_contention)
+
+    @classmethod
+    async def _contention_monitor(cls) -> None:
+        """Every ``_contention_interval_s``, one contention tick. A tick that
+        raises is logged at ERROR with its traceback and the loop goes on."""
+        while True:
+            await asyncio.sleep(cls._contention_interval_s)
+            try:
+                await cls._contention_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"GPU contention tick failed: {exc}", exc_info=True)
+
+    @classmethod
+    def start_pressure_task(cls) -> None:
+        """The idle brake monitor, and on Windows the contention monitor that
+        follows a contention to its end between turns (idempotent)."""
+        super().start_pressure_task()
+        if cls._contention_task is None and cls._host_is_windows():
+            cls._contention_task = asyncio.create_task(
+                cls._contention_monitor(), name="gpu-contention"
+            )
+            cls._contention_task.add_done_callback(_log_monitor_death)
+            logger.info("Started GPU contention monitor")
+
+    @classmethod
+    async def stop_pressure_task(cls) -> None:
+        """Cancel both monitors and wait for them (a sample in flight
+        finishes first: it is shielded). The memory pressure monitor is
+        stopped even when this stop is cancelled while it waits for the
+        contention monitor; the cancellation then goes on up."""
+        task, cls._contention_task = cls._contention_task, None
+        try:
+            if task is not None:
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    current = asyncio.current_task()
+                    if current is not None and current.cancelling():
+                        raise
+                logger.info("Stopped GPU contention monitor")
+        finally:
+            await super().stop_pressure_task()
 
     @classmethod
     def memory_bound_tokens(cls) -> Optional[int]:

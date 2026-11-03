@@ -330,6 +330,20 @@ def _consume_brake_notice(engine: Any) -> Optional[str]:
     return probe() if callable(probe) else None
 
 
+# The ``memory_warning`` event another app taking the graphics card becomes
+# (the CUDA engine's eviction gauge on Windows): no size to quote.
+_GPU_CONTENTION_WARNING = {"t": "memory_warning", "reason": "gpu_contention"}
+
+
+def _gpu_contention_active(engine: Any) -> bool:
+    """Whether the loaded child's last eviction-gauge reading says another
+    app is taking the card (``BaseEngine.gpu_contention_state``), read
+    defensively like the other engine probes."""
+    probe = getattr(engine, "gpu_contention_state", None)
+    state = probe() if callable(probe) else None
+    return isinstance(state, dict) and bool(state.get("active"))
+
+
 def _track_memory_warning(engine: Any, thread_id: Optional[str], active: bool) -> None:
     """Per-conversation warning state on the loaded child's handle, with ONE
     INFO line at each transition (start, end). Lost when the child is reaped
@@ -2078,9 +2092,14 @@ class AgentRunner:
                         # takes it): a shrink is ``pressure`` -- the bound
                         # criterion is not evaluated then, its window would be
                         # the one before the shrink --, pressure from other
-                        # apps is ``pressure_external``. Otherwise the event
-                        # goes out ONLY when memory bounds the child's window
-                        # and even a compaction down to the keep-tail would
+                        # apps is ``pressure_external``. Then, as long as
+                        # another app takes the graphics card from the child
+                        # (the CUDA engine's eviction gauge, read at this
+                        # turn's start or idle), ``gpu_contention`` at every
+                        # turn end, the bound criterion not evaluated either.
+                        # Otherwise the event goes out ONLY when memory
+                        # bounds the child's window and even a compaction
+                        # down to the keep-tail would
                         # leave the next request at 85 % of the working window
                         # or more (``bound``; see ``_memory_warning_event`` for
                         # the projection). The conversation service forwards
@@ -2093,6 +2112,8 @@ class AgentRunner:
                             warning = (
                                 dict(_BRAKE_WARNINGS[notice]) if notice in _BRAKE_WARNINGS else None
                             )
+                            if warning is None and _gpu_contention_active(engine):
+                                warning = dict(_GPU_CONTENTION_WARNING)
                             if warning is None and budget is not None:
                                 warning = await self._memory_warning_event(
                                     agent,

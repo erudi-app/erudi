@@ -17,7 +17,8 @@ BaseEngine
         │                         sizes -c itself, binds the llama.cpp memory brake)
         └── CUDA_Engine          (Popen + llama-server CUDA, -ngl -1 with fit, 27200-27299;
                                   sizes -c against the VRAM, binds the brake, which only a
-                                  Windows VRAM spill drives on a full offload)
+                                  Windows VRAM spill drives on a full offload, and on
+                                  Windows a notify-only eviction gauge)
 ```
 
 Concrete engines implement only the four hooks that are genuinely backend-specific:
@@ -108,6 +109,18 @@ push the machine into swap. With one slot and no prompt cache:
 The single slot is why the first message of a conversation requests its title *before* the
 chat turn (`ConversationPage.jsx`): a title run after the turn would overwrite the
 conversation's KV in the slot and the second message would re-read the whole conversation.
+
+## llama-server threads
+
+Neither llama.cpp engine passes `--threads`, on a load or a brake respawn: llama-server's
+own default (`common_cpu_get_num_math` in `common/common.cpp`) counts the physical cores —
+on Windows through `GetLogicalProcessorInformationEx`, the performance cores only on a
+hybrid Intel CPU under Linux, the P-cores on macOS — and drives the CPU engine and the
+layers fit leaves on the processor on CUDA. Every logical CPU (SMT included) stalls
+llama.cpp's thread barrier as soon as another app wants a slice: #661 measured 0.66
+tokens/s at 16 threads on an 8-core / 16-thread Ryzen 7 7700 with a browser and two
+launchers idle, against 17.3 at 8. A user who sets `LLAMA_ARG_THREADS` in the
+environment Erudi starts from overrides the default: the child inherits it.
 
 ## Context windows
 
@@ -519,9 +532,31 @@ engine's (`gguf_memory`). The window is passed with `-ngl -1 -fitt 1024`.
 **Division of labour with fit.** Erudi fixes the window: fit never changes an explicit
 `-c`, and the brake's cap, the window memory, `/context` and the compaction threshold all
 read it. Fit fixes the layers: `-ngl -1` is "auto" only while fit is on (at the model
-level a negative value means ALL layers, `llama.h:320`), and fit measures the real free
-memory (`cudaMemGetInfo`) with the margin Erudi hands it (`-fitt 1024`), so an
-optimistic estimate yields a partial offload instead of a dead child.
+level a negative value means ALL layers, `llama.h:320`), and fit measures the free
+memory (`cudaMemGetInfo`) with the margin Erudi hands it (`-fitt`), so an optimistic
+estimate yields a partial offload instead of a dead child.
+
+**fit's margin on Windows.** Under WDDM `cudaMemGetInfo` reports the process's budget,
+not the card's free memory: #661 read 15172 MiB on a 16 GB card with or without another
+app's 10.85 GiB (NVML: 3561 MiB), so fit kept every layer and a 40960 window on a card
+with 3.6 GB left, and the child thrashed. On every Windows spawn where fit places the
+layers on one GPU without a window Erudi sized for a full offload — the 4096 floor does
+not fit, a GGUF not modelled (MLA) or not read, `ERUDI_CTX` pinned —
+`CUDA_Engine._correct_fit_margin` runs the same `llama-server` with `--list-devices`
+just before the spawn, in the child's exact environment (its `CUDA_VISIBLE_DEVICES`
+pin, its `PATH`), and reads `CUDA0: <name> (<total> MiB, <free> MiB free)` — the very
+figure fit plans with. The margin becomes `1024 + max(0, CUDA free − NVML free)`
+(`cuda_memory.fit_target_mib`, NVML's being the free memory the spawn context was sized
+against, so `ERUDI_VRAM_OVERRIDE_GB` feeds it): fit then plans on NVML's figure and
+places the layers, a multimodal projector and MoE experts as it always does. #661's
+hog-first load gets `-fitt 12635`; a calm desktop about `-fitt 1166` (today's margin).
+One INFO, `fit's margin set from the free memory CUDA reports: cuda_free_mib=...,
+nvml_free_mib=..., fit_target_mib=...`. When `--list-devices` fails, times out (10 s,
+`LIST_DEVICES_TIMEOUT_S`) or prints no `CUDA0` line, the margin assumes the most CUDA
+can report, the card's total — `1024 + (total − NVML free)` — with one WARNING. The
+sized full offload and the `-ngl -2` brake respawn keep `-fitt 1024`: Erudi sized
+their window from NVML. Linux keeps `-fitt 1024` everywhere: there `cudaMemGetInfo` is
+the card's real free memory.
 
 **The spawn matrix.**
 
@@ -529,8 +564,9 @@ optimistic estimate yields a partial offload instead of a dead child.
 |---|---|---|
 | Sized load | `-c W -ngl -1 -fitt 1024` | On (`window_sized`), pending the placement below |
 | Brake respawn (Windows only: a spill is what drives it) | `-c min(static window, max(4096, cap)) -ngl -2 -fitt 1024`: nothing re-read; fit cannot change an explicit `-ngl` and keeps every layer on the device, where WDDM spills instead of failing | On, its state carried |
-| `ERUDI_CTX` pinned | `-c ERUDI_CTX -ngl -1 -fitt 1024` | Sampled, never resized; off (one INFO) when the allocated window stays unknown (`ERUDI_CTX=0` lets llama-server pick it, and `/props` failed) |
-| Floor unfit, MLA, GGUF or NVML unreadable | No `-c`, `-ngl -1 -fitt 1024`: fit sizes the window and places the layers (one WARNING) | Off (`window_sized=False`): never sampled |
+| `ERUDI_CTX` pinned | `-c ERUDI_CTX -ngl -1 -fitt 1024`; on Windows `-fitt 1024 + max(0, CUDA free − NVML free)` | Sampled, never resized; off (one INFO) when the allocated window stays unknown (`ERUDI_CTX=0` lets llama-server pick it, and `/props` failed) |
+| Floor unfit, MLA, GGUF unreadable | No `-c`, `-ngl -1 -fitt 1024`, on Windows `-fitt 1024 + max(0, CUDA free − NVML free)`: fit sizes the window and places the layers (one WARNING) | Off (`window_sized=False`): never sampled |
+| NVML unreadable | No `-c`, `-ngl -1 -fitt 1024`: fit sizes the window and places the layers on its own figures (one WARNING) | Off |
 | The user's `CUDA_VISIBLE_DEVICES` names several GPUs | No `-c`, `-ngl -1 -fitt 1024`: llama.cpp splits the layers across the cards, which a one-card sizing and measurement cannot model (one INFO) | Off |
 | NVML sees no GPU | No `-c`, `-ngl 0` (one WARNING) | Off |
 
@@ -632,7 +668,9 @@ that succeeds.
 **Linux** has no spill: an allocation that does not fit fails, so the window is sized to
 fit at spawn. With RAM pressure out, the brake has no signal there: `brake_point`
 returns before any sensor is read, so nothing ever acts and no `Memory brake` line is
-written. The idle monitor still ticks; its samples return at once.
+written. The idle monitor still ticks; its samples return at once. Linux has no WDDM
+eviction either: the eviction gauge below never reads anything there, and its 10 s task
+is not started.
 
 **The QA seam** (`ERUDI_FORCE_MEMORY_PRESSURE`, never set in normal use): `warning` and
 `critical` act inside the RAM reading, which the CUDA engine never takes, so they do
@@ -645,12 +683,55 @@ machine: a shrink at the turn end and a `-ngl -2` respawn once the user is away
 (warning), or a shrink and a respawn at the next turn boundary (critical), with the
 `acted` notice and the reload state; at the 4096 floor no shrink is possible and two idle
 criticals unload. The forced reading is also seen at load (the WARNING above the healthy
-level, and possibly the device check's). On Linux the brake reads nothing, so the VRAM
-values do nothing there either.
+level, and possibly the device check's). `vram-contention` forces the eviction gauge
+instead: the committed reading is the real Dedicated and Shared Usage plus 384 MiB, and
+the card's free memory is taken as 0 (NVML is not read), so the `gpu_contention` notice
+shows on a calm machine and stays while the seam is set; the spill gauge stays the real
+one. On Linux the brake reads nothing, so the VRAM values do nothing there either.
 
 A child whose window Erudi did not size (the fallback shape) or that loaded partly on the
-GPU is never sampled: `brake_point` returns before any sensor is read, so nothing — not
-even the unload — acts on it.
+GPU is never sampled by the brake: nothing — not even the unload — acts on it. Only the
+eviction gauge below reads it.
+
+**The eviction gauge (Windows, a notice only).** The spill gauge cannot see another app
+taking the card. When a game or another CUDA app oversubscribes the VRAM, WDDM *evicts*
+memory the child already holds — its Dedicated Usage drops, its Shared Usage does not
+rise (#661 saw it fall) — and pages it back in for every token: answers slow down four
+to ten times and no brake line is written. The evicted part is resident nowhere, so it
+is the child's `\GPU Process Memory(...)\Total Committed` minus its `Dedicated Usage +
+Shared Usage`, read from the same PDH query as a third, optional counter (a Windows
+whose PDH refuses it reads Dedicated and Shared as before, says once at INFO that the
+eviction goes unnoticed, and detects nothing; a collection that misses it — a failed
+read, no instance for the child yet — is a missing reading like any other, silent). #661 measured that gap at exactly 0 on every
+sample of a healthy child — full and partial offloads, across a respawn — and at 0.7
+to 6.3 GiB under a 10 GiB hog. **Contention** (`cuda_memory.gpu_contention`) is at
+least 256 MiB evicted (`CUDA_EVICTED_MIN_BYTES`) *and* NVML's free memory on the GPU
+the child was pinned to below the evicted bytes: those pages cannot come back. Once
+the other app is gone the gap stays until the next turn pages the child back in, but
+the card has the room again: that reads as no contention.
+
+The gauge samples every live child pinned to one GPU (`gpu_uuid`: not the
+several-GPU, NVML-unreadable or no-GPU shapes), brake-off ones included, at a turn start
+(after the brake's decision, on the child the turn uses — a respawned one if the brake
+just respawned it) and at every idle sample, never at a turn end (the generation just
+paged the child back in). While a contention holds, a light task
+(`CUDA_Engine._contention_tick`, every 10 s, under the generation lock, never during a
+turn) samples the gauge alone — never `brake_point(idle)`, whose samples count toward
+an unload — so its end is seen between turns. The reading is cached on the handle
+(`gpu_contention`: `active`, `evicted_bytes`, `device_free_bytes`, `read_at`) and a brake
+respawn carries it to the new child, on the same pinned GPU, until that child's first
+reading replaces it; a missing reading (a respawned child has no PDH instance for about
+6 s, NVML fails) leaves it unchanged, silently, and each transition is one INFO line, `GPU contention
+started|ended: evicted_mib=..., device_free_mib=...`. It never acts on the child.
+
+A stateful turn end turns an active contention into `memory_warning` with
+`reason: "gpu_contention"`, again at every turn while it lasts; a brake notice
+(`pressure`, `pressure_external`) comes first, and `bound` is not evaluated after it.
+`GET /erudi/hardware/gpu_contention/status` returns the cached reading (`active: null`,
+unknown, and no numbers on every other engine and OS and without a live child: only a
+reading with `active: false` drops the notice); it never reads a
+sensor or takes the generation lock, and its `/status` suffix keeps its access line at
+DEBUG. The conversation page polls it only while it shows that notice.
 
 **Driver policy.** With the NVIDIA Control Panel's "Prefer No Sysmem Fallback", Windows
 fails an allocation like Linux: a `-ngl -2` respawn under a VRAM hog fails instead of spilling, the

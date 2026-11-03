@@ -322,7 +322,6 @@ def test_the_real_spawn_child_preserves_the_window_facts(tmp_path, monkeypatch):
     )
     ctx = {
         "ctx_size": 30_720,
-        "threads": 4,
         "gpu_layers": 0,
         "trained_context_tokens": W,
         "static_window_tokens": W,

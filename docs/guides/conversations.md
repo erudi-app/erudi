@@ -197,7 +197,7 @@ their contents through history forever.
 | `tool_result` | `name`, `text` | What that tool returned |
 | `compaction` | `phase`; with `phase: "done"`: `summarized`, `reason`, `summary`, `summary_lost` | Earlier messages are summarized (see [compaction](#what-the-thread-shows-of-a-compaction)). `phase: "start"`: the summary call is about to run; never persisted. `phase: "done"`: the history was rewritten — `summarized` = the user messages and answers summarized (tool calls, tool results and the previous summary not counted), `reason` = `"memory"` (the computer's memory bounds the window) or `"length"`, `summary` = the summary text, `summary_lost: true` when no summary could be written (`summary` is then the previous summary the model keeps, possibly empty). Persisted in the turn's trace. Several per turn are possible: one before each model call that needs it |
 | `memory_reload` | `reason` (`"idle"` only) | Without `reason`, Apple Silicon and the CPU engine: the memory brake unloaded the model (or, on the CPU engine, restarted it with a smaller window) while the computer's memory was under pressure, and this turn reloads it or re-reads the conversation (see below). `reason: "idle"` (any engine): the model was unloaded after about five minutes without use, and this turn reloads it; the renderer says so instead of blaming memory. Only a conversation that already has messages gets it (a new one shows its first-reply hint), a model switch never sends it, and a turn announces at most one reload. Sent before anything else the model produces; never persisted |
-| `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one. `reason: "pressure"`: the computer's memory is under pressure and the memory brake shrank the window, so the conversation is summarized earlier. `reason: "pressure_external"`: the computer's memory is under pressure from other apps and this conversation uses little of it. `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
+| `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one, by precedence: a brake notice, then `gpu_contention`, then `bound`. `reason: "pressure"`: the computer's memory is under pressure and the memory brake shrank the window, so the conversation will be summarized sooner. `reason: "pressure_external"`: the computer's memory is under pressure from other apps and this conversation uses little of it. `reason: "gpu_contention"` (the CUDA engine on Windows): another app is taking the graphics card's memory from the model, so answers are slower; sent at every turn end while it lasts, and the renderer polls `GET /hardware/gpu_contention/status` to drop the notice once it ends (see below). `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
 | `error` | `text` | The turn failed; the text is the curated error message |
 | `done` | — | Terminal event, always sent, including after an `error` |
 
@@ -668,6 +668,16 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    when the pressure comes from other apps (this conversation uses little), `reason:
    "pressure_external"`. Either takes precedence over the `bound` projection above, which is then
    not evaluated. Only a conversation turn consumes the brake's notice; an Arena turn never does.
+
+   **Another app taking the graphics card** is not memory pressure and the brake does nothing
+   about it: on Windows, when a game or another GPU app evicts the model from the card, the CUDA
+   engine's eviction gauge (sampled at the start of a turn and while the model is idle, see
+   [the eviction gauge](../dev/architecture/engines.md#the-memory-brake-cuda)) makes every turn
+   end carry `memory_warning` with `reason: "gpu_contention"` for as long as it lasts — after a
+   brake notice, before `bound`, which is then not evaluated. While the renderer shows that
+   notice, and no turn runs, it polls `GET /hardware/gpu_contention/status` about every 10 s and
+   drops the notice once `active` is false; a failed poll, or `active: null` (no reading),
+   keeps it.
    When the brake unloaded the model while the user was away, the next turn first sends
    `memory_reload` (without `reason`; after the idle timeout's own unload it carries
    `reason: "idle"` and the copy names the pause instead of memory) and the renderer shows a reload state in the pending answer until the model

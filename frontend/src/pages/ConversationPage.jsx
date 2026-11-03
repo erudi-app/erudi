@@ -47,7 +47,12 @@ const MEMORY_WARNING_KEYS = {
   bound: "chat:memoryWarning.bound",
   pressure: "chat:memoryWarning.pressure",
   pressure_external: "chat:memoryWarning.pressureExternal",
+  gpu_contention: "chat:memoryWarning.gpuContention",
 };
+// While the `gpu_contention` notice shows, the cached contention state is
+// polled at this pace (the backend samples it every 10 s too).
+const GPU_CONTENTION_STATUS_PATH = "/hardware/gpu_contention/status";
+const GPU_CONTENTION_POLL_MS = 10_000;
 const alignmentClassFor = (isUser) => (isUser ? "items-end" : "items-start");
 const bubbleClassFor = (isUser, isError) => {
   if (isUser) {
@@ -152,6 +157,49 @@ export default function ConversationPage() {
   const messagesLengthRef = useRef(0);
   messagesLengthRef.current = messages.length;
   const isStreamingRef = useRef(false);
+
+  // The `gpu_contention` notice says another app is taking the graphics card
+  // NOW: while it shows, the cached contention state is polled about every
+  // 10 s (a setTimeout chain), and the notice drops once the contention
+  // ended (`active === false`; `null`, no reading, is not an end). The chain
+  // pauses while a turn runs -- its end re-evaluates the notice -- and a
+  // failed poll keeps the notice. The clear is functional
+  // and touches a gpu_contention notice only, never a warning of another
+  // reason that replaced it meanwhile.
+  const contentionShown = memoryWarning?.reason === "gpu_contention";
+  useEffect(() => {
+    if (!contentionShown) return undefined;
+    let cancelled = false;
+    let warned = false;
+    let timer = null;
+    const poll = async () => {
+      if (!isStreamingRef.current) {
+        try {
+          const status = await apiClient.get(GPU_CONTENTION_STATUS_PATH, { silentFailure: true });
+          if (cancelled) return;
+          if (status?.active === false) {
+            setMemoryWarning((current) => (current?.reason === "gpu_contention" ? null : current));
+            return;
+          }
+        } catch (error) {
+          // The notice stays: a contention that cannot be read is not over.
+          // Said once per notice, not at every tick.
+          if (!warned) {
+            warned = true;
+            log.warn("GPU contention status poll failed", error);
+          }
+        }
+      }
+      if (!cancelled) {
+        timer = setTimeout(poll, GPU_CONTENTION_POLL_MS);
+      }
+    };
+    timer = setTimeout(poll, GPU_CONTENTION_POLL_MS);
+    return () => {
+      cancelled = true;
+      clearTimeout(timer);
+    };
+  }, [contentionShown]);
 
   const toggleSidebar = () => {
     setCollapsed((prev) => !prev);
@@ -580,7 +628,8 @@ export default function ConversationPage() {
                 // only — never appended to the answer text or the trace, so
                 // it survives neither the copy path nor a reload.
                 // The copy follows `reason` (`bound` / `pressure` /
-                // `pressure_external`); `bound` alone quotes a size.
+                // `pressure_external` / `gpu_contention`); `bound` alone
+                // quotes a size.
                 sawMemoryWarning = true;
                 setMemoryWarning({
                   reason: evt.reason,
@@ -1276,13 +1325,17 @@ export default function ConversationPage() {
         </div>
         <div className="sticky bottom-0 left-0 right-0 px-10 py-10 backdrop-blur-md flex justify-center w-full">
           <div className="w-full max-w-lg">
-            {/* Amber memory warning, by reason: the Mac's memory bounds this
-                conversation and even after auto-compaction the next request
-                nearly fills that bound (`bound`); the Mac is under memory
-                pressure and the conversation is now summarized earlier
-                (`pressure`); or the pressure comes from other apps
-                (`pressure_external`). An unknown reason shows nothing. Same
-                amber vocabulary as the DragDropArea rejection toast. */}
+            {/* Amber memory warning, by reason, one at a time (the backend's
+                precedence: a brake notice, then `gpu_contention`, then
+                `bound`): the computer's memory bounds this conversation and
+                even after auto-compaction the next request nearly fills that
+                bound (`bound`); the computer is under memory pressure and the
+                conversation will be summarized sooner (`pressure`); the
+                pressure comes from other apps (`pressure_external`); or
+                another app is taking the graphics card's memory and answers
+                are slower (`gpu_contention`, polled away once it ends). An
+                unknown reason shows nothing. Same amber vocabulary as the
+                DragDropArea rejection toast. */}
             {memoryWarning && Object.hasOwn(MEMORY_WARNING_KEYS, memoryWarning.reason) && (
               <div
                 role="alert"

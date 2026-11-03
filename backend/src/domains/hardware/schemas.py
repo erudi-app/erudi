@@ -175,3 +175,25 @@ class DetailedHardwareInfo(BaseModel):
 
     # Include both raw and boosted for transparency
     boosted_inference_score: float = Field(..., description="UI-boosted inference score")
+
+
+class GpuContentionStatus(BaseModel):
+    """Whether another app is taking the graphics card from the loaded model
+    now: the last cached reading of the CUDA engine's eviction gauge
+    (Windows). Unknown (``active`` None), with no numbers, without a
+    reading: on every other engine and OS, without a loaded model, and
+    while a respawned child is not read yet."""
+
+    active: Optional[bool] = Field(
+        ...,
+        description=(
+            "Another app is taking the card from the model; null when there is no reading"
+        ),
+    )
+    evicted_bytes: Optional[int] = Field(
+        None, description="The model's GPU memory resident nowhere, in bytes"
+    )
+    device_free_bytes: Optional[int] = Field(
+        None, description="The card's free memory at that reading (NVML), in bytes"
+    )
+    read_at: Optional[float] = Field(None, description="When it was read (Unix time, seconds)")

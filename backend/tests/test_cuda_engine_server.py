@@ -12,6 +12,8 @@ from __future__ import annotations
 import dataclasses
 import logging
 import os
+import platform
+import subprocess
 import time
 from pathlib import Path
 from types import SimpleNamespace
@@ -83,14 +85,36 @@ def _device(*, total=16 * GIB, free=int(13.8 * GIB), uuid=UUID):
 @pytest.fixture
 def gpu(monkeypatch):
     """The NVML seam and the GGUF readers faked: a 16 GiB card with 13.8 GiB
-    free and a Qwen3-shaped 2.5 GiB model. The real NVML is never touched."""
-    state = SimpleNamespace(device=_device(), inputs=(QWEN3, WEIGHTS), reads=0)
+    free and a Qwen3-shaped 2.5 GiB model. The real NVML is never touched,
+    nor a real llama-server (``--list-devices`` answers from ``state``). The
+    host is Linux unless a test says Windows."""
+    state = SimpleNamespace(
+        device=_device(),
+        inputs=(QWEN3, WEIGHTS),
+        reads=0,
+        list_output=None,
+        list_error=None,
+        list_calls=[],
+    )
 
     def _read_vram_info(cls):
         state.reads += 1
         return state.device
 
+    def _run_list_devices(cls, argv, env):
+        state.list_calls.append((list(argv), dict(env)))
+        if state.list_error is not None:
+            raise state.list_error
+        return state.list_output
+
+    monkeypatch.setattr(platform, "system", lambda: "Linux")
     monkeypatch.setattr(CUDA_Engine, "_read_vram_info", classmethod(_read_vram_info))
+    monkeypatch.setattr(CUDA_Engine, "_run_list_devices", classmethod(_run_list_devices))
+    monkeypatch.setattr(
+        CUDA_Engine,
+        "_find_llama_server",
+        classmethod(lambda cls, install_dir=None: Path("/bin/llama-server")),
+    )
     monkeypatch.setattr(
         gguf_memory, "read_sizing_inputs", lambda path, mmproj_path=None: state.inputs
     )
@@ -135,7 +159,7 @@ class TestSpawnContextAndArgv:
         assert ctx["ctx_size"] == 40_960
         assert ctx["gpu_layers"] == -1
         assert ctx["window_sized"] is True
-        assert ctx["threads"] >= 1
+        assert "threads" not in ctx
         assert ctx["trained_context_tokens"] == ctx["static_window_tokens"] == 40_960
         assert ctx["kv_token_bytes"] == 114_688
         assert ctx["weights_bytes"] == WEIGHTS
@@ -282,7 +306,6 @@ class TestSpawnContextAndArgv:
             alias="erudi-9",
             port=8456,
             ctx_size=4096,
-            threads=4,
             gpu_layers=-1,
         )
         joined = " ".join(str(x) for x in argv)
@@ -294,7 +317,6 @@ class TestSpawnContextAndArgv:
         assert "--port 8456" in joined
         assert "--alias erudi-9" in joined
         assert "-c 4096" in joined
-        assert "--threads 4" in joined
         assert "-ngl -1" in joined
         assert "-fitt 1024" in joined
 
@@ -302,7 +324,52 @@ class TestSpawnContextAndArgv:
         """No window (the fallback shape) -> no ``-c``: llama-server's fit
         (ON by default in the pinned b10883) resolves the window and the
         layers at load."""
-        assert "-c" not in _argv(ctx_size=None, threads=4, gpu_layers=-1)
+        assert "-c" not in _argv(ctx_size=None, gpu_layers=-1)
+
+    @pytest.mark.parametrize(
+        "case", ["sized", "floor", "pinned", "no_gpu", "brake_respawn", "windows_floor"]
+    )
+    def test_no_spawn_passes_a_thread_count(self, gpu, monkeypatch, case):
+        """#661: ``--threads`` = every logical CPU collapsed generation on an
+        8C/16T Ryzen (0.66 tok/s against 17.3 at 8): the CPU half of a
+        partial offload ran with it too. llama-server's own default
+        (``common_cpu_get_num_math``: the physical cores)
+        applies on every spawn, load and respawn alike."""
+        respawn_from = None
+        if case == "floor":
+            gpu.inputs = (QWEN3, int(7.5 * GIB))
+            gpu.device = _device(total=8 * GIB, free=int(6.5 * GIB))
+        elif case == "pinned":
+            monkeypatch.setenv("ERUDI_CTX", "8192")
+        elif case == "no_gpu":
+            gpu.device = cuda_memory.DeviceMemory(
+                index=None, uuid=None, total_bytes=0, free_bytes=0
+            )
+        elif case == "brake_respawn":
+            monkeypatch.setattr(gguf_memory, "read_shape", lambda path: QWEN3)
+            respawn_from = {
+                "alias": "erudi-9",
+                "window_sized": True,
+                "static_window_tokens": 40_960,
+                "weights_bytes": WEIGHTS,
+                "vram_total_bytes": 16 * GIB,
+                "device_budget_bytes": 8 * GIB,
+                "gpu_uuid": UUID,
+            }
+        elif case == "windows_floor":
+            monkeypatch.setattr(platform, "system", lambda: "Windows")
+            gpu.inputs = (QWEN3, int(7.5 * GIB))
+            gpu.device = _device(total=8 * GIB, free=int(6.5 * GIB))
+            gpu.list_output = "  CUDA0: NVIDIA (8192 MiB, 7900 MiB free)\n"
+        ctx = CUDA_Engine._prepare_spawn_context(
+            Path("/m.gguf"),
+            "erudi-9",
+            brake_cap=30_720 if respawn_from else None,
+            respawn_from=respawn_from,
+        )
+        argv = _argv(**ctx)
+        assert "threads" not in ctx
+        assert "--threads" not in argv and "-t" not in argv
 
     def test_build_spawn_argv_keeps_native_reasoning_extraction_on(self):
         """#554: no ``--reasoning-format`` override. llama-server's default
@@ -320,6 +387,187 @@ class TestSpawnContextAndArgv:
             )
         ]
         assert "--reasoning-format" not in argv
+
+
+# =====================================================================
+# UNIT — fit's margin on Windows (what CUDA reports free vs NVML)
+# =====================================================================
+
+# #661: RTX 5060 Ti, a 10.85 GiB hog. NVML sees the hog; cudaMemGetInfo (fit,
+# --list-devices) reports the process's WDDM budget, 15172 MiB, hog or not.
+TOTAL_661 = 16283 * MIB
+NVML_FREE_661 = 3561 * MIB
+LIST_661 = "Available devices:\n  CUDA0: NVIDIA GeForce RTX 5060 Ti (16283 MiB, 15172 MiB free)\n"
+MARGIN_661 = 1024 + (15172 - 3561)
+
+
+@pytest.fixture
+def win661(gpu, monkeypatch):
+    """Windows, the #661 card under the hog, a model whose 4096 floor does
+    not fit the 3561 MiB NVML leaves."""
+    monkeypatch.setattr(platform, "system", lambda: "Windows")
+    monkeypatch.delenv("CUDA_VISIBLE_DEVICES", raising=False)
+    monkeypatch.setattr(
+        CUDA_Engine, "_resolve_cuda_bin_dir", classmethod(lambda cls: Path("/cuda/bin"))
+    )
+    gpu.device = _device(total=TOTAL_661, free=NVML_FREE_661)
+    gpu.inputs = (QWEN3, int(7.5 * GIB))
+    gpu.list_output = LIST_661
+    return gpu
+
+
+def _infos(caplog, text):
+    return [r for r in caplog.records if r.levelno == logging.INFO and text in r.getMessage()]
+
+
+@pytest.mark.unit
+class TestWindowsFitMargin:
+    def test_the_floor_path_hands_fit_the_margin_cuda_overstates(self, win661, caplog):
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert (ctx["ctx_size"], ctx["gpu_layers"], ctx["window_sized"]) == (None, -1, False)
+        assert ctx["fit_target_mib"] == MARGIN_661
+        argv = _argv(**ctx)
+        assert "-c" not in argv
+        assert _flag(argv, "-ngl") == "-1"
+        assert _flag(argv, "-fitt") == str(MARGIN_661) == "12635"
+        (info,) = _infos(caplog, "fit_target_mib=")
+        message = info.getMessage()
+        assert "cuda_free_mib=15172" in message
+        assert "nvml_free_mib=3561" in message
+        assert "fit_target_mib=12635" in message
+        # The floor's own WARNING, nothing more.
+        assert len(_warnings(caplog)) == 1
+
+    def test_list_devices_runs_the_same_binary_in_the_childs_environment(self, win661):
+        ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        ((argv, env),) = win661.list_calls
+        assert argv == [str(Path("/bin/llama-server")), "--list-devices"]
+        assert env == CUDA_Engine._build_spawn_env(**ctx)
+        assert env["CUDA_VISIBLE_DEVICES"] == UUID
+        assert env["PATH"].startswith(str(Path("/cuda/bin")) + os.pathsep)
+
+    def test_a_calm_desktop_keeps_about_todays_margin(self, win661):
+        win661.device = _device(total=TOTAL_661, free=15030 * MIB)
+        win661.inputs = (dataclasses.replace(QWEN3, kv_lora_rank=512), WEIGHTS)
+        ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert ctx["fit_target_mib"] == 1024 + 142
+
+    def test_cuda_reporting_less_than_nvml_keeps_the_base_margin(self, win661):
+        win661.list_output = "  CUDA0: NVIDIA GeForce RTX 5060 Ti (16283 MiB, 3000 MiB free)\n"
+        ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert ctx["fit_target_mib"] == 1024
+
+    @pytest.mark.parametrize(
+        "case",
+        ["mla", "unreadable_header", "erudi_ctx"],
+    )
+    def test_every_path_where_fit_places_the_layers_is_covered(self, win661, monkeypatch, case):
+        if case == "mla":
+            win661.inputs = (dataclasses.replace(QWEN3, kv_lora_rank=512), WEIGHTS)
+        elif case == "unreadable_header":
+            win661.inputs = None
+        else:
+            monkeypatch.setenv("ERUDI_CTX", "8192")
+        ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert len(win661.list_calls) == 1
+        argv = _argv(**ctx)
+        assert _flag(argv, "-fitt") == str(MARGIN_661)
+        assert _flag(argv, "-ngl") == "-1"
+        if case == "erudi_ctx":
+            assert _flag(argv, "-c") == "8192"
+
+    def test_the_sized_full_offload_keeps_the_base_margin(self, win661):
+        win661.device = _device(total=TOTAL_661, free=15030 * MIB)
+        win661.inputs = (QWEN3, WEIGHTS)
+        ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert ctx["window_sized"] is True
+        assert win661.list_calls == []
+        assert "fit_target_mib" not in ctx
+        assert _flag(_argv(**ctx), "-fitt") == "1024"
+
+    def test_a_brake_respawn_keeps_the_base_margin(self, win661, monkeypatch):
+        monkeypatch.setattr(gguf_memory, "read_shape", lambda path: QWEN3)
+        live = {
+            "alias": "erudi-9",
+            "window_sized": True,
+            "static_window_tokens": 40_960,
+            "weights_bytes": WEIGHTS,
+            "vram_total_bytes": TOTAL_661,
+            "device_budget_bytes": 8 * GIB,
+            "gpu_uuid": UUID,
+        }
+        ctx = CUDA_Engine._prepare_spawn_context(
+            Path("/m.gguf"), "erudi-9", brake_cap=30_720, respawn_from=live
+        )
+        assert ctx["gpu_layers"] == -2
+        assert win661.list_calls == []
+        assert _flag(_argv(**ctx), "-fitt") == "1024"
+
+    def test_linux_keeps_the_base_margin(self, win661, monkeypatch):
+        """No WDDM: cudaMemGetInfo is the card's real free memory."""
+        monkeypatch.setattr(platform, "system", lambda: "Linux")
+        ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert ctx["window_sized"] is False
+        assert win661.list_calls == []
+        assert _flag(_argv(**ctx), "-fitt") == "1024"
+
+    def test_several_visible_gpus_keep_the_base_margin(self, win661):
+        win661.device = dataclasses.replace(win661.device, visible_devices=2)
+        ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert win661.list_calls == []
+        assert _flag(_argv(**ctx), "-fitt") == "1024"
+
+    def test_unreadable_nvml_keeps_the_base_margin_with_one_warning(self, win661, caplog):
+        win661.device = cuda_memory.DeviceMemory(
+            index=None, uuid=None, total_bytes=0, free_bytes=0, unavailable="pynvml missing"
+        )
+        with caplog.at_level(logging.WARNING, logger="erudi"):
+            ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert win661.list_calls == []
+        assert _flag(_argv(**ctx), "-fitt") == "1024"
+        assert len(_warnings(caplog)) == 1
+
+    @pytest.mark.parametrize(
+        "error, output",
+        [
+            (subprocess.TimeoutExpired(cmd="llama-server", timeout=10), None),
+            (OSError("not found"), None),
+            (None, "Available devices:\n  (none)\n"),
+            (None, ""),
+        ],
+    )
+    def test_an_unreadable_cuda_free_takes_the_safe_upper_bound(
+        self, win661, monkeypatch, caplog, error, output
+    ):
+        """CUDA cannot report more than the card's total: margin = base +
+        (total - NVML free), the most fit could be overstating."""
+        monkeypatch.setenv("ERUDI_CTX", "8192")
+        win661.list_error, win661.list_output = error, output
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert ctx["fit_target_mib"] == 1024 + (16283 - 3561)
+        (warning,) = _warnings(caplog)
+        assert "--list-devices" in warning.getMessage()
+        assert "fit_target_mib=13746" in warning.getMessage()
+        assert not _infos(caplog, "fit_target_mib=")
+
+    def test_the_list_devices_run_is_bounded_and_hidden(self, monkeypatch):
+        """The real runner: no console window, a bounded wait, the output of
+        both streams."""
+        seen = {}
+
+        def _run(argv, **kwargs):
+            seen.update(argv=argv, **kwargs)
+            return SimpleNamespace(returncode=0, stdout=LIST_661, stderr="log\n")
+
+        monkeypatch.setattr(subprocess, "run", _run)
+        out = CUDA_Engine._run_list_devices(["/bin/llama-server", "--list-devices"], {"A": "1"})
+        assert "15172 MiB free" in out
+        assert seen["env"] == {"A": "1"}
+        assert 0 < seen["timeout"] <= 15
+        assert seen["capture_output"] is True
+        assert "creationflags" in seen
 
 
 # =====================================================================

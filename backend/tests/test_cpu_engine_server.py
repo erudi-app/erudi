@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import time
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
 import pytest
@@ -56,7 +57,8 @@ class TestSpawnContextAndArgv:
         with caplog.at_level(logging.WARNING, logger="erudi"):
             ctx = CPU_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-7")
         assert ctx["gpu_layers"] == 0
-        assert ctx["threads"] >= 1
+        # No thread count: llama.cpp's own default (physical / performance cores).
+        assert "threads" not in ctx
         assert ctx["ctx_size"] is None
         assert "spawn_memory_bound" not in ctx
         assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
@@ -128,7 +130,6 @@ class TestSpawnContextAndArgv:
             alias="erudi-7",
             port=8123,
             ctx_size=4096,
-            threads=8,
             gpu_layers=0,
         )
         joined = " ".join(str(x) for x in argv)
@@ -141,8 +142,49 @@ class TestSpawnContextAndArgv:
         assert "--port 8123" in joined
         assert "--alias erudi-7" in joined
         assert "-c 4096" in joined
-        assert "--threads 8" in joined
         assert "-ngl 0" in joined  # CPU forces 0
+
+    @pytest.mark.parametrize("case", ["sized", "unreadable", "pinned", "brake_respawn"])
+    def test_no_spawn_passes_a_thread_count(self, monkeypatch, case):
+        """#661: ``--threads`` = every logical CPU collapsed generation on
+        an 8C/16T Ryzen with a few idle apps (0.66 tok/s against 17.3 at 8).
+        llama-server's own default (``common_cpu_get_num_math``: physical
+        cores) applies, at a load and at
+        a brake respawn alike."""
+        from src.engines import gguf_memory
+
+        monkeypatch.delenv("ERUDI_CTX", raising=False)
+        CPU_Engine._window_memory = {}
+        if case == "pinned":
+            monkeypatch.setenv("ERUDI_CTX", "8192")
+        if case in ("sized", "brake_respawn"):
+            window = SimpleNamespace(
+                window=8192,
+                trained=40_960,
+                static_window=8192,
+                kv_token_bytes=114_688,
+                static_anonymous_bytes=1,
+                weights_bytes=1,
+                memory_bound=True,
+            )
+            monkeypatch.setattr(gguf_memory, "spawn_window", lambda *a, **kw: window)
+        ctx = CPU_Engine._prepare_spawn_context(
+            Path("/m.gguf"),
+            "erudi-7",
+            brake_cap=8192 if case == "brake_respawn" else None,
+        )
+        argv = [
+            str(x)
+            for x in CPU_Engine._build_spawn_argv(
+                llama_server=Path("/bin/llama-server"),
+                model_gguf=Path("/m.gguf"),
+                alias="erudi-7",
+                port=8123,
+                **ctx,
+            )
+        ]
+        assert "threads" not in ctx
+        assert "--threads" not in argv and "-t" not in argv
 
     def test_build_spawn_argv_omits_c_without_a_pinned_window(self):
         """No ERUDI_CTX -> no ``-c`` at all: llama-server's own fit (ON by
@@ -156,7 +198,6 @@ class TestSpawnContextAndArgv:
             alias="erudi-7",
             port=8123,
             ctx_size=None,
-            threads=8,
             gpu_layers=0,
         )
         assert "-c" not in [str(x) for x in argv]

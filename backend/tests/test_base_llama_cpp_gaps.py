@@ -225,7 +225,9 @@ class TestSpawnChild:
         assert handle["base_url"] == "http://127.0.0.1:27201"
         assert handle["alias"] == "erudi-1"
         assert handle["gpu_layers"] == 0  # CPU context preserved for observability
-        assert handle["threads"] >= 1
+        # No thread count is chosen: llama.cpp's own default applies.
+        assert "threads" not in handle
+        assert "--threads" not in captured["argv"]
         assert "--mmproj" not in captured["argv"]
 
     def test_mmproj_is_appended_to_argv(self, tmp_path, monkeypatch):
@@ -367,10 +369,10 @@ class TestSpawnSingleSlotNoPromptCache:
             with_mmproj=False,
             engine=CUDA_Engine,
             ctx_size=ctx_size,
-            threads=4,
             gpu_layers=32,
         )
         argv = captured["argv"]
+        assert "--threads" not in argv
         assert self._value(argv, "-np") == "1"
         assert self._value(argv, "--cache-ram") == "0"
         assert "--no-cache-idle-slots" in argv

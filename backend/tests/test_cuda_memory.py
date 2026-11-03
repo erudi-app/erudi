@@ -556,3 +556,120 @@ def test_a_calm_spill_contributes_no_damage_at_turn_end():
     )
     assert decision.level == mb.LEVEL_CALM
     assert decision.state.in_episode is False
+
+
+# ===================== the eviction gauge: another app takes the card =====================
+
+# #661's child under a 10 GiB hog, idle: 3717 MiB resident of 8519 committed.
+RESIDENT = 3717 * MIB
+
+
+@pytest.mark.parametrize(
+    "evicted_mib, free_mib, active",
+    [
+        (0, 0, False),  # healthy: committed == resident, on every #661 sample
+        (255, 0, False),  # under the floor of a real eviction
+        (256, 0, True),
+        (4672, 4671, True),  # free = evicted - 1 MiB: the pages cannot come back
+        (4672, 4672, False),  # free = evicted
+        (4672, 4673, False),  # free = evicted + 1 MiB
+        (6274, 310, True),  # #661: the hog running, idle
+        (4802, 9430, False),  # #661: the hog killed, the gap not yet paged back
+    ],
+)
+def test_the_contention_rule_at_its_bounds(evicted_mib, free_mib, active):
+    contention = cm.gpu_contention(
+        committed_bytes=RESIDENT + evicted_mib * MIB,
+        dedicated_bytes=RESIDENT,
+        shared_bytes=0,
+        device_free_bytes=free_mib * MIB,
+    )
+    assert contention == cm.GpuContention(
+        active=active, evicted_bytes=evicted_mib * MIB, device_free_bytes=free_mib * MIB
+    )
+
+
+def test_the_evicted_bytes_net_out_the_shared_memory():
+    contention = cm.gpu_contention(
+        committed_bytes=8520 * MIB,
+        dedicated_bytes=3718 * MIB,
+        shared_bytes=130 * MIB,
+        device_free_bytes=400 * MIB,
+    )
+    assert contention.evicted_bytes == 4672 * MIB
+    assert contention.active is True
+
+
+def test_a_committed_reading_under_the_resident_bytes_is_no_eviction():
+    """The counters are read one after the other: a resident reading that
+    passed the committed one by a few MiB is no eviction, never negative."""
+    contention = cm.gpu_contention(
+        committed_bytes=8516 * MIB,
+        dedicated_bytes=8390 * MIB,
+        shared_bytes=130 * MIB,
+        device_free_bytes=0,
+    )
+    assert contention.evicted_bytes == 0
+    assert contention.active is False
+
+
+@pytest.mark.parametrize(
+    "missing", ["committed_bytes", "dedicated_bytes", "shared_bytes", "device_free_bytes"]
+)
+def test_a_missing_term_is_no_reading(missing):
+    terms = {
+        "committed_bytes": 8520 * MIB,
+        "dedicated_bytes": RESIDENT,
+        "shared_bytes": 0,
+        "device_free_bytes": 0,
+    }
+    terms[missing] = None
+    assert cm.gpu_contention(**terms) is None
+
+
+# ===================== fit's margin on Windows: what CUDA reports free =====================
+
+# llama-server --list-devices (common/arg.cpp, b10883):
+#   printf("  %s: %s (%zu MiB, %zu MiB free)\n", name, description, total, free)
+LIST_DEVICES_661 = (
+    "ggml_cuda_init: found 1 CUDA devices:\n"
+    "  Device 0: NVIDIA GeForce RTX 5060 Ti, compute capability 12.0, VMM: yes\n"
+    "Available devices:\n"
+    "  CUDA0: NVIDIA GeForce RTX 5060 Ti (16283 MiB, 15172 MiB free)\n"
+)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        (LIST_DEVICES_661, (16283, 15172)),
+        # #661's -lv 5 trace prints the same figures padded (common_param).
+        ("CUDA0   : NVIDIA GeForce RTX 5060 Ti (16283 MiB, 15172 MiB free)", (16283, 15172)),
+        ("  - CUDA0   : NVIDIA GeForce RTX 5060 Ti (16283 MiB, 15172 MiB free)", (16283, 15172)),
+        # A description with its own parentheses.
+        ("  CUDA0: NVIDIA RTX A2000 (Laptop GPU) (4096 MiB, 3000 MiB free)\n", (4096, 3000)),
+        ("Available devices:\n  (none)\n", None),
+        ("  CUDA1: NVIDIA GeForce RTX 4090 (24564 MiB, 23000 MiB free)\n", None),
+        ("  CUDA0: NVIDIA GeForce RTX 5060 Ti (16283 MiB)\n", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_the_list_devices_line_of_the_first_cuda_device_is_parsed(text, expected):
+    assert cm.list_devices_memory_mib(text) == expected
+
+
+@pytest.mark.parametrize(
+    "cuda_free, nvml_free, margin",
+    [
+        # #661: a 10.85 GiB hog; CUDA reports the process's budget, NVML the card.
+        (15172, 3561, 1024 + 11611),
+        # A calm desktop: about today's margin.
+        (15172, 15030, 1024 + 142),
+        # CUDA reporting less than NVML: never under the base margin.
+        (3000, 3561, 1024),
+    ],
+)
+def test_fits_margin_adds_what_cuda_overstates(cuda_free, nvml_free, margin):
+    assert cm.fit_target_mib(cuda_free_mib=cuda_free, nvml_free_mib=nvml_free) == margin
+    assert cm.CUDA_FIT_TARGET_MIB == 1024

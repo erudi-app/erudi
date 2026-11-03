@@ -15,6 +15,7 @@ from src.core import config
 from src.core.exceptions import DatabaseException, HardwareException
 from src.domains.hardware.repository import Hardware_Repository
 from src.domains.hardware.services import Hardware_Service
+from src.engines.base_engine import BaseEngine
 from src.entities.HardwareProfile import HardwareProfile
 
 
@@ -370,3 +371,102 @@ class TestHardwareEndpoints:
             resp = client.post("/erudi/hardware/refresh")
         assert resp.status_code == 500
         assert resp.json()["detail"] == "Internal server error"
+
+
+# =====================================================================
+# UNIT - the GPU contention status the conversation page polls
+# =====================================================================
+
+STATUS_PATH = "/erudi/hardware/gpu_contention/status"
+
+
+def _status_app():
+    from fastapi import FastAPI
+
+    from src.domains.hardware.endpoints import router
+
+    app = FastAPI()
+    app.include_router(router, prefix="/erudi")
+    return app
+
+
+async def _get_status(app):
+    import httpx
+
+    transport = httpx.ASGITransport(app=app)
+    async with httpx.AsyncClient(transport=transport, base_url="http://test") as http:
+        return await http.get(STATUS_PATH)
+
+
+class _ContendedEngine(BaseEngine):
+    """An engine whose loaded child another app squeezes off the card."""
+
+    state = {
+        "active": True,
+        "evicted_bytes": 4672 * 1024**2,
+        "device_free_bytes": 400 * 1024**2,
+        "read_at": 1_700_000_000.5,
+    }
+
+    @classmethod
+    def gpu_contention_state(cls):
+        return cls.state
+
+
+@pytest.mark.unit
+class TestGpuContentionStatus:
+    async def test_reports_the_cached_contention_of_the_loaded_child(self, monkeypatch):
+        monkeypatch.setattr(config, "LLM_Engine", _ContendedEngine)
+        resp = await _get_status(_status_app())
+        assert resp.status_code == 200
+        assert resp.json() == _ContendedEngine.state
+
+    async def test_an_engine_without_a_contention_state_is_unknown(self, monkeypatch):
+        """CPU, MLX, Linux CUDA, no child loaded, a respawned child not read
+        yet: no reading says neither contended nor over (``active: null``),
+        so the conversation page keeps a notice it shows."""
+        monkeypatch.setattr(config, "LLM_Engine", BaseEngine)
+        resp = await _get_status(_status_app())
+        assert resp.json() == {
+            "active": None,
+            "evicted_bytes": None,
+            "device_free_bytes": None,
+            "read_at": None,
+        }
+
+    async def test_no_engine_is_unknown(self, monkeypatch):
+        monkeypatch.setattr(config, "LLM_Engine", None)
+        resp = await _get_status(_status_app())
+        assert resp.json()["active"] is None
+
+    async def test_the_real_cuda_engine_without_a_child_is_unknown(self, monkeypatch):
+        from src.engines.cuda_engine import CUDA_Engine
+
+        monkeypatch.setattr(config, "LLM_Engine", CUDA_Engine)
+        monkeypatch.setattr(CUDA_Engine, "_model", None)
+        resp = await _get_status(_status_app())
+        assert resp.json()["active"] is None
+
+    async def test_a_reading_that_contention_ended_is_false(self, monkeypatch):
+        """Only a reading says the contention is over."""
+        ended = {**_ContendedEngine.state, "active": False}
+        monkeypatch.setattr(_ContendedEngine, "state", ended)
+        monkeypatch.setattr(config, "LLM_Engine", _ContendedEngine)
+        resp = await _get_status(_status_app())
+        assert resp.json()["active"] is False
+
+    async def test_answers_while_a_generation_holds_the_lock(self, monkeypatch):
+        """The status only reads the cached state: it never waits for the
+        generation lock (an answer may stream for minutes under a hog)."""
+        import asyncio
+
+        monkeypatch.setattr(config, "LLM_Engine", _ContendedEngine)
+        app = _status_app()
+        async with _ContendedEngine._acquire_generation_lock():
+            resp = await asyncio.wait_for(_get_status(app), timeout=2.0)
+        assert resp.json()["active"] is True
+
+    def test_its_access_log_is_a_polling_line(self):
+        from src.core.api import _is_polling_path
+
+        assert _is_polling_path(STATUS_PATH)

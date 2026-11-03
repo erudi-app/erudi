@@ -8,6 +8,7 @@ Endpoints:
     GET /hardware/app_startup: Minimal UI data with boosted scores
     GET /hardware/detailed: Comprehensive diagnostics with raw/boosted scores
     POST /hardware/refresh: Force hardware re-detection
+    GET /hardware/gpu_contention/status: Whether another app takes the card (polled)
 
 Architecture:
     Endpoints → Service → Repository → Entity → Database
@@ -18,10 +19,11 @@ from sqlalchemy.orm import Session
 
 from src.database.core import get_db
 from src.domains.hardware.repository import Hardware_Repository
-from src.domains.hardware.services import Hardware_Service
+from src.domains.hardware.services import Hardware_Service, gpu_contention_status
 from src.domains.hardware.schemas import (
     HardwareAppStartupInfo,
     DetailedHardwareInfo,
+    GpuContentionStatus,
     PerformanceBreakdown,
     MLXHardwareInfo,
     CUDAHardwareInfo,
@@ -255,3 +257,22 @@ def refresh_hardware_profile(db: Session = Depends(get_db)):
         db.rollback()
         logger.exception(f"Unexpected error in refresh_hardware_profile: {e}")
         raise HTTPException(status_code=500, detail="Internal server error")
+
+
+@router.get("/gpu_contention/status", response_model=GpuContentionStatus)
+async def get_gpu_contention_status():
+    """Whether another app is taking the graphics card from the loaded model.
+
+    The conversation page polls it (about every 10 s) only while it shows the
+    ``gpu_contention`` notice, and drops the notice once ``active`` is false
+    (``null``, no reading, keeps it).
+    It returns the CUDA engine's last cached reading -- taken at a turn start,
+    by the idle monitor, and every 10 s while a contention lasts -- and never
+    reads a sensor or waits for the generation lock itself. The ``/status``
+    suffix keeps its access line at DEBUG (a polled path).
+
+    Example response:
+        {"active": true, "evicted_bytes": 4898947072,
+         "device_free_bytes": 419430400, "read_at": 1730000000.5}
+    """
+    return gpu_contention_status()

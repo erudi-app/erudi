@@ -20,8 +20,11 @@ window: the engine passes no ``-c`` and fit decides window and layers.
 Division of labour with fit (``common/fit.cpp``, ON by default, b10883):
 Erudi fixes the window (an explicit ``-c`` is never changed by fit) and
 hands fit its margin (``-fitt CUDA_FIT_TARGET_MIB``); fit fixes the layers
-(``-ngl -1``, "auto" while fit is on), measuring the real free memory -- an
-optimistic estimate yields a PARTIAL offload instead of a dead child. Under a
+(``-ngl -1``, "auto" while fit is on), measuring the free memory -- an
+optimistic estimate yields a PARTIAL offload instead of a dead child. On
+Windows that measure (``cudaMemGetInfo``) is the process's WDDM budget, blind
+to other apps: where fit places the layers without a window Erudi sized, the
+margin adds what it overstates against NVML (:func:`fit_target_mib`). Under a
 full offload the RAM neither binds the window nor drives the brake: the KV and
 the compute buffer live on the device, the host keeps clean mapped file pages,
 the fixed CUDA runtime and pinned buffers (the CUDA_Host compute buffer, about
@@ -51,6 +54,12 @@ bounded by that healthy level (the level itself when the load reading is
 missing), and :func:`spill_signals` turns what lies above the baseline into
 the brake's level and damage. Linux has no spill (an allocation that does not fit fails) and so no
 brake signal.
+
+The spill gauge is blind to an EVICTION: when another app oversubscribes the
+card, WDDM takes memory the child already holds out of it (Shared Usage even
+drops) and pages it back in for every token. :func:`gpu_contention` reads
+that from the child's Total Committed GPU memory above its resident bytes,
+against the card's free memory: a notice for the user, never an action.
 
 Every constant below that is not measured on the pinned build is INFERRED:
 QA calibrates it on a Windows CUDA machine and a Linux+NVIDIA one.
@@ -82,7 +91,9 @@ CUDA_VRAM_BUDGET_FRACTION = 0.90
 # margin as the start value (INFERRED; QA measures the growth).
 CUDA_FREE_MARGIN_BYTES = 1024 * _MIB
 # The per-device margin handed to fit (``-fitt``, MiB): pinned by Erudi rather
-# than left to the upstream default.
+# than left to the upstream default. On Windows, where fit places the layers
+# itself, what CUDA overstates of the free memory is added
+# (:func:`fit_target_mib`).
 CUDA_FIT_TARGET_MIB = 1024
 # The CUDA primary context, cuBLAS workspaces and pool granularity, invisible
 # to llama.cpp's buffer lines (INFERRED).
@@ -114,6 +125,11 @@ CUDA_SHARED_PER_TOKEN_NON_FA_BYTES = 2048
 # Spill tiers over the baseline (INFERRED).
 CUDA_SPILL_WARNING_BYTES = 256 * _MIB
 CUDA_SPILL_CRITICAL_BYTES = 1024 * _MIB
+# The eviction a contention notice needs (Windows): #661 read exactly 0 on
+# every sample of a healthy child (full and partial offloads, across a
+# respawn) and 0.7 to 6.3 GiB at idle under another app's 10 GiB
+# (INFERRED, calibrated in QA on other cards and drivers).
+CUDA_EVICTED_MIN_BYTES = 256 * _MIB
 # The placement classification's tolerance.
 CUDA_CLASSIFY_TOLERANCE_BYTES = 64 * _MIB
 # The post-load device check: above this margin over the prediction, plus the
@@ -122,6 +138,13 @@ CUDA_PREDICTION_MARGIN = 1.1
 CUDA_PREDICTION_SLACK_BYTES = 256 * _MIB
 
 _OFFLOADED_RE = re.compile(r"offloaded (\d+)/(\d+) layers to GPU")
+# llama-server --list-devices (common/arg.cpp, b10883) prints
+# "  CUDA0: <description> (<total> MiB, <free> MiB free)" per device: the
+# figures of ggml_backend_dev_memory, i.e. cudaMemGetInfo, what fit reads. The
+# -lv trace (common_param) prints the same figures padded, "- CUDA0   : ...".
+_LIST_DEVICES_CUDA0_RE = re.compile(
+    r"^\s*(?:-\s*)?CUDA0\s*:.*\((\d+) MiB, (\d+) MiB free\)\s*$", re.MULTILINE
+)
 # llama-context.cpp:546-551 (b10883): what the Flash Attention probe did at
 # context creation, "%s: %s enabled" (INFO) or "... not supported, set to
 # disabled" (WARN).
@@ -423,6 +446,28 @@ def placement_from_tail(tail: Optional[str]) -> Optional[Tuple[int, int]]:
     return int(offloaded), int(total)
 
 
+def list_devices_memory_mib(text: Optional[str]) -> Optional[Tuple[int, int]]:
+    """``(total, free)`` MiB of the first CUDA device in ``llama-server
+    --list-devices`` output -- the one device a child pinned by UUID sees --
+    or None when no such line is there."""
+    if not text:
+        return None
+    found = _LIST_DEVICES_CUDA0_RE.search(text)
+    if found is None:
+        return None
+    return int(found.group(1)), int(found.group(2))
+
+
+def fit_target_mib(*, cuda_free_mib: int, nvml_free_mib: int) -> int:
+    """fit's per-device margin (``-fitt``) on Windows: the base margin plus
+    what CUDA overstates. Under WDDM ``cudaMemGetInfo`` -- the free memory fit
+    plans with -- reports the process's budget, not the card's free memory:
+    #661 read 15172 MiB with or without another app's 10.85 GiB, while NVML
+    read 3561 MiB. fit keeps ``margin`` MiB free of what CUDA reports, so
+    adding the gap makes it plan on NVML's figure. Never under the base."""
+    return CUDA_FIT_TARGET_MIB + max(0, cuda_free_mib - nvml_free_mib)
+
+
 def healthy_shared_bytes(window: int, *, fa_on: bool) -> int:
     """The Shared GPU memory a healthy full-offload child of ``window``
     tokens holds on Windows: the fixed part plus the CUDA_Host compute
@@ -520,4 +565,46 @@ def spill_signals(spill_above_baseline: int) -> SpillSignals:
         level=level,
         damage_bytes=spill_above_baseline if warned else None,
         damage_available=warned,
+    )
+
+
+# ===================== the eviction gauge (a notice, never an action) =====================
+
+
+@dataclass(frozen=True)
+class GpuContention:
+    """One reading of the eviction gauge: whether another app is taking
+    the card from the child now, and the two numbers that say so."""
+
+    active: bool
+    evicted_bytes: int
+    device_free_bytes: int
+
+
+def gpu_contention(
+    *,
+    committed_bytes: Optional[int],
+    dedicated_bytes: Optional[int],
+    shared_bytes: Optional[int],
+    device_free_bytes: Optional[int],
+) -> Optional[GpuContention]:
+    """Another app is taking the card from the child (Windows). WDDM
+    evicts a process's memory when the card is oversubscribed and pages it
+    back in for every token it computes; the evicted bytes are the child's
+    Total Committed GPU memory that is resident nowhere,
+    ``committed - (dedicated + shared)`` (never negative: the counters are
+    read one after the other). Active when at least
+    ``CUDA_EVICTED_MIN_BYTES`` are evicted AND the card's free memory
+    (NVML) is below them: those pages cannot come back, so every answer
+    thrashes the bus. Once the other app is gone the gap stays until the
+    next turn pages the child back in, but the card has the room again:
+    that is not contention. None when a term is missing (no reading)."""
+    terms = (committed_bytes, dedicated_bytes, shared_bytes, device_free_bytes)
+    if any(term is None for term in terms):
+        return None
+    evicted = max(0, committed_bytes - dedicated_bytes - shared_bytes)
+    return GpuContention(
+        active=evicted >= CUDA_EVICTED_MIN_BYTES and device_free_bytes < evicted,
+        evicted_bytes=evicted,
+        device_free_bytes=device_free_bytes,
     )

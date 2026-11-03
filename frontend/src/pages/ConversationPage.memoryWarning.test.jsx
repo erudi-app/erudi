@@ -7,8 +7,9 @@ import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-libra
 //  - a `memory_warning` stream event renders an amber alert near the composer,
 //    its copy chosen by `reason`: `bound` quotes the approximate memory the
 //    model and the conversation take together (`footprint_bytes`); `pressure`
-//    says the conversation is now summarized earlier; `pressure_external`
-//    says other apps cause the pressure;
+//    says the conversation will be summarized sooner; `pressure_external`
+//    says other apps cause the pressure (`gpu_contention`: see
+//    ConversationPage.gpuContention.test.jsx);
 //  - the warning is transient state only: it never lands in the answer bubble
 //    (so it cannot be copied with the message) and a LATER turn that carries
 //    no warning clears it;
@@ -221,7 +222,7 @@ describe("ConversationPage memory warning", () => {
   it.each([
     [
       "pressure",
-      "Your computer's memory is under pressure: this conversation is summarized earlier to keep things fluid.",
+      "Your computer's memory is under pressure: this conversation will be summarized sooner to keep things fluid.",
     ],
     [
       "pressure_external",

@@ -223,6 +223,22 @@ curl -X POST http://127.0.0.1:27182/erudi/hardware/refresh
 
 Forces re-detection and updates the stored profile.
 
+### GPU contention
+
+```bash
+curl http://127.0.0.1:27182/erudi/hardware/gpu_contention/status
+```
+
+Returns whether another app is taking the graphics card's memory from the loaded model
+(`active`), with the model's evicted bytes, the card's free bytes and when they were read:
+the CUDA engine's last cached reading on Windows (see
+[the eviction gauge](../dev/architecture/engines.md#the-memory-brake-cuda)). Every other
+engine and OS, a machine with no model loaded, and a model the engine just restarted and
+has not read yet answer `active: null` (unknown) with no numbers; only `active: false`
+says the contention is over.
+It never reads a sensor itself; the conversation page polls it only while it shows the
+`gpu_contention` notice.
+
 ## Backend differences
 
 Expected relative throughput for a similarly sized model:

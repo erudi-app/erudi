@@ -134,7 +134,8 @@
   },
   "memoryWarning": {
     "bound": "La memoria de su equipo limita esta conversación: el modelo y esta conversación ocupan juntos alrededor de {{size}}, casi todo el espacio que permite la memoria. Inicie una nueva conversación, envíe menos a la vez o cambie a un modelo más pequeño.",
-    "pressure": "La memoria de su equipo está bajo presión: esta conversación se resume antes para mantener la fluidez.",
-    "pressureExternal": "La memoria de su equipo está bajo presión por otras aplicaciones; esta conversación usa poca."
+    "pressure": "La memoria de su equipo está bajo presión: esta conversación se resumirá antes para mantener la fluidez.",
+    "pressureExternal": "La memoria de su equipo está bajo presión por otras aplicaciones; esta conversación usa poca.",
+    "gpuContention": "Otra aplicación está ocupando la memoria de su tarjeta gráfica: las respuestas son más lentas hasta que libere parte de ella. No se pierde nada."
   }
 }
