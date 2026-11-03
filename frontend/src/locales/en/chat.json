@@ -134,7 +134,8 @@
   },
   "memoryWarning": {
     "bound": "Your computer's memory limits this conversation: the model and this conversation together take about {{size}}, nearly all the room memory allows. Start a new conversation, send less at once, or switch to a smaller model.",
-    "pressure": "Your computer's memory is under pressure: this conversation is summarized earlier to keep things fluid.",
-    "pressureExternal": "Your computer's memory is under pressure from other apps; this conversation uses little of it."
+    "pressure": "Your computer's memory is under pressure: this conversation will be summarized sooner to keep things fluid.",
+    "pressureExternal": "Your computer's memory is under pressure from other apps; this conversation uses little of it.",
+    "gpuContention": "Another app is taking your graphics card's memory: answers are slower until it frees some. Nothing is lost."
   }
 }

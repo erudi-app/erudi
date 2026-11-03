@@ -59,7 +59,12 @@ class _BrakeEngine(BaseEngine):
     bound: ClassVar[Optional[int]] = None
     bound_footprint: ClassVar[Optional[int]] = None
     window: ClassVar[Optional[int]] = None
+    contention: ClassVar[Optional[dict]] = None
     turn_start_outcome: ClassVar[BrakeOutcome] = BrakeOutcome()
+
+    @classmethod
+    def gpu_contention_state(cls):
+        return cls.contention
 
     @classmethod
     def brake_point(cls, point, *, llm_id=None):
@@ -115,6 +120,7 @@ def _engine(monkeypatch):
     _BrakeEngine.bound = None
     _BrakeEngine.bound_footprint = None
     _BrakeEngine.window = None
+    _BrakeEngine.contention = None
     _BrakeEngine.turn_start_outcome = BrakeOutcome()
     _BrakeEngine._idle_unload = None
     _BrakeEngine._model = None
@@ -362,6 +368,90 @@ async def test_without_a_notice_the_bound_criterion_decides(monkeypatch):
 
     warnings = [e for e in events if e["t"] == "memory_warning"]
     assert warnings == [{"t": "memory_warning", "reason": "bound", "footprint_bytes": 4321}]
+
+
+def _contended(active=True):
+    return {
+        "active": active,
+        "evicted_bytes": 4672 * 1024**2,
+        "device_free_bytes": 400 * 1024**2,
+        "read_at": time.time(),
+    }
+
+
+async def test_another_app_taking_the_card_is_the_gpu_contention_warning(monkeypatch):
+    _answer(monkeypatch)
+    _patch_budget(monkeypatch, _StubBudget(ceiling=10))
+    _BrakeEngine.bound = 4096
+    _BrakeEngine.contention = _contended()
+    evaluated = []
+
+    async def _never(self, *args, **kwargs):
+        evaluated.append(True)
+        return {"t": "memory_warning", "reason": "bound", "footprint_bytes": 1}
+
+    monkeypatch.setattr(AgentRunner, "_memory_warning_event", _never)
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    warnings = [e for e in events if e["t"] == "memory_warning"]
+    # No size to quote: the copy names none.
+    assert warnings == [{"t": "memory_warning", "reason": "gpu_contention"}]
+    assert evaluated == []
+
+
+@pytest.mark.parametrize(
+    "notice, reason", [(NOTICE_ACTED, "pressure"), (NOTICE_EXTERNAL, "pressure_external")]
+)
+async def test_a_brake_notice_wins_over_the_gpu_contention(monkeypatch, notice, reason):
+    _answer(monkeypatch)
+    _patch_budget(monkeypatch, _StubBudget(ceiling=16_000))
+    _BrakeEngine.notice = notice
+    _BrakeEngine.contention = _contended()
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    warnings = [e for e in events if e["t"] == "memory_warning"]
+    assert warnings == [{"t": "memory_warning", "reason": reason}]
+
+
+async def test_the_gpu_contention_warning_is_said_again_while_it_lasts(monkeypatch):
+    _patch_model(
+        monkeypatch,
+        ToolableFakeChatModel(messages=iter([AIMessage(content="a"), AIMessage(content="b")])),
+    )
+    _patch_budget(monkeypatch, _StubBudget(ceiling=16_000))
+    _BrakeEngine.contention = _contended()
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    first = await _events(runner)
+    second = await _events(runner)
+
+    for events in (first, second):
+        assert [e for e in events if e["t"] == "memory_warning"] == [
+            {"t": "memory_warning", "reason": "gpu_contention"}
+        ]
+
+
+async def test_an_ended_contention_lets_the_bound_criterion_decide(monkeypatch):
+    _answer(monkeypatch)
+    _patch_budget(monkeypatch, _StubBudget(ceiling=10))
+    _BrakeEngine.bound = 4096
+    _BrakeEngine.contention = _contended(active=False)
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    warnings = [e for e in events if e["t"] == "memory_warning"]
+    assert warnings == [{"t": "memory_warning", "reason": "bound", "footprint_bytes": 4321}]
+
+
+async def test_an_arena_turn_never_carries_the_gpu_contention(monkeypatch):
+    _answer(monkeypatch, "duel")
+    _BrakeEngine.contention = _contended()
+
+    out = await _events(AgentRunner(checkpointer=None), thread_id=None, summarize=False)
+
+    assert not any(e["t"] == "memory_warning" for e in out)
 
 
 async def test_the_warning_comes_after_the_answer(monkeypatch):

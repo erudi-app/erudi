@@ -52,6 +52,12 @@ missing), and :func:`spill_signals` turns what lies above the baseline into
 the brake's level and damage. Linux has no spill (an allocation that does not fit fails) and so no
 brake signal.
 
+The spill gauge is blind to an EVICTION: when another app oversubscribes the
+card, WDDM takes memory the child already holds out of it (Shared Usage even
+drops) and pages it back in for every token. :func:`gpu_contention` reads
+that from the child's Total Committed GPU memory above its resident bytes,
+against the card's free memory: a notice for the user, never an action.
+
 Every constant below that is not measured on the pinned build is INFERRED:
 QA calibrates it on a Windows CUDA machine and a Linux+NVIDIA one.
 """
@@ -114,6 +120,11 @@ CUDA_SHARED_PER_TOKEN_NON_FA_BYTES = 2048
 # Spill tiers over the baseline (INFERRED).
 CUDA_SPILL_WARNING_BYTES = 256 * _MIB
 CUDA_SPILL_CRITICAL_BYTES = 1024 * _MIB
+# The eviction a contention notice needs (Windows): #661 read exactly 0 on
+# every sample of a healthy child (full and partial offloads, across a
+# respawn) and 0.7 to 6.3 GiB at idle under another app's 10 GiB
+# (INFERRED, calibrated in QA on other cards and drivers).
+CUDA_EVICTED_MIN_BYTES = 256 * _MIB
 # The placement classification's tolerance.
 CUDA_CLASSIFY_TOLERANCE_BYTES = 64 * _MIB
 # The post-load device check: above this margin over the prediction, plus the
@@ -520,4 +531,46 @@ def spill_signals(spill_above_baseline: int) -> SpillSignals:
         level=level,
         damage_bytes=spill_above_baseline if warned else None,
         damage_available=warned,
+    )
+
+
+# ===================== the eviction gauge (a notice, never an action) =====================
+
+
+@dataclass(frozen=True)
+class GpuContention:
+    """One reading of the eviction gauge: whether another app is taking
+    the card from the child now, and the two numbers that say so."""
+
+    active: bool
+    evicted_bytes: int
+    device_free_bytes: int
+
+
+def gpu_contention(
+    *,
+    committed_bytes: Optional[int],
+    dedicated_bytes: Optional[int],
+    shared_bytes: Optional[int],
+    device_free_bytes: Optional[int],
+) -> Optional[GpuContention]:
+    """Another app is taking the card from the child (Windows). WDDM
+    evicts a process's memory when the card is oversubscribed and pages it
+    back in for every token it computes; the evicted bytes are the child's
+    Total Committed GPU memory that is resident nowhere,
+    ``committed - (dedicated + shared)`` (never negative: the counters are
+    read one after the other). Active when at least
+    ``CUDA_EVICTED_MIN_BYTES`` are evicted AND the card's free memory
+    (NVML) is below them: those pages cannot come back, so every answer
+    thrashes the bus. Once the other app is gone the gap stays until the
+    next turn pages the child back in, but the card has the room again:
+    that is not contention. None when a term is missing (no reading)."""
+    terms = (committed_bytes, dedicated_bytes, shared_bytes, device_free_bytes)
+    if any(term is None for term in terms):
+        return None
+    evicted = max(0, committed_bytes - dedicated_bytes - shared_bytes)
+    return GpuContention(
+        active=evicted >= CUDA_EVICTED_MIN_BYTES and device_free_bytes < evicted,
+        evicted_bytes=evicted,
+        device_free_bytes=device_free_bytes,
     )

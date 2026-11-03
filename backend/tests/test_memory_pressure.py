@@ -458,16 +458,19 @@ class _FakeWindowsGpu(mp._WindowsProvider):
     """The Windows provider with ``\\GPU Process Memory`` faked above PDH:
     instance name -> bytes for Dedicated and Shared Usage."""
 
-    def __init__(self, dedicated=None, shared=None, *, denied=False):
+    def __init__(self, dedicated=None, shared=None, *, committed=None, denied=False):
         super().__init__()
         self.dedicated = dedicated or {}
         self.shared = shared or {}
+        # None: the Total Committed counter is absent on this Windows.
+        self.committed = committed
         self.denied = denied
 
     def _pdh_gpu_process_memory(self):
         if self.denied:
             raise OSError("PdhAddEnglishCounterW status 0xc0000bb8")
-        return dict(self.dedicated), dict(self.shared)
+        committed = dict(self.committed) if self.committed is not None else None
+        return dict(self.dedicated), dict(self.shared), committed
 
 
 LUID_D = "luid_0x00000000_0x0000D1E5"
@@ -532,6 +535,47 @@ def test_windows_vram_denied_is_unavailable_with_its_reason_and_logs_nothing(cap
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
+def test_windows_vram_reads_the_total_committed_of_the_same_adapter():
+    """#661: the child's Total Committed GPU memory, whatever WDDM keeps
+    resident, on the adapter its dedicated memory lives on (exact pid)."""
+    provider = _FakeWindowsGpu(
+        dedicated={f"pid_7_{LUID_D}_phys_0": 3717 * MIB, f"pid_7_{LUID_I}_phys_0": MIB},
+        shared={f"pid_7_{LUID_D}_phys_0": 0},
+        committed={
+            f"pid_7_{LUID_D}_phys_0": 8519 * MIB,
+            f"pid_7_{LUID_I}_phys_0": 9 * GIB,
+            f"pid_77_{LUID_D}_phys_0": GIB,
+        },
+    )
+    reading = provider.vram(7)
+    assert reading.committed_bytes == 8519 * MIB
+    assert reading.dedicated_bytes == 3717 * MIB
+    assert reading.shared_bytes == 0
+
+
+def test_windows_vram_without_the_total_committed_counter_keeps_the_spill_gauge():
+    """A Windows without ``Total Committed``: no eviction gauge, the spill
+    gauge (Dedicated and Shared Usage) intact."""
+    provider = _FakeWindowsGpu(
+        dedicated={f"pid_7_{LUID_D}_phys_0": 6 * GIB},
+        shared={f"pid_7_{LUID_D}_phys_0": 900 * MIB},
+        committed=None,
+    )
+    reading = provider.vram(7)
+    assert reading == mp.VramReading(900 * MIB, 6 * GIB, committed_bytes=None)
+
+
+def test_windows_vram_without_a_committed_instance_for_the_pid_is_no_committed():
+    provider = _FakeWindowsGpu(
+        dedicated={f"pid_7_{LUID_D}_phys_0": 6 * GIB},
+        shared={f"pid_7_{LUID_D}_phys_0": 0},
+        committed={f"pid_8_{LUID_D}_phys_0": 9 * GIB},
+    )
+    reading = provider.vram(7)
+    assert reading.committed_bytes is None
+    assert reading.dedicated_bytes == 6 * GIB
+
+
 def test_linux_vram_is_unavailable_by_design(tmp_path, monkeypatch):
     provider, *_ = _linux(tmp_path, monkeypatch)
     reading = provider.vram(42)
@@ -577,10 +621,15 @@ class _FakePdh:
     wildcard counters, an instance list that may grow between the sizing
     call and the read (``grow`` times), or a refused counter."""
 
-    def __init__(self, items=None, *, add_status=0, grow=0):
+    def __init__(self, items=None, *, add_status=0, grow=0, refused=(), by_path=None):
         self.items = dict(items or {})
         self.add_status = add_status
         self.grow = grow
+        # Counter paths PDH refuses (the others are added), and per-path
+        # instance values (the others read ``items``).
+        self.refused = set(refused)
+        self.by_path = dict(by_path or {})
+        self.paths = []
         self.calls = []
         self._keep = []
 
@@ -590,7 +639,19 @@ class _FakePdh:
 
     def PdhAddEnglishCounterW(self, query, path, user, counter):
         self.calls.append("add")
+        if path in self.refused:
+            return 0xC0000BB8
+        if self.add_status == 0:
+            self.paths.append(path)
+            # The counter handle is the path's index, read back below.
+            counter._obj.value = len(self.paths)
         return self.add_status
+
+    def _items_of(self, counter):
+        index = getattr(counter, "value", None)
+        if index and index <= len(self.paths):
+            return self.by_path.get(self.paths[index - 1], self.items)
+        return self.items
 
     def PdhCloseQuery(self, query):
         self.calls.append("close")
@@ -601,23 +662,24 @@ class _FakePdh:
         return 0
 
     def PdhGetFormattedCounterArrayW(self, counter, fmt, size, count, buffer):
+        items = self._items_of(counter)
         item = ctypes.sizeof(mp._PdhFmtCounterValueItem)
         if buffer is None:
-            size._obj.value = item * len(self.items)
-            count._obj.value = len(self.items)
-            return PDH_MORE_DATA if self.items else 0
+            size._obj.value = item * len(items)
+            count._obj.value = len(items)
+            return PDH_MORE_DATA if items else 0
         if self.grow:
             self.grow -= 1
             size._obj.value += item
             return PDH_MORE_DATA
-        array = (mp._PdhFmtCounterValueItem * len(self.items)).from_buffer(buffer)
-        for slot, (name, value) in zip(array, self.items.items()):
+        array = (mp._PdhFmtCounterValueItem * len(items)).from_buffer(buffer)
+        for slot, (name, value) in zip(array, items.items()):
             text = ctypes.create_unicode_buffer(name)
             self._keep.append(text)
             slot.szName = ctypes.cast(text, ctypes.c_wchar_p)
             slot.FmtValue.CStatus = 0
             slot.FmtValue.value.largeValue = value
-        count._obj.value = len(self.items)
+        count._obj.value = len(items)
         return 0
 
 
@@ -628,13 +690,56 @@ def _native_windows(monkeypatch, pdh):
 
 def test_the_pdh_reader_parses_the_formatted_counter_array(monkeypatch):
     pdh = _FakePdh({f"pid_7_{LUID_D}_phys_0": 5 * GIB})
-    dedicated, shared = _native_windows(monkeypatch, pdh)._pdh_gpu_process_memory()
-    assert dedicated == shared == {f"pid_7_{LUID_D}_phys_0": 5 * GIB}
+    dedicated, shared, committed = _native_windows(monkeypatch, pdh)._pdh_gpu_process_memory()
+    assert dedicated == shared == committed == {f"pid_7_{LUID_D}_phys_0": 5 * GIB}
+
+
+def test_the_three_gpu_counters_share_one_query_and_one_collection(monkeypatch):
+    instance = f"pid_7_{LUID_D}_phys_0"
+    pdh = _FakePdh(
+        by_path={
+            mp._WindowsProvider._GPU_DEDICATED: {instance: 3717 * MIB},
+            mp._WindowsProvider._GPU_SHARED: {instance: 0},
+            mp._WindowsProvider._GPU_COMMITTED: {instance: 8519 * MIB},
+        }
+    )
+    provider = _native_windows(monkeypatch, pdh)
+    reading = provider.vram(7)
+    assert reading == mp.VramReading(0, 3717 * MIB, committed_bytes=8519 * MIB)
+    assert pdh.paths == [
+        "\\GPU Process Memory(*)\\Dedicated Usage",
+        "\\GPU Process Memory(*)\\Shared Usage",
+        "\\GPU Process Memory(*)\\Total Committed",
+    ]
+    assert pdh.calls.count("open") == 1
+    assert pdh.calls.count("collect") == 1
+
+
+def test_a_refused_total_committed_counter_keeps_the_spill_gauge(monkeypatch, caplog):
+    """``Total Committed`` is a separate, optional counter: PDH refusing it
+    leaves the query open and Dedicated and Shared Usage read -- the spill
+    brake intact -- with no eviction gauge, and it is never added again."""
+    instance = f"pid_7_{LUID_D}_phys_0"
+    pdh = _FakePdh(
+        by_path={
+            mp._WindowsProvider._GPU_DEDICATED: {instance: 6 * GIB},
+            mp._WindowsProvider._GPU_SHARED: {instance: 900 * MIB},
+        },
+        refused={mp._WindowsProvider._GPU_COMMITTED},
+    )
+    provider = _native_windows(monkeypatch, pdh)
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        first = provider.vram(7)
+        second = provider.vram(7)
+    assert first == second == mp.VramReading(900 * MIB, 6 * GIB, committed_bytes=None)
+    assert "close" not in pdh.calls
+    assert pdh.calls.count("add") == 3
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
 def test_an_instance_list_that_grows_between_the_calls_is_read_again(monkeypatch):
     pdh = _FakePdh({f"pid_7_{LUID_D}_phys_0": 5 * GIB}, grow=2)
-    dedicated, _ = _native_windows(monkeypatch, pdh)._pdh_gpu_process_memory()
+    dedicated, _, _ = _native_windows(monkeypatch, pdh)._pdh_gpu_process_memory()
     assert dedicated == {f"pid_7_{LUID_D}_phys_0": 5 * GIB}
 
 
@@ -714,6 +819,59 @@ def test_the_vram_seam_forces_a_spill_and_leaves_the_ram_alone(
     assert reading.shared_bytes == healthy + above
     assert reading.dedicated_bytes == 6 * GIB
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+class _CommittedGpu(_CalmGpu):
+    def vram(self, pid):
+        return mp.VramReading(
+            shared_bytes=130 * MIB, dedicated_bytes=6 * GIB, committed_bytes=6 * GIB + 130 * MIB
+        )
+
+
+@pytest.mark.parametrize("forced", ["vram-warning", "vram-critical"])
+def test_the_spill_seams_carry_the_committed_reading(monkeypatch, forced):
+    monkeypatch.setattr(mp, "_PROVIDER", _CommittedGpu())
+    monkeypatch.setenv("ERUDI_FORCE_MEMORY_PRESSURE", forced)
+    assert mp.read_vram(7, healthy_bytes=128 * MIB).committed_bytes == 6 * GIB + 130 * MIB
+
+
+@pytest.mark.parametrize("provider", [_CalmGpu(), _CommittedGpu()])
+def test_the_contention_seam_forces_an_eviction_and_nothing_else(monkeypatch, caplog, provider):
+    """``vram-contention``: the committed reading sits the eviction floor
+    plus 128 MiB above what is resident (the real Dedicated and Shared
+    Usage, untouched, so the spill gauge stays calm), whether or not this
+    Windows has the counter; the RAM reading is the provider's, and the
+    value is no unknown one (no warning)."""
+    monkeypatch.setattr(mp, "_PROVIDER", provider)
+    monkeypatch.setenv("ERUDI_FORCE_MEMORY_PRESSURE", "vram-contention")
+    real = provider.vram(7)
+    with caplog.at_level(logging.WARNING, logger="erudi"):
+        reading = mp.read_vram(7, healthy_bytes=128 * MIB)
+        assert mp.read_pressure() == mp.PressureReading(level=1, damage_total_bytes=7)
+    assert reading.shared_bytes == real.shared_bytes
+    assert reading.dedicated_bytes == real.dedicated_bytes
+    assert reading.committed_bytes == (
+        real.dedicated_bytes + real.shared_bytes + cuda_memory.CUDA_EVICTED_MIN_BYTES + 128 * MIB
+    )
+    assert mp.contention_forced() is True
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_the_contention_seam_leaves_an_unreadable_gauge_unreadable(monkeypatch):
+    class _Denied(_CalmGpu):
+        def vram(self, pid):
+            return mp.VramReading(None, None, unavailable="denied")
+
+    monkeypatch.setattr(mp, "_PROVIDER", _Denied())
+    monkeypatch.setenv("ERUDI_FORCE_MEMORY_PRESSURE", "vram-contention")
+    reading = mp.read_vram(7, healthy_bytes=128 * MIB)
+    assert reading.committed_bytes is None and reading.unavailable == "denied"
+
+
+@pytest.mark.parametrize("forced", ["", "warning", "vram-warning"])
+def test_only_the_contention_seam_forces_the_contention(monkeypatch, forced):
+    monkeypatch.setenv("ERUDI_FORCE_MEMORY_PRESSURE", forced)
+    assert mp.contention_forced() is False
 
 
 @pytest.mark.parametrize("forced", ["warning", "critical"])

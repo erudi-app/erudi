@@ -17,7 +17,8 @@ BaseEngine
         │                         sizes -c itself, binds the llama.cpp memory brake)
         └── CUDA_Engine          (Popen + llama-server CUDA, -ngl -1 with fit, 27200-27299;
                                   sizes -c against the VRAM, binds the brake, which only a
-                                  Windows VRAM spill drives on a full offload)
+                                  Windows VRAM spill drives on a full offload, and on
+                                  Windows a notify-only eviction gauge)
 ```
 
 Concrete engines implement only the four hooks that are genuinely backend-specific:
@@ -632,7 +633,9 @@ that succeeds.
 **Linux** has no spill: an allocation that does not fit fails, so the window is sized to
 fit at spawn. With RAM pressure out, the brake has no signal there: `brake_point`
 returns before any sensor is read, so nothing ever acts and no `Memory brake` line is
-written. The idle monitor still ticks; its samples return at once.
+written. The idle monitor still ticks; its samples return at once. Linux has no WDDM
+eviction either: the eviction gauge below never reads anything there, and its 10 s task
+is not started.
 
 **The QA seam** (`ERUDI_FORCE_MEMORY_PRESSURE`, never set in normal use): `warning` and
 `critical` act inside the RAM reading, which the CUDA engine never takes, so they do
@@ -645,12 +648,52 @@ machine: a shrink at the turn end and a `-ngl -2` respawn once the user is away
 (warning), or a shrink and a respawn at the next turn boundary (critical), with the
 `acted` notice and the reload state; at the 4096 floor no shrink is possible and two idle
 criticals unload. The forced reading is also seen at load (the WARNING above the healthy
-level, and possibly the device check's). On Linux the brake reads nothing, so the VRAM
-values do nothing there either.
+level, and possibly the device check's). `vram-contention` forces the eviction gauge
+instead: the committed reading is the real Dedicated and Shared Usage plus 384 MiB, and
+the card's free memory is taken as 0 (NVML is not read), so the `gpu_contention` notice
+shows on a calm machine and stays while the seam is set; the spill gauge stays the real
+one. On Linux the brake reads nothing, so the VRAM values do nothing there either.
 
 A child whose window Erudi did not size (the fallback shape) or that loaded partly on the
-GPU is never sampled: `brake_point` returns before any sensor is read, so nothing — not
-even the unload — acts on it.
+GPU is never sampled by the brake: nothing — not even the unload — acts on it. Only the
+eviction gauge below reads it.
+
+**The eviction gauge (Windows, a notice only).** The spill gauge cannot see another app
+taking the card. When a game or another CUDA app oversubscribes the VRAM, WDDM *evicts*
+memory the child already holds — its Dedicated Usage drops, its Shared Usage does not
+rise (#661 saw it fall) — and pages it back in for every token: answers slow down four
+to ten times and no brake line is written. The evicted part is resident nowhere, so it
+is the child's `\GPU Process Memory(...)\Total Committed` minus its `Dedicated Usage +
+Shared Usage`, read from the same PDH query as a third, optional counter (a Windows
+without it reads Dedicated and Shared as before, says once at INFO that the eviction
+goes unnoticed, and detects nothing). #661 measured that gap at exactly 0 on every
+sample of a healthy child — full and partial offloads, across a respawn — and at 0.7
+to 6.3 GiB under a 10 GiB hog. **Contention** (`cuda_memory.gpu_contention`) is at
+least 256 MiB evicted (`CUDA_EVICTED_MIN_BYTES`) *and* NVML's free memory on the GPU
+the child was pinned to below the evicted bytes: those pages cannot come back. Once
+the other app is gone the gap stays until the next turn pages the child back in, but
+the card has the room again: that reads as no contention.
+
+The gauge samples every live child pinned to one GPU (`gpu_uuid`: not the
+several-GPU, NVML-unreadable or no-GPU shapes), brake-off ones included, at a turn start
+(after the brake's decision, on the child the turn uses — a respawned one if the brake
+just respawned it) and at every idle sample, never at a turn end (the generation just
+paged the child back in). While a contention holds, a light task
+(`CUDA_Engine._contention_tick`, every 10 s, under the generation lock, never during a
+turn) samples the gauge alone — never `brake_point(idle)`, whose samples count toward
+an unload — so its end is seen between turns. The reading is cached on the handle
+(`gpu_contention`: `active`, `evicted_bytes`, `device_free_bytes`, `read_at`); a missing
+reading (a respawned child has no PDH instance for about 6 s, NVML fails) leaves it
+unchanged, silently, and each transition is one INFO line, `GPU contention
+started|ended: evicted_mib=..., device_free_mib=...`. It never acts on the child.
+
+A stateful turn end turns an active contention into `memory_warning` with
+`reason: "gpu_contention"`, again at every turn while it lasts; a brake notice
+(`pressure`, `pressure_external`) comes first, and `bound` is not evaluated after it.
+`GET /erudi/hardware/gpu_contention/status` returns the cached reading (`active: false`
+and no numbers on every other engine and OS and without a live child); it never reads a
+sensor or takes the generation lock, and its `/status` suffix keeps its access line at
+DEBUG. The conversation page polls it only while it shows that notice.
 
 **Driver policy.** With the NVIDIA Control Panel's "Prefer No Sysmem Fallback", Windows
 fails an allocation like Linux: a `-ngl -2` respawn under a VRAM hog fails instead of spilling, the

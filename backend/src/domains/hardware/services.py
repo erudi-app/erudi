@@ -29,6 +29,7 @@ Example:
 
 from typing import Dict, Any, Optional
 from src.domains.hardware.repository import Hardware_Repository
+from src.domains.hardware.schemas import GpuContentionStatus
 from src.entities.HardwareProfile import HardwareProfile
 from src.core.logging import logger
 from src.core.exceptions import HardwareException
@@ -143,6 +144,18 @@ def recommended_param_range(profile: HardwareProfile) -> tuple[float, float]:
     min_params = min(max_params * 0.5, _MAX_RECOMMENDED_MIN_PARAMS)
     min_params = max(_MIN_PARAM_FLOOR, min(min_params, max_params))
     return (round(min_params, 1), round(max_params, 1))
+
+
+def gpu_contention_status() -> GpuContentionStatus:
+    """Whether another app is taking the graphics card from the loaded
+    model: the engine's cached reading (``gpu_contention_state``), never a
+    fresh one, so it never waits for a generation. Not contended without a
+    reading (every engine but CUDA on Windows, no model loaded)."""
+    engine = config.LLM_Engine
+    state = engine.gpu_contention_state() if engine is not None else None
+    if not state:
+        return GpuContentionStatus(active=False)
+    return GpuContentionStatus(**state)
 
 
 class Hardware_Service:

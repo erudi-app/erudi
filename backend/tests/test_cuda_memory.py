@@ -556,3 +556,72 @@ def test_a_calm_spill_contributes_no_damage_at_turn_end():
     )
     assert decision.level == mb.LEVEL_CALM
     assert decision.state.in_episode is False
+
+
+# ===================== the eviction gauge: another app takes the card =====================
+
+# #661's child under a 10 GiB hog, idle: 3717 MiB resident of 8519 committed.
+RESIDENT = 3717 * MIB
+
+
+@pytest.mark.parametrize(
+    "evicted_mib, free_mib, active",
+    [
+        (0, 0, False),  # healthy: committed == resident, on every #661 sample
+        (255, 0, False),  # under the floor of a real eviction
+        (256, 0, True),
+        (4672, 4671, True),  # free = evicted - 1 MiB: the pages cannot come back
+        (4672, 4672, False),  # free = evicted
+        (4672, 4673, False),  # free = evicted + 1 MiB
+        (6274, 310, True),  # #661: the hog running, idle
+        (4802, 9430, False),  # #661: the hog killed, the gap not yet paged back
+    ],
+)
+def test_the_contention_rule_at_its_bounds(evicted_mib, free_mib, active):
+    contention = cm.gpu_contention(
+        committed_bytes=RESIDENT + evicted_mib * MIB,
+        dedicated_bytes=RESIDENT,
+        shared_bytes=0,
+        device_free_bytes=free_mib * MIB,
+    )
+    assert contention == cm.GpuContention(
+        active=active, evicted_bytes=evicted_mib * MIB, device_free_bytes=free_mib * MIB
+    )
+
+
+def test_the_evicted_bytes_net_out_the_shared_memory():
+    contention = cm.gpu_contention(
+        committed_bytes=8520 * MIB,
+        dedicated_bytes=3718 * MIB,
+        shared_bytes=130 * MIB,
+        device_free_bytes=400 * MIB,
+    )
+    assert contention.evicted_bytes == 4672 * MIB
+    assert contention.active is True
+
+
+def test_a_committed_reading_under_the_resident_bytes_is_no_eviction():
+    """The counters are read one after the other: a resident reading that
+    passed the committed one by a few MiB is no eviction, never negative."""
+    contention = cm.gpu_contention(
+        committed_bytes=8516 * MIB,
+        dedicated_bytes=8390 * MIB,
+        shared_bytes=130 * MIB,
+        device_free_bytes=0,
+    )
+    assert contention.evicted_bytes == 0
+    assert contention.active is False
+
+
+@pytest.mark.parametrize(
+    "missing", ["committed_bytes", "dedicated_bytes", "shared_bytes", "device_free_bytes"]
+)
+def test_a_missing_term_is_no_reading(missing):
+    terms = {
+        "committed_bytes": 8520 * MIB,
+        "dedicated_bytes": RESIDENT,
+        "shared_bytes": 0,
+        "device_free_bytes": 0,
+    }
+    terms[missing] = None
+    assert cm.gpu_contention(**terms) is None

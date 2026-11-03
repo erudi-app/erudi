@@ -72,6 +72,10 @@ Inference (llama.cpp compiled with CUDA, a llama-server subprocess):
       (memory_brake.llama_step); RAM pressure never drives it. On
       Linux, which has no spill, the brake has no signal and never acts. A
       partial or fit-sized child runs brake-off.
+    - On Windows an eviction gauge (Total Committed above the resident
+      bytes, against NVML's free memory) says when another app takes the
+      card from any child pinned to one GPU: the amber gpu_contention
+      notice, never an action.
     - One GPU, pinned by UUID (CUDA_VISIBLE_DEVICES), never over a value the
       user set.
 
@@ -82,14 +86,16 @@ Note:
     - Thread-safe through BaseEngine._lock
 """
 
+import asyncio
 import dataclasses
 import os
-import time  # used by hardware methods
+import time
 import platform
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from pathlib import Path
 
-from src.engines import cuda_memory, gguf_memory, memory_pressure
+from src.engines import cuda_memory, gguf_memory, memory_brake, memory_pressure
+from src.engines.base_engine import _log_monitor_death, run_reset_shielded
 from src.engines.base_llama_cpp_engine import BaseLlamaCppEngine, LlamaSignals
 from src.engines.cpu_brand import get_cpu_brand
 from src.engines.cuda_compatibility import format_cuda_version
@@ -914,26 +920,187 @@ class CUDA_Engine(BaseLlamaCppEngine):
         """Take the brake's sample at ``point`` and execute its decision --
         on Windows only, and only on a child whose window Erudi sized and
         that loaded in full: a fit-sized or partial child is never sampled
-        (nothing for the law's unload to act on either). Off Windows there
-        is no spill, so no signal: nothing is read and nothing acts (the idle
-        monitor still ticks; its samples return here). Never raises: a
-        failure is ONE WARNING with the exception's class name, and the
-        sample is lost."""
+        by the brake (nothing for the law's unload to act on either). Then,
+        at a turn start (for the child that turn uses) and at idle, the
+        eviction gauge samples the live child -- the one the brake's
+        decision left, brake-off children included (``_sample_gpu_contention``);
+        never at a turn end, which follows a generation that just paged the
+        child back in. Off Windows there is no spill and no eviction, so no
+        signal: nothing is read and nothing acts (the idle monitor still
+        ticks; its samples return here). Never raises: a failure is ONE
+        WARNING with the exception's class name, and the sample is lost."""
         handle = cls._model
-        if (
-            not cls._host_is_windows()
-            or not isinstance(handle, dict)
-            or not handle.get("window_sized")
+        if not cls._host_is_windows() or not isinstance(handle, dict):
+            return BrakeOutcome()
+        outcome = BrakeOutcome()
+        if handle.get("window_sized"):
+            try:
+                outcome = cls._llama_brake_point(point, llm_id)
+            except Exception as exc:
+                logger.warning(
+                    f"[{cls.__name__}] Memory brake sample failed ({type(exc).__name__}): "
+                    f"point={point}"
+                )
+        if point == memory_brake.POINT_IDLE or (
+            point == memory_brake.POINT_TURN_START and cls.loaded_child_for(llm_id)
         ):
-            return BrakeOutcome()
+            cls._sample_gpu_contention()
+        return outcome
+
+    # ---------- the eviction gauge: another app takes the card (Windows) ----------
+
+    # Seconds between the contention-only samples while a contention lasts
+    # (the conversation page polls the cached state at the same pace).
+    _contention_interval_s: ClassVar[float] = 10.0
+    _contention_task: ClassVar[Optional["asyncio.Task"]] = None
+    # A Windows without the Total Committed counter was said once.
+    _committed_gauge_missing_logged: ClassVar[bool] = False
+
+    @classmethod
+    def _read_device_free(cls, uuid: str) -> Optional[int]:
+        """NVML's free bytes of the GPU ``uuid`` now, or None when NVML
+        cannot say (the caller keeps its state: unknown is not free)."""
         try:
-            return cls._llama_brake_point(point, llm_id)
-        except Exception as exc:
-            logger.warning(
-                f"[{cls.__name__}] Memory brake sample failed ({type(exc).__name__}): "
-                f"point={point}"
+            import pynvml as nv
+
+            nv.nvmlInit()
+            device = nv.nvmlDeviceGetHandleByUUID(uuid.encode("ascii"))
+            return int(cls._nvml_memory(nv, device).free)
+        except Exception:
+            # Unknown, not zero: a missing reading leaves the state as it is.
+            return None
+
+    @classmethod
+    def _sample_gpu_contention(cls) -> None:
+        """Read the eviction gauge of the loaded child and keep the result on
+        its handle (``gpu_contention``): its Total Committed GPU memory above
+        its resident bytes (PDH), against NVML's free memory on the GPU it
+        was pinned to (``cuda_memory.gpu_contention``). Windows only; a child
+        with no pinned GPU (several visible GPUs, NVML unreadable at load, no
+        GPU) is not read. A missing reading -- no PDH instance yet (a
+        respawned child appears about 6 s after the stop), NVML failing --
+        leaves the state unchanged, silently; a Windows without the Total
+        Committed counter is said once (INFO) and detects nothing. Each
+        transition is ONE INFO. Never an action on the child; never raises
+        (an unexpected failure is ONE WARNING and the sample is lost)."""
+        handle = cls._model
+        try:
+            if (
+                not isinstance(handle, dict)
+                or not handle.get("gpu_uuid")
+                or not cls._proc_is_alive(handle.get("proc"))
+            ):
+                return
+            # The raw Shared Usage is the term; the healthy level plays no part.
+            vram = memory_pressure.read_vram(handle.get("pid"), healthy_bytes=0)
+            if vram.dedicated_bytes is None or vram.shared_bytes is None:
+                return
+            if vram.committed_bytes is None:
+                if not cls._committed_gauge_missing_logged:
+                    cls._committed_gauge_missing_logged = True
+                    logger.info(
+                        f"[{cls.__name__}] GPU Total Committed counter unavailable for the "
+                        f"child; another app taking the graphics card goes unnoticed "
+                        f"(port {handle.get('port')})"
+                    )
+                return
+            free = (
+                0
+                if memory_pressure.contention_forced()
+                else cls._read_device_free(handle["gpu_uuid"])
             )
-            return BrakeOutcome()
+            contention = cuda_memory.gpu_contention(
+                committed_bytes=vram.committed_bytes,
+                dedicated_bytes=vram.dedicated_bytes,
+                shared_bytes=vram.shared_bytes,
+                device_free_bytes=free,
+            )
+            if contention is None:
+                return
+            previous = handle.get("gpu_contention")
+            was_active = isinstance(previous, dict) and bool(previous.get("active"))
+            handle["gpu_contention"] = {
+                "active": contention.active,
+                "evicted_bytes": contention.evicted_bytes,
+                "device_free_bytes": contention.device_free_bytes,
+                "read_at": time.time(),
+            }
+            if contention.active != was_active:
+                logger.info(
+                    f"[{cls.__name__}] GPU contention "
+                    f"{'started' if contention.active else 'ended'}: "
+                    f"evicted_mib={contention.evicted_bytes // _MIB}, "
+                    f"device_free_mib={contention.device_free_bytes // _MIB} "
+                    f"(port {handle.get('port')})"
+                )
+        except Exception as exc:
+            logger.warning(f"[{cls.__name__}] GPU contention sample failed ({type(exc).__name__})")
+
+    @classmethod
+    def gpu_contention_state(cls) -> Optional[Dict[str, Any]]:
+        """The loaded, live child's last eviction-gauge reading, cached:
+        never a fresh read (the status endpoint and the turn end read it
+        without the generation lock). None without one."""
+        handle = cls._model
+        if not isinstance(handle, dict) or not cls._proc_is_alive(handle.get("proc")):
+            return None
+        state = handle.get("gpu_contention")
+        return dict(state) if isinstance(state, dict) else None
+
+    @classmethod
+    async def _contention_tick(cls) -> None:
+        """While a contention lasts, one contention-only sample under the
+        generation lock (never during a turn), shielded like a brake sample
+        -- never ``brake_point``, whose idle samples count toward an unload.
+        Nothing is taken or read otherwise."""
+        state = cls.gpu_contention_state()
+        if not (state and state.get("active")):
+            return
+        async with cls._acquire_generation_lock():
+            state = cls.gpu_contention_state()
+            if state and state.get("active"):
+                await run_reset_shielded(cls._sample_gpu_contention)
+
+    @classmethod
+    async def _contention_monitor(cls) -> None:
+        """Every ``_contention_interval_s``, one contention tick. A tick that
+        raises is logged at ERROR with its traceback and the loop goes on."""
+        while True:
+            await asyncio.sleep(cls._contention_interval_s)
+            try:
+                await cls._contention_tick()
+            except asyncio.CancelledError:
+                raise
+            except Exception as exc:
+                logger.error(f"GPU contention tick failed: {exc}", exc_info=True)
+
+    @classmethod
+    def start_pressure_task(cls) -> None:
+        """The idle brake monitor, and on Windows the contention monitor that
+        follows a contention to its end between turns (idempotent)."""
+        super().start_pressure_task()
+        if cls._contention_task is None and cls._host_is_windows():
+            cls._contention_task = asyncio.create_task(
+                cls._contention_monitor(), name="gpu-contention"
+            )
+            cls._contention_task.add_done_callback(_log_monitor_death)
+            logger.info("Started GPU contention monitor")
+
+    @classmethod
+    async def stop_pressure_task(cls) -> None:
+        """Cancel both monitors and wait for them (a sample in flight
+        finishes first: it is shielded)."""
+        task, cls._contention_task = cls._contention_task, None
+        if task is not None:
+            task.cancel()
+            try:
+                await task
+            except asyncio.CancelledError:
+                current = asyncio.current_task()
+                if current is not None and current.cancelling():
+                    raise
+            logger.info("Stopped GPU contention monitor")
+        await super().stop_pressure_task()
 
     @classmethod
     def memory_bound_tokens(cls) -> Optional[int]:

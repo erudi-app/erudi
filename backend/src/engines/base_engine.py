@@ -442,6 +442,14 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         return None
 
     @classmethod
+    def gpu_contention_state(cls) -> Optional[Dict[str, Any]]:
+        """The last reading of whether another app is taking the graphics
+        card from the loaded child (``active``, ``evicted_bytes``,
+        ``device_free_bytes``, ``read_at``), cached: never a fresh read. Set
+        on Windows by the CUDA engine; None here."""
+        return None
+
+    @classmethod
     def brake_reload_pending(cls, llm_id: Any) -> bool:
         """Whether the next turn for ``llm_id`` reloads a model the brake
         unloaded (or, on the CPU engine, re-prefills a child it respawned).

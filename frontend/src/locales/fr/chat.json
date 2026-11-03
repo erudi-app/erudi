@@ -134,7 +134,8 @@
   },
   "memoryWarning": {
     "bound": "La mémoire de votre ordinateur limite cette conversation : le modèle et cette conversation occupent ensemble environ {{size}}, presque toute la place que la mémoire permet. Démarrez une nouvelle conversation, envoyez moins à la fois ou passez à un modèle plus petit.",
-    "pressure": "La mémoire de votre ordinateur est sous pression : cette conversation est résumée plus tôt pour rester fluide.",
-    "pressureExternal": "La mémoire de votre ordinateur est sous pression à cause d'autres applications ; cette conversation en utilise peu."
+    "pressure": "La mémoire de votre ordinateur est sous pression : cette conversation sera résumée plus tôt pour rester fluide.",
+    "pressureExternal": "La mémoire de votre ordinateur est sous pression à cause d'autres applications ; cette conversation en utilise peu.",
+    "gpuContention": "Une autre application occupe la mémoire de votre carte graphique : les réponses sont plus lentes jusqu'à ce qu'elle en libère. Rien n'est perdu."
   }
 }

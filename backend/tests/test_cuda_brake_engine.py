@@ -172,6 +172,13 @@ class _World:
         self.vram_reads = []
         self.healthy_seen = []
         self.nvml_reads = 0
+        # The eviction gauge: what WDDM took out of the card from the child
+        # (Total Committed above Dedicated + Shared), the counter's presence,
+        # and the NVML free reads by UUID (the contention rule's other term).
+        self.evicted = 0
+        self.committed_available = True
+        self.device_free_unreadable = False
+        self.free_reads = []
         self.sized = 0
         self._ports = iter(range(27201, 27299))
         self._pids = iter(range(5000, 5100))
@@ -206,9 +213,21 @@ class _World:
             if world.vram_unavailable:
                 return VramReading(None, None, unavailable=world.vram_unavailable)
             total = world.device_bytes(pid)
-            return VramReading(world.spill, max(0, total - world.spill))
+            return VramReading(
+                world.spill,
+                max(0, total - world.spill),
+                committed_bytes=(
+                    max(total, world.spill) + world.evicted if world.committed_available else None
+                ),
+            )
 
         monkeypatch.setattr(memory_pressure, "read_vram", _read_vram)
+
+        def _read_device_free(cls, uuid):
+            world.free_reads.append(uuid)
+            return None if world.device_free_unreadable else world.free
+
+        monkeypatch.setattr(CUDA_Engine, "_read_device_free", classmethod(_read_device_free))
 
         def _read_vram_info(cls):
             world.nvml_reads += 1
@@ -316,6 +335,7 @@ def _reset():
     CUDA_Engine._brake_reload = None
     CUDA_Engine._brake_sensor_warned = False
     CUDA_Engine._window_memory = {}
+    CUDA_Engine._committed_gauge_missing_logged = False
     BaseEngine._pending_reset = None
 
 
@@ -701,7 +721,9 @@ def test_a_respawned_child_restamps_its_baseline_on_its_new_window(windows):
     assert new["context_tokens"] == new_window
     assert _healthy(new_window) < _healthy(W)
     assert new["spill_baseline"] == min(2 * GIB, _healthy(new_window)) == _healthy(new_window)
-    assert windows.healthy_seen[-1] == _healthy(new_window)
+    # The new child's load reading (the eviction gauge's read after it
+    # passes no healthy level: it reads the raw Shared Usage).
+    assert windows.healthy_seen[-2:] == [_healthy(new_window), 0]
 
 
 def test_two_idle_criticals_unload(windows, caplog):
@@ -772,8 +794,9 @@ def test_the_661_idle_unload_of_a_healthy_child_does_not_happen(windows, caplog)
     assert windows.reads == 0
     assert windows.anonymous_reads == 0
     assert windows.total_ram_reads == 0
-    # The load and both samples read the spill gauge: sampled, not skipped.
-    assert len(windows.vram_reads) == 3
+    # The load and both samples read the spill gauge: sampled, not skipped
+    # (each idle sample reads it twice: the brake, then the eviction gauge).
+    assert len(windows.vram_reads) == 5
     assert not _records(caplog, "Memory brake sample failed")
     assert not _records(caplog, "Memory brake")
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
@@ -1038,6 +1061,257 @@ def test_a_respawn_context_for_another_alias_is_a_fresh_load(windows):
     )
     assert windows.sized == sized + 1
     assert ctx["gpu_layers"] == -1
+
+
+# ===================== another app takes the card: the contention notice =====================
+
+
+def _squeeze(world, *, evicted=4672 * MIB, free=400 * MIB):
+    """#661: a 10 GiB hog evicted part of the idle child; the card is full."""
+    world.evicted, world.free = evicted, free
+
+
+def _contention():
+    state = CUDA_Engine.gpu_contention_state()
+    return None if state is None else state["active"]
+
+
+@pytest.mark.parametrize("point", ["turn_start", "idle"])
+def test_contention_is_sampled_on_a_brake_off_child(windows, caplog, point):
+    """The fit-sized child (here: a header the engine cannot read) runs
+    brake-off, yet the eviction gauge samples it at turn start and idle."""
+    windows.inputs = None
+    handle = _load(windows)
+    assert handle["window_sized"] is False
+    _squeeze(windows)
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        assert CUDA_Engine.brake_point(point, llm_id=7) == BrakeOutcome()
+    state = CUDA_Engine.gpu_contention_state()
+    assert state["active"] is True
+    assert state["evicted_bytes"] == 4672 * MIB
+    assert state["device_free_bytes"] == 400 * MIB
+    assert isinstance(state["read_at"], float)
+    (record,) = _records(caplog, "GPU contention")
+    assert record.levelno == logging.INFO
+    assert "evicted_mib=4672" in record.getMessage()
+    assert "device_free_mib=400" in record.getMessage()
+    # NVML is read on the GPU the child was pinned to.
+    assert windows.free_reads == [UUID]
+    _assert_no_key(caplog)
+
+
+def test_contention_is_never_sampled_at_a_turn_end(windows):
+    """At a turn end the generation has just paged the child back in: the
+    reading means nothing (#661)."""
+    _load(windows)
+    _squeeze(windows)
+    reads = len(windows.vram_reads)
+    CUDA_Engine.begin_memory_window()
+    CUDA_Engine.brake_point("turn_end")
+    assert CUDA_Engine.gpu_contention_state() is None
+    # The brake's own reading only.
+    assert len(windows.vram_reads) == reads + 1
+    assert windows.free_reads == []
+
+
+def test_contention_is_sampled_after_the_brakes_decision_on_the_live_child(windows):
+    """A turn_start respawn replaces the child: the gauge reads the new one."""
+    _load(windows)
+    windows.spill = 2 * GIB
+    _squeeze(windows)
+    assert CUDA_Engine.brake_point("turn_start", llm_id=7).action == "shrink+respawn"
+    new = CUDA_Engine._model
+    assert windows.vram_reads[-1] == new["pid"]
+    assert new["gpu_contention"]["active"] is True
+
+
+def test_contention_at_turn_start_samples_only_the_child_the_turn_uses(windows):
+    _load(windows)
+    _squeeze(windows)
+    CUDA_Engine.brake_point("turn_start", llm_id=99)
+    assert CUDA_Engine.gpu_contention_state() is None
+
+
+def test_each_contention_transition_is_one_info(windows, caplog):
+    _load(windows)
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        CUDA_Engine.brake_point("idle")
+        assert _contention() is False
+        _squeeze(windows)
+        CUDA_Engine.brake_point("idle")
+        CUDA_Engine.brake_point("idle")
+        assert _contention() is True
+        # #661: the hog killed, the gap stays until the next turn pages the
+        # child back in, but the card has room again: it is over.
+        _squeeze(windows, evicted=4802 * MIB, free=9430 * MIB)
+        CUDA_Engine.brake_point("idle")
+        CUDA_Engine.brake_point("idle")
+        assert _contention() is False
+    records = _records(caplog, "GPU contention")
+    assert [r.levelno for r in records] == [logging.INFO, logging.INFO]
+    assert "started" in records[0].getMessage()
+    assert "ended" in records[1].getMessage()
+
+
+def test_a_missing_reading_leaves_the_state_unchanged_and_silent(windows, caplog):
+    """#661: a respawned child's instance appears about 6 s after the stop;
+    NVML may fail: no reading says nothing -- not even that it ended."""
+    _load(windows)
+    _squeeze(windows)
+    CUDA_Engine.brake_point("idle")
+    before = dict(CUDA_Engine.gpu_contention_state())
+    caplog.clear()
+    windows.vram_unavailable = "no GPU Process Memory instance for pid 5000"
+    with caplog.at_level(logging.DEBUG, logger="erudi"):
+        CUDA_Engine.brake_point("idle")
+        windows.vram_unavailable = None
+        windows.device_free_unreadable = True
+        CUDA_Engine.brake_point("idle")
+    assert CUDA_Engine.gpu_contention_state() == before
+    assert not _records(caplog, "GPU contention")
+    assert not _records(caplog, "Total Committed")
+
+
+def test_a_windows_without_total_committed_says_so_once_and_detects_nothing(windows, caplog):
+    _load(windows)
+    _squeeze(windows)
+    windows.committed_available = False
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        CUDA_Engine.brake_point("idle")
+        CUDA_Engine.brake_point("idle")
+    assert CUDA_Engine.gpu_contention_state() is None
+    (record,) = _records(caplog, "Total Committed")
+    assert record.levelno == logging.INFO
+    # The spill gauge is intact: no brake WARNING.
+    assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+
+
+def test_contention_never_acts_on_the_child(windows):
+    handle = _load(windows)
+    _squeeze(windows, evicted=6 * GIB, free=0)
+    CUDA_Engine._last_used = datetime.now() - timedelta(seconds=600)
+    for _ in range(3):
+        assert CUDA_Engine.brake_point("idle") == BrakeOutcome()
+        CUDA_Engine._model["brake"].last_sample_at -= mb.BRAKE_IDLE_INTERVAL_S
+    assert CUDA_Engine._model is handle
+    assert len(windows.spawns) == 1
+    assert handle["brake"].notice is None
+
+
+def test_linux_samples_no_contention(linux):
+    _load(linux)
+    _squeeze(linux)
+    reads = len(linux.vram_reads)
+    CUDA_Engine.brake_point("turn_start", llm_id=7)
+    CUDA_Engine.brake_point("idle")
+    assert len(linux.vram_reads) == reads
+    assert linux.free_reads == []
+    assert CUDA_Engine.gpu_contention_state() is None
+
+
+def test_a_child_without_a_pinned_gpu_samples_no_contention(windows):
+    """Several visible GPUs, or NVML unreadable at load: no GPU to read the
+    free memory of."""
+    handle = _load(windows)
+    handle.pop("gpu_uuid")
+    _squeeze(windows)
+    CUDA_Engine.brake_point("idle")
+    assert CUDA_Engine.gpu_contention_state() is None
+    assert windows.free_reads == []
+
+
+def test_the_state_dies_with_the_child(windows):
+    handle = _load(windows)
+    _squeeze(windows)
+    CUDA_Engine.brake_point("idle")
+    assert _contention() is True
+    handle["proc"].alive = False
+    assert CUDA_Engine.gpu_contention_state() is None
+
+
+def test_the_contention_seam_raises_the_notice_on_a_calm_card(vram_seam, monkeypatch, caplog):
+    monkeypatch.setenv("ERUDI_FORCE_MEMORY_PRESSURE", "vram-contention")
+    handle = _load(vram_seam)
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        assert CUDA_Engine.brake_point("turn_start", llm_id=7) == BrakeOutcome()
+    state = CUDA_Engine.gpu_contention_state()
+    assert state["active"] is True
+    assert state["device_free_bytes"] == 0
+    assert state["evicted_bytes"] == cuda_memory.CUDA_EVICTED_MIN_BYTES + 128 * MIB
+    # The seam stands for NVML too: the real free is not read.
+    assert vram_seam.free_reads == []
+    # The spill gauge is calm under it: the brake does nothing.
+    assert CUDA_Engine._model is handle
+    assert not _records(caplog, "Memory brake")
+
+
+class _Lock:
+    """Records whether the contention tick runs under the generation lock."""
+
+    def __init__(self):
+        self.held = False
+        self.taken = 0
+
+    def __call__(self):
+        lock = self
+
+        class _Guard:
+            async def __aenter__(self):
+                lock.held = True
+                lock.taken += 1
+
+            async def __aexit__(self, *exc):
+                lock.held = False
+
+        return _Guard()
+
+
+async def test_the_contention_tick_samples_under_the_lock_only_while_active(windows, monkeypatch):
+    _load(windows)
+    lock = _Lock()
+    monkeypatch.setattr(CUDA_Engine, "_acquire_generation_lock", classmethod(lambda cls: lock()))
+
+    def _no_brake(cls, point, *, llm_id=None):
+        raise AssertionError("the contention tick never takes a brake sample")
+
+    real_sample = CUDA_Engine._sample_gpu_contention.__func__
+    sampled_under_lock = []
+
+    def _sample(cls):
+        sampled_under_lock.append(lock.held)
+        return real_sample(cls)
+
+    monkeypatch.setattr(CUDA_Engine, "_sample_gpu_contention", classmethod(_sample))
+    # Inactive: nothing is taken, nothing is read.
+    await CUDA_Engine._contention_tick()
+    assert lock.taken == 0 and sampled_under_lock == []
+
+    _squeeze(windows)
+    CUDA_Engine._sample_gpu_contention()
+    sampled_under_lock.clear()
+    assert _contention() is True
+    monkeypatch.setattr(CUDA_Engine, "brake_point", classmethod(_no_brake))
+    _squeeze(windows, evicted=4802 * MIB, free=9430 * MIB)
+    await CUDA_Engine._contention_tick()
+    assert sampled_under_lock == [True]
+    assert _contention() is False
+    # Over: the next tick takes nothing.
+    await CUDA_Engine._contention_tick()
+    assert lock.taken == 1
+
+
+@pytest.mark.parametrize("os_name, started", [("Windows", True), ("Linux", False)])
+async def test_the_contention_monitor_runs_on_windows_only(monkeypatch, os_name, started):
+    monkeypatch.setattr(platform, "system", lambda: os_name)
+    monkeypatch.setattr(CUDA_Engine, "_pressure_task", None)
+    monkeypatch.setattr(CUDA_Engine, "_contention_task", None)
+    CUDA_Engine.start_pressure_task()
+    try:
+        assert (CUDA_Engine._contention_task is not None) is started
+    finally:
+        await CUDA_Engine.stop_pressure_task()
+    assert CUDA_Engine._contention_task is None
+    assert CUDA_Engine._pressure_task is None
 
 
 # ===================== the OOM retry at load =====================

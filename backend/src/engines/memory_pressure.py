@@ -20,7 +20,9 @@ every OS; a provider chosen once per process on ``sys.platform`` gives them:
   fallback), very slowly and silently. Linux has no spill by design (a
   ``cudaMalloc`` that does not fit fails: nothing to react to), macOS no CUDA.
   This is the CUDA brake's only sensor: the CUDA engine reads none of the
-  RAM ones.
+  RAM ones. The same reading carries the child's Total Committed GPU
+  memory, the term of the CUDA engine's eviction gauge (another app taking
+  the card: a notice, never a brake action).
 * ``child_vram_bytes(pid, processes)``: the device bytes NVML attributes to
   the child in the process list the CUDA engine read (Linux; WDDM reports
   none).
@@ -53,7 +55,9 @@ Providers:
   Memory(pid_<pid>_luid_..._phys_<n>)\\Dedicated Usage`` and ``Shared Usage``
   (gauges, English names), on the adapter holding most of the child's
   dedicated memory; when PDH refuses them the reading says why and the CUDA
-  engine writes the one WARNING (its memory brake is then off).
+  engine writes the one WARNING (its memory brake is then off). ``Total
+  Committed`` of the same adapter is a third, optional counter of the same
+  query (absent: no eviction gauge, the spill gauge intact).
 
 Every threshold for Linux and Windows is a starting value, to be calibrated
 on real machines. Nothing native is loaded at import: the Windows and macOS
@@ -76,12 +80,19 @@ here, so on the llama.cpp engines only (the MLX brake reads
   at any window, and the spill shrink and ``-ngl -2`` respawn can be
   exercised on a calm Windows machine. The forced reading sits above the
   healthy level at load, so the load's WARNING shows under the seam too; the
-  RAM reading is left alone.
+  RAM reading is left alone;
+* ``vram-contention`` forces the committed GPU memory of every ``read_vram``
+  to the resident bytes plus ``CUDA_EVICTED_MIN_BYTES`` + 128 MiB (the
+  Dedicated and Shared Usage stay the real ones, so the spill gauge is
+  calm), and the CUDA engine takes the card's free memory as 0
+  (``contention_forced``): the contention notice shows on a calm Windows
+  machine.
 """
 
 from __future__ import annotations
 
 import ctypes
+import dataclasses
 import mmap
 import os
 import sys
@@ -93,7 +104,11 @@ from typing import Any, Callable, Dict, Iterable, Optional, Tuple
 import psutil
 
 from src.core.logging import logger
-from src.engines.cuda_memory import CUDA_SPILL_CRITICAL_BYTES, CUDA_SPILL_WARNING_BYTES
+from src.engines.cuda_memory import (
+    CUDA_EVICTED_MIN_BYTES,
+    CUDA_SPILL_CRITICAL_BYTES,
+    CUDA_SPILL_WARNING_BYTES,
+)
 from src.engines.memory_brake import (
     LEVEL_CALM,
     LEVEL_CRITICAL,
@@ -124,6 +139,9 @@ _FORCED_SPILL_TIERS = {
     "vram-warning": CUDA_SPILL_WARNING_BYTES,
     "vram-critical": CUDA_SPILL_CRITICAL_BYTES,
 }
+# The eviction the contention seam forces: past the floor with a margin.
+_FORCED_CONTENTION = "vram-contention"
+_FORCED_EVICTED_BYTES = CUDA_EVICTED_MIN_BYTES + 128 * _MIB
 _FORCED_DAMAGE_BYTES = 0
 _FORCE_WARNED = False
 _PROVIDER: Any = None
@@ -144,11 +162,15 @@ class VramReading:
     dedicated VRAM and in shared GPU memory (system RAM), both gauges, raw.
     A healthy child already holds some shared memory (its pinned host
     buffers); the spill is what lies above its baseline, which the CUDA
-    engine counts. ``unavailable`` says why they are None."""
+    engine counts. ``unavailable`` says why they are None.
+    ``committed_bytes`` is the child's Total Committed GPU memory, resident
+    or not (the eviction gauge's term); None when this Windows has no such
+    counter or no instance of it for the child, the other two intact."""
 
     shared_bytes: Optional[int]
     dedicated_bytes: Optional[int]
     unavailable: Optional[str] = None
+    committed_bytes: Optional[int] = None
 
 
 def _psutil_total() -> Optional[int]:
@@ -455,6 +477,7 @@ class _WindowsProvider(_NullProvider):
     _PAGES_OUTPUT = "\\Memory\\Pages Output/sec"
     _GPU_DEDICATED = "\\GPU Process Memory(*)\\Dedicated Usage"
     _GPU_SHARED = "\\GPU Process Memory(*)\\Shared Usage"
+    _GPU_COMMITTED = "\\GPU Process Memory(*)\\Total Committed"
 
     def __init__(self) -> None:
         self._pdh: Any = None
@@ -565,13 +588,18 @@ class _WindowsProvider(_NullProvider):
         count, the mapped weights never do."""
         return int(psutil.Process(pid).memory_info().private)
 
-    def _pdh_gpu_process_memory(self) -> Tuple[Dict[str, int], Dict[str, int]]:
-        """``\\GPU Process Memory(*)\\Dedicated Usage`` and ``Shared Usage``
-        of every process, instance name -> bytes (gauges, not rates). Added by
-        their English names (locale-proof); the wildcard instance is expanded
-        at every collection, so a child spawned later is seen. A query whose
-        counters PDH refused is closed and never reopened (the refusal is
-        remembered)."""
+    def _pdh_gpu_process_memory(
+        self,
+    ) -> Tuple[Dict[str, int], Dict[str, int], Optional[Dict[str, int]]]:
+        """``\\GPU Process Memory(*)\\Dedicated Usage``, ``Shared Usage`` and
+        ``Total Committed`` of every process, instance name -> bytes (gauges,
+        not rates), in one query and one collection. Added by their English
+        names (locale-proof); the wildcard instance is expanded at every
+        collection, so a child spawned later is seen. A query whose Dedicated
+        or Shared counter PDH refused is closed and never reopened (the
+        refusal is remembered). ``Total Committed`` is optional: PDH refusing
+        it, or a failed read of it, gives None for it alone -- the spill
+        gauge keeps reading."""
         pdh = ctypes.windll.pdh
         if self._gpu_pdh is False:
             raise OSError("GPU Process Memory counters refused earlier")
@@ -589,12 +617,28 @@ class _WindowsProvider(_NullProvider):
                     self._gpu_pdh = False
                     raise OSError(f"PdhAddEnglishCounterW status {status & 0xFFFFFFFF:#x}")
                 counters.append(counter)
-            self._gpu_pdh = (query, counters[0], counters[1])
-        query, dedicated, shared = self._gpu_pdh
+            committed = ctypes.c_void_p()
+            status = pdh.PdhAddEnglishCounterW(
+                query, self._GPU_COMMITTED, None, ctypes.byref(committed)
+            )
+            self._gpu_pdh = (query, counters[0], counters[1], committed if status == 0 else None)
+        query, dedicated, shared, committed = self._gpu_pdh
         status = pdh.PdhCollectQueryData(query)
         if status != 0:
             raise OSError(f"PdhCollectQueryData status {status & 0xFFFFFFFF:#x}")
-        return _pdh_counter_array(pdh, dedicated), _pdh_counter_array(pdh, shared)
+        committed_values: Optional[Dict[str, int]] = None
+        if committed is not None:
+            try:
+                committed_values = _pdh_counter_array(pdh, committed)
+            except OSError:
+                # This collection has no eviction gauge; the spill gauge's
+                # two counters below are read all the same.
+                committed_values = None
+        return (
+            _pdh_counter_array(pdh, dedicated),
+            _pdh_counter_array(pdh, shared),
+            committed_values,
+        )
 
     def vram(self, pid: int) -> VramReading:
         """Our child's dedicated VRAM and its shared GPU memory -- its pinned
@@ -603,9 +647,11 @@ class _WindowsProvider(_NullProvider):
         dedicated memory (the discrete GPU on an Optimus laptop), chosen at
         the child's first read and kept for it. PDH denied or absent:
         unavailable with the reason, logged by the CUDA engine (its memory
-        brake is then off: one WARNING there)."""
+        brake is then off: one WARNING there). The Total Committed of the
+        same adapter rides along, None without the counter or an instance of
+        it for the child."""
         try:
-            dedicated, shared = self._pdh_gpu_process_memory()
+            dedicated, shared, committed = self._pdh_gpu_process_memory()
         except Exception as exc:
             # Not logged here: the reason travels in the reading, and the CUDA
             # engine writes the one WARNING where the brake turns off.
@@ -622,7 +668,12 @@ class _WindowsProvider(_NullProvider):
             candidates = by_luid or spill_by_luid
             self._gpu_luid = (pid, max(candidates, key=candidates.get))
         luid = self._gpu_luid[1]
-        return VramReading(spill_by_luid.get(luid, 0), by_luid.get(luid, 0))
+        committed_by_luid = _gpu_bytes_by_luid(committed, pid) if committed is not None else {}
+        return VramReading(
+            spill_by_luid.get(luid, 0),
+            by_luid.get(luid, 0),
+            committed_bytes=committed_by_luid.get(luid),
+        )
 
 
 def _provider() -> Any:
@@ -652,16 +703,23 @@ def _forced() -> str:
 def _forced_level() -> Optional[int]:
     global _FORCE_WARNED
     raw = _forced()
-    if not raw or raw in _FORCED_SPILL_TIERS:
+    if not raw or raw in _FORCED_SPILL_TIERS or raw == _FORCED_CONTENTION:
         return None
     level = _FORCED_LEVELS.get(raw)
     if level is None and not _FORCE_WARNED:
         _FORCE_WARNED = True
         logger.warning(
-            "ERUDI_FORCE_MEMORY_PRESSURE is not 'warning', 'critical', 'vram-warning' or "
-            "'vram-critical'; ignoring it"
+            "ERUDI_FORCE_MEMORY_PRESSURE is not 'warning', 'critical', 'vram-warning', "
+            "'vram-critical' or 'vram-contention'; ignoring it"
         )
     return level
+
+
+def contention_forced() -> bool:
+    """The QA seam stands for another app taking the card
+    (``vram-contention``): the CUDA engine then takes the card's free
+    memory as 0 instead of reading NVML."""
+    return _forced() == _FORCED_CONTENTION
 
 
 def read_pressure() -> PressureReading:
@@ -700,20 +758,33 @@ def effective_total_ram_bytes() -> Optional[int]:
 
 
 def read_vram(pid: Optional[int], *, healthy_bytes: int) -> VramReading:
-    """The CUDA child's shared GPU memory and dedicated VRAM now (Windows
-    only; the other providers answer unavailable). Under the QA seam's VRAM
-    values the shared memory reads ``healthy_bytes`` -- the child's healthy
-    level -- plus the tier's threshold. Never raises."""
+    """The CUDA child's shared GPU memory, dedicated VRAM and Total Committed
+    GPU memory now (Windows only; the other providers answer unavailable).
+    Under the QA seam's spill values the shared memory reads
+    ``healthy_bytes`` -- the child's healthy level -- plus the tier's
+    threshold; under ``vram-contention`` the committed memory reads the
+    resident bytes (the real Dedicated and Shared Usage, left alone) plus
+    an eviction past the contention floor. Never raises."""
     if not pid:
         return VramReading(None, None, unavailable="no child")
     try:
         reading = _provider().vram(pid)
     except Exception as exc:
         reading = VramReading(None, None, unavailable=f"{type(exc).__name__}")
-    tier = _FORCED_SPILL_TIERS.get(_forced())
+    forced = _forced()
+    if forced == _FORCED_CONTENTION:
+        if reading.dedicated_bytes is None or reading.shared_bytes is None:
+            return reading
+        return dataclasses.replace(
+            reading,
+            committed_bytes=reading.dedicated_bytes + reading.shared_bytes + _FORCED_EVICTED_BYTES,
+        )
+    tier = _FORCED_SPILL_TIERS.get(forced)
     if tier is None:
         return reading
-    return VramReading(healthy_bytes + tier, reading.dedicated_bytes)
+    return VramReading(
+        healthy_bytes + tier, reading.dedicated_bytes, committed_bytes=reading.committed_bytes
+    )
 
 
 def child_vram_bytes(
