@@ -433,6 +433,7 @@ the card only appears where the setting does something.*
 - [ ] *(win-cuda, Processor only, an SMT CPU — e.g. 8 cores / 16 threads)* The child's command line carries no `--threads`, and with a browser and a game launcher open but idle a 4B model generates at about the speed of `--threads <physical cores>` run by hand (#661: 17.3 tokens/s on a Ryzen 7 7700), never the collapse of `--threads <logical CPUs>` (0.66). Record the generation and the prompt tokens/s, and the core counts.
 - [ ] *(NVIDIA machine)* When I relaunch the app, then the setting is still **Processor only**, inference is still on the processor, and the **Inference engine** card is still there — it is the only way back to Automatic.
 - [ ] *(NVIDIA machine)* When I switch back to **Automatic** and relaunch, then the GPU is used again — the choice is reversible.
+- [ ] *(NVIDIA machine, pinned to Processor only)* When I switch back to **Automatic** without relaunching, then the **Inference engine** card stays on screen, its select greyed out while the backend restarts, and once the backend is back it is still there, enabled, on **Automatic** — never gone until the app is relaunched.
 - [ ] *(Apple Silicon)* When I open Settings on a Mac, then there is no **Inference engine** card at all — the Apple silicon engine is the only one, so the setting would be a no-op.
 
 **Application language**
