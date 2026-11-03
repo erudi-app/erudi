@@ -3,13 +3,14 @@ name: Release
 # Auto-release on a vX.Y.Z tag: each matrix leg builds its PyInstaller backend
 # (native runner — PyInstaller can't cross-compile), compiles the inference binary
 # it needs (Windows/Linux: llama-server from the llama.cpp submodule, both the CPU
-# and the CUDA flavour on the cuda legs; macOS: none, MLX is pip), then electron-builder packages, signs (macOS), and publishes to the SAME
-# GitHub Release (draft). Windows ships TWO auto-update channels on the one release:
-# `latest` (the CPU build, universal — runs on every machine) and `cuda` (the GPU
-# build). Each installed app follows the channel baked into its app-update.yml at
-# build time, so a user picks cpu-vs-cuda once at download and then auto-updates
-# within that channel. CI starts the bundled CPU inference binary (on every leg,
-# the cuda legs included) but can run no
+# and the CUDA flavour on the cuda legs; macOS: none, MLX is pip), then
+# electron-builder packages, signs (macOS), and publishes to the SAME GitHub
+# Release (draft). Windows and Linux each ship TWO auto-update channels on the one
+# release: `latest` (the CPU build, universal — runs on every machine) and `cuda`
+# (the GPU build). Each installed app follows the channel baked into its
+# app-update.yml at build time, so a user picks cpu-vs-cuda once at download and
+# then auto-updates within that channel. On every Windows and Linux leg, the cuda
+# legs included, CI starts the bundled CPU inference binary, but it can run no
 # inference (no GPU runner, and the CUDA binaries need an NVIDIA driver to load at
 # all), so a tag publishes a DRAFT that is QA'd on real hardware before promotion
 # (release.yml only builds + publishes the draft — see docs/dev/release-qa-checklist.md).

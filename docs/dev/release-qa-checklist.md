@@ -106,6 +106,11 @@ then stays on that channel. So QA must, per release:
 >       runs `...\artifacts\llama-cpp\cpu\bin\llama-server.exe`, `backend.log` has no
 >       `falling back to the cuda build` WARNING, and the child holds 0 MiB of
 >       dedicated GPU memory.
+> - [ ] Linux CUDA AppImage, **Processor only**: the same check on a Linux + NVIDIA
+>       machine. `ps -o args= -C llama-server` shows the child running
+>       `.../artifacts/llama-cpp/cpu/bin/llama-server`, `backend.log` has no
+>       `falling back to the cuda build` WARNING, and `nvidia-smi` lists no
+>       `llama-server` process.
 
 ## Promote
 
