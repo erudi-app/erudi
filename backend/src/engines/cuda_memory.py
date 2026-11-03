@@ -20,8 +20,11 @@ window: the engine passes no ``-c`` and fit decides window and layers.
 Division of labour with fit (``common/fit.cpp``, ON by default, b10883):
 Erudi fixes the window (an explicit ``-c`` is never changed by fit) and
 hands fit its margin (``-fitt CUDA_FIT_TARGET_MIB``); fit fixes the layers
-(``-ngl -1``, "auto" while fit is on), measuring the real free memory -- an
-optimistic estimate yields a PARTIAL offload instead of a dead child. Under a
+(``-ngl -1``, "auto" while fit is on), measuring the free memory -- an
+optimistic estimate yields a PARTIAL offload instead of a dead child. On
+Windows that measure (``cudaMemGetInfo``) is the process's WDDM budget, blind
+to other apps: where fit places the layers without a window Erudi sized, the
+margin adds what it overstates against NVML (:func:`fit_target_mib`). Under a
 full offload the RAM neither binds the window nor drives the brake: the KV and
 the compute buffer live on the device, the host keeps clean mapped file pages,
 the fixed CUDA runtime and pinned buffers (the CUDA_Host compute buffer, about
@@ -88,7 +91,9 @@ CUDA_VRAM_BUDGET_FRACTION = 0.90
 # margin as the start value (INFERRED; QA measures the growth).
 CUDA_FREE_MARGIN_BYTES = 1024 * _MIB
 # The per-device margin handed to fit (``-fitt``, MiB): pinned by Erudi rather
-# than left to the upstream default.
+# than left to the upstream default. On Windows, where fit places the layers
+# itself, what CUDA overstates of the free memory is added
+# (:func:`fit_target_mib`).
 CUDA_FIT_TARGET_MIB = 1024
 # The CUDA primary context, cuBLAS workspaces and pool granularity, invisible
 # to llama.cpp's buffer lines (INFERRED).
@@ -133,6 +138,13 @@ CUDA_PREDICTION_MARGIN = 1.1
 CUDA_PREDICTION_SLACK_BYTES = 256 * _MIB
 
 _OFFLOADED_RE = re.compile(r"offloaded (\d+)/(\d+) layers to GPU")
+# llama-server --list-devices (common/arg.cpp, b10883) prints
+# "  CUDA0: <description> (<total> MiB, <free> MiB free)" per device: the
+# figures of ggml_backend_dev_memory, i.e. cudaMemGetInfo, what fit reads. The
+# -lv trace (common_param) prints the same figures padded, "- CUDA0   : ...".
+_LIST_DEVICES_CUDA0_RE = re.compile(
+    r"^\s*(?:-\s*)?CUDA0\s*:.*\((\d+) MiB, (\d+) MiB free\)\s*$", re.MULTILINE
+)
 # llama-context.cpp:546-551 (b10883): what the Flash Attention probe did at
 # context creation, "%s: %s enabled" (INFO) or "... not supported, set to
 # disabled" (WARN).
@@ -432,6 +444,28 @@ def placement_from_tail(tail: Optional[str]) -> Optional[Tuple[int, int]]:
         return None
     offloaded, total = found[-1]
     return int(offloaded), int(total)
+
+
+def list_devices_memory_mib(text: Optional[str]) -> Optional[Tuple[int, int]]:
+    """``(total, free)`` MiB of the first CUDA device in ``llama-server
+    --list-devices`` output -- the one device a child pinned by UUID sees --
+    or None when no such line is there."""
+    if not text:
+        return None
+    found = _LIST_DEVICES_CUDA0_RE.search(text)
+    if found is None:
+        return None
+    return int(found.group(1)), int(found.group(2))
+
+
+def fit_target_mib(*, cuda_free_mib: int, nvml_free_mib: int) -> int:
+    """fit's per-device margin (``-fitt``) on Windows: the base margin plus
+    what CUDA overstates. Under WDDM ``cudaMemGetInfo`` -- the free memory fit
+    plans with -- reports the process's budget, not the card's free memory:
+    #661 read 15172 MiB with or without another app's 10.85 GiB, while NVML
+    read 3561 MiB. fit keeps ``margin`` MiB free of what CUDA reports, so
+    adding the gap makes it plan on NVML's figure. Never under the base."""
+    return CUDA_FIT_TARGET_MIB + max(0, cuda_free_mib - nvml_free_mib)
 
 
 def healthy_shared_bytes(window: int, *, fa_on: bool) -> int:

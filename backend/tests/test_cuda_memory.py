@@ -625,3 +625,51 @@ def test_a_missing_term_is_no_reading(missing):
     }
     terms[missing] = None
     assert cm.gpu_contention(**terms) is None
+
+
+# ===================== fit's margin on Windows: what CUDA reports free =====================
+
+# llama-server --list-devices (common/arg.cpp, b10883):
+#   printf("  %s: %s (%zu MiB, %zu MiB free)\n", name, description, total, free)
+LIST_DEVICES_661 = (
+    "ggml_cuda_init: found 1 CUDA devices:\n"
+    "  Device 0: NVIDIA GeForce RTX 5060 Ti, compute capability 12.0, VMM: yes\n"
+    "Available devices:\n"
+    "  CUDA0: NVIDIA GeForce RTX 5060 Ti (16283 MiB, 15172 MiB free)\n"
+)
+
+
+@pytest.mark.parametrize(
+    "text, expected",
+    [
+        (LIST_DEVICES_661, (16283, 15172)),
+        # #661's -lv 5 trace prints the same figures padded (common_param).
+        ("CUDA0   : NVIDIA GeForce RTX 5060 Ti (16283 MiB, 15172 MiB free)", (16283, 15172)),
+        ("  - CUDA0   : NVIDIA GeForce RTX 5060 Ti (16283 MiB, 15172 MiB free)", (16283, 15172)),
+        # A description with its own parentheses.
+        ("  CUDA0: NVIDIA RTX A2000 (Laptop GPU) (4096 MiB, 3000 MiB free)\n", (4096, 3000)),
+        ("Available devices:\n  (none)\n", None),
+        ("  CUDA1: NVIDIA GeForce RTX 4090 (24564 MiB, 23000 MiB free)\n", None),
+        ("  CUDA0: NVIDIA GeForce RTX 5060 Ti (16283 MiB)\n", None),
+        ("", None),
+        (None, None),
+    ],
+)
+def test_the_list_devices_line_of_the_first_cuda_device_is_parsed(text, expected):
+    assert cm.list_devices_memory_mib(text) == expected
+
+
+@pytest.mark.parametrize(
+    "cuda_free, nvml_free, margin",
+    [
+        # #661: a 10.85 GiB hog; CUDA reports the process's budget, NVML the card.
+        (15172, 3561, 1024 + 11611),
+        # A calm desktop: about today's margin.
+        (15172, 15030, 1024 + 142),
+        # CUDA reporting less than NVML: never under the base margin.
+        (3000, 3561, 1024),
+    ],
+)
+def test_fits_margin_adds_what_cuda_overstates(cuda_free, nvml_free, margin):
+    assert cm.fit_target_mib(cuda_free_mib=cuda_free, nvml_free_mib=nvml_free) == margin
+    assert cm.CUDA_FIT_TARGET_MIB == 1024

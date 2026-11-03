@@ -64,7 +64,10 @@ Inference (llama.cpp compiled with CUDA, a llama-server subprocess):
       the selected GPU's memory at load (cuda_memory); llama.cpp's fit places
       the layers (-ngl -1, "auto" while fit is on) with Erudi's margin
       (-fitt). When the floor window does not fit or the GGUF cannot be
-      modelled, no -c: fit sizes the window and places the layers.
+      modelled, no -c: fit sizes the window and places the layers. On
+      Windows, wherever fit places the layers without a window Erudi sized,
+      the margin adds what CUDA overstates of the free memory against NVML
+      (llama-server --list-devices, run in the child's environment).
     - After load the placement is classified (full or partial offload); on
       Windows a full-offload child carries a memory brake driven by the WDDM
       spill gauge alone -- its Shared GPU memory above its baseline, the
@@ -89,11 +92,13 @@ Note:
 import asyncio
 import dataclasses
 import os
+import subprocess
 import time
 import platform
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from pathlib import Path
 
+from src.core.subprocess_flags import hidden_console_creationflags
 from src.engines import cuda_memory, gguf_memory, memory_brake, memory_pressure
 from src.engines.base_engine import _log_monitor_death, run_reset_shielded
 from src.engines.base_llama_cpp_engine import BaseLlamaCppEngine, LlamaSignals
@@ -108,6 +113,9 @@ _MIB = 1024**2
 # How much of the child's output the post-load checks scan (the offload line,
 # the Flash-Attention WARN).
 _LOAD_TAIL_CHARS = 20000
+# The bound on ``llama-server --list-devices`` before a Windows spawn whose
+# layers fit places (it initializes CUDA and exits; QA measures it).
+LIST_DEVICES_TIMEOUT_S = 10.0
 
 
 class CUDA_Engine(BaseLlamaCppEngine):
@@ -206,6 +214,12 @@ class CUDA_Engine(BaseLlamaCppEngine):
           model): no ``-c``, ``-ngl -1``, the brake off, ONE INFO;
         * NVML sees no GPU: no ``-c``, ``-ngl 0``, the brake off.
 
+        On Windows, where fit places the layers on one GPU without a window
+        Erudi sized for a full offload -- ``ERUDI_CTX`` pinned, the floor
+        that does not fit, a GGUF not modelled or not read -- fit's margin
+        also takes away what CUDA overstates of the free memory
+        (``fit_target_mib``, ``_correct_fit_margin``).
+
         ``-ngl -1`` is "auto" while fit is on (llama.cpp ``common.h:473``);
         at the model level any negative value offloads every layer."""
         ctx: Dict[str, Any] = {"threads": max(1, os.cpu_count() or 1)}
@@ -276,9 +290,11 @@ class CUDA_Engine(BaseLlamaCppEngine):
                         window, **cls._load_facts(model_path, inputs[0], mmproj is not None)
                     )
                 )
+            cls._correct_fit_margin(ctx, device)
             return ctx
         if inputs is None:
             ctx.update(ctx_size=None, window_sized=False)
+            cls._correct_fit_margin(ctx, device)
             return ctx
         shape, weights = inputs
         if brake_cap is None:
@@ -307,6 +323,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
                 f"places the layers; the memory brake is off"
             )
             ctx.update(ctx_size=None, window_sized=False)
+            cls._correct_fit_margin(ctx, device)
             return ctx
         logger.info(
             f"[{cls.__name__}] Window sized at spawn: window={window.window}, "
@@ -367,6 +384,71 @@ class CUDA_Engine(BaseLlamaCppEngine):
             "tok_embd_bytes": tensors.tok_embd_bytes if tensors else None,
             "exps_bytes": tensors.exps_bytes if tensors else None,
         }
+
+    @classmethod
+    def _correct_fit_margin(cls, ctx: Dict[str, Any], device: cuda_memory.DeviceMemory) -> None:
+        """On Windows, hand fit a margin that takes away what CUDA
+        overstates of the free memory (``ctx["fit_target_mib"]``, passed as
+        ``-fitt``). Under WDDM ``cudaMemGetInfo`` -- fit's free memory --
+        reports the process's budget whatever another app holds (#661:
+        15172 MiB beside a 10.85 GiB hog, NVML 3561), so fit placed every
+        layer and a full window on a crowded card and the child thrashed.
+        The CUDA figure is ``llama-server --list-devices`` run just before
+        the spawn, with the same binary and the child's exact environment
+        (its pinned GPU, its PATH); NVML's is the free memory the spawn
+        context was sized against. ONE INFO with both and the margin. When
+        the CUDA figure cannot be read (the run fails, times out or prints
+        no CUDA0 line) the margin assumes the most CUDA can report, the
+        card's total: ONE WARNING. Linux reads the card's real free memory:
+        nothing to correct."""
+        if not cls._host_is_windows():
+            return
+        nvml_free_mib = device.free_bytes // _MIB
+        try:
+            argv = [str(cls._find_llama_server(cls._default_install_dir())), "--list-devices"]
+            output = cls._run_list_devices(argv, cls._build_spawn_env(**ctx))
+            listed = cuda_memory.list_devices_memory_mib(output)
+            reason = None if listed is not None else "no CUDA0 line"
+        except Exception as exc:
+            listed, reason = None, type(exc).__name__
+        if listed is None:
+            total_mib = device.total_bytes // _MIB
+            margin = cuda_memory.fit_target_mib(
+                cuda_free_mib=total_mib, nvml_free_mib=nvml_free_mib
+            )
+            logger.warning(
+                f"[{cls.__name__}] CUDA's free memory unreadable (llama-server --list-devices: "
+                f"{reason}); fit's margin assumes the whole card is reported free: "
+                f"vram_total_mib={total_mib}, nvml_free_mib={nvml_free_mib}, "
+                f"fit_target_mib={margin}"
+            )
+        else:
+            margin = cuda_memory.fit_target_mib(
+                cuda_free_mib=listed[1], nvml_free_mib=nvml_free_mib
+            )
+            logger.info(
+                f"[{cls.__name__}] fit's margin set from the free memory CUDA reports: "
+                f"cuda_free_mib={listed[1]}, nvml_free_mib={nvml_free_mib}, "
+                f"fit_target_mib={margin}"
+            )
+        ctx["fit_target_mib"] = margin
+
+    @staticmethod
+    def _run_list_devices(argv: List[str], env: Dict[str, str]) -> str:
+        """``llama-server --list-devices``'s output (both streams): it prints
+        each device's memory as ``cudaMemGetInfo`` reports it and exits, no
+        model loaded. Bounded by ``LIST_DEVICES_TIMEOUT_S``; raises when the
+        binary cannot run or the bound passes."""
+        result = subprocess.run(
+            argv,
+            env=env,
+            capture_output=True,
+            text=True,
+            errors="replace",
+            timeout=LIST_DEVICES_TIMEOUT_S,
+            creationflags=hidden_console_creationflags(),
+        )
+        return (result.stdout or "") + (result.stderr or "")
 
     @classmethod
     def _respawn_context(
@@ -466,6 +548,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
         ctx_size: Optional[int] = None,
         threads: int = 1,
         gpu_layers: int = -1,
+        fit_target_mib: int = cuda_memory.CUDA_FIT_TARGET_MIB,
         **_ignored: Any,
     ) -> List[Any]:
         """CUDA CLI for llama-server: the window and the layers the spawn
@@ -478,8 +561,9 @@ class CUDA_Engine(BaseLlamaCppEngine):
         load; ``_read_server_properties`` reads the allocated value back
         after the probe. ``-ngl`` is ``-1`` (auto: fit places the layers),
         ``-2`` (all: a Windows brake respawn) or ``0`` (no GPU). ``-fitt``
-        pins fit's per-device margin to ``CUDA_FIT_TARGET_MIB`` on every
-        spawn.
+        pins fit's per-device margin: ``CUDA_FIT_TARGET_MIB``, plus what
+        CUDA overstates of the free memory on a Windows spawn whose layers
+        fit places (``fit_target_mib``, ``_correct_fit_margin``).
 
         ``--jinja`` enables the model's own chat template and with it
         OpenAI-style function calling (the agent's calculator tool) —
@@ -517,7 +601,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
             "-ngl",
             str(gpu_layers),
             "-fitt",
-            str(cuda_memory.CUDA_FIT_TARGET_MIB),
+            str(fit_target_mib),
             "--jinja",
         ]
         return argv

@@ -179,6 +179,8 @@ class _World:
         self.committed_available = True
         self.device_free_unreadable = False
         self.free_reads = []
+        self.cuda_free = None
+        self.list_devices_runs = 0
         self.sized = 0
         self._ports = iter(range(27201, 27299))
         self._pids = iter(range(5000, 5100))
@@ -228,6 +230,24 @@ class _World:
             return None if world.device_free_unreadable else world.free
 
         monkeypatch.setattr(CUDA_Engine, "_read_device_free", classmethod(_read_device_free))
+
+        # ``llama-server --list-devices`` on the spawn paths where fit places
+        # the layers (Windows): CUDA reports the process's WDDM budget,
+        # ``cuda_free`` (the free NVML reads unless a test says otherwise).
+        def _run_list_devices(cls, argv, env):
+            world.list_devices_runs += 1
+            free_mib = (world.cuda_free if world.cuda_free is not None else world.free) // MIB
+            return (
+                f"  CUDA0: NVIDIA GeForce RTX 5060 Ti "
+                f"({world.vram_total // MIB} MiB, {free_mib} MiB free)\n"
+            )
+
+        monkeypatch.setattr(CUDA_Engine, "_run_list_devices", classmethod(_run_list_devices))
+        monkeypatch.setattr(
+            CUDA_Engine,
+            "_find_llama_server",
+            classmethod(lambda cls, install_dir=None: Path("/bin/llama-server")),
+        )
 
         def _read_vram_info(cls):
             world.nvml_reads += 1
@@ -1312,6 +1332,37 @@ async def test_the_contention_monitor_runs_on_windows_only(monkeypatch, os_name,
         await CUDA_Engine.stop_pressure_task()
     assert CUDA_Engine._contention_task is None
     assert CUDA_Engine._pressure_task is None
+
+
+# ===================== fit's margin on Windows =====================
+
+
+def test_a_hog_first_floor_load_hands_fit_the_real_free_memory(windows, caplog):
+    """#661: a 10.85 GiB hog left 3561 MiB free (NVML); CUDA reported 15172
+    to fit, which loaded 37/37 layers and a 40960 window and thrashed. The
+    margin now takes away what CUDA overstates: fit sees ~3.5 GiB."""
+    windows.vram_total = 16283 * MIB
+    windows.free = 3561 * MIB
+    windows.cuda_free = 15172 * MIB
+    windows.inputs = (QWEN3, int(7.5 * GIB))
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        handle = _load(windows)
+    spawn = windows.spawns[0]
+    assert spawn.get("ctx_size") is None
+    assert spawn["fit_target_mib"] == 1024 + 15172 - 3561
+    assert windows.list_devices_runs == 1
+    assert handle["window_sized"] is False
+    # Observability only: the margin is not a handle key.
+    assert "fit_target_mib" not in handle
+
+
+def test_a_sized_load_and_its_brake_respawn_never_run_list_devices(windows):
+    _load(windows)
+    windows.spill = 2 * GIB
+    CUDA_Engine.brake_point("turn_start", llm_id=7)
+    assert len(windows.spawns) == 2
+    assert windows.list_devices_runs == 0
+    assert all("fit_target_mib" not in spawn for spawn in windows.spawns)
 
 
 # ===================== the OOM retry at load =====================

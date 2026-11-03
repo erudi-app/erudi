@@ -520,9 +520,31 @@ engine's (`gguf_memory`). The window is passed with `-ngl -1 -fitt 1024`.
 **Division of labour with fit.** Erudi fixes the window: fit never changes an explicit
 `-c`, and the brake's cap, the window memory, `/context` and the compaction threshold all
 read it. Fit fixes the layers: `-ngl -1` is "auto" only while fit is on (at the model
-level a negative value means ALL layers, `llama.h:320`), and fit measures the real free
-memory (`cudaMemGetInfo`) with the margin Erudi hands it (`-fitt 1024`), so an
-optimistic estimate yields a partial offload instead of a dead child.
+level a negative value means ALL layers, `llama.h:320`), and fit measures the free
+memory (`cudaMemGetInfo`) with the margin Erudi hands it (`-fitt`), so an optimistic
+estimate yields a partial offload instead of a dead child.
+
+**fit's margin on Windows.** Under WDDM `cudaMemGetInfo` reports the process's budget,
+not the card's free memory: #661 read 15172 MiB on a 16 GB card with or without another
+app's 10.85 GiB (NVML: 3561 MiB), so fit kept every layer and a 40960 window on a card
+with 3.6 GB left, and the child thrashed. On every Windows spawn where fit places the
+layers on one GPU without a window Erudi sized for a full offload — the 4096 floor does
+not fit, a GGUF not modelled (MLA) or not read, `ERUDI_CTX` pinned —
+`CUDA_Engine._correct_fit_margin` runs the same `llama-server` with `--list-devices`
+just before the spawn, in the child's exact environment (its `CUDA_VISIBLE_DEVICES`
+pin, its `PATH`), and reads `CUDA0: <name> (<total> MiB, <free> MiB free)` — the very
+figure fit plans with. The margin becomes `1024 + max(0, CUDA free − NVML free)`
+(`cuda_memory.fit_target_mib`, NVML's being the free memory the spawn context was sized
+against, so `ERUDI_VRAM_OVERRIDE_GB` feeds it): fit then plans on NVML's figure and
+places the layers, a multimodal projector and MoE experts as it always does. #661's
+hog-first load gets `-fitt 12635`; a calm desktop about `-fitt 1166` (today's margin).
+One INFO, `fit's margin set from the free memory CUDA reports: cuda_free_mib=...,
+nvml_free_mib=..., fit_target_mib=...`. When `--list-devices` fails, times out (10 s,
+`LIST_DEVICES_TIMEOUT_S`) or prints no `CUDA0` line, the margin assumes the most CUDA
+can report, the card's total — `1024 + (total − NVML free)` — with one WARNING. The
+sized full offload and the `-ngl -2` brake respawn keep `-fitt 1024`: Erudi sized
+their window from NVML. Linux keeps `-fitt 1024` everywhere: there `cudaMemGetInfo` is
+the card's real free memory.
 
 **The spawn matrix.**
 
@@ -530,8 +552,9 @@ optimistic estimate yields a partial offload instead of a dead child.
 |---|---|---|
 | Sized load | `-c W -ngl -1 -fitt 1024` | On (`window_sized`), pending the placement below |
 | Brake respawn (Windows only: a spill is what drives it) | `-c min(static window, max(4096, cap)) -ngl -2 -fitt 1024`: nothing re-read; fit cannot change an explicit `-ngl` and keeps every layer on the device, where WDDM spills instead of failing | On, its state carried |
-| `ERUDI_CTX` pinned | `-c ERUDI_CTX -ngl -1 -fitt 1024` | Sampled, never resized; off (one INFO) when the allocated window stays unknown (`ERUDI_CTX=0` lets llama-server pick it, and `/props` failed) |
-| Floor unfit, MLA, GGUF or NVML unreadable | No `-c`, `-ngl -1 -fitt 1024`: fit sizes the window and places the layers (one WARNING) | Off (`window_sized=False`): never sampled |
+| `ERUDI_CTX` pinned | `-c ERUDI_CTX -ngl -1 -fitt 1024`; on Windows `-fitt 1024 + (CUDA free − NVML free)` | Sampled, never resized; off (one INFO) when the allocated window stays unknown (`ERUDI_CTX=0` lets llama-server pick it, and `/props` failed) |
+| Floor unfit, MLA, GGUF unreadable | No `-c`, `-ngl -1 -fitt 1024`, on Windows `-fitt 1024 + (CUDA free − NVML free)`: fit sizes the window and places the layers (one WARNING) | Off (`window_sized=False`): never sampled |
+| NVML unreadable | No `-c`, `-ngl -1 -fitt 1024`: fit sizes the window and places the layers on its own figures (one WARNING) | Off |
 | The user's `CUDA_VISIBLE_DEVICES` names several GPUs | No `-c`, `-ngl -1 -fitt 1024`: llama.cpp splits the layers across the cards, which a one-card sizing and measurement cannot model (one INFO) | Off |
 | NVML sees no GPU | No `-c`, `-ngl 0` (one WARNING) | Off |
 
