@@ -33,6 +33,7 @@ from src.domains.llms import repository as llm_repo_mod
 from src.domains.llms import services as llm_services
 from src.domains.llms.services import DownloadCancelled, DownloadTracker, make_callback
 from src.entities.DownloadJob import DownloadJobModel
+from tests._helpers import FakeDownloadQuery
 
 SHARDS = [f"model-0000{i}-of-00003.safetensors" for i in (1, 2, 3)]
 
@@ -213,12 +214,7 @@ class TestDownloadLlmCancelledMidTransfer:
 def _session_with(monkeypatch, job_row, llm_row):
     session = MagicMock()
 
-    def query(model):
-        q = MagicMock()
-        q.get.return_value = job_row if model is DownloadJobModel else llm_row
-        return q
-
-    session.query.side_effect = query
+    session.query.side_effect = lambda model: FakeDownloadQuery(model, job_row, llm_row)
     monkeypatch.setattr(llm_endpoints, "SessionLocal", lambda: session)
     return session
 
@@ -304,6 +300,7 @@ class _RealDownload:
         self.gate_calls: list[str] = []
         self.flushed = threading.Event()
         self.canceller = None
+        self.cancel_errors: list[Exception] = []
         monkeypatch.setattr(
             config,
             "LLM_Engine",
@@ -353,9 +350,14 @@ class _RealDownload:
 
         def run():
             with self.Session() as db:
-                llm_services.cancel_download_job(
-                    self.job_id, Download_Job_Repository(db), Llm_Repository(db), db
-                )
+                try:
+                    llm_services.cancel_download_job(
+                        self.job_id, Download_Job_Repository(db), Llm_Repository(db), db
+                    )
+                except Exception as exc:
+                    # The cancel endpoint rolls back and answers an error.
+                    db.rollback()
+                    self.cancel_errors.append(exc)
 
         self.canceller = threading.Thread(target=run)
         self.canceller.start()
@@ -463,6 +465,74 @@ class TestCancelRacingTheDownloadTask:
             if f"Download job {real_download.job_id} was cancelled" in r.getMessage()
         ]
         assert said == [logging.INFO]
+
+    def test_a_cancel_that_failed_after_stopping_the_transfer_still_ends_the_job(
+        self, real_download, monkeypatch, caplog
+    ):
+        """The cancel endpoint stopped the transfer (tracker flagged), then
+        failed and rolled back: the job must not stay ``running`` until the
+        next boot. The task records the cancel itself."""
+
+        def delete_fails(self, llm):
+            raise RuntimeError("database went away")
+
+        monkeypatch.setattr(llm_repo_mod.Llm_Repository, "delete", delete_fails)
+        real_download.hub_cancelled_mid_shard()
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            real_download.run()
+
+        assert len(real_download.cancel_errors) == 1
+        assert real_download.job().status == "cancelled"
+        assert real_download.gate_calls == []
+        assert _errors(caplog) == []
+
+    def test_a_failure_on_a_vanished_job_row_is_still_an_error(
+        self, real_download, monkeypatch, caplog
+    ):
+        """No row to mark failed is not a cancel: the failure is recorded."""
+        monkeypatch.setattr(llm_endpoints, "download_llm", _transferred)
+
+        def gate_on_a_vanished_row(path):
+            with real_download.Session() as s:
+                s.delete(s.get(DownloadJobModel, real_download.job_id))
+                s.commit()
+            real_download.gate(path)
+
+        monkeypatch.setattr(config.LLM_Engine, "validate_local_artifact", gate_on_a_vanished_row)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            real_download.run()
+
+        (error,) = _errors(caplog)
+        assert f"Download job {real_download.job_id} failed" in error.getMessage()
+        assert error.exc_info is not None
+
+    def test_a_cancel_committed_during_the_finish_is_never_overwritten_by_completed(
+        self, real_download, monkeypatch, caplog
+    ):
+        """The integrity gate passed while the user's cancel ran to its
+        commit: the job stays cancelled, and nothing says it completed."""
+        monkeypatch.setattr(llm_endpoints, "download_llm", _transferred)
+
+        def gate_passes_while_a_cancel_commits(path):
+            real_download.cancel_now()
+            real_download.canceller.join(5)
+
+        monkeypatch.setattr(
+            config.LLM_Engine, "validate_local_artifact", gate_passes_while_a_cancel_commits
+        )
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            real_download.run()
+
+        assert real_download.cancel_errors == []
+        assert real_download.job().status == "cancelled"
+        assert _errors(caplog) == []
+        messages = [r.getMessage() for r in caplog.records]
+        assert not any("completed successfully" in m for m in messages)
+        said = [m for m in messages if f"Download job {real_download.job_id} was cancelled" in m]
+        assert len(said) == 1
 
     def test_a_genuine_integrity_failure_is_one_error_and_fails_the_job(
         self, real_download, monkeypatch, caplog

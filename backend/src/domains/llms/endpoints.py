@@ -200,6 +200,25 @@ def _assert_downloaded_artifact_ok(final_save_dir, temp_save_dir) -> None:
         raise
 
 
+def _write_job_unless_cancelled(session, job_id: int, values: dict) -> int:
+    """UPDATE the job row with ``values`` unless it is ``cancelled``; the
+    number of rows written. A row the cancel endpoint has flushed but not
+    committed holds its lock: the UPDATE waits for that commit, then skips
+    it."""
+    return (
+        session.query(DownloadJobModel)
+        .filter(DownloadJobModel.id == job_id, DownloadJobModel.status != "cancelled")
+        .update(values, synchronize_session=False)
+    )
+
+
+def _job_cancelled(session, job_id: int) -> bool:
+    """Whether the job row reads ``cancelled`` now (a column read, never the
+    session's cached object). False when the row is gone."""
+    row = session.query(DownloadJobModel.status).filter(DownloadJobModel.id == job_id).one_or_none()
+    return row is not None and row.status == "cancelled"
+
+
 def _run_download_task(
     model_link: str, model_id: int, temp_save_dir, final_save_dir, job_id: int
 ) -> None:
@@ -210,9 +229,11 @@ def _run_download_task(
     A cancel is the cancel endpoint's: it flags the transfer's tracker, flushes
     ``cancelled`` and commits only after its cleanup, so until then this session
     reads ``running`` (READ COMMITTED). The task therefore takes the cancel from
-    ``download_llm`` itself (``DownloadCancelled``), and a failure is written only
-    over a row that is not ``cancelled`` -- a conditional UPDATE that waits for a
-    cancel in flight to commit and then leaves it alone."""
+    ``download_llm`` itself (``DownloadCancelled``), and ``completed`` or
+    ``failed`` is written only over a row that is not ``cancelled``
+    (``_write_job_unless_cancelled``). A cancel that stopped the transfer and
+    then failed (rolled back) leaves the row ``running``: the task records the
+    cancel itself."""
     from src.domains.llms.repository import (
         detect_supports_tools,
         detect_supports_vision,
@@ -284,8 +305,18 @@ def _run_download_task(
                         f"leaving the catalog estimate in place: {e}",
                         exc_info=True,
                     )
-            job_obj.status = "completed"
-            job_obj.progress = 100.0
+            # Never over a cancel committed meanwhile (the cancel removed the
+            # files and the model row): then nothing is finalized.
+            if not _write_job_unless_cancelled(
+                session, job_id, {"status": "completed", "progress": 100.0}
+            ):
+                session.rollback()
+                if not _job_cancelled(session, job_id):
+                    raise DownloadJobNotFoundException(job_id)
+                logger.info(
+                    f"Download job {job_id} was cancelled while finishing; nothing finalized"
+                )
+                return
             session.commit()
 
             # Best-effort enrichment. A failure here leaves the model usable with
@@ -327,36 +358,50 @@ def _run_download_task(
     except DownloadCancelled:
         # The user cancelled during the transfer (#377): the cancel endpoint
         # owns the row and the cleanup; nothing to finalize, nothing failed.
-        logger.info(f"Download job {job_id} was cancelled during transfer; nothing finalized")
-    except Exception as e:
-        # Never over a cancel: the UPDATE skips a cancelled row, and one the
-        # cancel endpoint has flushed but not committed holds its row lock, so
-        # the UPDATE waits for that commit and then skips it too.
-        unmarked = ""
+        # If it failed after stopping the transfer (it rolled back), the row
+        # still reads ``running``: record the cancel here, or the job stays
+        # running until the next boot. A cancel in flight holds the row lock:
+        # the UPDATE waits for its commit and then finds nothing to do.
         try:
             session.rollback()
-            failed = (
-                session.query(DownloadJobModel)
-                .filter(DownloadJobModel.id == job_id, DownloadJobModel.status != "cancelled")
-                .update({"status": "failed", "error_message": str(e)}, synchronize_session=False)
-            )
+            session.query(DownloadJobModel).filter(
+                DownloadJobModel.id == job_id, DownloadJobModel.status == "running"
+            ).update({"status": "cancelled"}, synchronize_session=False)
+            session.commit()
+        except Exception:
+            # The task boundary: the cancel's job row is left as it was.
+            logger.exception(f"Download job {job_id} was cancelled; its row could not be updated")
+        else:
+            logger.info(f"Download job {job_id} was cancelled during transfer; nothing finalized")
+    except Exception as e:
+        # Never over a cancel (``_write_job_unless_cancelled``). Nothing
+        # written means a cancel only if the row reads ``cancelled``; a row
+        # that is gone is still a failure to report.
+        cancelled, unmarked = False, ""
+        try:
+            session.rollback()
+            if not _write_job_unless_cancelled(
+                session, job_id, {"status": "failed", "error_message": str(e)}
+            ):
+                cancelled = _job_cancelled(session, job_id)
+                unmarked = "" if cancelled else " (the job row is gone)"
             session.commit()
         except Exception as db_error:
             # The row could not be written: the download's failure is still
             # the record below, which says so.
-            failed, unmarked = 1, f" (the job row could not be marked failed: {db_error})"
-        if failed:
-            # The task boundary: nobody awaits a BackgroundTask, so this is the
-            # record of the failed download, with the model and the traceback.
-            logger.exception(
-                f"Download job {job_id} failed for LLM {model_id} ({model_link}): {e}{unmarked}"
-            )
-        else:
+            unmarked = f" (the job row could not be marked failed: {db_error})"
+        if cancelled:
             # The user cancelled while the job was finishing (the files the
             # cancel removed are what failed): no failure to report.
             logger.info(
                 f"Download job {job_id} was cancelled while finishing; nothing finalized "
                 f"({type(e).__name__} not reported)"
+            )
+        else:
+            # The task boundary: nobody awaits a BackgroundTask, so this is the
+            # record of the failed download, with the model and the traceback.
+            logger.exception(
+                f"Download job {job_id} failed for LLM {model_id} ({model_link}): {e}{unmarked}"
             )
     finally:
         session.close()

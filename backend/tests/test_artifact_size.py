@@ -23,6 +23,7 @@ from src.core import config
 from src.domains.knowledge_base.repository import COPIED_FIELDS
 from src.domains.llms.schemas import LLMResponse
 from src.entities.Llm import Llm
+from tests._helpers import FakeDownloadQuery
 
 
 # ---------------------------------------------------------------- unit: API + entity
@@ -102,16 +103,9 @@ class TestDownloadCompletionRecordsTheRealBytes:
             status="running",
         )
 
-        class _Query:
-            def __init__(self, obj):
-                self._obj = obj
-
-            def get(self, _id):
-                return self._obj
-
         class _Session:
             def query(self, model):
-                return _Query(job if model is DownloadJobModel else llm)
+                return FakeDownloadQuery(model, job, llm)
 
             def commit(self):
                 pass

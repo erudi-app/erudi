@@ -23,6 +23,7 @@ from src.core import config
 from src.core.exceptions import EngineException
 from src.engines import integrity
 from src.utils.hf_model_metadata import measure_dir_size_gb
+from tests._helpers import FakeDownloadQuery
 
 pytestmark = pytest.mark.unit
 
@@ -289,18 +290,14 @@ class TestDownloadCompletionSize:
             status="running",
         )
 
-        class _FakeQuery:
-            def __init__(self, obj):
-                self._obj = obj
-
-            def get(self, _id):
-                return self._obj
-
         class _FakeSession:
             def query(self, model):
-                return _FakeQuery(job if model is DownloadJobModel else llm)
+                return FakeDownloadQuery(model, job, llm)
 
             def commit(self):
+                pass
+
+            def rollback(self):
                 pass
 
             def close(self):
@@ -374,16 +371,9 @@ class TestDownloadCompletionSize:
         # that is exactly what the UI's next poll would render.
         seen = {}
 
-        class _FakeQuery:
-            def __init__(self, obj):
-                self._obj = obj
-
-            def get(self, _id):
-                return self._obj
-
         class _FakeSession:
             def query(self, model):
-                return _FakeQuery(job if model is DownloadJobModel else llm)
+                return FakeDownloadQuery(model, job, llm)
 
             def commit(self):
                 if job.status == "completed" and "at_completion" not in seen:

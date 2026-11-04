@@ -100,3 +100,41 @@ class ToolableFakeChatModel(GenericFakeChatModel):
                     ],
                 )
             )
+
+
+class FakeDownloadQuery:
+    """In-memory stand-in for the queries the download task runs
+    (``_run_download_task``) over one job row and one model row: ``get``
+    returns the row, and the job's conditional UPDATE (``filter`` on
+    ``status``, then ``update``) and its column read (``one_or_none``) apply
+    to the job row the way Postgres would."""
+
+    def __init__(self, model, job, llm):
+        from src.entities.DownloadJob import DownloadJobModel
+
+        self._job, self._llm = job, llm
+        self._is_job = model is DownloadJobModel or (
+            getattr(model, "class_", None) is DownloadJobModel
+        )
+        self._criteria = []
+
+    def get(self, _id):
+        return self._job if self._is_job else self._llm
+
+    def filter(self, *criteria):
+        self._criteria.extend(criteria)
+        return self
+
+    def update(self, values, **_):
+        for criterion in self._criteria:
+            key = criterion.left.key
+            if key != "id" and not criterion.operator(
+                getattr(self._job, key), criterion.right.value
+            ):
+                return 0
+        for key, value in values.items():
+            setattr(self._job, key, value)
+        return 1
+
+    def one_or_none(self):
+        return self._job
