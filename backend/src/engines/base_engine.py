@@ -209,6 +209,8 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         _tokenizer: Currently loaded tokenizer instance.
         _model_id: ID of the currently loaded model.
         _last_used: Timestamp of last model access for cleanup tracking.
+        _generation_ended_at: ``time.monotonic()`` when the last generation
+            released the lock (immune to a wall-clock jump).
         _cleanup_task: Async task monitoring idle time.
         _max_idle_time: Seconds before automatic memory cleanup (default: 300).
         MODEL_MAPPING: Dictionary mapping model architectures to classes.
@@ -241,6 +243,7 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     _tokenizer: Optional[Any] = None
     _model_id: Optional[int] = None
     _last_used: Optional[datetime] = None
+    _generation_ended_at: Optional[float] = None
 
     # Serializes a full generation (model resolution + stream) on the
     # single-model engine. Lazily created and rebound per running loop so each
@@ -1049,6 +1052,7 @@ class BaseEngine(ABC, metaclass=EngineMeta):
             finally:
                 # Restart the idle clock from the end of the generation.
                 cls._last_used = datetime.now()
+                cls._generation_ended_at = time.monotonic()
                 held_ms = (time.perf_counter() - held_start_s) * 1000
                 logger.info(
                     f"[{cls.__name__}] generation_guard released "

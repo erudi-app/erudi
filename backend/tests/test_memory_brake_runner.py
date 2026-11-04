@@ -433,6 +433,39 @@ async def test_the_gpu_contention_warning_is_said_again_while_it_lasts(monkeypat
         ]
 
 
+async def test_a_tick_at_the_turn_end_never_takes_the_gpu_contention_warning(monkeypatch):
+    """A regression guard on the ordering, not the #661 fix (that is the
+    engine's settle delay, pinned in test_cuda_brake_engine): a contention
+    tick queued on the generation lock during the turn runs only once the
+    turn releases it, so the turn-end check, under the lock, still reads the
+    turn-start reading and the warning goes out."""
+    import asyncio
+
+    _answer(monkeypatch)
+    _patch_budget(monkeypatch, _StubBudget(ceiling=16_000))
+    _BrakeEngine.contention = _contended()
+    ticks = []
+
+    async def _tick():
+        async with _BrakeEngine._acquire_generation_lock():
+            _BrakeEngine.contention = _contended(active=False)
+
+    def _pending(cls, llm_id):
+        # Inside the turn's generation guard, on the event loop.
+        ticks.append(asyncio.get_running_loop().create_task(_tick()))
+        return False
+
+    monkeypatch.setattr(_BrakeEngine, "brake_reload_pending", classmethod(_pending))
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+    await ticks[0]
+
+    assert [e for e in events if e["t"] == "memory_warning"] == [
+        {"t": "memory_warning", "reason": "gpu_contention"}
+    ]
+    assert _BrakeEngine.contention["active"] is False
+
+
 async def test_an_ended_contention_lets_the_bound_criterion_decide(monkeypatch):
     _answer(monkeypatch)
     _patch_budget(monkeypatch, _StubBudget(ceiling=10))

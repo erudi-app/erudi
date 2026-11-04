@@ -29,10 +29,10 @@ from src.domains.conversations.schemas import ConversationCreate
 from src.domains.conversations.services import ConversationService
 from src.domains.llms import endpoints as llm_endpoints
 from src.entities.Conversation import Conversation
-from src.entities.DownloadJob import DownloadJobModel
 from src.entities.Llm import Llm
 from src.engines.base_engine import BaseEngine
 from tests._helpers import ToolableFakeChatModel
+from tests._helpers import FakeDownloadQuery
 from langchain_core.messages import AIMessage
 
 pytestmark = pytest.mark.integration
@@ -428,9 +428,7 @@ class TestDownloadCarriesHints:
             supports_vision=None,
         )
         session = MagicMock()
-        session.query.side_effect = lambda model: SimpleNamespace(
-            get=lambda _id: job if model is DownloadJobModel else llm
-        )
+        session.query.side_effect = lambda model: FakeDownloadQuery(model, job, llm)
         monkeypatch.setattr(llm_endpoints, "SessionLocal", lambda: session)
 
         async def ok_download(**kwargs):

@@ -253,7 +253,6 @@ a = Analysis(
         "multiprocessing.util",
         "multiprocessing.managers",
         "asyncio",
-        "pkg_resources",
         "importlib_metadata",
         "email.mime.multipart",
         "email.mime.text",

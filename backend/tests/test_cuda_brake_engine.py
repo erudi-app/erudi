@@ -355,6 +355,7 @@ def _reset():
     CUDA_Engine._tokenizer = None
     CUDA_Engine._model_id = None
     CUDA_Engine._last_used = None
+    CUDA_Engine._generation_ended_at = None
     CUDA_Engine._brake_reload = None
     CUDA_Engine._brake_sensor_warned = False
     CUDA_Engine._window_memory = {}
@@ -1383,6 +1384,97 @@ async def test_the_contention_tick_samples_under_the_lock_only_while_active(wind
     # Over: the next tick takes nothing.
     await CUDA_Engine._contention_tick()
     assert lock.taken == 1
+
+
+def _ended_ago(seconds):
+    """The last generation released the lock ``seconds`` ago."""
+    CUDA_Engine._generation_ended_at = time.monotonic() - seconds
+
+
+def _paged_back_in(world):
+    """#661: the turn just paged the child back in; the hog still holds the
+    card (evicted 0, 164 MiB free)."""
+    _squeeze(world, evicted=0, free=164 * MIB)
+
+
+async def test_a_tick_queued_during_a_turn_samples_nothing_at_its_end(windows, caplog):
+    """#661: under the hog, the tick queued on the generation lock during
+    the turn, got it the moment the turn released it and read the child the
+    turn had just paged back in -- "ended" 4 ms before the turn's end, and
+    the page's poll hid the notice. The real lock and the real stamp: the
+    tick that runs at the turn end reads nothing, the contention goes on."""
+    import asyncio
+
+    _load(windows)
+    _squeeze(windows)
+    CUDA_Engine.brake_point("turn_start", llm_id=7)
+    assert _contention() is True
+    reads = len(windows.free_reads)
+    caplog.clear()
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        async with CUDA_Engine.generation_guard():
+            tick = asyncio.create_task(CUDA_Engine._contention_tick())
+            await asyncio.sleep(0)
+            assert not tick.done()
+            _paged_back_in(windows)
+        await tick
+    assert _contention() is True
+    assert len(windows.free_reads) == reads
+    assert not _records(caplog, "GPU contention")
+
+
+@pytest.mark.parametrize("point", ["idle", "turn_start"])
+def test_no_contention_sample_within_the_settle_delay_of_a_turn(windows, point):
+    """Every contention sample, not only the tick's: a turn that ended
+    seconds ago left the child paged in, whatever reads it next."""
+    _load(windows)
+    _squeeze(windows)
+    CUDA_Engine.brake_point("idle")
+    before = dict(CUDA_Engine.gpu_contention_state())
+    reads = len(windows.free_reads)
+    _paged_back_in(windows)
+    _ended_ago(CUDA_Engine._contention_settle_s - 2)
+    CUDA_Engine.brake_point(point, llm_id=7)
+    assert CUDA_Engine.gpu_contention_state() == before
+    assert len(windows.free_reads) == reads
+
+
+async def test_the_tick_samples_once_the_settle_delay_is_over(windows):
+    """Past the settle delay the idle child is re-evicted while the hog
+    lasts; once it is gone the card has room again: the tick reads it."""
+    _load(windows)
+    _squeeze(windows)
+    CUDA_Engine.brake_point("idle")
+    _squeeze(windows, evicted=3712 * MIB, free=10472 * MIB)
+    _ended_ago(CUDA_Engine._contention_settle_s + 1)
+    await CUDA_Engine._contention_tick()
+    assert _contention() is False
+
+
+def test_the_settle_delay_runs_on_the_monotonic_clock(windows, monkeypatch):
+    """The wall clock went back an hour since the turn ended (DST, NTP):
+    the settle delay is still over once 16 monotonic seconds have passed."""
+    _load(windows)
+    _squeeze(windows)
+    CUDA_Engine.brake_point("idle")
+    _paged_back_in(windows)
+    CUDA_Engine._generation_ended_at = 1000.0
+    CUDA_Engine._last_used = datetime.now() + timedelta(hours=1)
+    monkeypatch.setattr(time, "monotonic", lambda: 1000.0 + 2)
+    CUDA_Engine.brake_point("idle")
+    assert _contention() is True
+    monkeypatch.setattr(time, "monotonic", lambda: 1000.0 + CUDA_Engine._contention_settle_s + 1)
+    CUDA_Engine.brake_point("idle")
+    assert _contention() is False
+
+
+async def test_the_generation_guard_stamps_its_end_on_the_monotonic_clock():
+    before = time.monotonic()
+    async with CUDA_Engine.generation_guard():
+        assert CUDA_Engine._generation_ended_at is None or (
+            CUDA_Engine._generation_ended_at < before
+        )
+    assert before <= CUDA_Engine._generation_ended_at <= time.monotonic()
 
 
 @pytest.mark.parametrize("os_name, started", [("Windows", True), ("Linux", False)])

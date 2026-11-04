@@ -7,6 +7,7 @@ automated check that the swap reached them.
 """
 
 import pathlib
+import re
 
 import pytest
 
@@ -112,6 +113,15 @@ def test_all_specs_pin_lazy_langchain_stacks():
         spec = _read(name)
         for entry in needed:
             assert entry in spec, f"{name} must hidden-import {entry} (#160)"
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("name", ["backend.spec", "backend-mac-silicon.spec", "backend-cpu.spec"])
+def test_no_spec_hidden_imports_pkg_resources(name):
+    # Nothing in the backend or its runtime dependencies imports it, and a
+    # build environment whose setuptools no longer ships it turned the entry
+    # into `ERROR: Hidden import 'pkg_resources' not found` in the build log.
+    assert not re.search(r"[\"']pkg_resources[\"']", _read(name))
 
 
 @pytest.mark.unit
