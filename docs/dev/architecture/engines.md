@@ -715,9 +715,14 @@ The gauge samples every live child pinned to one GPU (`gpu_uuid`: not the
 several-GPU, NVML-unreadable or no-GPU shapes), brake-off ones included, at a turn start
 (after the brake's decision, on the child the turn uses — a respawned one if the brake
 just respawned it) and at every idle sample, never at a turn end (the generation just
-paged the child back in). While a contention holds, a light task
-(`CUDA_Engine._contention_tick`, every 10 s, under the generation lock, never during a
-turn) samples the gauge alone — never `brake_point(idle)`, whose samples count toward
+paged the child back in) and never within 15 s of one (`_contention_settle_s`, keyed on
+`_last_used`, which the generation guard stamps as it releases the lock): until WDDM
+evicts the idle child again — 6 to 9 s after the turn under a 10 GiB hog in #661 — the
+gap reads 0 and the contention would read as ended while the other app still holds the
+card. A skipped sample leaves the cached reading as it is. While a contention holds, a
+light task (`CUDA_Engine._contention_tick`, every 10 s, under the generation lock, never
+during a turn nor within the settle delay of its end, though it queues on the lock during
+the turn and gets it as the turn ends) samples the gauge alone — never `brake_point(idle)`, whose samples count toward
 an unload — so its end is seen between turns. The reading is cached on the handle
 (`gpu_contention`: `active`, `evicted_bytes`, `device_free_bytes`, `read_at`) and a brake
 respawn carries it to the new child, on the same pinned GPU, until that child's first

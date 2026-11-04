@@ -95,6 +95,7 @@ import os
 import subprocess
 import time
 import platform
+from datetime import datetime
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from pathlib import Path
 
@@ -1012,7 +1013,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
         eviction gauge samples the live child -- the one the brake's
         decision left, brake-off children included (``_sample_gpu_contention``);
         never at a turn end, which follows a generation that just paged the
-        child back in. Off Windows there is no spill and no eviction, so no
+        child back in, nor within the settle delay of it. Off Windows there is no spill and no eviction, so no
         signal: nothing is read and nothing acts (the idle monitor still
         ticks; its samples return here). Never raises: a failure is ONE
         WARNING with the exception's class name, and the sample is lost."""
@@ -1039,6 +1040,14 @@ class CUDA_Engine(BaseLlamaCppEngine):
     # Seconds between the contention-only samples while a contention lasts
     # (the conversation page polls the cached state at the same pace).
     _contention_interval_s: ClassVar[float] = 10.0
+    # Seconds after a generation ends during which the gauge reads nothing:
+    # the generation paged the child back in (evicted 0), and a reading then
+    # says the contention ended while the other app still holds the card.
+    # Under a 10 GiB hog on a 16 GiB card (#661, Windows 11, RTX 5060 Ti)
+    # WDDM evicted the idle child again within 6 to 9 s of the turn's end;
+    # 15 s leaves that margin, and a contention that did end is still read
+    # by the next tick (10 s later at most).
+    _contention_settle_s: ClassVar[float] = 15.0
     _contention_task: ClassVar[Optional["asyncio.Task"]] = None
     # A Windows without the Total Committed counter was said once.
     _committed_gauge_missing_logged: ClassVar[bool] = False
@@ -1058,13 +1067,26 @@ class CUDA_Engine(BaseLlamaCppEngine):
             return None
 
     @classmethod
+    def _contention_settling(cls) -> bool:
+        """Whether the last generation ended less than
+        ``_contention_settle_s`` ago (``_last_used`` is stamped when the
+        generation guard releases the lock, so a tick that queued on it
+        during the turn sees the fresh stamp)."""
+        last_used = cls._last_used
+        return (
+            isinstance(last_used, datetime)
+            and (datetime.now() - last_used).total_seconds() < cls._contention_settle_s
+        )
+
+    @classmethod
     def _sample_gpu_contention(cls) -> None:
         """Read the eviction gauge of the loaded child and keep the result on
         its handle (``gpu_contention``): its Total Committed GPU memory above
         its resident bytes (PDH), against NVML's free memory on the GPU it
         was pinned to (``cuda_memory.gpu_contention``). Windows only; a child
         with no pinned GPU (several visible GPUs, NVML unreadable at load, no
-        GPU) is not read. A missing reading -- no PDH instance yet (a
+        GPU) is not read, nor one a generation left less than
+        ``_contention_settle_s`` ago (the state stays). A missing reading -- no PDH instance yet (a
         respawned child appears about 6 s after the stop), a failed
         collection, NVML failing -- leaves the state unchanged, silently; a
         Windows whose PDH refuses the Total Committed counter is said once
@@ -1077,6 +1099,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
                 not isinstance(handle, dict)
                 or not handle.get("gpu_uuid")
                 or not cls._proc_is_alive(handle.get("proc"))
+                or cls._contention_settling()
             ):
                 return
             # The raw Shared Usage is the term; the healthy level plays no part.
@@ -1159,9 +1182,11 @@ class CUDA_Engine(BaseLlamaCppEngine):
     @classmethod
     async def _contention_tick(cls) -> None:
         """While a contention lasts, one contention-only sample under the
-        generation lock (never during a turn), shielded like a brake sample
-        -- never ``brake_point``, whose idle samples count toward an unload.
-        Nothing is taken or read otherwise."""
+        generation lock (never during a turn, and none within the settle
+        delay of its end: a tick that queued on the lock during the turn
+        gets it as the turn ends), shielded like a brake sample -- never
+        ``brake_point``, whose idle samples count toward an unload. Nothing
+        is taken or read otherwise."""
         state = cls.gpu_contention_state()
         if not (state and state.get("active")):
             return
