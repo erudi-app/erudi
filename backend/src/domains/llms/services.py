@@ -380,8 +380,9 @@ class DownloadCancelled(Exception):
     tracker flag and returns. This exception is how the download side reacts to
     that flag from where it is looked at -- before each shard starts and on every
     progress chunk -- so a cancelled job stops transferring instead of running
-    every remaining shard to the end (#377). `download_llm` catches it and
-    returns early; it never reaches the endpoint.
+    every remaining shard to the end (#377). `download_llm` raises it to the
+    download task, which takes it as the user's cancel: nothing to finalize,
+    the cancel endpoint owns the job row and the cleanup.
     """
 
 
@@ -723,6 +724,8 @@ async def download_llm(
         Path to temp_save_dir (note: moved to final_save_dir on success).
 
     Raises:
+        DownloadCancelled: The job's tracker was cancelled (the user cancelled)
+            before the files were moved: nothing was promoted.
         InvalidInputException: The repo ships no artefact in this engine's format
             (checked before any byte is transferred, #408).
         Exception: If HuggingFace API fails or the download fails.
@@ -829,22 +832,15 @@ async def download_llm(
             await download_files_concurrent(fs, callback, shard_tasks, temp_save_dir, tracker=job)
             logger.info("All shards downloaded")
         except DownloadCancelled:
-            # Raised from the pre-shard check or from inside a transfer (#377).
-            # The cancel endpoint already marked the job and cleaned the temp dir;
-            # there is nothing to finalize and nothing to report as an error.
+            # Raised from the pre-shard check or from inside a transfer (#377);
+            # the download task says it, once.
             eta_task.cancel()
-            logger.info(
-                f"Download job {job_id} was cancelled during transfer, skipping finalization"
-            )
-            return temp_save_dir
+            raise
 
         # Cancel landed between the last chunk and here: same outcome, no finalization.
         if not job.should_continue():
             eta_task.cancel()
-            logger.info(
-                f"Download job {job_id} was cancelled during transfer, skipping finalization"
-            )
-            return temp_save_dir
+            raise DownloadCancelled("download cancelled after the transfer")
 
         # Everything is a pre-built quant: move files straight to the final dir
         logger.info("Moving downloaded files to final location")
@@ -868,6 +864,9 @@ async def download_llm(
                 feature=model_link,
                 reason="requires HuggingFace authentication and cannot be downloaded anonymously",
             )
+        raise
+    except DownloadCancelled:
+        # The user's cancel, not an error to rename.
         raise
     except Exception as e:
         # Re-raised in both branches: the download task that owns the job

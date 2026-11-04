@@ -115,11 +115,25 @@ def test_download_task_failure_names_job_and_model(monkeypatch, caplog):
         def get(self, _id):
             return job_row
 
+        def filter(self, *_):
+            return self
+
+        def update(self, values, **_):
+            # The failure is written over a row that is not cancelled.
+            if job_row.status == "cancelled":
+                return 0
+            job_row.status = values["status"]
+            job_row.error_message = values["error_message"]
+            return 1
+
     class _Session:
         def query(self, *_):
             return _Query()
 
         def commit(self):
+            pass
+
+        def rollback(self):
             pass
 
         def close(self):

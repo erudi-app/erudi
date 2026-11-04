@@ -168,6 +168,8 @@ curl -X POST http://127.0.0.1:27182/erudi/llms/downloads/123/cancel
 
 `status` is one of `pending`, `running`, `completed`, `failed`, `cancelled`. Polling a `failed` or
 `cancelled` job also cleans up: the placeholder row is deleted and the temporary files removed.
+`cancelled` is final: the download stops, says so in one INFO line, and never turns the job
+`failed`, even when the cancel lands while the download is finishing.
 
 ## Searching
 
