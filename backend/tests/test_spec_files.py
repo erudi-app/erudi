@@ -7,6 +7,7 @@ automated check that the swap reached them.
 """
 
 import pathlib
+import re
 
 import pytest
 
@@ -120,7 +121,7 @@ def test_no_spec_hidden_imports_pkg_resources(name):
     # Nothing in the backend or its runtime dependencies imports it, and a
     # build environment whose setuptools no longer ships it turned the entry
     # into `ERROR: Hidden import 'pkg_resources' not found` in the build log.
-    assert '"pkg_resources"' not in _read(name)
+    assert not re.search(r"[\"']pkg_resources[\"']", _read(name))
 
 
 @pytest.mark.unit
