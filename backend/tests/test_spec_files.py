@@ -115,6 +115,15 @@ def test_all_specs_pin_lazy_langchain_stacks():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("name", ["backend.spec", "backend-mac-silicon.spec", "backend-cpu.spec"])
+def test_no_spec_hidden_imports_pkg_resources(name):
+    # Nothing in the backend or its runtime dependencies imports it, and a
+    # build environment whose setuptools no longer ships it turned the entry
+    # into `ERROR: Hidden import 'pkg_resources' not found` in the build log.
+    assert '"pkg_resources"' not in _read(name)
+
+
+@pytest.mark.unit
 def test_cpu_spec_excludes_mlx_vlm():
     spec = _read("backend-cpu.spec")
     assert "mlx_vlm" in spec

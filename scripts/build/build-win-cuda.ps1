@@ -15,7 +15,7 @@
 #   .\scripts\build\build-win-cuda.ps1
 #
 # Output:
-#   frontend\dist\Erudi Setup 1.0.0.exe
+#   frontend\dist\Erudi Setup <version>.exe (the version in frontend\package.json)
 
 $ErrorActionPreference = "Stop"
 
@@ -219,15 +219,21 @@ Write-Host ""
 Write-Host "Installer output:"
 
 $installerOut = Join-Path $FrontendRoot "dist"
+# dist\ keeps the installers of earlier builds: the newest is this build's.
+$installer = $null
 if (Test-Path $installerOut) {
-    Get-ChildItem -Path $installerOut -Filter "*.exe" | ForEach-Object {
-        Write-Host "  $($_.FullName)" -ForegroundColor White
-    }
+    $installer = Get-ChildItem -Path $installerOut -Filter "*.exe" |
+        Sort-Object LastWriteTime -Descending | Select-Object -First 1
+}
+if ($installer) {
+    Write-Host "  $($installer.FullName)" -ForegroundColor White
 } else {
-    Write-Warn "dist/ directory not found. Check build output above."
+    Write-Warn "No installer found in $installerOut. Check build output above."
 }
 Write-Host "============================================================" -ForegroundColor Green
-Write-Host ""
-Write-Host "To install:" -ForegroundColor Cyan
-Write-Host "  Run 'Erudi Setup 1.0.0.exe' - installs to the user's AppData by default."
-Write-Host ""
+if ($installer) {
+    Write-Host ""
+    Write-Host "To install:" -ForegroundColor Cyan
+    Write-Host "  Run '$($installer.Name)' - installs to the user's AppData by default."
+    Write-Host ""
+}
