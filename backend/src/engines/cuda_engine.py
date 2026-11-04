@@ -95,7 +95,6 @@ import os
 import subprocess
 import time
 import platform
-from datetime import datetime
 from typing import Any, ClassVar, Dict, List, Optional, Tuple
 from pathlib import Path
 
@@ -1013,10 +1012,11 @@ class CUDA_Engine(BaseLlamaCppEngine):
         eviction gauge samples the live child -- the one the brake's
         decision left, brake-off children included (``_sample_gpu_contention``);
         never at a turn end, which follows a generation that just paged the
-        child back in, nor within the settle delay of it. Off Windows there is no spill and no eviction, so no
-        signal: nothing is read and nothing acts (the idle monitor still
-        ticks; its samples return here). Never raises: a failure is ONE
-        WARNING with the exception's class name, and the sample is lost."""
+        child back in, nor within the settle delay of it. Off Windows there
+        is no spill and no eviction, so no signal: nothing is read and
+        nothing acts (the idle monitor still ticks; its samples return
+        here). Never raises: a failure is ONE WARNING with the exception's
+        class name, and the sample is lost."""
         handle = cls._model
         if not cls._host_is_windows() or not isinstance(handle, dict):
             return BrakeOutcome()
@@ -1069,14 +1069,12 @@ class CUDA_Engine(BaseLlamaCppEngine):
     @classmethod
     def _contention_settling(cls) -> bool:
         """Whether the last generation ended less than
-        ``_contention_settle_s`` ago (``_last_used`` is stamped when the
-        generation guard releases the lock, so a tick that queued on it
-        during the turn sees the fresh stamp)."""
-        last_used = cls._last_used
-        return (
-            isinstance(last_used, datetime)
-            and (datetime.now() - last_used).total_seconds() < cls._contention_settle_s
-        )
+        ``_contention_settle_s`` ago, on the monotonic clock
+        (``_generation_ended_at`` is stamped as the generation guard releases
+        the lock, so a tick that queued on it during the turn sees the fresh
+        stamp)."""
+        ended_at = cls._generation_ended_at
+        return ended_at is not None and time.monotonic() - ended_at < cls._contention_settle_s
 
     @classmethod
     def _sample_gpu_contention(cls) -> None:
@@ -1086,13 +1084,13 @@ class CUDA_Engine(BaseLlamaCppEngine):
         was pinned to (``cuda_memory.gpu_contention``). Windows only; a child
         with no pinned GPU (several visible GPUs, NVML unreadable at load, no
         GPU) is not read, nor one a generation left less than
-        ``_contention_settle_s`` ago (the state stays). A missing reading -- no PDH instance yet (a
-        respawned child appears about 6 s after the stop), a failed
-        collection, NVML failing -- leaves the state unchanged, silently; a
-        Windows whose PDH refuses the Total Committed counter is said once
-        (INFO) and detects nothing. Each
-        transition is ONE INFO. Never an action on the child; never raises
-        (an unexpected failure is ONE WARNING and the sample is lost)."""
+        ``_contention_settle_s`` ago (the state stays). A missing reading --
+        no PDH instance yet (a respawned child appears about 6 s after the
+        stop), a failed collection, NVML failing -- leaves the state
+        unchanged, silently; a Windows whose PDH refuses the Total Committed
+        counter is said once (INFO) and detects nothing. Each transition is
+        ONE INFO. Never an action on the child; never raises (an unexpected
+        failure is ONE WARNING and the sample is lost)."""
         handle = cls._model
         try:
             if (

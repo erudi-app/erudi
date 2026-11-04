@@ -434,10 +434,11 @@ async def test_the_gpu_contention_warning_is_said_again_while_it_lasts(monkeypat
 
 
 async def test_a_tick_at_the_turn_end_never_takes_the_gpu_contention_warning(monkeypatch):
-    """#661: a contention tick queues on the generation lock during the turn
-    and gets it as the turn releases it. The turn-end check reads the
-    turn-start reading under the lock, before that tick runs: the warning
-    goes out even when the tick then reads the child paged back in."""
+    """A regression guard on the ordering, not the #661 fix (that is the
+    engine's settle delay, pinned in test_cuda_brake_engine): a contention
+    tick queued on the generation lock during the turn runs only once the
+    turn releases it, so the turn-end check, under the lock, still reads the
+    turn-start reading and the warning goes out."""
     import asyncio
 
     _answer(monkeypatch)

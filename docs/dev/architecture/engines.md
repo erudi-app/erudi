@@ -716,7 +716,9 @@ several-GPU, NVML-unreadable or no-GPU shapes), brake-off ones included, at a tu
 (after the brake's decision, on the child the turn uses — a respawned one if the brake
 just respawned it) and at every idle sample, never at a turn end (the generation just
 paged the child back in) and never within 15 s of one (`_contention_settle_s`, keyed on
-`_last_used`, which the generation guard stamps as it releases the lock): until WDDM
+`_generation_ended_at`, a `time.monotonic()` stamp the generation guard takes as it releases
+the lock, so a wall-clock jump cannot stretch the delay; `_last_used`, the idle reap's
+wall-clock stamp, is also taken at model resolution and load, inside the same guard): until WDDM
 evicts the idle child again — 6 to 9 s after the turn under a 10 GiB hog in #661 — the
 gap reads 0 and the contention would read as ended while the other app still holds the
 card. A skipped sample leaves the cached reading as it is. While a contention holds, a
