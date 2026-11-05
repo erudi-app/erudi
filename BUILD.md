@@ -21,8 +21,8 @@ PyInstaller cannot cross-compile, so **each platform is built on that platform**
 | Tool | Version | Why |
 |---|---|---|
 | Python | **exactly 3.12** | `pgserver` only ships cp312 wheels; CI pins `3.12` |
-| Node.js | **>= 20.9** | matches the CI runners; `webpack-cli` declares this floor |
-| npm | bundled with Node 20 | |
+| Node.js | **22.18+, 24.11+ or 26+** | the CI runners use Node 22; Babel 8 and Vitest 5 together accept `^22.18.0 || ^24.11.0 || >=26.0.0` |
+| npm | bundled with Node 22 | |
 | PyInstaller | latest | installed into the backend venv |
 | CUDA toolkit | any **12.x**; releases use **12.8** | only for the Windows/Linux CUDA legs, to compile `llama-server`. 12.8 is the first that emits native code for Blackwell (RTX 50); on an older 12.x the build scripts drop `120-real` and those cards JIT from PTX instead. Not needed for a CPU or macOS build — and never needed to *run* Erudi. |
 
@@ -251,7 +251,7 @@ resolved by the backend itself in `src/launcher/runtime_paths.py`.
 | `linux-cpu` | `ubuntu-22.04` | `linux-cpu-prod.txt` | `backend-cpu.spec` | cpu |
 | `linux-cuda` | `ubuntu-22.04` | `linux-cuda-prod.txt` | `backend.spec` | cuda + cpu |
 
-Each leg: checks out with submodules, sets up Python 3.12 and Node 20, compiles
+Each leg: checks out with submodules, sets up Python 3.12 and Node 22, compiles
 `llama-server` from the submodule (Windows/Linux only; the CUDA legs compile the
 CPU build too, in the same job), runs
 `pyinstaller backend/<spec> --distpath backend/dist`, verifies the frozen tree,
