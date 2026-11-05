@@ -115,7 +115,7 @@ function ModelCard({
           )}
           {type === "local" && (
             <button
-              className="p-1 bg-red-500/20 hover:bg-red-500/40 rounded-lg transition-colors ml-8"
+              className="p-1 bg-red-500/20 hover:bg-red-500/40 rounded-lg transition-colors ml-2"
               onClick={(e) => {
                 e.stopPropagation();
                 onDelete && onDelete(model);
