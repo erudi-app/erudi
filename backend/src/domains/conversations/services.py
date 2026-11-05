@@ -506,12 +506,20 @@ class ConversationService:
             effort_plan = await run_in_threadpool(
                 plan_reasoning_effort, llm, conversation.reasoning_effort
             )
+            # The turn's instructions: the payload's when it carries them (an
+            # explicit "" runs without any), else the conversation's stored
+            # ones, so a client that sends none never drops them.
+            custom_prompt = (
+                payload.custom_prompt
+                if payload.custom_prompt is not None
+                else conversation.custom_prompt or ""
+            )
             plan = await run_in_threadpool(
                 plan_turn,
                 llm,
                 question=payload.question,
                 retrieve=lambda: self._retrieve_kb_excerpts(llm, payload.question),
-                custom_prompt=payload.custom_prompt,
+                custom_prompt=custom_prompt,
                 starred_messages=starred,
                 # #310: the conversation OWNS its web toggle (set at creation from
                 # the model's saved defaults or the global default, #609).
@@ -538,7 +546,7 @@ class ConversationService:
                 f"effort={conversation.reasoning_effort}, temperature={params.temperature}, "
                 f"top_p={params.top_p}, threshold={conversation.compaction_threshold}, "
                 f"web_search_toggle={bool(conversation.web_search_enabled)}, "
-                f"custom_prompt_chars={len(payload.custom_prompt or '')}"
+                f"custom_prompt_chars={len(custom_prompt)}"
             )
 
             # Safety net (#133/#212): unless the model is positively vision-
