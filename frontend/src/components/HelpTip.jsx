@@ -18,6 +18,9 @@ const windowBounds = () => ({
  * The `?` beside a popup field (#585): a button Tab reaches, described by its
  * help text, which shows on hover and on keyboard focus.
  *
+ * A closed tooltip is hidden from assistive technology, and Escape on the
+ * button closes the open tooltip without closing the popup.
+ *
  * The text is drawn on <body> with fixed positioning, so the popup's
  * scrolling body (or any other container) never clips it, and it is placed
  * inside the popup holding the `?` (the window outside a popup): below the
@@ -65,6 +68,16 @@ export default function HelpTip({ label, text }) {
 
   const show = () => setOpen(true);
   const hide = () => setOpen(false);
+  const shown = open && place !== null;
+  // Escape dismisses the open tooltip alone (WCAG 1.4.13); a second Escape
+  // reaches the popup.
+  const handleKeyDown = (e) => {
+    if (e.key === "Escape" && open) {
+      e.preventDefault();
+      e.stopPropagation();
+      hide();
+    }
+  };
 
   return (
     <>
@@ -80,6 +93,7 @@ export default function HelpTip({ label, text }) {
         onBlur={hide}
         onMouseEnter={show}
         onMouseLeave={hide}
+        onKeyDown={handleKeyDown}
         className="inline-flex align-middle rounded-full text-gray-400 hover:text-emerald-400 focus:text-emerald-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60 transition-colors cursor-help"
       >
         <HelpCircle className="w-4 h-4" aria-hidden />
@@ -88,15 +102,18 @@ export default function HelpTip({ label, text }) {
         <div
           ref={tipRef}
           data-help-tooltip
-          data-open={open && place ? "true" : "false"}
+          data-open={shown ? "true" : "false"}
           style={{
             position: "fixed",
+            // Closed, it is out of the accessibility tree; the button's
+            // aria-describedby still reads its text.
+            visibility: shown ? "visible" : "hidden",
             top: place?.top ?? 0,
             left: place?.left ?? 0,
             width: place?.width ?? TOOLTIP_WIDTH,
           }}
           className={`pointer-events-none z-[10000] transition-opacity duration-200 ${
-            open && place ? "opacity-100" : "opacity-0"
+            shown ? "opacity-100" : "opacity-0"
           }`}
         >
           <div

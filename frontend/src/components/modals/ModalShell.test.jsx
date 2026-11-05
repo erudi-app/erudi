@@ -103,3 +103,46 @@ describe("ModalShell", () => {
     expect(onClose).toHaveBeenCalledTimes(1);
   });
 });
+
+// A click on a heading, a label or the padding leaves nothing focused inside
+// the popup: the keys must still reach it.
+describe("ModalShell after a click on a non-focusable spot", () => {
+  it("still closes on Escape sent from the page body", async () => {
+    const onClose = vi.fn();
+    render(<Harness onClose={onClose} />);
+    open();
+    await screen.findByRole("dialog");
+    document.activeElement.blur();
+    expect(document.activeElement).toBe(document.body);
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
+  it("brings Tab and Shift+Tab back into the dialog", async () => {
+    render(<Harness />);
+    open();
+    await screen.findByRole("dialog");
+    document.activeElement.blur();
+    fireEvent.keyDown(document.body, { key: "Tab" });
+    expect(document.activeElement).toBe(screen.getByRole("button", { name: "Close" }));
+    document.activeElement.blur();
+    fireEvent.keyDown(document.body, { key: "Tab", shiftKey: true });
+    expect(document.activeElement).toBe(screen.getByText("last"));
+  });
+
+  it("lets a click on the panel focus the panel itself", async () => {
+    render(<Harness />);
+    open();
+    expect((await screen.findByRole("dialog")).tabIndex).toBe(-1);
+  });
+
+  it("stops listening once closed", async () => {
+    const onClose = vi.fn();
+    render(<Harness onClose={onClose} />);
+    open();
+    fireEvent.keyDown(await screen.findByRole("dialog"), { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+});

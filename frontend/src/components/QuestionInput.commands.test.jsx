@@ -15,7 +15,7 @@ const COMMANDS = commandsFor(COMMAND_SCOPES.CONVERSATION);
 const pdfFile = () =>
   new File([new Uint8Array([37, 80, 68, 70])], "report.pdf", { type: "application/pdf" });
 
-const textarea = () => screen.getByRole("textbox");
+const textarea = () => screen.getByRole("combobox");
 const type = (value) => fireEvent.change(textarea(), { target: { value } });
 const key = (k, extra = {}) => fireEvent.keyDown(textarea(), { key: k, ...extra });
 const options = () => screen.queryAllByRole("option");
@@ -44,6 +44,28 @@ beforeEach(() => {
 afterEach(() => {
   cleanup();
   delete window.electron;
+});
+
+describe("combobox semantics", () => {
+  it("exposes the composer as a combobox whose expanded state follows the drop-up", () => {
+    renderComposer();
+    const box = textarea();
+    expect(box.tagName).toBe("TEXTAREA");
+    expect(box.getAttribute("aria-expanded")).toBe("false");
+    expect(box.getAttribute("aria-controls")).toBeNull();
+    type("/");
+    expect(box.getAttribute("aria-expanded")).toBe("true");
+    expect(box.getAttribute("aria-controls")).toBe(screen.getByRole("listbox").id);
+    expect(box.getAttribute("aria-activedescendant")).toBe(options()[0].id);
+    key("Escape");
+    expect(box.getAttribute("aria-expanded")).toBe("false");
+  });
+
+  it("stays a plain textbox on a page without commands (the Arena)", () => {
+    render(<QuestionInput placeholder="ask" onSend={onSend} />);
+    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.getByRole("textbox").getAttribute("aria-expanded")).toBeNull();
+  });
 });
 
 describe("the drop-up", () => {
@@ -147,9 +169,9 @@ describe("the drop-up", () => {
 
   it("never opens on a page without commands (the Arena)", () => {
     render(<QuestionInput placeholder="ask" onSend={onSend} />);
-    type("/");
+    fireEvent.change(screen.getByRole("textbox"), { target: { value: "/" } });
     expect(screen.queryByRole("listbox")).toBeNull();
-    key("Enter");
+    fireEvent.keyDown(screen.getByRole("textbox"), { key: "Enter" });
     expect(onSend).toHaveBeenCalledWith("/", [], [], []);
   });
 });

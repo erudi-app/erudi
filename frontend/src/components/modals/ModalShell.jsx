@@ -49,27 +49,40 @@ export default function ModalShell({
     };
   }, [isOpen]);
 
-  const handleKeyDown = (e) => {
-    if (e.key === "Escape") {
-      e.preventDefault();
-      e.stopPropagation();
-      onClose();
-      return;
-    }
-    if (e.key !== "Tab") return;
-    const focusables = Array.from(panelRef.current?.querySelectorAll(FOCUSABLE) ?? []);
-    if (focusables.length === 0) return;
-    const first = focusables[0];
-    const last = focusables[focusables.length - 1];
-    const inside = panelRef.current.contains(document.activeElement);
-    if (e.shiftKey && (document.activeElement === first || !inside)) {
-      e.preventDefault();
-      last.focus();
-    } else if (!e.shiftKey && (document.activeElement === last || !inside)) {
-      e.preventDefault();
-      first.focus();
-    }
-  };
+  // The keys are heard on the document while the popup is open: a click on a
+  // heading, a label or the padding leaves the focus on the panel or on the
+  // page body, and Escape and the Tab trap must still work from there.
+  const onCloseRef = useRef(onClose);
+  onCloseRef.current = onClose;
+  useEffect(() => {
+    if (!isOpen) return undefined;
+    const handleKeyDown = (e) => {
+      if (e.defaultPrevented) return;
+      if (e.key === "Escape") {
+        e.preventDefault();
+        onCloseRef.current();
+        return;
+      }
+      if (e.key !== "Tab") return;
+      const panel = panelRef.current;
+      const focusables = Array.from(panel?.querySelectorAll(FOCUSABLE) ?? []);
+      if (focusables.length === 0) return;
+      const first = focusables[0];
+      const last = focusables[focusables.length - 1];
+      const active = document.activeElement;
+      // Focus on the panel itself (after a click) counts as outside its fields.
+      const inside = panel.contains(active) && active !== panel;
+      if (e.shiftKey && (active === first || !inside)) {
+        e.preventDefault();
+        last.focus();
+      } else if (!e.shiftKey && (active === last || !inside)) {
+        e.preventDefault();
+        first.focus();
+      }
+    };
+    document.addEventListener("keydown", handleKeyDown);
+    return () => document.removeEventListener("keydown", handleKeyDown);
+  }, [isOpen]);
 
   return (
     <AnimatePresence>
@@ -90,12 +103,14 @@ export default function ModalShell({
             aria-modal
             aria-labelledby={titleId}
             aria-describedby={subtitle ? subtitleId : undefined}
-            onKeyDown={handleKeyDown}
+            // A click on a spot with no field focuses the panel, so the keys
+            // stay inside the popup.
+            tabIndex={-1}
             initial={{ opacity: 0, scale: 0.95, y: 20 }}
             animate={{ opacity: 1, scale: 1, y: 0 }}
             exit={{ opacity: 0, scale: 0.95, y: 20 }}
             transition={{ duration: 0.3, ease: [0.16, 1, 0.3, 1] }}
-            className={`relative w-full ${width}`}
+            className={`relative w-full outline-none ${width}`}
           >
             <div
               className={[

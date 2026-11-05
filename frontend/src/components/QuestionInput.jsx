@@ -517,6 +517,10 @@ export default function QuestionInput({
           value={value}
           onChange={(e) => updateValue(e.target.value)}
           onKeyDown={handleKeyDown}
+          // With commands the composer is a (multi-line) combobox whose popup
+          // is the drop-up; without them (the Arena) a plain textbox.
+          role={commands.length > 0 ? "combobox" : undefined}
+          aria-expanded={commands.length > 0 ? menuOpen : undefined}
           aria-autocomplete={commands.length > 0 ? "list" : undefined}
           aria-controls={menuOpen ? listId : undefined}
           aria-activedescendant={highlighted ? optionId(highlighted.name) : undefined}
