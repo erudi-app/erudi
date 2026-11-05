@@ -268,7 +268,9 @@ async def test_a_manual_unload_of_a_model_no_longer_loaded_is_refused():
     the press must not unload B."""
     from src.core.exceptions import LoadedModelChangedException
 
-    _load_idle("b", idle_s=1)
+    _load_idle("b", idle_s=200)
+    last_used = _GuardEngine._last_used
+    _GuardEngine._generation_ended_at = None
     try:
         with pytest.raises(LoadedModelChangedException) as raised:
             await _GuardEngine.unload("a")
@@ -278,6 +280,10 @@ async def test_a_manual_unload_of_a_model_no_longer_loaded_is_refused():
         assert _GuardEngine._model is not None
         assert _GuardEngine._model_id == "b"
         assert _GuardEngine._idle_unload is None
+        # A refused press changes nothing: B's idle clock does not restart,
+        # and no generation end is stamped (CUDA's contention settle).
+        assert _GuardEngine._last_used == last_used
+        assert _GuardEngine._generation_ended_at is None
         assert not _GuardEngine._generation_lock_for_running_loop().locked()
     finally:
         _reset()

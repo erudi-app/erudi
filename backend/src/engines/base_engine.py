@@ -1139,8 +1139,13 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         lock, so nobody slips in between the check and it --, which drains a
         pending prefix-cache reset first.
 
-        On exit the idle clock restarts only when a model is still loaded:
-        a holder that unloaded it leaves nothing for the idle check to time.
+        On exit the idle clock restarts (and the generation end is stamped)
+        only when a model is still loaded: a holder that unloaded it leaves
+        nothing for the idle check to time. A holder refused with
+        ``LoadedModelChangedException`` (an unload naming a model that is no
+        longer loaded) changed nothing, so it stamps nothing either: the
+        loaded model's idle clock and CUDA's contention settle stay as they
+        were.
         ``asyncio.Lock`` is not reentrant: nothing inside may call
         ``generation_guard``.
         """
@@ -1155,10 +1160,14 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         async with cls._acquire_generation_lock():
             logger.info(f"[{cls.__name__}] try_generation_guard acquired (model={cls._model_id})")
             held_start_s = time.perf_counter()
+            refused = False
             try:
                 yield
+            except LoadedModelChangedException:
+                refused = True
+                raise
             finally:
-                if cls._model is not None:
+                if cls._model is not None and not refused:
                     cls._last_used = datetime.now()
                     cls._generation_ended_at = time.monotonic()
                 held_ms = (time.perf_counter() - held_start_s) * 1000
