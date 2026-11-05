@@ -404,7 +404,8 @@ panel with one button per command (Model, Config, Effort), each opening that com
 as typing the command does. When the conversation's model was deleted, the line turns into a red
 "Please select a model" and the composer is blocked; the panel's Model button still works, and
 picking a model there unblocks sending. The composer also stays blocked until the conversation's
-values are loaded, so no turn goes out without them. Model is disabled while an answer streams.
+values are loaded, so no turn goes out without them; when the conversation cannot be read, an error
+line with a Retry button shows above the composer and runs the load again. Model is disabled while an answer streams.
 
 The same commands are typed in the composer. Their names are fixed English identifiers in every
 interface language (`frontend/src/utils/slashCommands.js`); their descriptions and popups are
@@ -423,7 +424,8 @@ complete command, Enter runs exactly that text, so `/config global` never turns 
 highlighted `/config`. Enter while an input method is composing (Chinese, Japanese) does nothing.
 
 The popups share one shell: it takes the focus when it opens (its first field), keeps Tab inside,
-closes on Escape and gives the focus back to where it was. The keys are heard on the whole page
+closes on Escape (not the Escape that cancels an input method's composition) and gives the focus
+back to where it was. The keys are heard on the whole page
 while a popup is open, so a click on a heading or a label never lets them escape. Each popup carries
 a subtitle and a `?` help button next to each field, whose help shows on hover and on keyboard
 focus, drawn above the page so nothing clips it and placed inside the popup; Escape on the `?`
@@ -438,12 +440,13 @@ closes the help alone. An engine failure that opens its dialog closes any comman
   change, the instructions on Save, when the editor loses the focus or when the popup closes, and
   creativity and diversity 300 ms after the slider stops. Saves go out one after another, in the
   order they were made, each to the conversation it was made in (switching conversation never
-  lets one conversation's save touch another). Sending a message first waits for every pending
+  lets one conversation's save touch another, nor makes a send wait for another's save). Sending a message first waits for every pending
   save, so a message sent right after a change runs on it; the turn's `Turn settings: ...` line in
   `backend.log` shows the values. A failed save re-reads the conversation and shows what the server
   holds (the last saved value when that read fails too), and a short error says the change was not
   saved, until the next successful save, a conversation switch or a few seconds. A conversation
-  row loaded while a save or a `/model` switch was made is dropped. The header panel, the popups
+  row loaded while a save or a `/model` switch was made is dropped, and so is a load of a
+  conversation the page has already left. The header panel, the popups
   and the send path read one state (`frontend/src/shared/hooks/useConversationSettings.js`), so
   two views never disagree.
 - **`/config global`** saves the six current values as the defaults of the current model with
