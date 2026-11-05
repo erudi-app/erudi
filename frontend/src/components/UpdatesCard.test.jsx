@@ -39,7 +39,7 @@ function mockUpdaterAPI(overrides = {}) {
     checkNow: vi.fn().mockResolvedValue({ ok: true }),
     downloadNow: vi.fn().mockResolvedValue({ ok: true }),
     installNow: vi.fn().mockResolvedValue(undefined),
-    setAutoUpdateEnabled: vi.fn(),
+    setPreferences: vi.fn(),
     ...overrides,
   };
   window.updaterAPI = api;

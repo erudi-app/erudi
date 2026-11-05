@@ -22,6 +22,13 @@ const { singleFlight } = require("./utils/singleFlight");
 const { readAppLogTailResult } = require("./utils/appLogTail");
 const { describeProcessGone, formatMainRecord } = require("./utils/mainLog");
 const { createBackendStartTracker, requestStop } = require("./utils/backendStartTracker");
+const {
+  NO_INSTALL_ARMED,
+  installArmedAfterDownload,
+  isHandedOff,
+  planPreferenceChange,
+  resolveUpdatePreferences,
+} = require("./utils/updaterPolicy");
 
 // electron-updater: only loaded in production to avoid dev noise.
 // Reads latest.yml / latest-mac.yml from GitHub Releases and handles
@@ -35,20 +42,31 @@ if (app.isPackaged) {
     autoUpdater = require("electron-updater").autoUpdater;
     autoUpdater.logger = require("electron-log");
     autoUpdater.logger.transports.file.level = "info";
+    // The library defaults both to true. Nothing downloads and nothing is
+    // armed to install until the renderer has handed over the user's switches
+    // (applyUpdatePreferences raises them from a known snapshot only).
+    autoUpdater.autoDownload = false;
+    autoUpdater.autoInstallOnAppQuit = false;
   } catch (e) {
     updaterLoadError = e;
     autoUpdater = null;
   }
 }
 
-// Automatic updates are refusable in Settings. The preference is persisted with
-// the other user settings, which only the renderer can read, so main starts out
-// not knowing it and does NOT check for updates until the renderer says so:
-// checking early would send a request the user may have declined. Enabled is
-// what the renderer reports when the setting cannot be read, so the shipped
-// behaviour is unchanged for anyone who never opens the setting.
-let autoUpdateEnabled = null;
+// The update switches (#563) -- Check for updates, Download updates
+// automatically, Install downloaded updates when I quit -- are persisted with
+// the other user settings, which only the renderer can read, so main starts
+// out not knowing them and does NOT check for updates until the renderer says
+// so: checking early would send a request the user may have declined. What
+// each snapshot means for electron-updater is decided in utils/updaterPolicy.js
+// (unit-tested per platform); this file only wires its answers.
+let updatePreferences = null; // the effective switches, once the renderer reported them
 let updatePollTimer = null;
+// The version this process downloaded (still on disk), and what is armed to
+// install it at quit: the library's quit handler (Windows, Linux) or the
+// hand-off to Squirrel.Mac (macOS).
+let downloadedVersion = null;
+let installArmed = NO_INSTALL_ARMED;
 
 // Renderer + preload entry resolution (replaces the @electron-forge/plugin-webpack
 // magic globals). Prod (packaged): load the built files that sit next to this
@@ -1129,12 +1147,14 @@ ipcMain.handle("data:clearAll", async () => {
 //
 // It lives in memory for the life of this process and is deliberately NOT
 // persisted across restarts: after a relaunch the card starts at "idle" and
-// the next check re-derives the truth -- the boot check when automatic
-// updates are on, the button when they are off. That check validates
-// electron-updater's own download cache and serves the file from it without
-// downloading anything again, which a version string we wrote to disk cannot
-// do: ours would still claim an update is staged after the cache was cleared,
-// the release was pulled, or the app was updated by other means.
+// the next check re-derives the truth -- the boot check when Check for
+// updates is on, the button otherwise. A check does not look at
+// electron-updater's download cache; the download that follows it does
+// (automatic when Download updates automatically is on, the card's Download
+// button otherwise), and serves the file from the cache without downloading
+// anything again. A version string we wrote to disk cannot do that: it would
+// still claim an update is staged after the cache was cleared, the release
+// was pulled, or the app was updated by other means.
 let updaterState = { phase: "idle", version: null, percent: 0 };
 
 // Renderer can trigger an immediate install via "updater:install-now".
@@ -1144,24 +1164,27 @@ ipcMain.handle("updater:install-now", () => {
   }
 });
 
+// `handedOff`: macOS already handed a downloaded update to Squirrel.Mac,
+// which installs it at quit whatever the switches say from then on; the
+// Settings card says so when install is off.
 ipcMain.handle("updater:get-state", () => ({
   available: autoUpdater !== null,
   ...updaterState,
+  handedOff: isHandedOff(installArmed),
 }));
 
-// A check the user asked for. It runs even when automatic updates are off:
-// that is the whole point of the button, and a refused preference is about
-// what the app does on its own, not about what the user asks it to do. What
-// stays off is everything automatic -- no download without a second click,
-// and `autoInstallOnAppQuit` is left exactly as the preference set it, so
-// this never re-arms the install-on-quit path the user turned down.
+// A check the user asked for. It runs even when Check for updates is off:
+// that is the whole point of the button, and the switches are about what the
+// app does on its own, not about what the user asks it to do. What it does
+// with a version it finds is the effective Download switch: off (or not known
+// yet) means no download without a second click. `autoInstallOnAppQuit` is
+// left exactly as the switches set it, so this never arms an install at quit
+// the user did not ask for.
 ipcMain.handle("updater:check-now", async () => {
   if (!autoUpdater) {
     return { ok: false, reason: "unavailable" };
   }
-  if (autoUpdateEnabled !== true) {
-    autoUpdater.autoDownload = false;
-  }
+  autoUpdater.autoDownload = updatePreferences?.download === true;
   try {
     await autoUpdater.checkForUpdates();
     return { ok: true };
@@ -1186,16 +1209,86 @@ ipcMain.handle("updater:download-now", async () => {
   }
 });
 
+// ── "Updated to X.Y.Z" (#572) ─────────────────────────────────────────────────
+// Two small files in the app's user data folder (not getDataDirectory(), which
+// names a macOS path on Linux): the release notes received with the last
+// update downloaded, kept so the first launch of that version can show them
+// offline, and the version the renderer's dialog last settled. The renderer
+// decides whether to show the dialog (utils/updateNotice.js); main only reads
+// and writes the files.
+const UPDATE_NOTES_FILE = "update-notes.json";
+const LAST_SEEN_VERSION_FILE = "last-seen-version";
+
+function userDataFile(name) {
+  return path.join(app.getPath("userData"), name);
+}
+
+// A missing file is the normal case (no update downloaded yet, a fresh
+// install), not a failure.
+function readUserDataFile(name) {
+  try {
+    return fs.readFileSync(userDataFile(name), "utf8");
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      logWarn(`Could not read ${name} in the user data folder`, err);
+    }
+    return null;
+  }
+}
+
+// `releaseNotes` is what the feed carried: an HTML string, one entry per
+// version, or nothing. It is stored as it came; the renderer turns it into
+// text before showing it.
+function keepReleaseNotes(info) {
+  try {
+    fs.writeFileSync(
+      userDataFile(UPDATE_NOTES_FILE),
+      JSON.stringify({ version: info.version, notes: info.releaseNotes ?? null })
+    );
+  } catch (err) {
+    // The dialog then shows the version and the release page link instead.
+    logWarn(`Updater: could not keep the release notes of v${info.version}`, err);
+  }
+}
+
+ipcMain.handle("updater:get-launch-state", () => {
+  const lastSeen = readUserDataFile(LAST_SEEN_VERSION_FILE)?.trim() || null;
+  let notes = null;
+  const rawNotes = readUserDataFile(UPDATE_NOTES_FILE);
+  if (rawNotes !== null) {
+    try {
+      notes = JSON.parse(rawNotes);
+    } catch (err) {
+      logWarn("The kept release notes are not valid JSON; the dialog shows the link only", err);
+    }
+  }
+  return { running_version: app.getVersion(), last_seen_version: lastSeen, notes };
+});
+
+// Records the version running now, never one the renderer names.
+ipcMain.handle("updater:mark-version-seen", () => {
+  try {
+    fs.writeFileSync(userDataFile(LAST_SEEN_VERSION_FILE), app.getVersion());
+    return { ok: true };
+  } catch (err) {
+    // The dialog comes back at the next launch; nothing else depends on it.
+    logWarn("Could not record the running version as seen", err);
+    return { ok: false };
+  }
+});
+
+function sendUpdaterEvent(event, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("updater-event", { event, ...payload });
+  }
+}
+
 function setupAutoUpdater() {
   if (!autoUpdater) {
     return;
   }
 
-  const send = (event, payload) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("updater-event", { event, ...payload });
-    }
-  };
+  const send = sendUpdaterEvent;
 
   // Every event both records the phase and is forwarded, including the two
   // that used to be logged and dropped ("update-not-available", "error"):
@@ -1210,7 +1303,9 @@ function setupAutoUpdater() {
   autoUpdater.on("update-available", (info) => {
     log(`Updater: update available - v${info.version}`);
     updaterState = { phase: "available", version: info.version, percent: 0 };
-    send("update-available", { version: info.version, releaseNotes: info.releaseNotes || "" });
+    // Whether a download follows on its own (Download updates automatically),
+    // so the banner says "downloading" or offers Download, never the wrong one.
+    send("update-available", { version: info.version, downloading: autoUpdater.autoDownload });
   });
 
   autoUpdater.on("update-not-available", () => {
@@ -1226,10 +1321,25 @@ function setupAutoUpdater() {
     send("download-progress", { percent });
   });
 
+  // The library arms the install at quit right after this event, from the
+  // value autoInstallOnAppQuit holds now (BaseUpdater registers its quit
+  // handler, MacUpdater hands the update to Squirrel.Mac), so the record of
+  // what is armed is taken from the same value.
   autoUpdater.on("update-downloaded", (info) => {
     log(`Updater: v${info.version} downloaded, ready to install.`);
+    downloadedVersion = info.version;
+    installArmed = installArmedAfterDownload({
+      platform: process.platform,
+      version: info.version,
+      autoInstallOnAppQuit: autoUpdater.autoInstallOnAppQuit,
+      armed: installArmed,
+    });
+    if (autoUpdater.autoInstallOnAppQuit) {
+      log(`Updater: v${info.version} will install when the app quits`);
+    }
     updaterState = { phase: "downloaded", version: info.version, percent: 100 };
-    send("update-downloaded", { version: info.version });
+    keepReleaseNotes(info);
+    send("update-downloaded", { version: info.version, handedOff: isHandedOff(installArmed) });
   });
 
   autoUpdater.on("error", (err) => {
@@ -1241,40 +1351,80 @@ function setupAutoUpdater() {
     send("error", {});
   });
 
-  // No check yet: applyAutoUpdatePreference() starts the first one once the
-  // renderer has reported whether the user allows updates at all.
+  // No check yet: applyUpdatePreferences() starts the first one once the
+  // renderer has reported the user's switches.
 }
 
-// Renderer -> main: the persisted "automatic updates" preference, sent at boot
-// and on every change. Off means off end to end: no check, no download, no
-// install on quit.
-ipcMain.on("updater:set-enabled", (_event, enabled) => {
-  autoUpdateEnabled = enabled !== false;
-  applyAutoUpdatePreference();
+// Renderer -> main: the three persisted update switches, sent at boot and on
+// every change ({check, download, install}, null for a switch the renderer
+// could not read).
+ipcMain.on("updater:set-preferences", (_event, snapshot) => {
+  updatePreferences = resolveUpdatePreferences(snapshot);
+  applyUpdatePreferences();
 });
 
-function applyAutoUpdatePreference() {
-  if (!autoUpdater || autoUpdateEnabled === null) {
-    return;
-  }
-
-  autoUpdater.autoDownload = autoUpdateEnabled;
-  autoUpdater.autoInstallOnAppQuit = autoUpdateEnabled;
-
-  if (!autoUpdateEnabled) {
-    if (updatePollTimer) {
-      clearInterval(updatePollTimer);
-      updatePollTimer = null;
+// Arm the install at quit of an update downloaded while install was off.
+// Never quitAndInstall from a quit handler: it runs the installer with its
+// window and re-enters before-quit.
+function armDownloadedInstall(how) {
+  if (how === "quit-handler") {
+    // BaseUpdater registers its quit handler only when autoInstallOnAppQuit is
+    // on at download; registering it now makes the silent install at quit
+    // happen. The handler reads autoInstallOnAppQuit again at quit, so a
+    // later "off" is honoured.
+    autoUpdater.addQuitHandler();
+    installArmed = { ...installArmed, quitHandler: true };
+  } else {
+    // MacUpdater keeps serving the download to Squirrel.Mac when install was
+    // off; asking Squirrel to check again fetches it from there, after which
+    // Squirrel installs it at quit on its own.
+    try {
+      require("electron").autoUpdater.checkForUpdates();
+    } catch (err) {
+      logWarn(`Updater: could not hand v${downloadedVersion} to the system installer`, err);
+      return;
     }
-    log("Updater: automatic updates are turned off; no check will run");
+    installArmed = { ...installArmed, handedOffVersion: downloadedVersion };
+    sendUpdaterEvent("install-handed-off", { version: downloadedVersion });
+  }
+  log(`Updater: v${downloadedVersion} will install when the app quits`);
+}
+
+function applyUpdatePreferences() {
+  if (!autoUpdater || updatePreferences === null) {
     return;
   }
 
-  if (updatePollTimer) {
+  const plan = planPreferenceChange({
+    preferences: updatePreferences,
+    platform: process.platform,
+    downloadedVersion,
+    armed: installArmed,
+    polling: updatePollTimer !== null,
+  });
+  autoUpdater.autoDownload = plan.autoDownload;
+  autoUpdater.autoInstallOnAppQuit = plan.autoInstallOnAppQuit;
+  log(
+    `Updater: switches check=${updatePreferences.check} download=${updatePreferences.download} ` +
+      `install=${updatePreferences.install}`
+  );
+  if (plan.armInstall) {
+    armDownloadedInstall(plan.armInstall);
+  }
+
+  if (plan.stopPolling) {
+    clearInterval(updatePollTimer);
+    updatePollTimer = null;
+  }
+  if (!updatePreferences.check) {
+    log("Updater: Check for updates is off; no check will run");
+    return;
+  }
+  if (!plan.startPolling) {
     return; // already checking on its cadence
   }
 
-  log("Updater: automatic updates are on; checking now, then every 4 hours");
+  log("Updater: Check for updates is on; checking now, then every 4 hours");
   autoUpdater.checkForUpdates().catch((err) => {
     logWarn("Updater: initial check failed", err);
   });

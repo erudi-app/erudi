@@ -87,7 +87,8 @@ contextBridge.exposeInMainWorld("languageAPI", {
 contextBridge.exposeInMainWorld("updaterAPI", {
   // Register a callback for updater events from main process.
   // event types: "checking-for-update" | "update-available" | "update-not-available"
-  //            | "download-progress" | "update-downloaded" | "error"
+  //            | "download-progress" | "update-downloaded" | "install-handed-off"
+  //            | "error"
   //
   // The cleanup removes THIS listener only: the banner and the Settings card
   // both listen, and removing every listener would leave whichever unmounted
@@ -107,8 +108,14 @@ contextBridge.exposeInMainWorld("updaterAPI", {
   // Recover the last phase/version if the card mounted after the events fired
   // -- the updater equivalent of "backend:getInfo".
   getState: () => ipcRenderer.invoke("updater:get-state"),
-  // The renderer owns the persisted "automatic updates" preference (the
-  // user_settings API); main owns electron-updater and holds every check until
-  // this arrives. Fire-and-forget, sent at boot and whenever the user changes it.
-  setAutoUpdateEnabled: (enabled) => ipcRenderer.send("updater:set-enabled", enabled),
+  // The renderer owns the three persisted update switches (the user_settings
+  // API); main owns electron-updater and holds every check until this arrives.
+  // The full snapshot {check, download, install}, null for a switch that could
+  // not be read. Fire-and-forget, sent at boot and whenever the user changes one.
+  setPreferences: (snapshot) => ipcRenderer.send("updater:set-preferences", snapshot),
+  // The "Updated to X.Y.Z" dialog (#572): {running_version, last_seen_version,
+  // notes} read from the user data folder, then recording the running version
+  // as seen (main writes its own version, the renderer names none).
+  getLaunchState: () => ipcRenderer.invoke("updater:get-launch-state"),
+  markVersionSeen: () => ipcRenderer.invoke("updater:mark-version-seen"),
 });

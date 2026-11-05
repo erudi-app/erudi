@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import { describe, it, expect, vi, afterEach, beforeEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 const { getMock, putMock } = vi.hoisted(() => ({
@@ -174,52 +174,141 @@ describe("SettingsPage", () => {
   });
 });
 
-describe("SettingsPage — automatic updates", () => {
-  it("shows automatic updates on, the behaviour of an install nobody configured", async () => {
+describe("SettingsPage — Updates (#563)", () => {
+  const SETTINGS = {
+    web_search_enabled: false,
+    language: "en",
+    auto_update_enabled: true,
+    auto_download_updates: false,
+    auto_install_updates: false,
+    inference_backend: "auto",
+  };
+  const CHECK = "Check for updates";
+  const DOWNLOAD = "Download updates automatically";
+  const INSTALL = "Install downloaded updates when I quit";
+
+  const switchNamed = (name) => screen.findByRole("switch", { name });
+  const checked = (toggle) => toggle.getAttribute("aria-checked");
+
+  it("shows Check on and the two opt-ins off on a fresh install", async () => {
+    mockGetByUrl({ userSettings: SETTINGS, appStartup: { backend_type: "cuda" } });
     renderPage();
-    const toggle = await screen.findByRole("switch", { name: "Automatic updates" });
-    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("true"));
+    const check = await switchNamed(CHECK);
+    await waitFor(() => expect(checked(check)).toBe("true"));
+    expect(checked(await switchNamed(DOWNLOAD))).toBe("false");
+    expect(checked(await switchNamed(INSTALL))).toBe("false");
   });
 
-  it("reflects a refusal that was persisted earlier", async () => {
+  it("says what each switch sends and does", async () => {
+    mockGetByUrl({ userSettings: SETTINGS, appStartup: { backend_type: "cuda" } });
+    renderPage();
+    await switchNamed(CHECK);
+    const text = document.body.textContent;
+    expect(text).toMatch(/GitHub releases/);
+    expect(text).toMatch(/nothing but your version and platform/);
+    expect(text).toMatch(/fetches the installer/);
+    expect(text).toMatch(/replaces the app.*when you quit/);
+  });
+
+  it("disables the two opt-ins while Check is off, and says why", async () => {
     mockGetByUrl({
-      userSettings: {
-        web_search_enabled: false,
-        language: "en",
-        auto_update_enabled: false,
-      },
+      userSettings: { ...SETTINGS, auto_update_enabled: false, auto_install_updates: true },
       appStartup: { backend_type: "cuda" },
     });
     renderPage();
-    const toggle = await screen.findByRole("switch", { name: "Automatic updates" });
-    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
+    const check = await switchNamed(CHECK);
+    await waitFor(() => expect(checked(check)).toBe("false"));
+    expect((await switchNamed(DOWNLOAD)).disabled).toBe(true);
+    expect((await switchNamed(INSTALL)).disabled).toBe(true);
+    expect(check.disabled).toBe(false);
+    expect(document.body.textContent).toMatch(/Turn on Check for updates/);
   });
 
-  it("persists a refusal and tells the main process to stop checking", async () => {
-    const setAutoUpdateEnabled = vi.fn();
-    window.updaterAPI = { setAutoUpdateEnabled };
-    putMock.mockResolvedValue({
-      web_search_enabled: false,
-      language: "en",
-      auto_update_enabled: false,
-    });
+  it.each([
+    [CHECK, "auto_update_enabled", false],
+    [DOWNLOAD, "auto_download_updates", true],
+    [INSTALL, "auto_install_updates", true],
+  ])("persists %s and hands main the full snapshot", async (name, field, next) => {
+    const setPreferences = vi.fn();
+    window.updaterAPI = { setPreferences };
+    mockGetByUrl({ userSettings: SETTINGS, appStartup: { backend_type: "cuda" } });
+    const saved = { ...SETTINGS, [field]: next };
+    putMock.mockResolvedValue(saved);
     renderPage();
-    const toggle = await screen.findByRole("switch", { name: "Automatic updates" });
-    await waitFor(() => expect(getMock).toHaveBeenCalled());
+    const toggle = await switchNamed(name);
+    await waitFor(() => expect(toggle.disabled).toBe(false));
 
     fireEvent.click(toggle);
 
+    await waitFor(() => expect(putMock).toHaveBeenCalledWith("/user_settings/", { [field]: next }));
     await waitFor(() =>
-      expect(putMock).toHaveBeenCalledWith("/user_settings/", { auto_update_enabled: false })
+      expect(setPreferences).toHaveBeenCalledWith({
+        check: saved.auto_update_enabled,
+        download: saved.auto_download_updates,
+        install: saved.auto_install_updates,
+      })
     );
-    await waitFor(() => expect(setAutoUpdateEnabled).toHaveBeenCalledWith(false));
-    await waitFor(() => expect(toggle.getAttribute("aria-checked")).toBe("false"));
+    await waitFor(() => expect(checked(toggle)).toBe(String(next)));
   });
 
-  it("says that updates are downloaded and installed without asking", async () => {
+  it("keeps the manual Update Erudi card", async () => {
     renderPage();
-    await screen.findByText("Automatic updates");
-    expect(document.body.textContent).toMatch(/install/i);
+    expect(await screen.findByText("Update Erudi")).toBeTruthy();
+  });
+
+  it("warns on macOS that an update already handed to the system may still install", async () => {
+    window.updaterAPI = {
+      setPreferences: vi.fn(),
+      getState: vi
+        .fn()
+        .mockResolvedValue({ available: true, phase: "downloaded", handedOff: true }),
+      onUpdaterEvent: vi.fn(() => () => {}),
+    };
+    mockGetByUrl({ userSettings: SETTINGS, appStartup: { backend_type: "mlx" } });
+    renderPage();
+
+    expect(await screen.findByText(/may still install when you quit/)).toBeTruthy();
+  });
+
+  it("does not warn while install stays on after the hand-off", async () => {
+    window.updaterAPI = {
+      setPreferences: vi.fn(),
+      getState: vi
+        .fn()
+        .mockResolvedValue({ available: true, phase: "downloaded", handedOff: true }),
+      onUpdaterEvent: vi.fn(() => () => {}),
+    };
+    mockGetByUrl({
+      userSettings: { ...SETTINGS, auto_install_updates: true },
+      appStartup: { backend_type: "mlx" },
+    });
+    renderPage();
+    const install = await switchNamed(INSTALL);
+    await waitFor(() => expect(checked(install)).toBe("true"));
+
+    expect(screen.queryByText(/may still install when you quit/)).toBeNull();
+  });
+
+  it("learns about a hand-off from the updater event", async () => {
+    // Both update cards listen; main broadcasts to every listener.
+    const listeners = [];
+    const emit = (payload) => listeners.forEach((listener) => listener(payload));
+    window.updaterAPI = {
+      setPreferences: vi.fn(),
+      getState: vi.fn().mockResolvedValue({ available: true, phase: "idle", handedOff: false }),
+      onUpdaterEvent: vi.fn((callback) => {
+        listeners.push(callback);
+        return () => {};
+      }),
+    };
+    mockGetByUrl({ userSettings: SETTINGS, appStartup: { backend_type: "mlx" } });
+    renderPage();
+    await switchNamed(CHECK);
+    expect(screen.queryByText(/may still install when you quit/)).toBeNull();
+
+    act(() => emit({ event: "install-handed-off" }));
+
+    expect(await screen.findByText(/may still install when you quit/)).toBeTruthy();
   });
 });
 
@@ -437,16 +526,17 @@ describe("SettingsPage — how a failure is reported", () => {
     delete window.backendAPI;
   });
 
-  it("only tells main about an automatic-update choice that persisted", async () => {
+  it("only tells main about an update choice that persisted", async () => {
     putMock.mockRejectedValue(new Error("backend is down"));
-    window.updaterAPI = { setAutoUpdateEnabled: vi.fn() };
+    window.updaterAPI = { setPreferences: vi.fn() };
     renderPage();
-    const toggle = await screen.findByLabelText("Automatic updates");
+    const toggle = await screen.findByLabelText("Check for updates");
+    await waitFor(() => expect(toggle.disabled).toBe(false));
 
     fireEvent.click(toggle);
 
     await waitFor(() => expect(putMock).toHaveBeenCalled());
-    expect(window.updaterAPI.setAutoUpdateEnabled).not.toHaveBeenCalled();
+    expect(window.updaterAPI.setPreferences).not.toHaveBeenCalled();
     expect(messages().length).toBe(1);
   });
 });

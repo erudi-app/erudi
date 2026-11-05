@@ -11,16 +11,16 @@ const log = createLogger("UpdatesCard");
  * The Settings card that gives updates a surface of their own (#571).
  *
  * `UpdateBanner` only exists while an updater event is fresh and the user has
- * not dismissed it, and the install it promises is handed to the native
- * installer at quit. That installer aborts when the app is reopened before
+ * not dismissed it, and an install at quit (Install downloaded updates when I
+ * quit) is handed to the native installer. That installer aborts when the app is reopened before
  * the swap finishes ("App Still Running Error") and tells the app nothing, so
  * a user who reopens quickly can be stuck on an old version forever with no
  * control anywhere. This card is that control: check, download, install, on
  * demand.
  *
  * It follows the events rather than assuming what they will be. With
- * automatic updates on, `autoDownload` turns a check straight into a
- * download, so the Download button is offered only in the one state where it
+ * Download updates automatically on, `autoDownload` turns a check straight
+ * into a download, so the Download button is offered only in the one state where it
  * is real -- an update found and not yet downloading. On mount it asks main
  * for the phase it may have missed (`updater:get-state`), the way the error
  * screen asks `backend:getInfo`: an update staged hours ago is exactly the
