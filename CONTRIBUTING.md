@@ -317,7 +317,7 @@ cd backend
 pytest tests/ -q --ignore=tests/e2e -m "not mlx_only"
 ```
 
-**Frontend** (`.github/workflows/frontend-ci.yml`, Node 22 — Babel 8 needs `^22.18.0 || >=24.11.0`, which the CI runner's Node 22 satisfies):
+**Frontend** (`.github/workflows/frontend-ci.yml`, Node 22 — Babel 8 and Vitest 5 together need `^22.18.0 || ^24.11.0 || >=26.0.0`):
 
 ```bash
 cd frontend

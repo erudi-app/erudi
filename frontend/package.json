@@ -29,7 +29,7 @@
   "author": "Djalil Chikhi, Rayan Hanader, Sami Taider, Youssef Chaouki, Youssef Laatar",
   "license": "MIT",
   "engines": {
-    "node": ">=22.18.0"
+    "node": "^22.18.0 || ^24.11.0 || >=26.0.0"
   },
   "devDependencies": {
     "@babel/core": "^8.1.0",

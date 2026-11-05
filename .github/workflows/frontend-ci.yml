@@ -24,7 +24,7 @@ jobs:
       - name: Set up Node.js
         uses: actions/setup-node@v7
         with:
-          node-version: '22.18'
+          node-version: '22'
           cache: 'npm'
           cache-dependency-path: frontend/package-lock.json
 
@@ -44,8 +44,9 @@ jobs:
         working-directory: frontend
         run: npm run test:run
 
-      # Vitest does not run Babel, and the full-app smoke only boots the
-      # backend, so this is the one gate that compiles the renderer JSX.
+      # Vitest does not run Babel; the full-app smoke compiles the bundles
+      # too, but only on ready-for-review PRs and in the merge queue. This
+      # step gives the same signal on every push, in under a minute.
       - name: Build bundles (webpack)
         working-directory: frontend
         run: npm run build

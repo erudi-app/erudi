@@ -112,7 +112,7 @@ if (-not (Test-Path $BackendSpec)) {
 Write-OK "backend.spec found"
 
 $npmCmd = Get-Command npm -ErrorAction SilentlyContinue
-if (-not $npmCmd) { Write-Fail "npm not found in PATH. Install Node.js 22.18 or later." }
+if (-not $npmCmd) { Write-Fail "npm not found in PATH. Install Node.js 22 (22.18 or later)." }
 Write-OK "npm found: $($npmCmd.Source)"
 
 # ── PyInstaller ────────────────────────────────────────────────────────────────

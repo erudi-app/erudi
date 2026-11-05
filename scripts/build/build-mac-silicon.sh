@@ -57,7 +57,7 @@ ok "Backend venv found"
 ok "backend-mac-silicon.spec found"
 
 command -v npm >/dev/null 2>&1 || \
-    fail "npm not found in PATH. Install Node.js 22.18 or later."
+    fail "npm not found in PATH. Install Node.js 22 (22.18 or later)."
 ok "npm found: $(command -v npm)"
 
 # ── PyInstaller ────────────────────────────────────────────────────────────────
