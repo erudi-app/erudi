@@ -23,10 +23,12 @@ vi.mock("./contexts/DownloadModalContext", () => ({
 vi.mock("./contexts/KnowledgeBaseContext", () => ({
   KnowledgeBaseProvider: ({ children }) => <>{children}</>,
 }));
-// The language sync (#385) and the automatic-update sync also call the client
-// once ready; keep the health poll counts below about the health poll only.
+// The language sync (#385), the update-preferences sync and the update notice
+// also call the client once ready; keep the health poll counts below about the
+// health poll only.
 vi.mock("./i18n/sync", () => ({ syncLanguageWithBackend: vi.fn() }));
-vi.mock("./utils/autoUpdate", () => ({ syncAutoUpdateWithMain: vi.fn() }));
+vi.mock("./utils/autoUpdate", () => ({ syncUpdatePreferencesWithMain: vi.fn() }));
+vi.mock("./utils/updateNotice", () => ({ loadUpdateNotice: vi.fn().mockResolvedValue(null) }));
 vi.mock("./services/api/client", () => ({
   apiClient: { get: vi.fn() },
   default: { get: vi.fn() },

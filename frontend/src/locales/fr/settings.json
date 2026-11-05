@@ -27,11 +27,23 @@
     "note": "80 % par défaut. Plus bas : résume plus tôt et plus souvent, ce qui garde la conversation plus courte. Plus haut : en garde davantage mot pour mot et résume moins souvent.",
     "selectLabel": "Seuil de compaction par défaut"
   },
-  "autoUpdate": {
-    "title": "Mises à jour automatiques",
-    "description": "Cherche une nouvelle version d'Erudi en arrière-plan, la télécharge et l'installe à la prochaine fermeture. La requête part vers les releases GitHub de ce projet et ne transporte que votre version et votre plateforme.",
-    "note": "Activées par défaut. Une fois désactivées, l'application ne fait plus aucune requête de mise à jour ; vous pouvez toujours installer une nouvelle version vous-même depuis la page des releases.",
-    "toggleLabel": "Mises à jour automatiques"
+  "updatePreferences": {
+    "title": "Mises à jour",
+    "description": "Ce qu'Erudi fait de lui-même quand une nouvelle version est publiée. La carte « Mettre à jour Erudi » ci-dessous recherche, télécharge et installe à la demande, quoi que vous choisissiez ici.",
+    "check": {
+      "label": "Rechercher des mises à jour",
+      "help": "Interroge les releases GitHub de ce projet au lancement, puis toutes les 4 heures, et affiche un bandeau quand une nouvelle version existe. La requête ne transporte que votre version et votre plateforme."
+    },
+    "download": {
+      "label": "Télécharger les mises à jour automatiquement",
+      "help": "Dès que la recherche trouve une nouvelle version, Erudi télécharge l'installeur en arrière-plan. Désactivé, le bandeau propose un bouton Télécharger et rien n'est téléchargé tant que vous n'appuyez pas dessus."
+    },
+    "install": {
+      "label": "Installer les mises à jour téléchargées quand je quitte",
+      "help": "Une version téléchargée remplace l'application quand vous quittez Erudi, sans boîte de dialogue. Désactivé, elle attend « Installer maintenant »."
+    },
+    "checkOffNote": "Activez « Rechercher des mises à jour » pour utiliser les deux autres interrupteurs.",
+    "handedOffNote": "Cette mise à jour peut encore s'installer quand vous quittez : macOS l'a déjà reçue."
   },
   "updates": {
     "title": "Mettre à jour Erudi",

@@ -12,12 +12,14 @@ import { KnowledgeBaseProvider } from "./contexts/KnowledgeBaseContext";
 import LoadingScreen from "./components/LoadingScreen";
 import BackendErrorScreen from "./components/BackendErrorScreen";
 import UpdateBanner from "./components/UpdateBanner";
+import UpdateNoticeDialog from "./components/modals/UpdateNoticeDialog";
 import EngineFailureModal from "./components/modals/EngineFailureModal";
 import InteractionLogger from "./components/InteractionLogger";
 import { apiClient } from "./services/api/client";
 import { setBackendPort } from "./config/api";
 import { syncLanguageWithBackend } from "./i18n/sync";
-import { syncAutoUpdateWithMain } from "./utils/autoUpdate";
+import { syncUpdatePreferencesWithMain } from "./utils/autoUpdate";
+import { loadUpdateNotice, markVersionSeen } from "./utils/updateNotice";
 import {
   describeBackendError,
   isStartupError,
@@ -44,6 +46,9 @@ export default function App() {
   // — so it is held here and shown over the real UI once the app is past
   // `ready`, never on the loader and never on the error screen.
   const [engineNotice, setEngineNotice] = useState(null);
+  // "Updated to X.Y.Z" (#572): decided once the backend answers, recorded as
+  // seen when dismissed.
+  const [updateNotice, setUpdateNotice] = useState(null);
 
   useEffect(() => {
     let cancelled = false;
@@ -121,14 +126,27 @@ export default function App() {
   }, [retryNonce]);
 
   // Once the backend answers, reconcile the boot language (local mirror or
-  // OS locale) with the persisted user setting (#385), and hand the persisted
-  // automatic-update preference to the main process, which holds every update
-  // check until it hears one.
+  // OS locale) with the persisted user setting (#385), hand the persisted
+  // update switches to the main process, which holds every update check until
+  // it hears them (#563), and decide whether this launch is the first of a
+  // new version (#572).
   useEffect(() => {
-    if (!isBackendReady) return;
+    if (!isBackendReady) return undefined;
+    let cancelled = false;
     syncLanguageWithBackend(apiClient);
-    syncAutoUpdateWithMain(apiClient);
+    syncUpdatePreferencesWithMain(apiClient);
+    loadUpdateNotice(apiClient).then((notice) => {
+      if (!cancelled) setUpdateNotice(notice);
+    });
+    return () => {
+      cancelled = true;
+    };
   }, [isBackendReady]);
+
+  const handleUpdateNoticeDismiss = useCallback(() => {
+    setUpdateNotice(null);
+    markVersionSeen();
+  }, []);
 
   const handleRetry = useCallback(() => {
     setBackendError(null);
@@ -160,6 +178,7 @@ export default function App() {
         {/* Dismissing persists nothing: the condition is real and still there
             next launch, so the notice is expected to come back. */}
         <EngineFailureModal notice={engineNotice} onDismiss={() => setEngineNotice(null)} />
+        <UpdateNoticeDialog notice={updateNotice} onDismiss={handleUpdateNoticeDismiss} />
         <Router>
           {/* Mounted-once UI interaction tracer (needs the Router for useLocation). */}
           <InteractionLogger />

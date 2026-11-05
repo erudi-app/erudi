@@ -39,7 +39,7 @@ function mockUpdaterAPI(overrides = {}) {
     checkNow: vi.fn().mockResolvedValue({ ok: true }),
     downloadNow: vi.fn().mockResolvedValue({ ok: true }),
     installNow: vi.fn().mockResolvedValue(undefined),
-    setAutoUpdateEnabled: vi.fn(),
+    setPreferences: vi.fn(),
     ...overrides,
   };
   window.updaterAPI = api;
@@ -189,6 +189,44 @@ describe("UpdatesCard — installing", () => {
   });
 });
 
+describe("UpdatesCard — a downloaded update and later events", () => {
+  it("keeps Install now when the 4-hourly check finds the same version again (P2-2)", async () => {
+    render(<UpdatesCard />);
+    await screen.findByRole("button", { name: "Check for updates" });
+    emit({ event: "update-downloaded", version: "1.1.0" });
+
+    emit({ event: "checking-for-update" });
+    emit({ event: "update-available", version: "1.1.0", downloading: false });
+
+    expect(screen.getByRole("button", { name: "Install now" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Download" })).toBeNull();
+  });
+
+  it("moves on to a newer version", async () => {
+    render(<UpdatesCard />);
+    await screen.findByRole("button", { name: "Check for updates" });
+    emit({ event: "update-downloaded", version: "1.1.0" });
+
+    emit({ event: "update-available", version: "1.2.0", downloading: false });
+
+    expect(screen.getByText("Version 1.2.0 is available.")).toBeTruthy();
+  });
+
+  it.each(["error", "download-cancelled"])(
+    "offers Download again when an automatic download ends in %s (P3-4, P3-9)",
+    async (event) => {
+      render(<UpdatesCard />);
+      await screen.findByRole("button", { name: "Check for updates" });
+      emit({ event: "update-available", version: "1.1.0", downloading: true });
+      emit({ event: "download-progress", percent: 30 });
+
+      emit({ event });
+
+      expect(screen.getByRole("button", { name: "Download" })).toBeTruthy();
+    }
+  );
+});
+
 describe("UpdatesCard — failures stay on the card", () => {
   it("shows an inline line when the updater fails during a check the user asked for", async () => {
     render(<UpdatesCard />);
@@ -200,6 +238,31 @@ describe("UpdatesCard — failures stay on the card", () => {
     expect(screen.getByText(/could not be checked/i)).toBeTruthy();
     // The product decision for #571: no dialog, no popup, ever.
     expect(screen.queryByRole("dialog")).toBeNull();
+    expect(screen.getByRole("button", { name: "Check for updates" }).disabled).toBe(false);
+  });
+
+  it("leaves Checking when a background check fails while the card is open (P3-B)", async () => {
+    render(<UpdatesCard />);
+    await screen.findByRole("button", { name: "Check for updates" });
+
+    emit({ event: "checking-for-update" });
+    expect(screen.getByRole("button", { name: "Checking…" }).disabled).toBe(true);
+    emit({ event: "error" });
+
+    expect(screen.getByRole("button", { name: "Check for updates" }).disabled).toBe(false);
+    expect(screen.queryByText(/could not be checked/i)).toBeNull();
+  });
+
+  it("goes back to what it said before a background check that fails", async () => {
+    render(<UpdatesCard />);
+    fireEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
+    emit({ event: "update-not-available" });
+    expect(screen.getByText("You are on the latest version.")).toBeTruthy();
+
+    emit({ event: "checking-for-update" });
+    emit({ event: "error" });
+
+    expect(screen.getByText("You are on the latest version.")).toBeTruthy();
     expect(screen.getByRole("button", { name: "Check for updates" }).disabled).toBe(false);
   });
 
@@ -229,6 +292,21 @@ describe("UpdatesCard — failures stay on the card", () => {
     fireEvent.click(screen.getByRole("button", { name: "Download" }));
 
     expect(await screen.findByText(/could not be checked/i)).toBeTruthy();
+    // The update is still there: the button comes back.
+    expect(screen.getByRole("button", { name: "Download" })).toBeTruthy();
+  });
+
+  it("says a download the user started failed, and offers it again", async () => {
+    render(<UpdatesCard />);
+    await screen.findByRole("button", { name: "Check for updates" });
+    emit({ event: "update-available", version: "1.1.0" });
+    fireEvent.click(screen.getByRole("button", { name: "Download" }));
+    await waitFor(() => expect(window.updaterAPI.downloadNow).toHaveBeenCalled());
+
+    emit({ event: "error" });
+
+    expect(screen.getByText(/could not be checked/i)).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Download" })).toBeTruthy();
   });
 });
 

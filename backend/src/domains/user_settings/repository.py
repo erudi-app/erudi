@@ -34,7 +34,8 @@ class User_Settings_Repository:
         Returns:
             UserSettings: The singleton settings entity (defaults applied on
             first creation: web_search_enabled=False, language="en",
-            auto_update_enabled=True, inference_backend="auto").
+            auto_update_enabled=True, auto_download_updates=False,
+            auto_install_updates=False, inference_backend="auto").
         """
         settings = self.db.query(UserSettings).first()
         if not settings:
@@ -125,13 +126,45 @@ class User_Settings_Repository:
 
         Args:
             settings: The singleton entity to update.
-            value: New Boolean value (False refuses update checks entirely).
+            value: New Boolean value (False refuses the automatic check entirely).
 
         Returns:
             UserSettings: Updated entity.
         """
         logger.info(f"Updating UserSettings.auto_update_enabled = {value}")
         settings.auto_update_enabled = value
+        self.db.flush()
+        self.db.refresh(settings)
+        return settings
+
+    def set_auto_download_updates(self, settings: UserSettings, value: bool) -> UserSettings:
+        """Update the "Download updates automatically" opt-in (flushed, not committed).
+
+        Args:
+            settings: The singleton entity to update.
+            value: New Boolean value (True lets a found version download on its own).
+
+        Returns:
+            UserSettings: Updated entity.
+        """
+        logger.info(f"Updating UserSettings.auto_download_updates = {value}")
+        settings.auto_download_updates = value
+        self.db.flush()
+        self.db.refresh(settings)
+        return settings
+
+    def set_auto_install_updates(self, settings: UserSettings, value: bool) -> UserSettings:
+        """Update the "Install downloaded updates when I quit" opt-in (flushed, not committed).
+
+        Args:
+            settings: The singleton entity to update.
+            value: New Boolean value (True installs a downloaded version at quit).
+
+        Returns:
+            UserSettings: Updated entity.
+        """
+        logger.info(f"Updating UserSettings.auto_install_updates = {value}")
+        settings.auto_install_updates = value
         self.db.flush()
         self.db.refresh(settings)
         return settings

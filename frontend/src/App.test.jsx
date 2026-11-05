@@ -146,3 +146,60 @@ describe("App engine notice", () => {
     expect(screen.queryByText("MODELS_PAGE")).toBeNull();
   });
 });
+
+describe("App update notice (#572)", () => {
+  let getSpy;
+
+  beforeEach(() => {
+    window.updaterAPI = {
+      setPreferences: vi.fn(),
+      getLaunchState: vi.fn().mockResolvedValue({
+        running_version: "1.1.4",
+        last_seen_version: null,
+        notes: null,
+      }),
+      markVersionSeen: vi.fn().mockResolvedValue({ ok: true }),
+    };
+    getSpy = vi.spyOn(apiClient, "get").mockImplementation(async (url) => {
+      if (url === "/startup/install_state") return { has_user_data: true };
+      return {};
+    });
+  });
+
+  afterEach(() => {
+    getSpy.mockRestore();
+    delete window.updaterAPI;
+  });
+
+  it("shows the dialog over the app once ready, and records the version when dismissed", async () => {
+    render(<App />);
+    await act(async () => {
+      emit({ event: "ready", port: 8766 });
+    });
+
+    expect(await screen.findByRole("dialog", { name: "Updated to 1.1.4" })).toBeTruthy();
+    expect(screen.getByText("MODELS_PAGE")).toBeTruthy();
+    expect(window.updaterAPI.markVersionSeen).not.toHaveBeenCalled();
+
+    await act(async () => {
+      screen.getByRole("button", { name: "Close" }).click();
+    });
+
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+    expect(window.updaterAPI.markVersionSeen).toHaveBeenCalledTimes(1);
+  });
+
+  it("shows nothing on a fresh install and records the version at once", async () => {
+    getSpy.mockImplementation(async (url) => {
+      if (url === "/startup/install_state") return { has_user_data: false };
+      return {};
+    });
+    render(<App />);
+    await act(async () => {
+      emit({ event: "ready", port: 8766 });
+    });
+
+    await waitFor(() => expect(window.updaterAPI.markVersionSeen).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("dialog")).toBeNull();
+  });
+});
