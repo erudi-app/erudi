@@ -20,23 +20,28 @@ curl -X POST http://127.0.0.1:27182/erudi/conversations/ \
 ```
 
 `ConversationCreate` has one required field, `llm_id`. Everything else is optional and, when left
-out, is resolved rather than hard-coded:
+out, is resolved for that model rather than hard-coded. The first value that exists wins:
 
 | Field | Type | When omitted |
 |-------|------|--------------|
 | `llm_id` | int | required |
-| `temperature` | float, 0.0–2.0 | resolved from the model's own defaults (`sampling_defaults`) |
-| `top_p` | float, 0.0–1.0 | resolved from the model's own defaults |
+| `temperature` | float, 0.0–2.0 | saved for the model, else the model's recommendation (`sampling_defaults`), else 0.2 |
+| `top_p` | float, 0.0–1.0 | saved for the model, else the model's recommendation, else 0.95 |
 | `max_tokens` | int, 1–32768 | resolved from the model's own defaults — see [Output budget](#output-budget) |
-| `custom_prompt` | string, ≤ 4096 chars | empty |
-| `web_search_enabled` | bool | copies the global default from `GET /erudi/user_settings/` |
-| `reasoning_effort` | `none` \| `low` \| `medium` \| `high` \| `xhigh` | copies the global default from `GET /erudi/user_settings/` |
-| `compaction_threshold` | int, 50–90 in steps of 5 (percent) | copies the global default from `GET /erudi/user_settings/` — see [compaction](#how-conversation-state-is-kept) |
+| `custom_prompt` | string, ≤ 4096 chars | saved for the model, else empty |
+| `web_search_enabled` | bool | saved for the model, else the global default from `GET /erudi/user_settings/` |
+| `reasoning_effort` | `none` \| `low` \| `medium` \| `high` \| `xhigh` | saved for the model, else the global default from `GET /erudi/user_settings/` |
+| `compaction_threshold` | int, 50–90 in steps of 5 (percent) | saved for the model, else the global default from `GET /erudi/user_settings/` — see [compaction](#how-conversation-state-is-kept) |
+
+"Saved for the model" is what `/config global` stored with `PUT
+/erudi/llms/{id}/conversation_defaults` (see [Conversation defaults per
+model](#conversation-defaults-per-model)). Without a settings row (a fresh database) the global
+defaults are `medium`, off and 80. An explicit value always wins, an empty `custom_prompt` included.
 
 There is no `name` field: the conversation is created as `"New Conversation"` and renamed later.
-Once created, the conversation **owns** its values — a later change to the model's defaults, to the
-global web-search setting, to the global reasoning effort or to the global compaction threshold
-never retro-affects it.
+Once created, the conversation **owns** its values — a later change to the model's saved values,
+to the model's defaults, to the global web-search setting, to the global reasoning effort or to the
+global compaction threshold never retro-affects it.
 
 The response (`ConversationResponse`) carries `id`, `llm_id`, `name`, `created_at`,
 `last_message_time`, `temperature`, `top_p`, `max_tokens`, `custom_prompt`, `web_search_enabled`,
@@ -72,6 +77,11 @@ Request body (`ConversationQuery`):
 | `attachments` | list of strings | local paths of documents, or of folders of documents, attached to this question |
 | `temperature`, `top_p`, `custom_prompt` | optional | per-turn overrides of the conversation's settings |
 | `max_new_tokens` | optional | accepted and ignored — see [Output budget](#output-budget) |
+
+`backend.log` records the values each turn runs with, overrides included, in one line:
+`Turn settings: conversation=<id>, model=<llm_id>, effort=<level>, temperature=<t>, top_p=<p>,
+threshold=<percent>, web_search=<True|False>, custom_prompt_chars=<n>` (the instructions' length,
+never their text).
 
 ### Output budget
 
@@ -225,9 +235,12 @@ answer.
 
 A conversation carries a reasoning effort — one of `none`, `low`, `medium`, `high`, `xhigh` — that
 says how much the model may deliberate before answering. `medium` is the default: a conversation
-copies the global default (`user_settings.default_reasoning_effort`) when it is created and owns its
-level afterwards, so changing the global setting only affects the next conversation. Arena panels
-have no conversation row and read the global level on every turn.
+starts at the level saved for its model with `/config global`, else at the global default
+(`user_settings.default_reasoning_effort`), and owns its level afterwards, so changing the global
+setting only affects the next conversation. There is no per-model recommendation: a model without a
+saved level starts at the global default whether it reasons or not. Arena panels have no conversation
+row: a panel that sends no level runs at the level saved for its model, else at the global default,
+read on every turn.
 
 The chat header's settings panel carries a Reasoning effort control next to the Web search toggle,
 seeded from the conversation's level and persisted through the same one-field PATCH the moment it
@@ -427,6 +440,44 @@ curl -X PATCH http://127.0.0.1:27182/erudi/conversations/42 \
 `web_search_enabled`, `reasoning_effort` and `compaction_threshold`; omitted fields are left
 unchanged, and a `compaction_threshold` off the 50–90 scale (or not a multiple of 5) is a 422. Switching `llm_id` is how an unbound
 conversation (its model was deleted) is put back to work.
+
+A PATCH whose `llm_id` differs from the stored one (the `/model` command) also brings the new model's
+values, in the same transaction, and returns the updated conversation:
+
+- every value saved for the new model replaces the conversation's, whatever the PATCH carries for it;
+- `temperature` and `top_p` it has not saved take its recommendation; a `temperature` or `top_p` in
+  the same PATCH is ignored;
+- `reasoning_effort`, `compaction_threshold`, `web_search_enabled` and `custom_prompt` it has not
+  saved take the PATCH's value when it carries one, and otherwise stay as they are.
+
+A PATCH with the same `llm_id` re-applies nothing. A switch to a model that does not exist is a 404
+and changes nothing. `backend.log` records each switch as `Conversation <id> switched to model
+<llm_id>: saved=[...], temperature=<value> (<source>), top_p=<value> (<source>)`.
+
+### Conversation defaults per model
+
+`/config global` saves a conversation's values as the defaults of its model, in the
+`model_defaults` table (one row per model, one nullable column per value, NULL = not saved; the row
+is deleted with the model, so a model deleted and downloaded again starts with nothing saved, and a
+KB assistant keeps its own values when it is re-bound).
+
+```bash
+curl http://127.0.0.1:27182/erudi/llms/57/conversation_defaults
+curl -X PUT http://127.0.0.1:27182/erudi/llms/57/conversation_defaults \
+  -H 'Content-Type: application/json' \
+  -d '{"reasoning_effort": "high", "temperature": null, "custom_prompt": ""}'
+```
+
+`GET` answers, for each of `reasoning_effort`, `temperature`, `top_p`, `compaction_threshold`,
+`web_search_enabled` and `custom_prompt`, the value a new conversation on that model starts from and
+its `source`: `saved`, `settings` (the global default), `model` (the publisher's recommendation) or
+`fallback` (a constant). One resolver (`backend/src/domains/llms/conversation_defaults.py`) answers it
+for the routes, the conversation creation, the model switch and the Arena.
+
+`PUT` is partial: a field left out is unchanged, an explicit `null` clears it, and empty or
+whitespace-only `custom_prompt` clears the saved instructions (empty instructions are never saved).
+It never touches another model's values and returns the resolved values. A value off its scale or an
+unknown field is a 422 and saves nothing; an unknown model is a 404.
 
 ### Star and unstar a message
 
@@ -783,8 +834,9 @@ for how a KB turn routes between agentic and systematic mode.
 
 ## Web search
 
-`web_search_enabled` is a per-conversation toggle, copied at creation from the global default in
-`GET /erudi/user_settings/` (itself `false` until changed). The `web_search` tool is actually carried
+`web_search_enabled` is a per-conversation toggle, set at creation from the value saved for the
+model, else from the global default in `GET /erudi/user_settings/` (itself `false` until changed).
+Arena panels follow the global default only. The `web_search` tool is actually carried
 on a turn only when the toggle is on **and** the model's tool calls are verified to parse on the
 active engine's wire (`supports_tools` and `supports_tools_wire is True`) — the same gate as agentic
 Knowledge Base turns. A systematic-KB turn stays zero-tool whatever the toggle says.

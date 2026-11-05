@@ -12,6 +12,10 @@
 
 ::: src.domains.llms.schemas
 
+## Conversation defaults per model
+
+::: src.domains.llms.conversation_defaults
+
 ## Services (Business Logic)
 
 ::: src.domains.llms.services
