@@ -130,6 +130,19 @@ describe("ModalShell after a click on a non-focusable spot", () => {
     expect(document.activeElement).toBe(screen.getByText("last"));
   });
 
+  it("ignores an Escape that only cancels an input method's composition", async () => {
+    const onClose = vi.fn();
+    render(<Harness onClose={onClose} />);
+    open();
+    const dialog = await screen.findByRole("dialog");
+    const field = screen.getByLabelText("middle");
+    fireEvent.keyDown(field, { key: "Escape", isComposing: true });
+    fireEvent.keyDown(field, { key: "Escape", keyCode: 229 });
+    expect(onClose).not.toHaveBeenCalled();
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    expect(onClose).toHaveBeenCalledTimes(1);
+  });
+
   it("lets a click on the panel focus the panel itself", async () => {
     render(<Harness />);
     open();

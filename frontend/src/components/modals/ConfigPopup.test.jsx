@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, act, within } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, act, within, waitFor } from "@testing-library/react";
 
 // /config (#609): every adjustable value of the conversation in one popup,
 // each saved as it changes through the shared settings hook (no Apply). The
@@ -57,6 +57,27 @@ function Harness({
     if (conversation) settings.adopt(conversation);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
   return <Popup isOpen onClose={onClose} settings={settings} model={model} />;
+}
+
+// /config as the page opens it: Escape and the close button really close it.
+function ClosingHarness() {
+  const [open, setOpen] = React.useState(true);
+  const settings = useConversationSettings(7);
+  hookRef = settings;
+  React.useEffect(() => {
+    settings.adopt(CONVERSATION);
+  }, []); // eslint-disable-line react-hooks/exhaustive-deps
+  return (
+    <>
+      <span data-testid="open">{String(open)}</span>
+      <ConfigPopup
+        isOpen={open}
+        onClose={() => setOpen(false)}
+        settings={settings}
+        model={TOOL_MODEL}
+      />
+    </>
+  );
 }
 
 beforeEach(() => {
@@ -197,16 +218,30 @@ describe("ConfigPopup", () => {
     expect(patchMock).not.toHaveBeenCalled();
   });
 
-  it("saves edited instructions when the popup closes (Escape)", async () => {
-    const onClose = vi.fn();
-    render(<Harness onClose={onClose} />);
+  it("saves edited instructions once when the popup really closes (Escape)", async () => {
+    render(<ClosingHarness />);
     await settle();
     const editor = screen.getByRole("textbox", { name: "Custom instructions" });
     fireEvent.change(editor, { target: { value: "Be terse" } });
     fireEvent.keyDown(editor, { key: "Escape" });
+    await waitFor(() => expect(screen.getByTestId("open").textContent).toBe("false"));
+    // The exiting editor (its last props) still blurs as the focus goes back.
+    fireEvent.blur(editor);
     await act(async () => hookRef.flush());
-    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(patchMock).toHaveBeenCalledTimes(1);
     expect(patchMock).toHaveBeenCalledWith("/conversations/7", { custom_prompt: "Be terse" });
+  });
+
+  it("saves once when the editor blurs and then the popup closes", async () => {
+    render(<ClosingHarness />);
+    await settle();
+    const editor = screen.getByRole("textbox", { name: "Custom instructions" });
+    fireEvent.change(editor, { target: { value: "Be terse" } });
+    fireEvent.blur(editor);
+    fireEvent.keyDown(document.body, { key: "Escape" });
+    await waitFor(() => expect(screen.getByTestId("open").textContent).toBe("false"));
+    await act(async () => hookRef.flush());
+    expect(patchMock).toHaveBeenCalledTimes(1);
   });
 
   it("puts a control back and says so when its save fails", async () => {

@@ -102,10 +102,12 @@ export default function ConfigPopup({ isOpen, onClose, settings, model }) {
   const setWebSearch = (next) => setField("web_search_enabled", next);
   const setThreshold = (e) => setField("compaction_threshold", Number(e.target.value));
   // The instructions are saved on Save, when the editor loses the focus, and
-  // when the popup closes with an edit in it: never lost on close.
-  const edited = values.custom_prompt !== null && instructions !== values.custom_prompt;
+  // when the popup closes with an edit in it: never lost on close. Whether
+  // they changed is decided against the live value at call time, so a blur
+  // of the exiting editor after a close never saves the same text twice.
   const saveInstructions = () => {
-    if (edited) setField("custom_prompt", instructions);
+    const saved = settings.getValues().custom_prompt;
+    if (saved !== null && instructions !== saved) setField("custom_prompt", instructions);
   };
   const close = () => {
     saveInstructions();
@@ -282,6 +284,7 @@ ConfigPopup.propTypes = {
   settings: PropTypes.shape({
     values: PropTypes.object.isRequired,
     setField: PropTypes.func.isRequired,
+    getValues: PropTypes.func.isRequired,
     saveFailed: PropTypes.bool,
     isDraft: PropTypes.bool,
   }).isRequired,

@@ -57,7 +57,9 @@ export default function ModalShell({
   useEffect(() => {
     if (!isOpen) return undefined;
     const handleKeyDown = (e) => {
-      if (e.defaultPrevented) return;
+      // An input method composing (Chinese, Japanese): its Escape cancels the
+      // composition, never the popup.
+      if (e.defaultPrevented || e.isComposing || e.keyCode === 229) return;
       if (e.key === "Escape") {
         e.preventDefault();
         onCloseRef.current();
