@@ -506,6 +506,113 @@ Starred messages are read back when a turn is planned and appended to the system
 "Important points from the conversation so far" (`build_system_prompt` in
 `backend/src/utils/prompt_utils.py`).
 
+### Compact a conversation now
+
+```bash
+curl -X POST http://127.0.0.1:27182/erudi/conversations/42/compact
+```
+
+Summarizes the earlier messages right away (`/compact` in the composer) with the same summary as
+the automatic compaction, and answers `{"summarized": N, "reason": "length"|"memory", "summary":
+"..."}` — N counts the questions and answers the summary replaced. The cutoff is the automatic
+compaction's (`compaction_cutoff`) with a keep budget of one token, no futility guard and never the
+message-count fallback (`manual_compaction_cutoff`), so the model keeps
+`[summary, previous answer, last question, last answer]`: the summary is inserted as a user
+message, and keeping the last question alone would put two user messages in a row, which strict
+chat templates reject. With two exchanges or more (a previous summary counts as history) everything
+before the previous answer is summarized; a single exchange, or nothing said since the last manual
+compaction, is `{"summarized": 0}` — decided on the committed thread before the model is loaded,
+and nothing is stored.
+
+The request never re-assigns a model and never waits in line:
+
+- A conversation whose model was deleted is a 409 (`STATE_CONFLICT`, `detail.reason: "no_model"`,
+  "pick a model first").
+- While an answer streams, the model reloads, or a memory or idle check holds the model, the
+  request waits at most 2 seconds and then is a 409 (`ENGINE_BUSY`, "The model is busy; try again in
+  a moment."): it takes the engine's non-blocking guard (`try_generation_guard`), never the queue.
+- Once it holds the guard, a conversation whose last message is a question without an answer (a
+  turn killed before it ended) is a 409 (`detail.reason: "unanswered_question"`). The last message
+  is read only then, because a turn saves its answer after it releases the model. An answer of
+  any kind is accepted, a failed one included — a turn that timed out on a long history is exactly
+  when shrinking it helps. A thread whose failed turn was left open (the runner's repair did not
+  land) is closed the way that repair closes it, in the same write as the summary.
+
+Then, in a turn's order: the memory brake's turn-start sample, the model (loaded if needed), the
+prefix-cache claim for this conversation, the memory measurement window a turn opens (so the
+brake counts `/compact` as a turn, and a child its start sample restarted is not announced as a
+reload again on the next turn), the summary call, bounded on the server by the summary client's
+first-chunk ceiling plus its length decoded at the watchdog's conservative rate
+(`manual_summary_timeout_s`); the thread state rewritten as the `model` node; the prefix-cache reset
+of a compaction; the separator saved on the answer read under the guard; the window closed and the
+brake's turn-end sample, also after a failure (a model that could not load included).
+`backend.log` shows one `Conversation compacted: ... threshold=<pct>%, manual` line.
+
+Each failure has one record in `backend.log`:
+
+- A summary that fails or runs past its bound, or a thread state that cannot be written, changes
+  nothing — the model still sees the whole history — and is a 503 (`COMPACTION_FAILED`). Its one
+  warning names the causes of each attempt; the summarizer's per-attempt records are debug-level
+  for a manual compaction.
+- A conversation deleted while its summary ran is a 404 (`CONVERSATION_NOT_FOUND`, logged at info):
+  the thread written back meanwhile is deleted again, so a later conversation that reuses the id
+  never inherits it.
+- A separator that cannot be saved after the thread was rewritten is a 500
+  (`COMPACTION_SEPARATOR_NOT_SAVED`, "The history was summarized, but the separator could not be
+  saved.", one error with its traceback).
+
+A client that goes away during the summary releases the model with nothing written (the memory
+window is closed as abandoned, as for a turn); once the stores are being written, they are finished
+first, and a failure no response will carry is logged then.
+
+### Context usage
+
+```bash
+curl http://127.0.0.1:27182/erudi/conversations/42/context
+```
+
+What the conversation's **next** request would carry (`/context` in the composer), a snapshot the
+panel renders and never stores:
+
+```json
+{
+  "categories": {"system_prompt": 412, "tools": 0, "messages": 2310, "summary": 180,
+                 "free": 3651, "autocompaction_buffer": 1639},
+  "window": {"working": 8192, "allocated": 8192, "trained": 40960,
+             "reduced_by_memory": false, "model_loaded": true},
+  "kb_excerpts_excluded": false,
+  "over_window": false
+}
+```
+
+The counts are estimates in real tokens, from the same projection the compaction trigger and the
+memory notice use (`project_next_request`): the committed thread, past knowledge-base and web
+results as the short marker that replaces them in every request, an empty next question, the
+weights frozen once on the whole set and then split by category — the system prompt and the tool
+schemas share the overhead's weight, and the previous summary is never counted inside the
+messages. The system prompt is planned the way a turn plans it: the conversation's own
+instructions (its stored value), its starred messages, its reasoning-effort section, and the tools
+its mode carries. An assistant that searches its knowledge base on every question is counted in
+that mode — its knowledge-base instructions, no tools — without the excerpts a question retrieves
+(`kb_excerpts_excluded: true`); an assistant that searches through a tool counts the tool and the
+markers of its earlier searches.
+
+`used` is `system_prompt + tools + messages + summary`. The denominator `W` is the working window
+when this conversation's model is the loaded one — the allocated window, folded with the memory
+ceiling on Apple Silicon; `reduced_by_memory` says this computer's memory bounds it — and the
+model's trained window otherwise (`model_loaded: false`; the window this computer allows is known
+once the model loads). With `T` the compaction trigger at the conversation's threshold
+(`trigger_tokens(W, pct)`), `free = max(0, T − used)` and `autocompaction_buffer = max(0, W −
+max(T, used))`: the six blocks add up to `W` while the request fits. Past the threshold `free` is 0
+and the next turn compacts first; past the window (`over_window: true`) every block is used. With
+no window known at all, both are 0.
+
+The request takes no lock, never loads the model and never writes: a conversation whose model was
+deleted is a 409 (`detail.reason: "no_model"`) and is never re-assigned one. Without the lock, the
+loaded model is read once: its handle is checked to serve this conversation's model, and the
+allocated window, the memory bound and the memory ceiling all come from that one snapshot, so a
+model swapped meanwhile never lends its window to the panel.
+
 ### Record a failed generation
 
 ```bash
@@ -799,6 +906,10 @@ answer text from the `model` node only.
 - **After a reload.** The `done` events are part of the persisted trace, error turns included, so
   the separators come back with the conversation; a trace holding only compactions shows no
   reasoning strip.
+- **A manual compaction** (`POST /conversations/{id}/compact`) has no turn of its own: its `done`
+  event, with `manual: true` and the same other keys, is appended to the trace of the
+  conversation's last answer (without re-running the trace cap: a full trace may exceed it by that
+  one event), and the separator is drawn **below** that answer.
 
 The announcements never cost a turn: a direct call of the middleware (no runtime) has no channel
 and stays silent, and a channel that fails is one warning in `backend.log` per turn.

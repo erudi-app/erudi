@@ -333,6 +333,19 @@ class MessageRepository:
         except SQLAlchemyError as e:
             raise DatabaseException("Could not retrieve messages", trace=str(e))
 
+    def get_last_message(
+        self, conversation_id: int, sender: Optional[str] = None
+    ) -> Optional[Message]:
+        """The conversation's newest message (by insertion order), only
+        among ``sender``'s when given, or ``None``."""
+        try:
+            query = self.db.query(Message).filter(Message.conversation_id == conversation_id)
+            if sender is not None:
+                query = query.filter(Message.sender == sender)
+            return query.order_by(Message.id.desc()).first()
+        except SQLAlchemyError as e:
+            raise DatabaseException("Could not retrieve messages", trace=str(e))
+
     def has_messages(self, conversation_id: int) -> bool:
         """Whether the conversation holds any message (read-only, one row)."""
         try:

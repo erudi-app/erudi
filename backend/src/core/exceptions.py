@@ -24,7 +24,11 @@ Exception Hierarchy:
     ├── DownloadJobNotFoundException (404, DOWNLOAD_JOB_NOT_FOUND)
     ├── TokenizationException (500, TOKENIZATION_ERROR)
     ├── ConfigurationException (500, CONFIGURATION_ERROR)
-    └── EngineException (500, LLM_ENGINE_FAILURE)
+    ├── EngineException (500, LLM_ENGINE_FAILURE)
+    ├── HardwareException (500, HARDWARE_ERROR)
+    ├── EngineBusyException (409, ENGINE_BUSY)
+    ├── CompactionFailedException (503, COMPACTION_FAILED)
+    └── CompactionSeparatorException (500, COMPACTION_SEPARATOR_NOT_SAVED)
 
 Fonctionnalités:
 - Structured exception hierarchy with status codes
@@ -81,9 +85,10 @@ Exception Categories:
     - MessageNotFoundException
     - DownloadJobNotFoundException
 
-    **Client Errors (400, 422):**
+    **Client Errors (400, 409, 422):**
     - InvalidInputException (422)
     - StateConflictException (400)
+    - EngineBusyException (409)
 
     **Server Errors (500):**
     - DatabaseException
@@ -94,9 +99,11 @@ Exception Categories:
     - TokenizationException
     - ConfigurationException
     - EngineException
+    - CompactionSeparatorException
 
     **Service Unavailable (503):**
     - HuggingFaceAPIException
+    - CompactionFailedException
 
     **Not Implemented (501):**
     - UnsupportedPlatformException
@@ -857,6 +864,65 @@ class HardwareException(AppBaseException):
         )
 
 
+class EngineBusyException(AppBaseException):
+    """Exception raised when an action that must not queue finds the engine busy.
+
+    ``BaseEngine.try_generation_guard`` raises it after waiting at most
+    ``GENERATION_BUSY_WAIT_S`` for the generation lock: an answer, a model
+    reload, a memory-brake sample or the idle check holds it, or a turn is
+    queued for it. The wording is neutral because the holder can be any of
+    them.
+    """
+
+    def __init__(self, trace: Optional[str] = None):
+        super().__init__(
+            message="The model is busy; try again in a moment.",
+            status_code=status.HTTP_409_CONFLICT,
+            erudi_code="ENGINE_BUSY",
+            trace=trace,
+        )
+
+
+class CompactionFailedException(AppBaseException):
+    """Exception raised when a manual compaction could not write its summary.
+
+    The summary call failed or ran past its bound, or the summarized history
+    could not be written to the thread: nothing was changed, the model still
+    sees the whole history. The conversation endpoint handles it (one
+    WARNING, the app degraded on its own) and answers 503. ``trace`` names
+    the causes.
+    """
+
+    def __init__(
+        self,
+        message: str = "The summary could not be written; nothing was changed.",
+        trace: Optional[str] = None,
+    ):
+        super().__init__(
+            message=message,
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            erudi_code="COMPACTION_FAILED",
+            trace=trace,
+        )
+
+
+class CompactionSeparatorException(AppBaseException):
+    """Exception raised when a manual compaction rewrote the history but its
+    separator could not be saved in the messages table.
+
+    The model works on the summarized history from the next turn; only the
+    marker below the last answer is missing.
+    """
+
+    def __init__(self, trace: Optional[str] = None):
+        super().__init__(
+            message="The history was summarized, but the separator could not be saved.",
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            erudi_code="COMPACTION_SEPARATOR_NOT_SAVED",
+            trace=trace,
+        )
+
+
 def log_level_for_status(status_code: int) -> int:
     """The log level of a request that ends with ``status_code``.
 
@@ -906,6 +972,16 @@ async def app_base_exception_handler(request: Request, exc: AppBaseException):
     if exc.trace:
         record = f"{record}\n- Trace: {exc.trace}"
     logger.log(level, record, exc_info=exc if level >= logging.ERROR else None)
+    return app_error_response(exc)
+
+
+def app_error_response(exc: AppBaseException) -> JSONResponse:
+    """The JSON response of an ``AppBaseException``, without any log record.
+
+    The global handler returns it after writing the request's record; an
+    endpoint that handles a failure itself (and logs it at the level of what
+    happened) returns the same shape through it.
+    """
     error: dict = {
         "type": exc.erudi_code,
         "message": exc.message,

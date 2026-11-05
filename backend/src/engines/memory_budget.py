@@ -483,14 +483,17 @@ class MemoryBudget:
         )
 
     @classmethod
-    def from_engine(cls, engine: Any) -> "MemoryBudget":
-        """The accounting of the CURRENTLY LOADED child of ``engine``. Never
-        raises: an unreadable fact is a ``None`` field."""
+    def from_engine(cls, engine: Any, handle: Any = None) -> "MemoryBudget":
+        """The accounting of the CURRENTLY LOADED child of ``engine`` -- or of
+        ``handle``, a snapshot of it the caller already holds. Never raises:
+        an unreadable fact is a ``None`` field."""
         if engine is None or getattr(engine, "FORMAT_TAG", None) != "mlx":
             # llama.cpp: KV allocated in full at load -- nothing to account,
             # and nothing written on the handle.
             return cls.unaccounted()
-        return cls.from_handle(engine, getattr(engine, "_model", None))
+        return cls.from_handle(
+            engine, handle if handle is not None else getattr(engine, "_model", None)
+        )
 
     @classmethod
     def from_handle(cls, engine: Any, handle: Any) -> "MemoryBudget":
