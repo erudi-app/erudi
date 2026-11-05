@@ -131,6 +131,8 @@ export default function ConversationPage() {
   const [engineFailure, setEngineFailure] = useState(null);
   const [initialHandled, setInitialHandled] = useState(false);
   const [loading, setLoading] = useState(false);
+  // Turns completed on this page; bumped once each turn is over.
+  const [turnsEnded, setTurnsEnded] = useState(0);
   const [models, setModels] = useState([]);
   // The models list and the conversation load independently; the orphan
   // check below only fires once each has resolved, so the "missing model"
@@ -702,6 +704,9 @@ export default function ConversationPage() {
 
       isStreamingRef.current = false;
       await fetchMessagesAndConversations();
+      // The turn is over (the model it loaded is up): the header's Unload
+      // button reads the loaded model again.
+      setTurnsEnded((count) => count + 1);
 
       if (isFirstMessage) {
         setTimeout(() => setCurrentTitle(""), 3000);
@@ -1000,8 +1005,9 @@ export default function ConversationPage() {
             onCommand={setOpenCommand}
             saveFailed={conversationSettings.saveFailed}
           >
-            {/* Re-read the loaded model when a turn ends or the model changes. */}
-            <UnloadModelButton refreshKey={`${loading}:${llmId}`} />
+            {/* Re-read the loaded model when a turn has completed (turnsEnded),
+                when one starts streaming (loading) and when the model changes. */}
+            <UnloadModelButton refreshKey={`${turnsEnded}:${loading}:${llmId}`} />
           </ConversationHeader>
         </div>
 

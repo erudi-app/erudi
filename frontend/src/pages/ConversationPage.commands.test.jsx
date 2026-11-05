@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within, act } from "@testing-library/react";
 
 // The command surface on a conversation (#585, #609): the static header, its
 // settings panel, the slash commands typed in the composer, and the popups
@@ -208,6 +208,42 @@ describe("the header", () => {
     loaded = { llm_id: 1, name: "Qwen3-4B" };
     typeAndEnter("Hello");
     expect(await screen.findByRole("button", { name: "Unload Qwen3-4B" })).toBeTruthy();
+  });
+
+  it("re-reads the loaded model once a reload turn has ended, not at its first event", async () => {
+    // The reload notice is the turn's first event and comes before the model
+    // is loaded: only the read after the turn ends can see the model.
+    let loaded = null;
+    getMock.mockImplementation(async (path) => (path === "/llms/loaded" ? loaded : []));
+    const stream = controlledStream();
+    tracedFetchMock.mockImplementation(async (url, opts) =>
+      String(url).includes("/query") ? stream.response : routeFetch(url, opts)
+    );
+    const reads = () => getMock.mock.calls.filter(([path]) => path === "/llms/loaded").length;
+    await renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
+    await waitFor(() => expect(reads()).toBe(1));
+
+    typeAndEnter("Hello again");
+    await waitFor(() => expect(composer().disabled).toBe(true));
+    await act(async () => {
+      stream.push('{"t":"memory_reload","reason":"manual"}');
+    });
+    // Whatever the page read while the model was loading, it saw nothing.
+    await act(async () => {
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    });
+    const readsDuringTheTurn = reads();
+    expect(screen.queryByRole("button", { name: /^Unload/ })).toBeNull();
+
+    loaded = { llm_id: 1, name: "Qwen3-4B" };
+    await act(async () => {
+      stream.push('{"t":"answer","text":"Back."}');
+      stream.push('{"t":"done"}');
+      stream.end();
+    });
+    expect(await screen.findByRole("button", { name: "Unload Qwen3-4B" })).toBeTruthy();
+    expect(reads()).toBeGreaterThan(readsDuringTheTurn);
   });
 
   it("names the newly loaded model after a /model switch, with the panel open", async () => {

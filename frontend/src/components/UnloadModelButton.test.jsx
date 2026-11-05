@@ -129,16 +129,27 @@ describe("UnloadModelButton", () => {
 
   it("asks again when the page says a turn ended or the model changed", async () => {
     getMock.mockResolvedValue(null);
-    const { rerender } = render(<UnloadModelButton refreshKey="idle:3" />);
+    const { rerender } = render(<UnloadModelButton refreshKey="0:3" />);
     await waitFor(() => expect(getMock).toHaveBeenCalledTimes(1));
     expect(screen.queryByRole("button")).toBeNull();
 
     getMock.mockResolvedValue(LOADED);
-    rerender(<UnloadModelButton refreshKey="idle:3" />);
+    rerender(<UnloadModelButton refreshKey="0:3" />);
     expect(getMock).toHaveBeenCalledTimes(1);
-    rerender(<UnloadModelButton refreshKey="answering:3" />);
-    rerender(<UnloadModelButton refreshKey="idle:3" />);
+    // One more turn ended.
+    rerender(<UnloadModelButton refreshKey="1:3" />);
     expect(await screen.findByRole("button", { name: "Unload Qwen3-4B" })).toBeTruthy();
-    expect(getMock).toHaveBeenCalledTimes(3);
+    expect(getMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("drops a refusal once the page says something changed", async () => {
+    getMock.mockResolvedValue(LOADED);
+    postMock.mockRejectedValue(httpError(409));
+    const { rerender } = render(<UnloadModelButton refreshKey="0:3" />);
+    fireEvent.click(await screen.findByRole("button", { name: "Unload Qwen3-4B" }));
+    expect((await screen.findByRole("alert")).textContent).toBe(BUSY);
+    rerender(<UnloadModelButton refreshKey="1:3" />);
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(screen.getByRole("button", { name: "Unload Qwen3-4B" })).toBeTruthy();
   });
 });

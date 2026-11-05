@@ -16,9 +16,11 @@ function refusalKey(error) {
  *
  * Rendered as a child of `ConversationHeader`, so it exists only while the
  * panel is open: it asks the backend which model is loaded when it appears
- * (`GET /llms/loaded`), again whenever the page's `refreshKey` changes (a
- * turn ends, the conversation's model changes), and names that model,
- * whichever conversation loaded it. Nothing loaded (or no answer): nothing is
+ * (`GET /llms/loaded`), again whenever the page's `refreshKey` changes (the
+ * conversation page changes it when a turn has completed, after its own
+ * refetch, and when the conversation's model changes; a change also clears a
+ * refusal shown earlier), and names that model, whichever conversation loaded
+ * it. Nothing loaded (or no answer): nothing is
  * shown. Pressing it unloads the model it names (`POST /llms/loaded/unload`
  * with its `llm_id`) and asks again, so the button goes once the model has
  * left memory. The backend refuses with 409 while the engine is busy (an
@@ -58,6 +60,9 @@ export default function UnloadModelButton({ refreshKey }) {
   }, []);
 
   useEffect(() => {
+    // Something changed (a turn started or ended, the model changed): a
+    // refusal shown earlier no longer describes the engine.
+    setRefusal(null);
     refresh();
   }, [refresh, refreshKey]);
 

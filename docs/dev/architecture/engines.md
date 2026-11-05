@@ -310,7 +310,9 @@ one. `unload` runs under `try_generation_guard`: busy (an answer, a reload, a br
 the idle check holds the lock, or a turn waits for it, for more than 2 s) it raises
 `EngineBusyException` (409) and changes nothing; with nothing loaded it is a no-op; when the
 loaded model is not the `llm_id` the button named it raises `LoadedModelChangedException` (409)
-and unloads nothing. `_unload_and_record` runs `cleanup()` in a thread task waited through
+and unloads nothing; `try_generation_guard` then stamps neither `_last_used` nor
+`_generation_ended_at`, so the loaded model's idle clock and CUDA's contention settle stay as they
+were. `_unload_and_record` runs `cleanup()` in a thread task waited through
 `wait_shielded`, like a prefix-cache reset: a cancelled caller keeps the lock until the thread is
 done, the record is written, then the cancellation is raised. Being the
 same `cleanup()` as the idle reap, a manual unload on llama.cpp keeps the per-alias window

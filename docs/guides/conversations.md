@@ -449,8 +449,10 @@ line with a Retry button shows above the composer and runs the load again. Model
 
 While a model is loaded, the panel (here and on the new-conversation page) also shows a small red
 **Unload <model>** button naming the model in memory, whichever conversation loaded it; it asks
-`GET /erudi/llms/loaded` when the panel opens, when a turn ends or the conversation's model changes,
-and after an unload, and is absent when nothing is loaded. Pressing it unloads the model it names
+`GET /erudi/llms/loaded` when the panel opens, when an answer starts streaming, once a turn has
+completed (after the page reloads the conversation, so a model the turn reloaded is named), when
+the conversation's model changes and after an unload, and is absent when nothing is loaded. Any of
+these reads clears a refusal message shown earlier. Pressing it unloads the model it names
 (`POST /erudi/llms/loaded/unload` with its `llm_id`) and the button goes; while an answer is being
 generated the backend refuses with "The model is busy; try again in a moment." and nothing is
 interrupted, and when another model was loaded since, it refuses with "Another model is loaded

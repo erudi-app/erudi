@@ -320,12 +320,13 @@ still acts when the computer runs short of memory.
 The conversation header's settings panel (in a conversation and on the new-conversation page) shows
 a small red **Unload <model>** button while a model is loaded, naming it whichever conversation
 loaded it (`GET /erudi/llms/loaded`, which checks that the inference child is alive, read when the
-panel opens, when a turn ends or the conversation's model changes, and after an unload). Pressing it
-calls `POST /erudi/llms/loaded/unload` with the `llm_id` it names, which runs `BaseEngine.unload`
-under `try_generation_guard`: while an answer, a reload, a memory-brake sample or the idle check
+panel opens, when an answer starts streaming, once a turn has completed, when the conversation's
+model changes, and after an unload). Pressing it calls `POST /erudi/llms/loaded/unload` with the
+`llm_id` it names, which runs `BaseEngine.unload` under `try_generation_guard`: while an answer, a reload, a memory-brake sample or the idle check
 holds the engine (waited out for at most 2 seconds) it answers 409 "The model is busy; try again in
 a moment." and nothing is interrupted; when another model is loaded than the one named it answers
-409 "Another model is loaded now." and nothing is unloaded (the button then names the loaded model);
+409 "Another model is loaded now." and nothing is unloaded, not even the loaded model's idle clock
+restarted (the button then names the loaded model);
 otherwise the model goes through the same `cleanup()` as an idle unload, so on llama.cpp a window
 the memory brake reduced recently stays reduced at the next load. The cleanup thread is shielded: a
 request cancelled meanwhile keeps the lock until the thread is done, the record is written, then the
