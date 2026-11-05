@@ -308,7 +308,11 @@ go through `_unload_and_record`, which leaves
 `cleanup()` itself clears it, so a delete, the shutdown and the brake's unload never leave
 one. `unload` runs under `try_generation_guard`: busy (an answer, a reload, a brake sample or
 the idle check holds the lock, or a turn waits for it, for more than 2 s) it raises
-`EngineBusyException` (409) and changes nothing; with nothing loaded it is a no-op. Being the
+`EngineBusyException` (409) and changes nothing; with nothing loaded it is a no-op; when the
+loaded model is not the `llm_id` the button named it raises `LoadedModelChangedException` (409)
+and unloads nothing. `_unload_and_record` runs `cleanup()` in a thread task waited through
+`wait_shielded`, like a prefix-cache reset: a cancelled caller keeps the lock until the thread is
+done, the record is written, then the cancellation is raised. Being the
 same `cleanup()` as the idle reap, a manual unload on llama.cpp keeps the per-alias window
 memory, so the next load keeps a recent brake reduction exactly as after an idle unload. A
 model switch does not call `cleanup()`: what keeps it from reading as an unload is that

@@ -549,10 +549,11 @@ takes the same lock as `generation_guard`, so it waits for a generation in fligh
 it — and the guard refreshes `_last_used` on release — which is what keeps a model from being
 reaped mid-stream.
 
-The conversation header's Unload button (`POST /erudi/llms/loaded/unload`) unloads the model
-on demand through `BaseEngine.unload`, under `try_generation_guard`: refused with 409 while an
-answer, a reload or a memory check holds the engine, otherwise the same `cleanup()` as the
-idle reap, so the next turn of that model reloads it exactly as after an idle unload.
+The conversation header's Unload button (`POST /erudi/llms/loaded/unload` with the `llm_id` it
+names) unloads that model on demand through `BaseEngine.unload`, under `try_generation_guard`:
+refused with 409 while an answer, a reload or a memory check holds the engine, or when another
+model is loaded now, otherwise the same `cleanup()` as the idle reap (shielded from a cancelled
+request), so the next turn of that model reloads it exactly as after an idle unload.
 
 ### The memory brake (Apple Silicon and CPU)
 

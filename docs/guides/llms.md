@@ -283,7 +283,7 @@ Regenerated from `backend/src/domains/llms/endpoints.py`.
 | `GET` | `/erudi/llms/search?name=` | Search the catalog by name |
 | `GET` | `/erudi/llms/search/huggingface?q=&limit=` | Live Hugging Face search in the engine's format |
 | `GET` | `/erudi/llms/loaded` | The model in memory (`{"llm_id", "name"}`), or `null` |
-| `POST` | `/erudi/llms/loaded/unload` | Unload it now: `204` (also when nothing is loaded), `409` while busy |
+| `POST` | `/erudi/llms/loaded/unload` | Unload the model named in the body (`{"llm_id": ...}`) now: `204` (also when nothing is loaded), `409` while busy or when another model is loaded |
 | `GET` | `/erudi/llms/{llm_id}` | One model |
 | `GET` | `/erudi/llms/{llm_id}/dependents` | KB assistants and conversation counts a delete would affect |
 | `GET` | `/erudi/llms/{llm_id}/conversation_defaults` | The values a new conversation on the model starts from, with their source |
@@ -320,12 +320,16 @@ still acts when the computer runs short of memory.
 The conversation header's settings panel (in a conversation and on the new-conversation page) shows
 a small red **Unload <model>** button while a model is loaded, naming it whichever conversation
 loaded it (`GET /erudi/llms/loaded`, which checks that the inference child is alive, read when the
-panel opens and after an unload). Pressing it calls `POST /erudi/llms/loaded/unload`, which runs
-`BaseEngine.unload` under `try_generation_guard`: while an answer, a reload, a memory-brake sample or
-the idle check holds the engine (waited out for at most 2 seconds) it answers 409 "The model is busy;
-try again in a moment." and nothing is interrupted; otherwise the model goes through the same
-`cleanup()` as an idle unload, so on llama.cpp a window the memory brake reduced recently stays
-reduced at the next load.
+panel opens, when a turn ends or the conversation's model changes, and after an unload). Pressing it
+calls `POST /erudi/llms/loaded/unload` with the `llm_id` it names, which runs `BaseEngine.unload`
+under `try_generation_guard`: while an answer, a reload, a memory-brake sample or the idle check
+holds the engine (waited out for at most 2 seconds) it answers 409 "The model is busy; try again in
+a moment." and nothing is interrupted; when another model is loaded than the one named it answers
+409 "Another model is loaded now." and nothing is unloaded (the button then names the loaded model);
+otherwise the model goes through the same `cleanup()` as an idle unload, so on llama.cpp a window
+the memory brake reduced recently stays reduced at the next load. The cleanup thread is shielded: a
+request cancelled meanwhile keeps the lock until the thread is done, the record is written, then the
+cancellation is raised.
 
 The next request reloads an unloaded model, which costs the usual load time; the next turn of an
 existing conversation says why it reloads (`memory_reload` with `reason: "idle"` after the idle
