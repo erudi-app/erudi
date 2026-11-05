@@ -245,7 +245,7 @@ resolved by the backend itself in `src/launcher/runtime_paths.py`.
 
 | Leg | Runner | Requirements | Spec | llama-server |
 |---|---|---|---|---|
-| `mac-arm` | `macos-14` | `mac-silicon-prod.txt` | `backend-mac-silicon.spec` | — (MLX) |
+| `mac-arm` | `macos-15` | `mac-silicon-prod.txt` | `backend-mac-silicon.spec` | — (MLX) |
 | `win-cpu` | `windows-2022` | `win-cpu-prod.txt` | `backend-cpu.spec` | cpu |
 | `win-cuda` | `windows-2022` | `win-cuda-prod.txt` | `backend.spec` | cuda + cpu |
 | `linux-cpu` | `ubuntu-22.04` | `linux-cpu-prod.txt` | `backend-cpu.spec` | cpu |
@@ -273,6 +273,16 @@ instead — every dependency of the bundled binary must resolve except that driv
 library, which is the only thing that would catch a freeze dropping
 `libcublas.so.12` — and Windows CUDA is checked for the bundled CUDA runtime
 DLLs. Real hardware in the QA pass is the first thing that runs either.
+
+The `mac-arm` leg runs on a newer macOS than the app's floor
+(`mac.minimumSystemVersion` in `electron-builder.yml`, 14.0), and pip prefers
+the wheels built for the runner's own macOS (mlx, mlx-metal and orjson publish
+one per release). So the leg downloads the requirements with
+`--only-binary=:all: --platform macosx_<floor>_arm64` into a wheelhouse and
+installs from it alone, then `scripts/ci/check_macos_floor.sh backend/dist <floor>`
+reads the minimum macOS of every Mach-O file in the frozen backend (`otool -l`)
+and fails the leg on any file above the floor. `app-build-smoke.yml` does the
+same on its macOS leg.
 
 The CUDA legs inject `-c.publish.channel=cuda` (plus a distinct artifact name)
 so the GPU builds feed a separate `cuda` auto-update channel while the CPU

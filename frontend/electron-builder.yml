@@ -79,11 +79,14 @@ nsis:
 # notarizes and staples in one pass — no manual codesign dance.
 mac:
   # The frozen backend needs macOS 14 (Sonoma): mlx/mlx-metal 0.32.x and torch 2.12
-  # only ship macosx_14_0+ arm64 wheels, and numpy/scipy resolve to their 14_0
-  # wheels on the macos-14 release runner. Below 14 the app launched and the
-  # backend died at import time ("built for macOS 14.0 which is newer than
-  # running OS") behind a generic "Backend failed to load" screen (#343). Declare
-  # the real floor so the installer refuses older systems with Apple's own dialog.
+  # only ship macosx_14_0+ arm64 wheels, and numpy/scipy ship 14_0 builds too.
+  # Below 14 the app launched and the backend died at import time ("built for
+  # macOS 14.0 which is newer than running OS") behind a generic "Backend failed
+  # to load" screen (#343). Declare the real floor so the installer refuses older
+  # systems with Apple's own dialog. The macOS build legs (release.yml,
+  # app-build-smoke.yml) read this value: they install the wheels built for it
+  # rather than for the newer runner, and scripts/ci/check_macos_floor.sh fails
+  # the build when a file in the frozen backend needs a newer macOS.
   minimumSystemVersion: "14.0"
   target:
     - target: dmg
