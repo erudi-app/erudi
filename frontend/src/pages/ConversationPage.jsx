@@ -121,6 +121,10 @@ export default function ConversationPage() {
   const { adopt, loadStamp, flush, getValues, changeModel } = conversationSettings;
   // The command being run (its popup is open), or null.
   const [openCommand, setOpenCommand] = useState(null);
+  // The conversation could not be read: an error with a Retry, which runs
+  // the load again (`loadAttempt`); the composer stays locked meanwhile.
+  const [loadFailed, setLoadFailed] = useState(false);
+  const [loadAttempt, setLoadAttempt] = useState(0);
   const [collapsed, setCollapsed] = useState(false);
   const [firstReplyPending, setFirstReplyPending] = useState(false);
   // The amber memory warning (1.1.2): the LATEST turn's `memory_warning`
@@ -133,6 +137,7 @@ export default function ConversationPage() {
   useEffect(() => {
     setMemoryWarning(null);
     setOpenCommand(null);
+    setLoadFailed(false);
   }, [id]);
   // A ref, not state: the scroll handler updates it on every scroll event, and
   // reading it from the auto-scroll effect must NOT re-run that effect. As state
@@ -669,6 +674,10 @@ export default function ConversationPage() {
       return;
     }
 
+    // A load the page has moved on from (another conversation, a new run of
+    // this effect) lands nowhere: its rows belong to what was shown then.
+    let cancelled = false;
+
     const loadConversationData = async () => {
       // Re-check inside async in case streaming started between effect trigger and execution
       if (isStreamingRef.current) {
@@ -676,7 +685,8 @@ export default function ConversationPage() {
       }
 
       try {
-        // A row older than a save or a /model made while it loads is dropped.
+        // A row older than a save or a /model made while it loads is dropped,
+        // and so is a row of a conversation the page has left.
         const stamp = loadStamp();
         const [convRes, msgRes, convDetailRes] = await Promise.all([
           tracedFetch(`${API_BASE_URL}/conversations/`),
@@ -686,11 +696,12 @@ export default function ConversationPage() {
 
         // Load conversations
         const convs = await convRes.json();
+        const msgs = await msgRes.json();
+        if (cancelled) return;
         convs.sort((a, b) => new Date(b.last_message_time) - new Date(a.last_message_time));
         setConversations(convs);
 
         // Load messages
-        const msgs = await msgRes.json();
         const starredMap = {};
         msgs.forEach((m) => {
           if (m.starred) {
@@ -713,11 +724,17 @@ export default function ConversationPage() {
         // from the running context window. llm_id can be null after the
         // model was deleted (conversations survive, no auto-fallback, #225);
         // the orphan check below decides whether to block the composer.
-        if (convDetailRes.ok) {
-          adopt(await convDetailRes.json(), stamp);
+        if (!convDetailRes.ok) {
+          throw new Error(`Conversation ${id} could not be read (HTTP ${convDetailRes.status})`);
         }
+        const conversation = await convDetailRes.json();
+        if (cancelled) return;
+        adopt(conversation, stamp);
+        setLoadFailed(false);
       } catch (err) {
         log.error("Failed to fetch conversations", err);
+        if (cancelled) return;
+        setLoadFailed(true);
       }
 
       // The first message from the new-conversation page: it runs on the
@@ -734,6 +751,7 @@ export default function ConversationPage() {
       } else if (!location.state || !location.state.initialQuestion) {
         try {
           const msgs = await apiClient.get(`/conversations/${id}/fetch_messages`);
+          if (cancelled) return;
           // initialize starred state on initial load
           const starredMap = {};
           msgs.forEach((m) => {
@@ -761,6 +779,9 @@ export default function ConversationPage() {
     };
 
     loadConversationData();
+    return () => {
+      cancelled = true;
+    };
   }, [
     id,
     location.state,
@@ -770,7 +791,13 @@ export default function ConversationPage() {
     navigate,
     location.pathname,
     initialHandled,
+    loadAttempt,
   ]);
+
+  const retryLoad = () => {
+    setLoadFailed(false);
+    setLoadAttempt((n) => n + 1);
+  };
 
   // Detect when user manually scrolls
   useEffect(() => {
@@ -1167,6 +1194,21 @@ export default function ConversationPage() {
                     size: formatBytes(memoryWarning.footprintBytes) ?? "?",
                   })}
                 </span>
+              </div>
+            )}
+            {loadFailed && (
+              <div
+                role="alert"
+                className="mb-3 flex items-center justify-between gap-3 px-3 py-2 rounded-lg bg-red-500/10 border border-red-500/30 text-red-200 text-xs"
+              >
+                <span>{t("chat:conversation.loadFailed")}</span>
+                <button
+                  type="button"
+                  onClick={retryLoad}
+                  className="shrink-0 rounded-md px-2.5 py-1 font-semibold bg-white/10 hover:bg-white/15 border border-white/20 text-gray-100 transition"
+                >
+                  {t("common:actions.retry")}
+                </button>
               </div>
             )}
             <QuestionInput

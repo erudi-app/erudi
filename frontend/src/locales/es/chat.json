@@ -148,7 +148,8 @@
     "star": "Destacar mensaje"
   },
   "conversation": {
-    "untitled": "Nueva conversación"
+    "untitled": "Nueva conversación",
+    "loadFailed": "No se pudo cargar esta conversación."
   },
   "compaction": {
     "length_one": "{{count}} mensaje anterior se resumió para mantener la conversación dentro del contexto del modelo",

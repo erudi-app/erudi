@@ -81,15 +81,16 @@ const newBook = () => ({ saved: {}, latest: {}, inFlight: {}, changes: 0 });
  * creativity and diversity 300 ms after the slider stops (they also ride in
  * each turn's payload). Saves go out one after another, in the order they
  * were made, each tied to the conversation it was made in: a save of A that
- * lands after the page moved to B never touches B. A failed save re-reads
+ * lands after the page moved to B never touches B, and B's saves and sends
+ * never wait for A's (one save chain per conversation). A failed save re-reads
  * the conversation and shows what the server holds (the last saved value
  * when that read fails too), unless a later change of the same control is on
  * its way, and raises `saveFailed`, cleared by the next successful save, a
  * conversation switch or after a few seconds. `flush()` sends what is pending
- * and resolves once every save has settled: the send path and /model wait
- * for it. A load takes `loadStamp()` when it starts and passes it to
- * `adopt(conversation, stamp)`, which drops a row older than a change made
- * meanwhile. `changeModel(llmId)` sends only `{llm_id}` and adopts the
+ * and resolves once every save of the current conversation has settled: the
+ * send path and /model wait for it. A load takes `loadStamp()` when it starts and passes it to
+ * `adopt(conversation, stamp)`, which drops a row of a conversation the page
+ * has left, or older than a change made meanwhile. `changeModel(llmId)` sends only `{llm_id}` and adopts the
  * conversation the backend returns, with the new model's values applied
  * server-side.
  *
@@ -123,10 +124,10 @@ export default function useConversationSettings(conversationId) {
   idRef.current = conversationId;
 
   // Conversation: the bookkeeping per conversation id, the save sequence,
-  // the save chain, the pending slider save and its timer.
+  // the save chain per conversation id, the pending slider save and its timer.
   const booksRef = useRef(new Map());
   const saveSeqRef = useRef(0);
-  const chainRef = useRef(Promise.resolve());
+  const chainsRef = useRef(new Map());
   const pendingSamplingRef = useRef({ id: null, patch: {} });
   const timerRef = useRef(null);
   const failedTimerRef = useRef(null);
@@ -171,6 +172,18 @@ export default function useConversationSettings(conversationId) {
     clearTimeout(failedTimerRef.current);
     setSaveFailed(false);
   }, []);
+
+  // One save chain per conversation: a save of A, slow or failing, never
+  // delays a save or a send in B.
+  const chain = useCallback((id) => chainsRef.current.get(id) ?? Promise.resolve(), []);
+  const enqueue = useCallback(
+    (id, task) => {
+      const next = chain(id).then(task);
+      chainsRef.current.set(id, next);
+      return next;
+    },
+    [chain]
+  );
 
   const reportFailure = useCallback(() => {
     setSaveFailed(true);
@@ -241,10 +254,9 @@ export default function useConversationSettings(conversationId) {
           for (const field of fields) entry.inFlight[field] -= 1;
         }
       };
-      chainRef.current = chainRef.current.then(run);
-      return chainRef.current;
+      return enqueue(id, run);
     },
-    [book, write, reread, clearFailure, reportFailure]
+    [book, enqueue, write, reread, clearFailure, reportFailure]
   );
 
   const sendPendingSampling = useCallback(() => {
@@ -274,8 +286,8 @@ export default function useConversationSettings(conversationId) {
 
   const flush = useCallback(() => {
     sendPendingSampling();
-    return chainRef.current;
-  }, [sendPendingSampling]);
+    return chain(idRef.current);
+  }, [sendPendingSampling, chain]);
 
   const setField = useCallback(
     (field, value) => {
@@ -300,15 +312,19 @@ export default function useConversationSettings(conversationId) {
     [write, enqueuePatch, sendPendingSampling]
   );
 
-  const loadStamp = useCallback(() => book(idRef.current).changes, [book]);
+  const loadStamp = useCallback(
+    () => ({ id: idRef.current, changes: book(idRef.current).changes }),
+    [book]
+  );
 
-  // A conversation row from a load: dropped when a save or a model switch
-  // was made since the load started (`stamp`, from loadStamp()); its values
-  // are then older than what the page shows.
+  // A conversation row from a load: dropped when the page has moved to
+  // another conversation since the load started, or when a save or a model
+  // switch was made meanwhile (`stamp`, from loadStamp()); its values are then
+  // another conversation's, or older than what the page shows.
   const adopt = useCallback(
     (conversation, stamp) => {
       const id = idRef.current;
-      if (stamp !== undefined && stamp !== book(id).changes) return false;
+      if (stamp && (stamp.id !== id || stamp.changes !== book(id).changes)) return false;
       takeRow(id, fromConversation(conversation));
       return true;
     },
@@ -323,7 +339,7 @@ export default function useConversationSettings(conversationId) {
       entry.changes += 1;
       entry.inFlight.llm_id = (entry.inFlight.llm_id ?? 0) + 1;
       let switched = null;
-      chainRef.current = chainRef.current.then(async () => {
+      await enqueue(id, async () => {
         let row = null;
         let failed = false;
         try {
@@ -341,10 +357,9 @@ export default function useConversationSettings(conversationId) {
         if (failed) reportFailure();
         else clearFailure();
       });
-      await chainRef.current;
       return switched;
     },
-    [book, takeRow, reread, sendPendingSampling, reportFailure, clearFailure]
+    [book, enqueue, takeRow, reread, sendPendingSampling, reportFailure, clearFailure]
   );
 
   // The model's defaults into the draft. `switchSeq` is the touch sequence

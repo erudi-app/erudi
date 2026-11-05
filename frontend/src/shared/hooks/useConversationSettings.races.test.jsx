@@ -110,6 +110,57 @@ describe("switching conversation while a save of the previous one is on its way"
   });
 });
 
+describe("a load of another conversation", () => {
+  it("is never adopted into the conversation the page moved to", () => {
+    const { result, rerender } = renderHook(({ id }) => useConversationSettings(id), {
+      initialProps: { id: "7" },
+    });
+    const stamp = result.current.loadStamp(); // A's load starts
+    rerender({ id: "8" });
+    act(() => result.current.adopt(row(8, { custom_prompt: "B's" }), result.current.loadStamp()));
+    let taken;
+    act(() => {
+      taken = result.current.adopt(row(7, { llm_id: 3, custom_prompt: "A's" }), stamp);
+    });
+    expect(taken).toBe(false);
+    expect(result.current.values).toMatchObject({ llm_id: 1, custom_prompt: "B's" });
+  });
+});
+
+describe("one save chain per conversation", () => {
+  it("a save of A still on its way never delays a send in B", async () => {
+    const slowA = deferred();
+    patchMock.mockReturnValueOnce(slowA.promise);
+    const { result, rerender } = renderHook(({ id }) => useConversationSettings(id), {
+      initialProps: { id: "7" },
+    });
+    act(() => result.current.adopt(row(7)));
+    act(() => result.current.setField("reasoning_effort", "high"));
+    rerender({ id: "8" });
+    act(() => result.current.adopt(row(8)));
+
+    let flushed = false;
+    await act(async () => {
+      result.current.flush().then(() => {
+        flushed = true;
+      });
+    });
+    expect(flushed).toBe(true);
+
+    patchMock.mockResolvedValueOnce(row(8, { compaction_threshold: 60 }));
+    let savedInB = false;
+    await act(async () => {
+      result.current.setField("compaction_threshold", 60);
+      result.current.flush().then(() => {
+        savedInB = true;
+      });
+    });
+    expect(patchMock).toHaveBeenLastCalledWith("/conversations/8", { compaction_threshold: 60 });
+    expect(savedInB).toBe(true);
+    await act(async () => slowA.reject(new Error("offline")));
+  });
+});
+
 describe("a load older than a change", () => {
   it("is dropped when a save was made after it started", async () => {
     patchMock.mockImplementation(async (_p, body) => row(7, body));

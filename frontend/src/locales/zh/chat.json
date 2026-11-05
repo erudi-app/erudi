@@ -148,7 +148,8 @@
     "star": "收藏消息"
   },
   "conversation": {
-    "untitled": "新对话"
+    "untitled": "新对话",
+    "loadFailed": "无法加载此对话。"
   },
   "compaction": {
     "length_one": "已将 {{count}} 条之前的消息总结为摘要，使对话保持在模型的上下文范围内",

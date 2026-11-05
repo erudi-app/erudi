@@ -8,21 +8,25 @@ import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-li
 // they open, wired to the conversation through one settings owner. The real
 // header, composer and popups render here; only the network is faked.
 
-const { tracedFetchMock, navigateMock, locationMock, patchMock, putMock } = vi.hoisted(() => ({
-  tracedFetchMock: vi.fn(),
-  navigateMock: vi.fn(),
-  locationMock: { pathname: "/conversation/7", state: null },
-  patchMock: vi.fn(),
-  putMock: vi.fn(),
-}));
+const { tracedFetchMock, navigateMock, locationMock, paramsMock, getMock, patchMock, putMock } =
+  vi.hoisted(() => ({
+    tracedFetchMock: vi.fn(),
+    navigateMock: vi.fn(),
+    locationMock: { pathname: "/conversation/7", state: null },
+    // The route's conversation id: a test moves it to switch conversation.
+    paramsMock: { id: "7" },
+    getMock: vi.fn(),
+    patchMock: vi.fn(),
+    putMock: vi.fn(),
+  }));
 
 vi.mock("../services/api/client", () => ({
-  default: { get: vi.fn(async () => []), patch: patchMock, put: putMock },
+  default: { get: getMock, patch: patchMock, put: putMock },
   tracedFetch: tracedFetchMock,
 }));
 
 vi.mock("react-router-dom", () => ({
-  useParams: () => ({ id: "7" }),
+  useParams: () => paramsMock,
   useNavigate: () => navigateMock,
   useLocation: () => locationMock,
 }));
@@ -148,6 +152,9 @@ beforeEach(() => {
   detail = { ...DETAIL };
   order = [];
   locationMock.state = null;
+  paramsMock.id = "7";
+  getMock.mockReset();
+  getMock.mockImplementation(async () => []);
   tracedFetchMock.mockReset();
   tracedFetchMock.mockImplementation(routeFetch);
   patchMock.mockReset();
@@ -347,6 +354,84 @@ describe("before the conversation's values are loaded", () => {
     await new Promise((resolve) => setTimeout(resolve, 50));
     expect(header().textContent).toBe("You are chatting with Gemma-3-4B");
   });
+});
+
+describe("switching conversation while the previous one still loads", () => {
+  it("never takes A's late load into B: header, messages and values stay B's", async () => {
+    const gateA = deferred();
+    const DETAIL_B = { ...DETAIL, id: 8, llm_id: 2, custom_prompt: "B's instructions" };
+    const messages = {
+      7: [{ id: 1, sender: "user", content: "A's message" }],
+      8: [{ id: 2, sender: "user", content: "B's message" }],
+    };
+    const MESSAGES_PATH = /^\/conversations\/(\d+)\/fetch_messages$/;
+    const CONVERSATION_URL = /\/conversations\/(\d+)(\/fetch_messages|\/query)?$/;
+    getMock.mockImplementation(async (path) => {
+      const match = path.match(MESSAGES_PATH);
+      if (match?.[1] === "7") await gateA.promise;
+      return match ? messages[match[1]] : [];
+    });
+    tracedFetchMock.mockImplementation(async (url, opts) => {
+      const match = String(url).match(CONVERSATION_URL);
+      if (match?.[2] === "/query") {
+        order.push(["query", JSON.parse(opts.body)]);
+        return answerStream();
+      }
+      if (match?.[1] === "7") {
+        await gateA.promise;
+        return { ok: true, json: async () => (match[2] ? messages[7] : DETAIL) };
+      }
+      if (match?.[1] === "8") {
+        return { ok: true, json: async () => (match[2] ? messages[8] : DETAIL_B) };
+      }
+      return routeFetch(url, opts);
+    });
+
+    const { rerender } = render(<ConversationPage />);
+    paramsMock.id = "8";
+    rerender(<ConversationPage />);
+    await waitFor(() => expect(header().textContent).toBe("You are chatting with Gemma-3-4B"));
+    expect(screen.getByText("B's message")).toBeTruthy();
+
+    gateA.resolve(); // A's load lands last
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(header().textContent).toBe("You are chatting with Gemma-3-4B");
+    expect(screen.queryByText("A's message")).toBeNull();
+    expect(screen.getByText("B's message")).toBeTruthy();
+
+    typeAndEnter("Hello B");
+    await waitFor(() => expect(queries()).toHaveLength(1));
+    expect(queries()[0][1].custom_prompt).toBe("B's instructions");
+  });
+});
+
+describe("when the conversation cannot be read", () => {
+  const serverError = async () => ({ ok: false, status: 500, json: async () => ({}) });
+  const networkError = async () => {
+    throw new TypeError("Failed to fetch");
+  };
+
+  it.each([
+    ["the server answers an error", serverError],
+    ["the request fails", networkError],
+  ])(
+    "shows an error with a Retry when %s, the composer staying locked",
+    async (_label, failing) => {
+      let fail = true;
+      tracedFetchMock.mockImplementation(async (url, opts) =>
+        String(url).endsWith("/conversations/7") && fail ? failing() : routeFetch(url, opts)
+      );
+      render(<ConversationPage />);
+      await screen.findByText("This conversation could not be loaded.");
+      expect(composer().disabled).toBe(true);
+
+      fail = false;
+      fireEvent.click(screen.getByRole("button", { name: "Retry" }));
+      await waitFor(() => expect(composer().disabled).toBe(false));
+      expect(screen.queryByText("This conversation could not be loaded.")).toBeNull();
+      expect(header().textContent).toBe("You are chatting with Qwen3-4B");
+    }
+  );
 });
 
 describe("an orphaned conversation", () => {

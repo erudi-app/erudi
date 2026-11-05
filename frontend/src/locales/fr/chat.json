@@ -148,7 +148,8 @@
     "star": "Mettre le message en favori"
   },
   "conversation": {
-    "untitled": "Nouvelle conversation"
+    "untitled": "Nouvelle conversation",
+    "loadFailed": "Cette conversation n'a pas pu être chargée."
   },
   "compaction": {
     "length_one": "{{count}} message précédent a été résumé pour que la conversation tienne dans le contexte du modèle",
