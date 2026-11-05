@@ -28,6 +28,9 @@ class _FakeEngine:
     async def stop_pressure_task(self):
         pass
 
+    def set_idle_unload_minutes(self, minutes):
+        pass
+
     def cleanup(self):
         pass
 

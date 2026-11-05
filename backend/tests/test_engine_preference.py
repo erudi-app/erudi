@@ -201,6 +201,11 @@ def _stub_startup(monkeypatch):
         return {}
 
     monkeypatch.setattr(api, "startup_populate_database", _fake_populate)
+    # The idle delay is read from the database and written on the engine
+    # class: a stored five minutes, and every engine's delay put back after.
+    monkeypatch.setattr("src.domains.user_settings.repository.read_idle_unload_minutes", lambda: 5)
+    for engine in (CPU_Engine, CUDA_Engine, MLX_Engine):
+        monkeypatch.setattr(engine, "_max_idle_time", engine._max_idle_time)
 
 
 @pytest.mark.unit
@@ -268,3 +273,60 @@ async def test_lifespan_applies_the_cpu_preference_and_stays_quiet(monkeypatch):
         assert config.LLM_Engine is CPU_Engine
 
     assert events == []
+
+
+# ============ The idle unload delay (#619) ============
+
+
+def _stub_cpu_tasks(monkeypatch, start_cleanup=lambda cls: None):
+    monkeypatch.setattr(CPU_Engine, "start_cleanup_task", classmethod(start_cleanup))
+    monkeypatch.setattr(CPU_Engine, "stop_cleanup_task", classmethod(lambda cls: None))
+    monkeypatch.setattr(CPU_Engine, "start_pressure_task", classmethod(lambda cls: None))
+    monkeypatch.setattr(CPU_Engine, "stop_pressure_task", classmethod(_no_pressure_task))
+    monkeypatch.setattr(CPU_Engine, "cleanup", classmethod(lambda cls: None))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("minutes, seconds", [(30, 1800), (0, None)])
+async def test_lifespan_applies_the_idle_delay_to_the_engine_left_after_the_swap(
+    monkeypatch, minutes, seconds
+):
+    """The stored delay lands on the engine that actually runs: after the
+    CUDA engine was swapped for the processor one, the processor engine
+    carries it and the CUDA class keeps its default."""
+    _stub_startup(monkeypatch)
+    _stub_cpu_tasks(monkeypatch)
+    monkeypatch.setattr(api, "BaseEngine", SimpleNamespace(get_engine=lambda: CUDA_Engine))
+    monkeypatch.setattr(config, "LLM_Engine", None, raising=False)
+    monkeypatch.setattr(
+        "src.domains.user_settings.repository.read_inference_backend", lambda: "cpu"
+    )
+    monkeypatch.setattr(
+        "src.domains.user_settings.repository.read_idle_unload_minutes", lambda: minutes
+    )
+    monkeypatch.delenv("ERUDI_FORCE_CPU", raising=False)
+    monkeypatch.setattr(api, "cuda_preflight_notice", lambda: None)
+
+    async with api.lifespan(FastAPI()):
+        assert config.LLM_Engine is CPU_Engine
+        assert CPU_Engine._max_idle_time == seconds
+        assert CUDA_Engine._max_idle_time == 300
+
+
+@pytest.mark.unit
+async def test_lifespan_applies_the_idle_delay_before_the_idle_monitor_starts(monkeypatch):
+    _stub_startup(monkeypatch)
+    seen: list = []
+    _stub_cpu_tasks(monkeypatch, start_cleanup=lambda cls: seen.append(cls._max_idle_time))
+    monkeypatch.setattr(api, "BaseEngine", SimpleNamespace(get_engine=lambda: CPU_Engine))
+    monkeypatch.setattr(config, "LLM_Engine", None, raising=False)
+    monkeypatch.setattr(
+        "src.domains.user_settings.repository.read_inference_backend", lambda: "auto"
+    )
+    monkeypatch.setattr("src.domains.user_settings.repository.read_idle_unload_minutes", lambda: 60)
+    monkeypatch.delenv("ERUDI_FORCE_CPU", raising=False)
+
+    async with api.lifespan(FastAPI()):
+        pass
+
+    assert seen == [3600]

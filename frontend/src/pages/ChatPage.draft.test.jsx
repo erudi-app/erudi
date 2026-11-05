@@ -108,6 +108,17 @@ describe("the new-conversation page", () => {
     expect(screen.queryByText("Customize Prompt")).toBeNull();
   });
 
+  it("offers to unload the loaded model from the settings panel, whichever it is", async () => {
+    const answer = getMock.getMockImplementation();
+    getMock.mockImplementation(async (path) =>
+      path === "/llms/loaded" ? { llm_id: 42, name: "Beta Model" } : answer(path)
+    );
+    await renderPage();
+    expect(getMock).not.toHaveBeenCalledWith("/llms/loaded");
+    fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
+    expect(await screen.findByRole("button", { name: "Unload Beta Model" })).toBeTruthy();
+  });
+
   it("creates the conversation with the model alone when nothing was set", async () => {
     await renderPage();
     typeAndEnter("What is the sun?");

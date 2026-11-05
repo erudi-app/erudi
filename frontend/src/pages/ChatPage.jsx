@@ -6,6 +6,7 @@ import ChatCollapsibleSection from "../components/ChatCollapsibleSection";
 import GradientBox from "../components/GradientBox";
 import QuestionInput from "../components/QuestionInput";
 import ConversationHeader from "../components/ConversationHeader";
+import UnloadModelButton from "../components/UnloadModelButton";
 import CommandPopups from "../components/CommandPopups";
 import ErrorModal from "../components/modals/ErrorModal";
 import { motion, AnimatePresence } from "framer-motion";
@@ -297,7 +298,10 @@ export default function ChatPage() {
               attention={!selectedModel}
               commands={COMMANDS}
               onCommand={setOpenCommand}
-            />
+            >
+              {/* Re-read the loaded model when the draft's model changes. */}
+              <UnloadModelButton refreshKey={llm?.id} />
+            </ConversationHeader>
 
             {/* Question Input - Always visible */}
             <div className="mt-6">

@@ -30,7 +30,11 @@
   "conversationHeader": {
     "chattingWith": "Estás chateando con <model>{{model}}</model>",
     "settings": "Ajustes de la conversación",
-    "pickerAttention": "Selecciona un modelo"
+    "pickerAttention": "Selecciona un modelo",
+    "unload": "Liberar {{model}}",
+    "unloadBusy": "El modelo está ocupado; inténtalo de nuevo en un momento.",
+    "unloadFailed": "No se pudo liberar el modelo.",
+    "unloadModelChanged": "Ahora hay otro modelo cargado."
   },
   "commands": {
     "listLabel": "Comandos",
@@ -140,7 +144,8 @@
   "message": {
     "firstReplyHint": "La primera respuesta puede tardar un poco más mientras el modelo se carga en memoria...",
     "memoryReload": "Se liberó memoria en su equipo; recargando el modelo para retomar la conversación…",
-    "idleReload": "El modelo se descargó tras unos minutos sin uso; recargándolo para retomar la conversación…",
+    "idleReload": "El modelo se liberó de la memoria al no usarse; recargándolo para retomar la conversación…",
+    "manualReload": "Liberaste el modelo; recargándolo…",
     "compacting": "Resumiendo los mensajes anteriores para hacer espacio…",
     "imagePlaceholder": "🖼 imagen adjunta",
     "attachmentAlt": "adjunto {{index}}",

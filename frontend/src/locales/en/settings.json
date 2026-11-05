@@ -27,6 +27,14 @@
     "note": "80% by default. Lower: summarizes sooner and more often, keeping the conversation shorter. Higher: keeps more of it word for word and summarizes less often.",
     "selectLabel": "Default compaction threshold"
   },
+  "idleUnload": {
+    "title": "Unload the model when idle",
+    "description": "An unused model leaves memory after this delay, which frees it for your other apps, and reloads at your next message. The delay counts from the model's last answer and applies at once, without restarting Erudi.",
+    "note": "5 minutes by default. Never keeps the model loaded however long it stays unused; the model is still unloaded when your computer runs short of memory, and the Unload button in a conversation's settings unloads it whenever no answer is being written. The knowledge-base search model has its own delay.",
+    "selectLabel": "Unload the model when idle",
+    "minutes": "{{minutes}} minutes",
+    "never": "Never"
+  },
   "updatePreferences": {
     "title": "Updates",
     "description": "What Erudi does on its own when a new version is published. The Update Erudi card below checks, downloads and installs on demand, whatever you choose here.",

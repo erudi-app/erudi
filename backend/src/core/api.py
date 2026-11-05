@@ -359,6 +359,20 @@ def apply_inference_backend_preference() -> None:
     config.LLM_Engine = CPU_Engine
 
 
+def apply_idle_unload_preference() -> None:
+    """Give the engine that runs the Settings idle unload delay (#619).
+
+    Runs AFTER ``apply_inference_backend_preference``: the delay is a class
+    attribute, so it must land on the engine left once CUDA may have been
+    swapped for CPU, and before the idle monitor starts. The settings PUT
+    applies later changes to the same ``config.LLM_Engine``. The knowledge-base
+    embedding model keeps its own idle release.
+    """
+    from src.domains.user_settings.repository import read_idle_unload_minutes
+
+    config.LLM_Engine.set_idle_unload_minutes(read_idle_unload_minutes())
+
+
 def emit_engine_notice(app: FastAPI) -> None:
     """Emit an ``engine_notice`` when the selected GPU cannot run our CUDA build.
 
@@ -415,6 +429,9 @@ async def _start_services(app: FastAPI, _phase) -> None:
     # `FORMAT_TAG = "gguf"`: the catalog just reconciled under CUDA is
     # identical under CPU.
     await run_in_threadpool(apply_inference_backend_preference)
+    # The idle unload delay, on that same engine (a class attribute: applied
+    # before the swap it would sit on the class that lost).
+    await run_in_threadpool(apply_idle_unload_preference)
     # Only now, on the engine that actually won, is the pre-flight meaningful:
     # a user who already chose CPU must not be nagged about their GPU.
     await run_in_threadpool(emit_engine_notice, app)
@@ -493,8 +510,9 @@ async def lifespan(app: FastAPI):
             # Cleanup runs automatically on shutdown
 
     Note:
-        The cleanup task runs every 30 seconds to free a model idle for over 300 seconds.
-        See BaseEngine.start_cleanup_task() for details.
+        The cleanup task runs every 30 seconds to free a model idle for longer
+        than the Settings idle unload delay (5 minutes by default; never when
+        the user picked Never). See BaseEngine.start_cleanup_task() for details.
 
     Lifecycle Flow:
         1. Start the embedded PostgreSQL cluster (postgres_runtime)
@@ -502,8 +520,10 @@ async def lifespan(app: FastAPI):
         3. Select engine via platform detection (BaseEngine.get_engine)
         4. Migrate the schema to head (Alembic, forward-only)
         5. Seed database with default models (startup_populate_database)
-        6. Apply the persisted inference-backend preference and run the CUDA
-           pre-flight (apply_inference_backend_preference / emit_engine_notice)
+        6. Apply the persisted inference-backend preference, then the idle
+           unload delay to the engine that won, and run the CUDA pre-flight
+           (apply_inference_backend_preference / apply_idle_unload_preference
+           / emit_engine_notice)
         7. Open the LangGraph checkpointer (app.state.checkpointer)
         8. Start the cleanup background task (30s interval) and the memory
            pressure monitor (60s interval)

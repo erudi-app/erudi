@@ -69,5 +69,5 @@ Electron appends every backend stdout line to the stdout capture log prefixed `B
 
 ## Timing constants
 
-- Idle unload: threshold 300 s, check tick 30 s → the inference child exits about 300–330 s after the last use (300–600 s on 1.1.2 and earlier, tick 300 s) (`backend/src/engines/base_engine.py`).
+- Idle unload: threshold = the Settings idle delay (`user_settings.idle_unload_minutes`: 5 minutes by default, or 15, 30, 60, or 0 for never), check tick 30 s → at the default the inference child exits about 300–330 s after the last use (300–600 s on 1.1.2 and earlier, tick 300 s) (`backend/src/engines/base_engine.py`). `POST /erudi/llms/loaded/unload` with `{"llm_id": <the loaded id>}` unloads it on demand.
 - Backend startup budgets: 120 s (300 s on first run); Electron outer cap 330 s.

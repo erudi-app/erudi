@@ -157,7 +157,7 @@ async def test_idle_reap_records_which_model_it_unloaded():
     try:
         await asyncio.wait_for(_GuardEngine._cleanup_tick(), timeout=5)
         assert _GuardEngine._model is None
-        assert _GuardEngine._idle_unload == {"model_id": "x"}
+        assert _GuardEngine._idle_unload == {"model_id": "x", "reason": "idle"}
     finally:
         _reset()
 
@@ -185,40 +185,202 @@ def test_any_other_unload_forgets_the_record():
         _reset()
 
 
-def test_take_idle_reload_is_true_once_for_the_reaped_model():
-    _GuardEngine._idle_unload = {"model_id": "x"}
+@pytest.mark.parametrize("reason", ["idle", "manual"])
+def test_take_idle_reload_returns_the_reason_once_for_the_unloaded_model(reason):
+    _GuardEngine._idle_unload = {"model_id": "x", "reason": reason}
     try:
-        assert _GuardEngine.take_idle_reload("x") is True
-        assert _GuardEngine.take_idle_reload("x") is False
+        assert _GuardEngine.take_idle_reload("x") == reason
+        assert _GuardEngine.take_idle_reload("x") is None
         assert _GuardEngine._idle_unload is None
     finally:
         _reset()
 
 
-def test_take_idle_reload_is_false_for_another_model_and_keeps_the_record():
-    _GuardEngine._idle_unload = {"model_id": "x"}
+def test_take_idle_reload_is_none_for_another_model_and_keeps_the_record():
+    _GuardEngine._idle_unload = {"model_id": "x", "reason": "idle"}
     try:
-        assert _GuardEngine.take_idle_reload("y") is False
-        assert _GuardEngine._idle_unload == {"model_id": "x"}
+        assert _GuardEngine.take_idle_reload("y") is None
+        assert _GuardEngine._idle_unload == {"model_id": "x", "reason": "idle"}
     finally:
         _reset()
 
 
-def test_take_idle_reload_is_false_and_clears_when_a_model_is_loaded():
+def test_take_idle_reload_is_none_and_clears_when_a_model_is_loaded():
     """The title request of a new conversation may have reloaded the model
     already: the record is stale, and the turn must not announce a reload."""
-    _GuardEngine._idle_unload = {"model_id": "x"}
+    _GuardEngine._idle_unload = {"model_id": "x", "reason": "manual"}
     _GuardEngine._model = object()
     _GuardEngine._model_id = "x"
     try:
-        assert _GuardEngine.take_idle_reload("x") is False
+        assert _GuardEngine.take_idle_reload("x") is None
         assert _GuardEngine._idle_unload is None
     finally:
         _reset()
 
 
-def test_take_idle_reload_without_a_record_is_false():
-    assert _GuardEngine.take_idle_reload("x") is False
+def test_take_idle_reload_without_a_record_is_none():
+    assert _GuardEngine.take_idle_reload("x") is None
+
+
+# ───────────────── manual unload (#619: the header's Unload button) ─────────────────
+
+
+async def test_a_manual_unload_reaps_the_model_and_records_why():
+    _load_idle("x", idle_s=1)
+    try:
+        assert await asyncio.wait_for(_GuardEngine.unload("x"), timeout=5) == "x"
+        assert _GuardEngine._model is None
+        assert _GuardEngine._last_used is None
+        assert _GuardEngine._idle_unload == {"model_id": "x", "reason": "manual"}
+        assert BaseEngine._generation_lock.demand == 0
+        assert not _GuardEngine._generation_lock_for_running_loop().locked()
+    finally:
+        _reset()
+
+
+async def test_a_manual_unload_with_nothing_loaded_does_nothing():
+    _GuardEngine._idle_unload = {"model_id": "x", "reason": "idle"}
+    try:
+        assert await asyncio.wait_for(_GuardEngine.unload("x"), timeout=5) is None
+        # An earlier idle record still says why that model reloads.
+        assert _GuardEngine._idle_unload == {"model_id": "x", "reason": "idle"}
+    finally:
+        _reset()
+
+
+async def test_a_manual_unload_is_refused_while_a_generation_runs(_short_busy_wait):
+    from src.core.exceptions import EngineBusyException
+
+    _load_idle("x", idle_s=1)
+    try:
+        async with _GuardEngine.generation_guard():
+            with pytest.raises(EngineBusyException):
+                await _GuardEngine.unload("x")
+            assert _GuardEngine._model is not None
+        assert _GuardEngine._idle_unload is None
+        assert BaseEngine._generation_lock.demand == 0
+    finally:
+        _reset()
+
+
+async def test_a_manual_unload_of_a_model_no_longer_loaded_is_refused():
+    """The button named A; B was loaded since (a /model switch and a send):
+    the press must not unload B."""
+    from src.core.exceptions import LoadedModelChangedException
+
+    _load_idle("b", idle_s=200)
+    last_used = _GuardEngine._last_used
+    _GuardEngine._generation_ended_at = None
+    try:
+        with pytest.raises(LoadedModelChangedException) as raised:
+            await _GuardEngine.unload("a")
+        assert raised.value.status_code == 409
+        assert raised.value.erudi_code == "LOADED_MODEL_CHANGED"
+        assert raised.value.message == "Another model is loaded now."
+        assert _GuardEngine._model is not None
+        assert _GuardEngine._model_id == "b"
+        assert _GuardEngine._idle_unload is None
+        # A refused press changes nothing: B's idle clock does not restart,
+        # and no generation end is stamped (CUDA's contention settle).
+        assert _GuardEngine._last_used == last_used
+        assert _GuardEngine._generation_ended_at is None
+        assert not _GuardEngine._generation_lock_for_running_loop().locked()
+    finally:
+        _reset()
+
+
+async def test_a_cancelled_manual_unload_finishes_the_cleanup_under_the_lock(monkeypatch):
+    """A request cancelled mid-unload (shutdown, a disconnect) never releases
+    the lock while the cleanup thread still kills the child and resets the
+    engine: the cleanup ends, the record is written, then the cancellation
+    is raised."""
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    real_cleanup = _GuardEngine.cleanup
+
+    def _slow_cleanup():
+        started.set()
+        release.wait(5)
+        real_cleanup()
+
+    monkeypatch.setattr(_GuardEngine, "cleanup", staticmethod(_slow_cleanup))
+    _load_idle("x", idle_s=1)
+    try:
+        request = asyncio.create_task(_GuardEngine.unload("x"))
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        request.cancel()
+        await asyncio.sleep(0.05)
+        # Still cleaning: the request has not ended and the lock is held.
+        assert not request.done()
+        assert _GuardEngine._generation_lock_for_running_loop().locked()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(request, timeout=5)
+        assert _GuardEngine._model is None
+        assert _GuardEngine._idle_unload == {"model_id": "x", "reason": "manual"}
+        assert not _GuardEngine._generation_lock_for_running_loop().locked()
+        assert BaseEngine._generation_lock.demand == 0
+    finally:
+        release.set()
+        _reset()
+
+
+# ───────────── the idle delay setting (#619: 5/15/30/60 minutes or never) ─────────────
+
+
+@pytest.fixture
+def _restore_idle_delay(monkeypatch):
+    """The delay is a class attribute the setter writes: put it back."""
+    monkeypatch.setattr(_GuardEngine, "_max_idle_time", BaseEngine._max_idle_time)
+
+
+@pytest.mark.parametrize("minutes, seconds", [(5, 300), (15, 900), (30, 1800), (60, 3600)])
+def test_the_idle_delay_is_set_in_minutes(_restore_idle_delay, minutes, seconds):
+    _GuardEngine.set_idle_unload_minutes(minutes)
+    assert _GuardEngine._max_idle_time == seconds
+    # Only the engine it is applied to: the base class keeps its default.
+    assert BaseEngine._max_idle_time == 300
+
+
+def test_never_is_zero_minutes_and_no_idle_time(_restore_idle_delay):
+    _GuardEngine.set_idle_unload_minutes(0)
+    assert _GuardEngine._max_idle_time is None
+
+
+def test_a_longer_delay_keeps_a_model_idle_past_five_minutes(_restore_idle_delay):
+    _GuardEngine.set_idle_unload_minutes(15)
+    _load_idle("x", idle_s=600)
+    try:
+        assert _GuardEngine._should_cleanup() is False
+        _GuardEngine._last_used = datetime.now() - timedelta(seconds=905)
+        assert _GuardEngine._should_cleanup() is True
+    finally:
+        _reset()
+
+
+async def test_never_keeps_an_idle_model_loaded(_restore_idle_delay):
+    _GuardEngine.set_idle_unload_minutes(0)
+    _load_idle("x", idle_s=10 * 24 * 3600)
+    try:
+        assert _GuardEngine._should_cleanup() is False
+        await asyncio.wait_for(_GuardEngine._cleanup_tick(), timeout=5)
+        assert _GuardEngine._model is not None
+        assert _GuardEngine._idle_unload is None
+    finally:
+        _reset()
+
+
+async def test_never_still_lets_the_button_unload(_restore_idle_delay):
+    _GuardEngine.set_idle_unload_minutes(0)
+    _load_idle("x", idle_s=1)
+    try:
+        assert await _GuardEngine.unload("x") == "x"
+        assert _GuardEngine._model is None
+    finally:
+        _reset()
 
 
 # ───────────────────── idle cadence (30 s tick, 300 s threshold) ─────────────────────

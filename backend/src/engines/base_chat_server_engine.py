@@ -483,11 +483,12 @@ class BaseChatServerEngine(BaseEngine):
     @classmethod
     def cleanup(cls) -> None:
         """Terminate the child and reset cached engine state; a pending brake
-        reload is forgotten with it (an idle-timeout reap, a shutdown -- the
-        brake's own unload records its reload after this call).
+        reload is forgotten with it (an idle reap, a manual unload, a shutdown
+        -- the brake's own unload records its reload after this call).
 
         Called by `BaseEngine._cleanup_monitor` once the model has been idle
-        300 s (checked every 30 s), or explicitly when switching models.
+        past the Settings delay (checked every 30 s), by `BaseEngine.unload`
+        (the Unload button), or explicitly when switching models.
         """
         cls._brake_reload = None
         cls._stop_server_if_running()

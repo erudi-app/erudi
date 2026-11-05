@@ -411,6 +411,7 @@ class TestUserSettingsCompactionThreshold:
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 60,
+            "idle_unload_minutes": 5,
         }
 
 
