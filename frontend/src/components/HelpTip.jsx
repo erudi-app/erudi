@@ -15,6 +15,9 @@ export default function HelpTip({ label, text, side = "right", width = "w-64" })
         type="button"
         aria-label={label}
         aria-describedby={id}
+        // The popup shell skips it when it places the first focus: focusing
+        // it would open its tooltip over the field it explains.
+        data-help-tip
         className="inline-flex rounded-full text-gray-400 hover:text-emerald-400 focus:text-emerald-400 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60 transition-colors cursor-help"
       >
         <HelpCircle className="w-4 h-4" aria-hidden />

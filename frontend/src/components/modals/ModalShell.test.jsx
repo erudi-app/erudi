@@ -7,6 +7,7 @@ import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/re
 // opens, keeps Tab inside, closes on Escape, and hands the focus back.
 
 import ModalShell from "./ModalShell.jsx";
+import HelpTip from "../HelpTip";
 
 afterEach(cleanup);
 
@@ -55,6 +56,16 @@ describe("ModalShell", () => {
     await waitFor(() =>
       expect(screen.getByRole("dialog").contains(document.activeElement)).toBe(true)
     );
+  });
+
+  it("focuses the first field, not a ? help button (its tooltip would cover the field)", async () => {
+    render(
+      <ModalShell isOpen onClose={() => {}} title="T">
+        <HelpTip label="Help: Field" text="Some help" />
+        <input aria-label="field" />
+      </ModalShell>
+    );
+    await waitFor(() => expect(document.activeElement).toBe(screen.getByLabelText("field")));
   });
 
   it("cycles Tab and Shift+Tab inside the dialog", async () => {

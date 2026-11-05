@@ -46,7 +46,7 @@ export default function ConversationHeader({
       />
       <div className="relative z-10 p-5">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="min-w-0 truncate text-[1.15rem] font-semibold tracking-tight text-[#F2F7F4]">
+          <h3 className="min-w-0 break-words text-[1.15rem] font-semibold tracking-tight text-[#F2F7F4]">
             {attention ? (
               <span role="alert" className="text-red-400">
                 {t("chat:conversationHeader.pickerAttention")}

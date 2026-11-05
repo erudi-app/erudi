@@ -37,8 +37,10 @@ export default function ModalShell({
     if (!isOpen) return undefined;
     const previous = document.activeElement;
     const panel = panelRef.current;
+    // The first field, never the close button nor a `?` help button (its
+    // tooltip would open over the field it explains).
     const first = Array.from(panel?.querySelectorAll(FOCUSABLE) ?? []).find(
-      (el) => el !== closeRef.current
+      (el) => el !== closeRef.current && !el.hasAttribute("data-help-tip")
     );
     (first ?? closeRef.current)?.focus();
     return () => {
