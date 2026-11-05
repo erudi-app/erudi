@@ -400,7 +400,7 @@ them.
 ## Session controls in the app: the header and the slash commands
 
 A conversation's header reads a static "You are chatting with <model>". Its settings icon opens a
-panel with one button per command (Config, Effort, Model), each opening that command's popup exactly
+panel with one button per command (Model, Config, Effort), each opening that command's popup exactly
 as typing the command does. When the conversation's model was deleted, the line turns into a red
 "Please select a model" and the composer is blocked; the panel's Model button still works, and
 picking a model there unblocks sending.

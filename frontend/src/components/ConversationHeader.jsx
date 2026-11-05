@@ -3,12 +3,14 @@ import PropTypes from "prop-types";
 import { motion, AnimatePresence } from "framer-motion";
 import { SlidersHorizontal } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
+import { headerCommands } from "../utils/slashCommands";
 
 /**
  * The header of a conversation and of the new-conversation page (#585): a
  * static "You are chatting with <model>" line and a settings icon that opens
  * a panel with one button per command the page offers (`commands`, from the
- * slash-command registry), each running it exactly as typing it does. What
+ * slash-command registry, shown in its `headerOrder`), each running it
+ * exactly as typing it does. What
  * the page adds as children renders in the panel after the command buttons.
  *
  * `attention` is the orphaned-conversation state (#225): the model is gone,
@@ -96,7 +98,7 @@ export default function ConversationHeader({
               className="overflow-hidden"
             >
               <div className="mt-4 flex flex-wrap items-center gap-2">
-                {commands.map((command) => (
+                {headerCommands(commands).map((command) => (
                   <button
                     key={command.name}
                     type="button"
@@ -129,7 +131,12 @@ export default function ConversationHeader({
 ConversationHeader.propTypes = {
   modelName: PropTypes.string,
   attention: PropTypes.bool,
-  commands: PropTypes.arrayOf(PropTypes.shape({ name: PropTypes.string.isRequired })).isRequired,
+  commands: PropTypes.arrayOf(
+    PropTypes.shape({
+      name: PropTypes.string.isRequired,
+      headerOrder: PropTypes.number.isRequired,
+    })
+  ).isRequired,
   disabledCommands: PropTypes.arrayOf(PropTypes.string),
   onCommand: PropTypes.func.isRequired,
   saveFailed: PropTypes.bool,

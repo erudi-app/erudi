@@ -13,8 +13,11 @@
  * Anything else is an ordinary message for the model: an unknown name, an
  * argument the command does not take, or text before the command.
  *
- * The registry order is the order of the composer's drop-up and of the
- * header panel's buttons; a later command is one more entry.
+ * Two orders, both explicit: the registry order is the composer's drop-up
+ * (/config, /context, /compact, /effort, /model once all exist), and
+ * `headerOrder` places each command among the header panel's buttons
+ * (Model, Config, Effort, Compact, Context). A later command is one more
+ * entry, inserted where the drop-up lists it, with its `headerOrder`.
  */
 
 export const COMMAND_SCOPES = Object.freeze({
@@ -25,14 +28,19 @@ export const COMMAND_SCOPES = Object.freeze({
 const BOTH = [COMMAND_SCOPES.CONVERSATION, COMMAND_SCOPES.DRAFT];
 
 export const SLASH_COMMANDS = Object.freeze([
-  Object.freeze({ name: "config", args: ["global"], scopes: BOTH }),
-  Object.freeze({ name: "effort", args: [], scopes: BOTH }),
-  Object.freeze({ name: "model", args: [], scopes: BOTH }),
+  Object.freeze({ name: "config", args: ["global"], scopes: BOTH, headerOrder: 2 }),
+  Object.freeze({ name: "effort", args: [], scopes: BOTH, headerOrder: 3 }),
+  Object.freeze({ name: "model", args: [], scopes: BOTH, headerOrder: 1 }),
 ]);
 
 /** The commands a page offers, in registry order. */
 export function commandsFor(scope, registry = SLASH_COMMANDS) {
   return registry.filter((command) => command.scopes.includes(scope));
+}
+
+/** `commands` in the header panel's order (a new array). */
+export function headerCommands(commands) {
+  return [...commands].sort((a, b) => a.headerOrder - b.headerOrder);
 }
 
 /**

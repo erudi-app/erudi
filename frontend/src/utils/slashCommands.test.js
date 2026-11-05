@@ -3,6 +3,7 @@ import {
   COMMAND_SCOPES,
   SLASH_COMMANDS,
   commandsFor,
+  headerCommands,
   matchCommands,
   parseSlashCommand,
 } from "./slashCommands";
@@ -25,6 +26,39 @@ describe("the registry", () => {
       "effort",
       "model",
     ]);
+  });
+
+  it("keeps two explicit orders: the drop-up's (the registry's) and the header panel's", () => {
+    expect(matchCommands("/", ALL).map((c) => c.name)).toEqual(["config", "effort", "model"]);
+    expect(headerCommands(ALL).map((c) => c.name)).toEqual(["model", "config", "effort"]);
+  });
+
+  it("slots later commands into both orders as the spec lists them", () => {
+    const both = [COMMAND_SCOPES.CONVERSATION];
+    const registry = [
+      { name: "config", args: ["global"], scopes: both, headerOrder: 2 },
+      { name: "context", args: [], scopes: both, headerOrder: 5 },
+      { name: "compact", args: [], scopes: both, headerOrder: 4 },
+      { name: "effort", args: [], scopes: both, headerOrder: 3 },
+      { name: "model", args: [], scopes: both, headerOrder: 1 },
+    ];
+    const offered = commandsFor(COMMAND_SCOPES.CONVERSATION, registry);
+    expect(matchCommands("/", offered).map((c) => c.name)).toEqual([
+      "config",
+      "context",
+      "compact",
+      "effort",
+      "model",
+    ]);
+    expect(headerCommands(offered).map((c) => c.name)).toEqual([
+      "model",
+      "config",
+      "effort",
+      "compact",
+      "context",
+    ]);
+    // headerCommands never reorders the list it is given.
+    expect(offered.map((c) => c.name)[0]).toBe("config");
   });
 
   it("filters an entry out of a page it is not scoped to", () => {

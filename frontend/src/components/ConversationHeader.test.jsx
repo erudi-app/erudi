@@ -41,6 +41,16 @@ describe("ConversationHeader", () => {
     ]);
   });
 
+  it("orders the panel's buttons Model, Config, Effort", () => {
+    render(<ConversationHeader modelName="Qwen3-4B" commands={COMMANDS} onCommand={vi.fn()} />);
+    openPanel();
+    const labels = screen
+      .getAllByRole("button")
+      .map((b) => b.textContent)
+      .filter((text) => text.includes("/"));
+    expect(labels).toEqual(["Model/model", "Config/config", "Effort/effort"]);
+  });
+
   it("disables a command the page says is unavailable", () => {
     const onCommand = vi.fn();
     render(
