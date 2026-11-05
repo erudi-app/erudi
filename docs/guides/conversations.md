@@ -466,26 +466,42 @@ The request never re-assigns a model and never waits in line:
 
 - A conversation whose model was deleted is a 409 (`STATE_CONFLICT`, `detail.reason: "no_model"`,
   "pick a model first").
-- A conversation whose last message is a question without an answer (a turn killed before it
-  ended) is a 409 (`detail.reason: "unanswered_question"`). An answer of any kind is accepted,
-  a failed one included — a turn that timed out on a long history is exactly when shrinking it
-  helps (the runner's repair already closed that turn in the thread).
 - While an answer streams, the model reloads, or a memory or idle check holds the model, the
   request waits at most 2 seconds and then is a 409 (`ENGINE_BUSY`, "The model is busy; try again in
   a moment."): it takes the engine's non-blocking guard (`try_generation_guard`), never the queue.
+- Once it holds the guard, a conversation whose last message is a question without an answer (a
+  turn killed before it ended) is a 409 (`detail.reason: "unanswered_question"`). The last message
+  is read only then, because a turn saves its answer after it releases the model. An answer of
+  any kind is accepted, a failed one included — a turn that timed out on a long history is exactly
+  when shrinking it helps. A thread whose failed turn was left open (the runner's repair did not
+  land) is closed the way that repair closes it, in the same write as the summary.
 
 Then, in a turn's order: the memory brake's turn-start sample, the model (loaded if needed), the
-prefix-cache claim for this conversation, the summary call, bounded on the server by the summary
-client's first-chunk ceiling plus its length decoded at the watchdog's conservative rate
+prefix-cache claim for this conversation, the memory measurement window a turn opens (so the
+brake counts `/compact` as a turn, and a child its start sample restarted is not announced as a
+reload again on the next turn), the summary call, bounded on the server by the summary client's
+first-chunk ceiling plus its length decoded at the watchdog's conservative rate
 (`manual_summary_timeout_s`); the thread state rewritten as the `model` node; the prefix-cache reset
-of a compaction; the separator saved; the brake's turn-end sample. `backend.log` shows one
-`Conversation compacted: ... threshold=<pct>%, manual` line. A summary that fails or runs past its
-bound changes nothing — the model still sees the whole history — and is a 503
-(`COMPACTION_FAILED`, one warning in `backend.log`). A separator that cannot be saved after the
-thread was rewritten is a 500 (`COMPACTION_SEPARATOR_NOT_SAVED`, "The history was summarized, but
-the separator could not be saved.", one error with its traceback). A client that goes away during
-the summary releases the model with nothing written; once the stores are being written, they are
-finished first.
+of a compaction; the separator saved on the answer read under the guard; the window closed and the
+brake's turn-end sample, also after a failure (a model that could not load included).
+`backend.log` shows one `Conversation compacted: ... threshold=<pct>%, manual` line.
+
+Each failure has one record in `backend.log`:
+
+- A summary that fails or runs past its bound, or a thread state that cannot be written, changes
+  nothing — the model still sees the whole history — and is a 503 (`COMPACTION_FAILED`). Its one
+  warning names the causes of each attempt; the summarizer's per-attempt records are debug-level
+  for a manual compaction.
+- A conversation deleted while its summary ran is a 404 (`CONVERSATION_NOT_FOUND`, logged at info):
+  the thread written back meanwhile is deleted again, so a later conversation that reuses the id
+  never inherits it.
+- A separator that cannot be saved after the thread was rewritten is a 500
+  (`COMPACTION_SEPARATOR_NOT_SAVED`, "The history was summarized, but the separator could not be
+  saved.", one error with its traceback).
+
+A client that goes away during the summary releases the model with nothing written (the memory
+window is closed as abandoned, as for a turn); once the stores are being written, they are finished
+first, and a failure no response will carry is logged then.
 
 ### Context usage
 

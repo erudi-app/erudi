@@ -623,14 +623,16 @@ async def compact_conversation(
     without loading the model). The separator is saved below the last answer
     (a ``compaction`` event with ``manual: true`` in its trace).
 
-    Errors: 404 unknown conversation; 409 ``STATE_CONFLICT`` when the
+    Errors: 404 unknown conversation, or deleted while its summary ran (its
+    thread is then deleted again); 409 ``STATE_CONFLICT`` when the
     conversation has no model (``detail.reason: "no_model"``, never
-    re-assigned) or ends with an unanswered question (``"unanswered_question"``);
-    409 ``ENGINE_BUSY`` when an answer, a reload or a memory check holds the
-    model past 2 s; 503 ``COMPACTION_FAILED`` when the summary could not be
-    written (nothing changed; one WARNING here); 500
-    ``COMPACTION_SEPARATOR_NOT_SAVED`` when the history was summarized but
-    the separator could not be saved.
+    re-assigned) or ends with an unanswered question (``"unanswered_question"``,
+    read under the generation guard); 409 ``ENGINE_BUSY`` when an answer, a
+    reload or a memory check holds the model past 2 s; 503
+    ``COMPACTION_FAILED`` when the summary, or the summarized thread, could
+    not be written (nothing changed; this WARNING, carrying the causes, is
+    the failure's one record); 500 ``COMPACTION_SEPARATOR_NOT_SAVED`` when the
+    history was summarized but the separator could not be saved.
     """
     try:
         return await service.compact_conversation(conversation_id)

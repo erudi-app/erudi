@@ -313,14 +313,20 @@ def test_the_endpoint_says_to_pick_a_model_first(client, test_db_session, mock_l
     assert error["detail"] == {"reason": "no_model"}
 
 
-def test_a_busy_engine_is_a_409_logged_at_info(client, monkeypatch, caplog):
-    async def _busy(self, conversation_id):
+def test_a_busy_engine_is_a_409_logged_at_info(
+    client, test_db_session, mock_llm, setup, monkeypatch, caplog
+):
+    from src.agents.runner import AgentRunner
+
+    conversation_id = _client_conversation(client, test_db_session, mock_llm)
+
+    async def _busy(self, **kwargs):
         raise EngineBusyException()
 
-    monkeypatch.setattr(ConversationService, "compact_conversation", _busy)
+    monkeypatch.setattr(AgentRunner, "acompact", _busy)
 
     with caplog.at_level(logging.INFO):
-        response = client.post("/erudi/conversations/1/compact")
+        response = client.post(f"/erudi/conversations/{conversation_id}/compact")
 
     assert response.status_code == 409
     assert response.json()["error"]["type"] == "ENGINE_BUSY"
@@ -328,39 +334,155 @@ def test_a_busy_engine_is_a_409_logged_at_info(client, monkeypatch, caplog):
     assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
 
 
-def test_a_failed_summary_is_a_503_with_one_warning(client, monkeypatch, caplog):
-    async def _failed(self, conversation_id):
-        raise CompactionFailedException(trace="APIConnectionError")
+def _records_from(caplog, level=logging.WARNING):
+    return [r for r in caplog.records if r.levelno >= level]
 
-    monkeypatch.setattr(ConversationService, "compact_conversation", _failed)
 
-    with caplog.at_level(logging.INFO):
-        response = client.post("/erudi/conversations/5/compact")
+@pytest.mark.parametrize(
+    "script, cause",
+    [
+        ([ValueError("a bug"), ValueError("again")], "ValueError"),
+        (["", ""], "no text"),
+    ],
+    ids=["two-failed-calls", "two-empty-summaries"],
+)
+def test_a_failed_summary_is_a_503_with_exactly_one_warning(
+    client, test_db_session, mock_llm, monkeypatch, caplog, script, cause
+):
+    _Builds(monkeypatch, _ScriptedSummaryModel(messages=iter([]), script=list(script)))
+    conversation_id = _client_conversation(client, test_db_session, mock_llm)
+
+    with caplog.at_level(logging.DEBUG):
+        response = client.post(f"/erudi/conversations/{conversation_id}/compact")
 
     assert response.status_code == 503
-    assert response.json()["error"]["type"] == "COMPACTION_FAILED"
-    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
-    assert len(warnings) == 1
-    assert "APIConnectionError" in warnings[0].getMessage()
-    assert not [r for r in caplog.records if r.levelno >= logging.ERROR]
+    error = response.json()["error"]
+    assert error["type"] == "COMPACTION_FAILED"
+    assert "nothing was changed" in error["message"]
+    records = _records_from(caplog)
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert records[0].exc_info is None
+    assert cause in records[0].getMessage()
+    assert "retry attempt" in records[0].getMessage()
 
 
-def test_a_lost_separator_is_a_500_with_one_error_and_its_traceback(client, monkeypatch, caplog):
-    async def _lost(self, conversation_id):
-        try:
-            raise RuntimeError("database gone")
-        except RuntimeError as exc:
-            raise CompactionSeparatorException() from exc
+def test_a_thread_that_cannot_be_written_is_a_503_with_one_warning(
+    client, test_db_session, mock_llm, setup, monkeypatch, caplog
+):
+    from tests.test_manual_compaction import _FailingWrites
 
-    monkeypatch.setattr(ConversationService, "compact_conversation", _lost)
+    client.app.state.checkpointer = _FailingWrites()
+    conversation_id = _client_conversation(client, test_db_session, mock_llm)
+    client.app.state.checkpointer.broken = True
 
     with caplog.at_level(logging.INFO):
-        response = client.post("/erudi/conversations/5/compact")
+        response = client.post(f"/erudi/conversations/{conversation_id}/compact")
+
+    assert response.status_code == 503
+    assert "nothing was changed" in response.json()["error"]["message"]
+    records = _records_from(caplog)
+    assert [r.levelno for r in records] == [logging.WARNING]
+    assert "RuntimeError" in records[0].getMessage()
+    client.app.state.checkpointer.broken = False
+    state = asyncio.run(_state(client.app.state.checkpointer, str(conversation_id)))
+    assert [m.id for m in state] == ["h1", "a1", "h2", "a2"]
+
+
+def test_a_lost_separator_is_a_500_with_one_error_and_its_traceback(
+    client, test_db_session, mock_llm, setup, monkeypatch, caplog
+):
+    conversation_id = _client_conversation(client, test_db_session, mock_llm)
+
+    def _broken_commit():
+        raise RuntimeError("database gone")
+
+    monkeypatch.setattr(test_db_session, "commit", _broken_commit)
+
+    with caplog.at_level(logging.INFO):
+        response = client.post(f"/erudi/conversations/{conversation_id}/compact")
 
     assert response.status_code == 500
     error = response.json()["error"]
     assert error["type"] == "COMPACTION_SEPARATOR_NOT_SAVED"
     assert "summarized" in error["message"]
-    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
-    assert len(errors) == 1
-    assert errors[0].exc_info is not None
+    records = _records_from(caplog)
+    assert [r.levelno for r in records] == [logging.ERROR]
+    assert records[0].exc_info is not None
+
+
+class _DeletingSummaryModel(_ScriptedSummaryModel):
+    """A summary client during whose call the user deletes the conversation."""
+
+    delete: object = None
+
+    async def _agenerate(self, messages, stop=None, run_manager=None, **kwargs):
+        await self.delete()
+        return await super()._agenerate(messages, stop=stop, run_manager=run_manager, **kwargs)
+
+    async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+        await self.delete()
+        async for chunk in super()._astream(messages, stop=stop, run_manager=run_manager, **kwargs):
+            yield chunk
+
+
+def test_a_conversation_deleted_during_the_summary_is_a_404_and_leaves_no_thread(
+    client, test_db_session, mock_llm, monkeypatch, caplog
+):
+    conversation_id = _client_conversation(client, test_db_session, mock_llm)
+    checkpointer = client.app.state.checkpointer
+
+    async def _delete():
+        await ConversationService(test_db_session, checkpointer).delete_conversation(
+            conversation_id
+        )
+
+    _Builds(monkeypatch, _DeletingSummaryModel(messages=iter([]), delete=_delete))
+
+    with caplog.at_level(logging.INFO):
+        response = client.post(f"/erudi/conversations/{conversation_id}/compact")
+
+    assert response.status_code == 404
+    assert response.json()["error"]["type"] == "CONVERSATION_NOT_FOUND"
+    assert not _records_from(caplog)
+    tuple_ = asyncio.run(
+        checkpointer.aget_tuple({"configurable": {"thread_id": str(conversation_id)}})
+    )
+    assert tuple_ is None
+    test_db_session.expire_all()
+    assert test_db_session.get(Conversation, conversation_id) is None
+
+
+async def test_the_separator_goes_on_the_answer_read_under_the_guard(
+    test_db_session, mock_llm, monkeypatch
+):
+    """A turn persists its answer only after it releases the guard: a
+    /compact queued meanwhile reads the conversation's last row once it holds
+    the guard, so the answer that just landed is neither refused as an open
+    question nor skipped by the separator."""
+    from src.engines import base_engine
+
+    monkeypatch.setattr(base_engine, "GENERATION_BUSY_WAIT_S", 2.0)
+    cp = InMemorySaver()
+    service = ConversationService(test_db_session, cp)
+    conversation = service.create_conversation(llm_id=mock_llm.id)
+    test_db_session.commit()
+    _rows(test_db_session, conversation.id, 2)
+    _Builds(monkeypatch, _ScriptedSummaryModel(messages=iter([])))
+    await _seed(cp, str(conversation.id), _exchanges(3))
+
+    async with _BrakeEngine.generation_guard():
+        # The third turn: its question is persisted, its answer is not yet.
+        test_db_session.add(Message(conversation_id=conversation.id, sender="user", content="q3"))
+        test_db_session.commit()
+        compact = asyncio.create_task(service.compact_conversation(conversation.id))
+        await asyncio.sleep(0.1)
+    # The turn released the guard; its answer lands before /compact runs.
+    test_db_session.add(Message(conversation_id=conversation.id, sender="llm", content="a3"))
+    test_db_session.commit()
+
+    result = await compact
+
+    assert result["summarized"] > 0
+    last = _answers(test_db_session, conversation.id)[-1]
+    assert last.content == "a3"
+    assert last.trace[-1]["manual"] is True

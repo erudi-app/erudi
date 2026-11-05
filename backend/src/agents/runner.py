@@ -64,10 +64,11 @@ import asyncio
 import contextlib
 import functools
 import json
+import logging
 import time
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Optional, Protocol
 
 from fastapi.concurrency import run_in_threadpool
 
@@ -101,9 +102,12 @@ from src.database.generation_hints import resolve_sampling_defaults, trained_con
 from src.agents.think_splitter import ThinkSplitter
 from src.core import config
 from src.core.exceptions import (
+    AppBaseException,
     CompactionFailedException,
+    ConversationNotFoundException,
     EngineException,
     GenerationTimeoutException,
+    log_level_for_status,
 )
 from src.core.logging import logger
 from src.engines.base_engine import BaseEngine, run_reset_shielded, wait_shielded
@@ -1114,6 +1118,7 @@ def _summarization_middleware_class():
             self.allocated_window = allocated_window
             self.engine = engine
             self.manual = manual
+            self._attempt_failures: list = []
 
         def _real_count(self, messages) -> int:
             return real_token_count(messages, self._weights, self._past_ids)
@@ -1236,7 +1241,9 @@ def _summarization_middleware_class():
             retry with oversized messages truncated (the budget halved after
             a rejection), then a placeholder carrying the previous summary.
             One WARNING per failed attempt; an unexpected error is one ERROR
-            with its traceback.
+            with its traceback (``_attempt_failed``; in manual mode those
+            records are DEBUG and the causes ride the raised
+            ``CompactionFailedException``).
             """
             from src.agents.middleware import strip_stale_tool_results
 
@@ -1256,10 +1263,12 @@ def _summarization_middleware_class():
             retry_budget = budget
             trimmed = self._trim_for_summary(pool, budget, start_on="human")
             if pool and not trimmed:
-                logger.warning(
+                self._attempt_failed(
+                    logging.WARNING,
                     f"Compaction summary skipped its first attempt: no user turn fits "
                     f"the {budget}-token summarizer budget; retrying with oversized "
-                    f"messages truncated"
+                    f"messages truncated",
+                    cause="first attempt: no user turn fits the budget",
                 )
             else:
                 summary = await self._summarize(previous, trimmed, attempt="first")
@@ -1272,7 +1281,7 @@ def _summarization_middleware_class():
             trimmed = self._trim_for_summary(truncated, retry_budget, start_on=None)
             summary = await self._summarize(previous, trimmed, attempt="retry")
             if summary is None and self.manual:
-                raise CompactionFailedException(trace="no summary after the retry")
+                raise CompactionFailedException(trace="; ".join(self._attempt_failures))
             if summary is None:
                 cap = (
                     summary_cap(self.working_window) if _known_window(self.working_window) else None
@@ -1317,14 +1326,18 @@ def _summarization_middleware_class():
                 if _is_transient_summary_error(exc):
                     raise
                 if _is_rejection(exc):
-                    logger.warning(
+                    self._attempt_failed(
+                        logging.WARNING,
                         f"Compaction summary call rejected ({attempt} attempt): "
-                        f"{type(exc).__name__}, status={getattr(exc, 'status_code', None)}"
+                        f"{type(exc).__name__}, status={getattr(exc, 'status_code', None)}",
+                        cause=f"{attempt} attempt: {type(exc).__name__}",
                     )
                 else:
-                    logger.error(
+                    self._attempt_failed(
+                        logging.ERROR,
                         f"Compaction summary call failed ({attempt} attempt): "
                         f"{type(exc).__name__}",
+                        cause=f"{attempt} attempt: {type(exc).__name__}",
                         exc_info=True,
                     )
                 return None
@@ -1333,9 +1346,24 @@ def _summarization_middleware_class():
                 # An empty summary would replace the whole history with
                 # nothing: a failure, never a success. A summary that only
                 # thought (an unclosed ``<think>``) is one too.
-                logger.warning(f"Compaction summary call returned no text ({attempt} attempt)")
+                self._attempt_failed(
+                    logging.WARNING,
+                    f"Compaction summary call returned no text ({attempt} attempt)",
+                    cause=f"{attempt} attempt: no text",
+                )
                 return None
             return summary
+
+        def _attempt_failed(self, level, message, *, cause, exc_info=False) -> None:
+            """The record of one failed summary attempt. Automatic: at
+            ``level``. Manual: DEBUG, the cause kept for the
+            ``CompactionFailedException`` the compaction then raises -- the
+            endpoint's WARNING is the failure's one record."""
+            if self.manual:
+                self._attempt_failures.append(cause)
+                logger.debug(message, exc_info=exc_info)
+            else:
+                logger.log(level, message, exc_info=exc_info)
 
         def _compacted(self, messages_to_summarize, summary, *, lost=False):
             """Log the compaction (with the threshold it ran at) and record its
@@ -1706,6 +1734,47 @@ class _CompactionSetup:
     @property
     def summarizer(self) -> Any:
         return self.middleware[-1]
+
+
+class CompactionStore(Protocol):
+    """What a manual compaction (``AgentRunner.acompact``) needs from the
+    conversation's own store, the messages table. Each is called under the
+    generation guard."""
+
+    async def refuse_if_open(self) -> None:
+        """Raise when the conversation cannot be compacted now (its last row
+        is a question without an answer); read under the guard, since a turn
+        persists its answer only after releasing it."""
+
+    async def still_exists(self) -> bool:
+        """Whether the conversation still exists, once the checkpoint is
+        rewritten."""
+
+    async def save_separator(self, event: dict) -> None:
+        """Save the compaction's ``done`` event below the last answer."""
+
+
+def _closed_thread(messages: list) -> list:
+    """``messages`` closed the way ``_repair_alternation`` closes a failed
+    turn, when the committed thread ends open (a repair that did not land)."""
+    return messages + _closing_messages(messages, ERROR_MESSAGE)
+
+
+def _record_unanswered_failure(thread_id: str, failure: BaseException) -> None:
+    """The record of a manual compaction's failure that no response will
+    carry (its client is gone), at the level its response would have had."""
+    if isinstance(failure, CompactionFailedException):
+        level = logging.WARNING
+    elif isinstance(failure, AppBaseException):
+        level = log_level_for_status(failure.status_code)
+    else:
+        level = logging.ERROR
+    logger.log(
+        level,
+        f"Manual compaction of thread {thread_id} failed while its client was gone: "
+        f"{type(failure).__name__}",
+        exc_info=failure if level >= logging.ERROR else None,
+    )
 
 
 class AgentRunner:
@@ -2579,51 +2648,61 @@ class AgentRunner:
         thread_id: str,
         params: GenParams,
         compaction_threshold: int,
-        persist_marker: Callable[[dict], Awaitable[None]],
+        store: CompactionStore,
     ) -> dict:
         """Summarize the conversation's history now (``/compact``, #585).
 
         Returns the compaction's ``done`` event -- the automatic one's keys
         (``reason``, ``summarized``, ``summary``, ``summary_lost``) plus
         ``manual: True`` -- or ``{"summarized": 0}`` when there is nothing
-        to compact.
+        to compact. ``store`` is the conversation's own store
+        (``CompactionStore``).
 
         The cutoff is ``manual_compaction_cutoff`` on the COMMITTED thread
-        (``_committed_messages``): the answer before the last question
+        (``_committed_messages``), closed first when it ends open -- a turn
+        whose repair did not land leaves its question (or tool calls) last:
+        ``_closing_messages`` closes it as ``_repair_alternation`` would, in
+        the same write as the summary. The answer before the last question
         onward is kept. Nothing to compact (a single exchange, nothing new
         since the last manual compaction) is decided before the guard and
         again under it, before any model is loaded, and nothing is written.
 
-        Under ``try_generation_guard`` (busy: ``EngineBusyException``), in a
-        turn's order: the brake's turn_start sample before the model is
-        resolved, the chat model (which loads the child), the prefix-cache
-        claim for this conversation, the summary client and the middleware
-        through ``_compaction_setup`` (``manual``), then the summary call,
+        Under ``try_generation_guard`` (busy: ``EngineBusyException``):
+        ``store.refuse_if_open()`` (a turn persists its answer only after it
+        releases the guard, so the conversation's last row is read here),
+        then a turn's order -- the brake's turn_start sample before the model
+        is resolved, the chat model (which loads the child), the prefix-cache
+        claim for this conversation, the memory window a turn opens
+        (``begin_memory_window``: the brake sees a turn, a respawn of the
+        start sample is accounted), the summary client and the middleware
+        through ``_compaction_setup`` (``manual``), and the summary call,
         bounded by ``manual_summary_timeout_s``. A summary that fails or runs
         past the bound raises ``CompactionFailedException``: nothing is
-        written. Then, in one task awaited through ``wait_shielded``, the
-        checkpoint is rewritten as the ``model`` node (``RemoveMessage(
-        REMOVE_ALL)``, the summary, the kept tail -- the way
-        ``_repair_alternation`` updates a thread), the prefix cache is reset
-        like after an automatic compaction, and ``persist_marker`` saves the
-        separator: a client that goes away meanwhile cannot leave the stores
-        half-written, and its cancellation is re-raised once they are. The
-        brake's turn_end sample comes last. A client that goes away during
-        the summary call flags the child (``abandon_hook``) and releases the
-        lock with nothing written. ``persist_marker``'s own failure
-        propagates (the history is summarized by then).
-        """
-        from langchain.agents import create_agent
+        written. Then, in one task awaited through ``wait_shielded``
+        (``_write_manual_compaction``): the checkpoint rewritten as the
+        ``model`` node, the conversation's existence checked (deleted
+        meanwhile: its thread is deleted again and
+        ``ConversationNotFoundException``), the prefix cache reset like
+        after an automatic compaction, the separator saved. A client that
+        goes away meanwhile cannot leave the stores half-written; its
+        cancellation is re-raised once they are.
 
+        The end mirrors a turn's: on success or failure the memory window is
+        closed and the turn_end sample taken (``_end_manual_compaction``,
+        which records the failure itself if a cancellation cuts it short);
+        a client gone before the write flags the child (``abandon_hook``),
+        closes the window as abandoned and takes no end sample.
+        """
         engine = config.LLM_Engine
         run_config = {"configurable": {"thread_id": thread_id}}
         nothing = {"summarized": 0}
         messages = await self._committed_messages(run_config)
-        if manual_compaction_cutoff(messages, compaction_threshold) <= 0:
+        if manual_compaction_cutoff(_closed_thread(messages), compaction_threshold) <= 0:
             return nothing
         async with engine.try_generation_guard():
             # A turn may have run while the guard was awaited.
-            messages = await self._committed_messages(run_config)
+            messages = _closed_thread(await self._committed_messages(run_config))
+            await store.refuse_if_open()
             cutoff = manual_compaction_cutoff(messages, compaction_threshold)
             if cutoff <= 0:
                 return nothing
@@ -2633,21 +2712,25 @@ class AgentRunner:
                         engine.brake_point, POINT_TURN_START, llm_id=getattr(llm, "id", None)
                     )
                 )
-            sampling = resolve_sampling_defaults(llm)
-            model = await run_in_threadpool(
-                build_chat_model,
-                llm,
-                temperature=params.temperature,
-                top_p=params.top_p,
-                max_tokens=params.max_tokens,
-                sampling=sampling,
-            )
-            abandon_hook = getattr(model, "abandon_hook", None)
+            memory_token = None
+            abandon_hook = None
             try:
+                sampling = resolve_sampling_defaults(llm)
+                model = await run_in_threadpool(
+                    build_chat_model,
+                    llm,
+                    temperature=params.temperature,
+                    top_p=params.top_p,
+                    max_tokens=params.max_tokens,
+                    sampling=sampling,
+                )
+                abandon_hook = getattr(model, "abandon_hook", None)
                 if _engine_overrides(engine, "claim_prefix"):
                     await run_reset_shielded(
                         functools.partial(engine.claim_prefix, f"conv:{thread_id}")
                     )
+                if _engine_overrides(engine, "begin_memory_window"):
+                    memory_token = await run_in_threadpool(engine.begin_memory_window)
                 compaction = await self._compaction_setup(
                     llm,
                     params=params,
@@ -2680,44 +2763,100 @@ class AgentRunner:
                     ),
                     **facts,
                 }
-                agent = create_agent(model, tools=[], checkpointer=self.checkpointer)
                 write = asyncio.get_running_loop().create_task(
                     self._write_manual_compaction(
-                        agent, run_config, update, engine, persist_marker, event
+                        model, run_config, update, engine, store, event, thread_id
                     )
                 )
                 cancelled = await wait_shielded(write)
-            except CompactionFailedException:
-                await self._brake_turn_end(engine)
+                failure = None if write.cancelled() else write.exception()
+                if cancelled:
+                    if failure is not None:
+                        # Nobody is left to answer: this is the failure's only record.
+                        _record_unanswered_failure(thread_id, failure)
+                    raise asyncio.CancelledError()
+                if failure is not None:
+                    raise failure
+            except Exception as exc:
+                await self._end_manual_compaction(
+                    engine, memory_token, compaction_threshold, thread_id, failure=exc
+                )
                 raise
             except BaseException:
-                # The client went away (or a build failed) before anything
-                # was written.
+                # The client went away (or the process is stopping) before the
+                # write, or after it was finished: the turn is abandoned.
                 _flag_abandoned(abandon_hook)
+                _close_memory_window(
+                    engine,
+                    memory_token,
+                    abandoned=True,
+                    compaction_threshold=compaction_threshold,
+                )
                 raise
-            await self._brake_turn_end(engine)
-            if cancelled:
-                if not write.cancelled() and write.exception() is not None:
-                    # Nobody is left to answer: this is the failure's only record.
-                    logger.error(
-                        f"Manual compaction of thread {thread_id} failed while its client "
-                        f"was gone",
-                        exc_info=write.exception(),
-                    )
-                raise asyncio.CancelledError()
-            # The write's own failure (the checkpoint, or the separator).
-            write.result()
+            await self._end_manual_compaction(engine, memory_token, compaction_threshold, thread_id)
         return event
 
-    @staticmethod
     async def _write_manual_compaction(
-        agent, run_config, update: list, engine: Any, persist_marker, event: dict
+        self,
+        model,
+        run_config: dict,
+        update: list,
+        engine: Any,
+        store: CompactionStore,
+        event: dict,
+        thread_id: str,
     ) -> None:
         """The stores of a manual compaction, in order: the checkpoint (as
-        the ``model`` node), the prefix-cache reset, the separator."""
-        await agent.aupdate_state(run_config, {"messages": update}, as_node="model")
+        the ``model`` node), the conversation's existence, the prefix-cache
+        reset, the separator. A checkpoint that cannot be written changed
+        nothing (``CompactionFailedException``); a conversation deleted
+        while the summary ran has its thread deleted again -- its id may be
+        reused -- and is ``ConversationNotFoundException``."""
+        from langchain.agents import create_agent
+
+        agent = create_agent(model, tools=[], checkpointer=self.checkpointer)
+        try:
+            await agent.aupdate_state(run_config, {"messages": update}, as_node="model")
+        except Exception as exc:
+            raise CompactionFailedException(
+                message="The summarized history could not be saved; nothing was changed.",
+                trace=type(exc).__name__,
+            ) from exc
+        if not await store.still_exists():
+            await self.checkpointer.adelete_thread(thread_id)
+            raise ConversationNotFoundException(thread_id)
         await reset_prefix_after_rewrite(engine)
-        await persist_marker(event)
+        await store.save_separator(event)
+
+    @staticmethod
+    async def _end_manual_compaction(
+        engine: Any,
+        memory_token: Any,
+        compaction_threshold: int,
+        thread_id: str,
+        *,
+        failure: Optional[BaseException] = None,
+    ) -> None:
+        """The end of a manual compaction that was not abandoned, as a
+        turn's: the memory window closed, then the brake's turn_end sample
+        (shielded). A cancellation that arrives meanwhile is re-raised once
+        they are done; the ``failure`` in flight, which nobody will then
+        answer, is recorded first."""
+        try:
+            if memory_token is not None:
+                await run_in_threadpool(
+                    _close_memory_window,
+                    engine,
+                    memory_token,
+                    abandoned=False,
+                    compaction_threshold=compaction_threshold,
+                )
+            if _engine_overrides(engine, "brake_point"):
+                await run_reset_shielded(functools.partial(engine.brake_point, POINT_TURN_END))
+        except asyncio.CancelledError:
+            if failure is not None:
+                _record_unanswered_failure(thread_id, failure)
+            raise
 
     async def acontext_usage(
         self,
@@ -2819,12 +2958,6 @@ class AgentRunner:
             },
             "over_window": _known_window(window) and used > window,
         }
-
-    @staticmethod
-    async def _brake_turn_end(engine: Any) -> None:
-        """The brake's turn_end sample, shielded (as a turn takes it)."""
-        if _engine_overrides(engine, "brake_point"):
-            await run_reset_shielded(functools.partial(engine.brake_point, POINT_TURN_END))
 
     async def _compaction_setup(
         self,

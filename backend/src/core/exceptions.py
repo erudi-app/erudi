@@ -886,14 +886,20 @@ class EngineBusyException(AppBaseException):
 class CompactionFailedException(AppBaseException):
     """Exception raised when a manual compaction could not write its summary.
 
-    The summary call failed or ran past its bound: nothing was changed, the
-    model still sees the whole history. The conversation endpoint handles it
-    (one WARNING, the app degraded on its own) and answers 503.
+    The summary call failed or ran past its bound, or the summarized history
+    could not be written to the thread: nothing was changed, the model still
+    sees the whole history. The conversation endpoint handles it (one
+    WARNING, the app degraded on its own) and answers 503. ``trace`` names
+    the causes.
     """
 
-    def __init__(self, trace: Optional[str] = None):
+    def __init__(
+        self,
+        message: str = "The summary could not be written; nothing was changed.",
+        trace: Optional[str] = None,
+    ):
         super().__init__(
-            message="The summary could not be written; nothing was changed.",
+            message=message,
             status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
             erudi_code="COMPACTION_FAILED",
             trace=trace,

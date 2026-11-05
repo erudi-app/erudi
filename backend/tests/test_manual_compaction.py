@@ -15,6 +15,8 @@ leaves them half-written.
 from __future__ import annotations
 
 import asyncio
+import logging
+import time
 from typing import ClassVar
 
 import pytest
@@ -60,14 +62,27 @@ _PARAMS = GenParams(temperature=0.5, top_p=0.9, max_tokens=64)
 
 
 class _BrakeEngine(_WindowEngine):
-    """A window engine that records its brake samples and every client build."""
+    """A window engine that records its brake samples and its memory windows
+    (``points``, in order, beside the prefix hooks of ``_WindowEngine``)."""
 
     points: ClassVar[list] = []
+    turn_end_delay: ClassVar[float] = 0.0
 
     @classmethod
     def brake_point(cls, point, *, llm_id=None):
         cls.points.append((point, llm_id))
+        if point == POINT_TURN_END and cls.turn_end_delay:
+            time.sleep(cls.turn_end_delay)
         return BrakeOutcome()
+
+    @classmethod
+    def begin_memory_window(cls):
+        cls.points.append(("begin_window", None))
+        return "token"
+
+    @classmethod
+    def end_memory_window(cls, token, *, abandoned=False, compaction_threshold=None):
+        cls.points.append(("end_window", (token, abandoned, compaction_threshold)))
 
 
 @pytest.fixture(autouse=True)
@@ -76,10 +91,16 @@ def _engine(monkeypatch):
     _BrakeEngine.claims = []
     _BrakeEngine.rewrites = []
     _BrakeEngine.points = []
+    _BrakeEngine.turn_end_delay = 0.0
     monkeypatch.setattr(config, "LLM_Engine", _BrakeEngine)
     yield
     _BrakeEngine._last_used = None
     _BrakeEngine._model = None
+
+
+def _brake_points():
+    """The brake samples alone (no memory windows)."""
+    return [p for p in _BrakeEngine.points if p[0] in (POINT_TURN_START, POINT_TURN_END)]
 
 
 class _Builds:
@@ -111,15 +132,35 @@ def _two_exchanges():
     ]
 
 
-class _Marker:
-    """The caller's separator store: records what it was handed."""
+class _Store:
+    """The caller's conversation store (``CompactionStore``): records the
+    separators it was handed and what it was asked."""
 
-    def __init__(self, fail: BaseException | None = None, delay: float = 0.0):
+    def __init__(
+        self,
+        fail: BaseException | None = None,
+        delay: float = 0.0,
+        *,
+        refuse: BaseException | None = None,
+        exists: bool = True,
+    ):
         self.events: list = []
         self.fail = fail
         self.delay = delay
+        self.refuse = refuse
+        self.exists = exists
+        self.asked: list = []
 
-    async def __call__(self, event):
+    async def refuse_if_open(self):
+        self.asked.append("refuse_if_open")
+        if self.refuse is not None:
+            raise self.refuse
+
+    async def still_exists(self):
+        self.asked.append("still_exists")
+        return self.exists
+
+    async def save_separator(self, event):
         if self.delay:
             await asyncio.sleep(self.delay)
         if self.fail is not None:
@@ -127,13 +168,13 @@ class _Marker:
         self.events.append(event)
 
 
-async def _compact(runner, thread_id, marker=None):
+async def _compact(runner, thread_id, store=None):
     return await runner.acompact(
         llm=_Llm(),
         thread_id=thread_id,
         params=_PARAMS,
         compaction_threshold=80,
-        persist_marker=marker or _Marker(),
+        store=store or _Store(),
     )
 
 
@@ -154,7 +195,7 @@ async def test_a_manual_compaction_summarizes_everything_before_the_previous_ans
     _Builds(monkeypatch, summary)
     cp = InMemorySaver()
     await _seed(cp, "m1", _two_exchanges())
-    marker = _Marker()
+    marker = _Store()
 
     event = await _compact(AgentRunner(checkpointer=cp), "m1", marker)
 
@@ -193,7 +234,14 @@ async def test_the_brake_samples_surround_it_and_turn_start_comes_before_the_loa
 
     await _compact(AgentRunner(checkpointer=cp), "m3")
 
-    assert _BrakeEngine.points == [(POINT_TURN_START, 7), (POINT_TURN_END, None)]
+    # A turn's order: the start sample, the load, the claim, the memory
+    # window open around the work, closed normally, then the end sample.
+    assert _BrakeEngine.points == [
+        (POINT_TURN_START, 7),
+        ("begin_window", None),
+        ("end_window", ("token", False, 80)),
+        (POINT_TURN_END, None),
+    ]
     first_kind, points_at_first_build, _kw = builds.calls[0]
     assert first_kind == "main"
     assert points_at_first_build == [(POINT_TURN_START, 7)]
@@ -281,7 +329,7 @@ async def test_nothing_to_compact_loads_nothing_and_stores_nothing(monkeypatch, 
     cp = InMemorySaver()
     if state:
         await _seed(cp, "n1", state)
-    marker = _Marker()
+    marker = _Store()
 
     result = await _compact(AgentRunner(checkpointer=cp), "n1", marker)
 
@@ -338,7 +386,7 @@ async def test_a_summary_that_cannot_be_written_changes_nothing(monkeypatch, scr
     _Builds(monkeypatch, _ScriptedSummaryModel(messages=iter([]), script=list(script)))
     cp = InMemorySaver()
     await _seed(cp, "f1", _two_exchanges())
-    marker = _Marker()
+    marker = _Store()
 
     with pytest.raises(CompactionFailedException):
         await _compact(AgentRunner(checkpointer=cp), "f1", marker)
@@ -395,7 +443,7 @@ async def test_a_separator_that_cannot_be_saved_leaves_the_history_summarized(mo
 
     with pytest.raises(CompactionSeparatorException):
         await _compact(
-            AgentRunner(checkpointer=cp), "s1", _Marker(fail=CompactionSeparatorException())
+            AgentRunner(checkpointer=cp), "s1", _Store(fail=CompactionSeparatorException())
         )
 
     state = await _state(cp, "s1")
@@ -413,7 +461,7 @@ async def test_a_client_gone_during_the_summary_releases_the_lock_with_nothing_w
     _Builds(monkeypatch, summary)
     cp = InMemorySaver()
     await _seed(cp, "c1", _two_exchanges())
-    marker = _Marker()
+    marker = _Store()
 
     task = asyncio.create_task(_compact(AgentRunner(checkpointer=cp), "c1", marker))
     await asyncio.wait_for(summary.started.wait(), timeout=5)
@@ -431,7 +479,7 @@ async def test_a_client_gone_while_the_stores_are_written_never_half_writes(monk
     _Builds(monkeypatch, _ScriptedSummaryModel(messages=iter([])))
     cp = InMemorySaver()
     await _seed(cp, "c2", _two_exchanges())
-    marker = _Marker(delay=0.1)
+    marker = _Store(delay=0.1)
 
     task = asyncio.create_task(_compact(AgentRunner(checkpointer=cp), "c2", marker))
     while not _BrakeEngine.rewrites:
@@ -453,7 +501,7 @@ async def test_a_store_failing_after_the_client_went_away_is_logged_once(monkeyp
     _Builds(monkeypatch, _ScriptedSummaryModel(messages=iter([])))
     cp = InMemorySaver()
     await _seed(cp, "c3", _two_exchanges())
-    marker = _Marker(fail=CompactionSeparatorException(), delay=0.1)
+    marker = _Store(fail=CompactionSeparatorException(), delay=0.1)
 
     task = asyncio.create_task(_compact(AgentRunner(checkpointer=cp), "c3", marker))
     while not _BrakeEngine.rewrites:
@@ -487,3 +535,223 @@ async def test_a_tool_round_survives_a_manual_compaction(monkeypatch):
     await _compact(AgentRunner(checkpointer=cp), "r1")
 
     assert [m.id for m in (await _state(cp, "r1"))[1:]] == ["a1", "h2", "call", "res", "a2"]
+
+
+# ===================== review round: the stores, the brake, the logs =====================
+
+
+async def test_the_next_turn_on_a_tool_carrying_graph_after_a_compaction(monkeypatch):
+    from src.agents.tools import calculator
+
+    _Builds(monkeypatch, _ScriptedSummaryModel(messages=iter([]), script=["Ada, Lyon."]))
+    cp = InMemorySaver()
+    await _seed(cp, "g1", _two_exchanges())
+    runner = AgentRunner(checkpointer=cp)
+    await _compact(runner, "g1")
+
+    main = ToolableFakeChatModel(
+        messages=iter(
+            [
+                AIMessage(
+                    content="",
+                    tool_calls=[{"name": "calculator", "args": {"expression": "2+2"}, "id": "k"}],
+                ),
+                AIMessage(content="Four, Ada."),
+            ]
+        )
+    )
+
+    def _build(llm, **kw):
+        if kw.get("effort_plan") is NO_REASONING_PLAN:
+            return _ScriptedSummaryModel(messages=iter([]))
+        return main
+
+    monkeypatch.setattr(runner_module, "build_chat_model", _build)
+    events = [
+        e
+        async for e in runner.astream_text(
+            llm=_Llm(),
+            user_message="What is 2+2?",
+            system_prompt="s",
+            params=_PARAMS,
+            thread_id="g1",
+            summarize=True,
+            tools=[calculator],
+            emit_events=True,
+            compaction_threshold=80,
+        )
+    ]
+
+    assert [e["t"] for e in events if e["t"] in ("tool_call", "tool_result")] == [
+        "tool_call",
+        "tool_result",
+    ]
+    assert "".join(e["text"] for e in events if e["t"] == "answer") == "Four, Ada."
+    state = await _state(cp, "g1")
+    assert "Ada, Lyon." in state[0].content
+    _assert_alternates(state)
+    assert [m.type for m in state[-4:]] == ["human", "ai", "tool", "ai"]
+
+
+async def test_an_open_thread_is_closed_in_the_same_write(monkeypatch):
+    from src.agents.runner import ERROR_MESSAGE
+
+    _Builds(monkeypatch, _ScriptedSummaryModel(messages=iter([])))
+    cp = InMemorySaver()
+    # The repair of a failed turn did not land: the question is last.
+    await _seed(cp, "o1", [*_two_exchanges(), HumanMessage("And my job?", id="h3")])
+
+    await _compact(AgentRunner(checkpointer=cp), "o1")
+
+    state = await _state(cp, "o1")
+    assert [m.id for m in state[1:3]] == ["a2", "h3"]
+    assert state[-1].type == "ai" and state[-1].content == ERROR_MESSAGE
+    _assert_alternates(state)
+
+
+async def test_the_open_question_is_checked_under_the_guard_before_the_load(monkeypatch):
+    from src.core.exceptions import StateConflictException
+
+    builds = _Builds(monkeypatch, _ScriptedSummaryModel(messages=iter([])))
+    cp = InMemorySaver()
+    await _seed(cp, "q1", _two_exchanges())
+    store = _Store(refuse=StateConflictException("open", status_code=409))
+    seen_locked: list = []
+    original = store.refuse_if_open
+
+    async def _refuse():
+        seen_locked.append(_BrakeEngine._generation_lock_for_running_loop().locked())
+        await original()
+
+    store.refuse_if_open = _refuse
+
+    with pytest.raises(StateConflictException):
+        await _compact(AgentRunner(checkpointer=cp), "q1", store)
+
+    assert seen_locked == [True]
+    assert builds.calls == []
+    assert [m.id for m in await _state(cp, "q1")] == ["h1", "a1", "h2", "a2"]
+
+
+async def test_a_conversation_deleted_meanwhile_gets_no_thread_back(monkeypatch):
+    from src.core.exceptions import ConversationNotFoundException
+
+    _Builds(monkeypatch, _ScriptedSummaryModel(messages=iter([])))
+    cp = InMemorySaver()
+    await _seed(cp, "d1", _two_exchanges())
+    store = _Store(exists=False)
+
+    with pytest.raises(ConversationNotFoundException):
+        await _compact(AgentRunner(checkpointer=cp), "d1", store)
+
+    assert await cp.aget_tuple({"configurable": {"thread_id": "d1"}}) is None
+    assert store.events == []
+    assert _BrakeEngine.rewrites == []
+
+
+class _FailingWrites(InMemorySaver):
+    """A checkpointer whose writes fail once ``broken`` is set."""
+
+    broken = False
+
+    async def aput(self, *args, **kwargs):
+        if self.broken:
+            raise RuntimeError("database gone")
+        return await super().aput(*args, **kwargs)
+
+
+async def test_a_checkpoint_that_cannot_be_written_changes_nothing(monkeypatch):
+    _Builds(monkeypatch, _ScriptedSummaryModel(messages=iter([])))
+    cp = _FailingWrites()
+    await _seed(cp, "w1", _two_exchanges())
+    cp.broken = True
+    store = _Store()
+
+    with pytest.raises(CompactionFailedException) as raised:
+        await _compact(AgentRunner(checkpointer=cp), "w1", store)
+
+    assert "nothing was changed" in raised.value.message
+    assert raised.value.status_code == 503
+    cp.broken = False
+    assert [m.id for m in await _state(cp, "w1")] == ["h1", "a1", "h2", "a2"]
+    assert store.events == []
+    assert _BrakeEngine.rewrites == []
+
+
+async def test_a_failure_cancelled_during_the_end_sample_is_still_recorded(monkeypatch, caplog):
+    _Builds(monkeypatch, _ScriptedSummaryModel(messages=iter([])))
+    cp = InMemorySaver()
+    await _seed(cp, "e1", _two_exchanges())
+    _BrakeEngine.turn_end_delay = 0.2
+    store = _Store(fail=CompactionSeparatorException())
+
+    task = asyncio.create_task(_compact(AgentRunner(checkpointer=cp), "e1", store))
+    while (POINT_TURN_END, None) not in _BrakeEngine.points:
+        await asyncio.sleep(0.005)
+    with caplog.at_level(logging.WARNING):
+        task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await task
+
+    errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+    assert len(errors) == 1
+    assert isinstance(errors[0].exc_info[1], CompactionSeparatorException)
+
+
+async def test_a_load_failure_still_closes_the_window_and_takes_the_end_sample(monkeypatch):
+    def _broken_load(llm, **kw):
+        raise EngineException("the model could not be loaded")
+
+    monkeypatch.setattr(runner_module, "build_chat_model", _broken_load)
+    cp = InMemorySaver()
+    await _seed(cp, "l1", _two_exchanges())
+
+    with pytest.raises(EngineException):
+        await _compact(AgentRunner(checkpointer=cp), "l1")
+
+    assert _brake_points() == [(POINT_TURN_START, 7), (POINT_TURN_END, None)]
+    assert BaseEngine._generation_lock.demand == 0
+
+
+async def test_a_client_gone_closes_the_window_as_abandoned_without_an_end_sample(monkeypatch):
+    summary = _SlowSummaryModel(messages=iter([]))
+    _Builds(monkeypatch, summary)
+    cp = InMemorySaver()
+    await _seed(cp, "l2", _two_exchanges())
+
+    task = asyncio.create_task(_compact(AgentRunner(checkpointer=cp), "l2"))
+    await asyncio.wait_for(summary.started.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert _BrakeEngine.points == [
+        (POINT_TURN_START, 7),
+        ("begin_window", None),
+        ("end_window", ("token", True, 80)),
+    ]
+
+
+async def test_a_respawn_from_the_start_sample_is_consumed_like_a_turns(monkeypatch):
+    """The memory window opened for /compact is what tells the llama.cpp brake
+    a turn ran and consumes its ``brake_respawned`` flag: the next turn does
+    not announce a reload for a respawn /compact already went through."""
+    from src.engines.base_llama_cpp_engine import BaseLlamaCppEngine
+    from src.engines.memory_brake import BrakeState
+
+    class _Llama(_BrakeEngine):
+        @classmethod
+        def begin_memory_window(cls):
+            return BaseLlamaCppEngine._llama_begin_memory_window.__func__(cls)
+
+    handle = {"brake_respawned": True, "brake": BrakeState()}
+    monkeypatch.setattr(config, "LLM_Engine", _Llama)
+    monkeypatch.setattr(_Llama, "_model", handle)
+    _Builds(monkeypatch, _ScriptedSummaryModel(messages=iter([])))
+    cp = InMemorySaver()
+    await _seed(cp, "l3", _two_exchanges())
+
+    await _compact(AgentRunner(checkpointer=cp), "l3")
+
+    assert "brake_respawned" not in handle
+    assert handle["brake"].turn_happened is True

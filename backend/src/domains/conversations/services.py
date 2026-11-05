@@ -39,6 +39,7 @@ from src.domains.user_settings.repository import User_Settings_Repository
 from src.domains.conversations.schemas import ConversationQuery
 from src.entities.Conversation import Conversation
 from src.entities.Llm import Llm
+from src.entities.Message import Message
 from src.core.exceptions import (
     CompactionSeparatorException,
     DatabaseException,
@@ -788,33 +789,20 @@ class ConversationService:
         0}`` when there is nothing to compact (a single exchange, or nothing
         new since the last manual compaction: nothing is loaded or stored).
         Refused with a 409 when the conversation has no model (it is never
-        re-assigned one) or ends with a question that has no answer (an
-        answer of any kind, a failed one included, is accepted). The
-        runner compacts (``AgentRunner.acompact``: busy -> 409, a summary
-        that cannot be written -> ``CompactionFailedException``); the
-        separator -- the compaction's ``done`` event, ``manual: True`` -- is
-        appended to the LAST answer's trace once the checkpoint is
-        rewritten. A separator that cannot be saved then raises
+        re-assigned one) or, read under the generation guard, ends with a
+        question that has no answer (an answer of any kind, a failed one
+        included, is accepted). The runner compacts (``AgentRunner.acompact``:
+        busy -> 409, a summary or a thread write that fails ->
+        ``CompactionFailedException``, the conversation deleted meanwhile ->
+        ``ConversationNotFoundException``); the separator -- the compaction's
+        ``done`` event, ``manual: True`` -- is appended to the trace of the
+        last answer read under the guard, once the checkpoint is rewritten. A
+        separator that cannot be saved then raises
         ``CompactionSeparatorException`` (the history stays summarized).
         """
         conversation, llm = await run_in_threadpool(
             self._load_conversation_and_llm_read_only, conversation_id
         )
-        last = await run_in_threadpool(self.message_repo.get_last_message, conversation_id)
-        if last is not None and last.sender == "user":
-            raise StateConflictException(
-                "The last question has no answer yet; it must be answered before the "
-                "conversation can be summarized.",
-                status_code=409,
-                detail={"reason": "unanswered_question"},
-            )
-
-        async def _persist_marker(event: dict) -> None:
-            try:
-                await run_in_threadpool(self._append_to_last_answer_trace, conversation_id, event)
-            except Exception as exc:
-                raise CompactionSeparatorException() from exc
-
         event = await self.runner.acompact(
             llm=llm,
             thread_id=str(conversation_id),
@@ -824,7 +812,7 @@ class ConversationService:
                 max_tokens=conversation.max_tokens or FALLBACK_MAX_TOKENS,
             ),
             compaction_threshold=conversation.compaction_threshold,
-            persist_marker=_persist_marker,
+            store=_ConversationCompactionStore(self, conversation_id),
         )
         return {key: event[key] for key in ("summarized", "reason", "summary") if key in event}
 
@@ -886,19 +874,57 @@ class ConversationService:
             detail={"reason": "no_model"},
         )
 
-    def _append_to_last_answer_trace(self, conversation_id: int, event: dict) -> None:
-        """Append ``event`` to the trace of the conversation's last answer and
+    def _append_to_answer_trace(self, answer_id: Optional[int], event: dict) -> None:
+        """Append ``event`` to the trace of the answer ``answer_id`` and
         commit. Not re-capped (``_cap_trace``): the event is small, and a
         compaction event is pinned by the cap anyway; a full trace may exceed
         ``TRACE_MAX_BYTES`` by it."""
         try:
-            answer = self.message_repo.get_last_message(conversation_id, sender="llm")
+            answer = self.db.get(Message, answer_id) if answer_id is not None else None
             if answer is None:
-                raise DatabaseException(
-                    f"Conversation {conversation_id} has no answer to hold the separator"
-                )
+                raise DatabaseException(f"No answer {answer_id} to hold the separator")
             answer.trace = [*(answer.trace or []), event]
             self.db.commit()
         except Exception:
             self.db.rollback()
             raise
+
+    def _conversation_exists(self, conversation_id: int) -> bool:
+        return (
+            self.db.query(Conversation.id).filter(Conversation.id == conversation_id).first()
+            is not None
+        )
+
+
+class _ConversationCompactionStore:
+    """The messages table, as a manual compaction needs it
+    (``src.agents.runner.CompactionStore``). The conversation's last row is
+    read under the generation guard (``refuse_if_open``); the separator goes
+    on the answer read then."""
+
+    def __init__(self, service: ConversationService, conversation_id: int):
+        self._service = service
+        self._conversation_id = conversation_id
+        self._answer_id: Optional[int] = None
+
+    async def refuse_if_open(self) -> None:
+        last = await run_in_threadpool(
+            self._service.message_repo.get_last_message, self._conversation_id
+        )
+        if last is not None and last.sender == "user":
+            raise StateConflictException(
+                "The last question has no answer yet; it must be answered before the "
+                "conversation can be summarized.",
+                status_code=409,
+                detail={"reason": "unanswered_question"},
+            )
+        self._answer_id = last.id if last is not None else None
+
+    async def still_exists(self) -> bool:
+        return await run_in_threadpool(self._service._conversation_exists, self._conversation_id)
+
+    async def save_separator(self, event: dict) -> None:
+        try:
+            await run_in_threadpool(self._service._append_to_answer_trace, self._answer_id, event)
+        except Exception as exc:
+            raise CompactionSeparatorException() from exc
