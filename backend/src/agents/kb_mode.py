@@ -89,8 +89,9 @@ def plan_turn(
     regime, before the user's own instructions -- so the level means the same
     thing on a plain, a systematic and an agentic turn.
 
-    ``web_search_enabled`` is the conversation's toggle (#310, copied from the
-    global default at creation; arena passes the global setting directly). The
+    ``web_search_enabled`` is the conversation's toggle (#310, set at creation
+    from the model's saved defaults or the global default; arena passes the
+    global setting directly). The
     web_search tool joins the turn iff the toggle is on AND the model is
     wire-capable — the SAME gate as agentic KB (#301): supports_tools AND
     supports_tools_wire is True. It rides plain turns (plain+web becomes a

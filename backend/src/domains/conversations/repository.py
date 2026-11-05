@@ -135,8 +135,8 @@ class ConversationRepository:
             max_tokens: Maximum tokens to generate
             custom_prompt: Custom system prompt
             web_search_enabled: Per-conversation web-search toggle (#310);
-                the service resolves it from the global default when the
-                caller does not pass an explicit value
+                the service resolves it (the model's saved defaults, else the
+                global default) when the caller does not pass an explicit value
             reasoning_effort: Per-conversation reasoning effort (1.1.2), same
                 lifecycle as the web-search toggle
             compaction_threshold: Per-conversation compaction threshold in

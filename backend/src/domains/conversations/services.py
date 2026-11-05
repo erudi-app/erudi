@@ -495,8 +495,8 @@ class ConversationService:
                 retrieve=lambda: self._retrieve_kb_excerpts(llm, payload.question),
                 custom_prompt=payload.custom_prompt,
                 starred_messages=starred,
-                # #310: the conversation OWNS its web toggle (copied from the
-                # global default at creation).
+                # #310: the conversation OWNS its web toggle (set at creation from
+                # the model's saved defaults or the global default, #609).
                 web_search_enabled=bool(conversation.web_search_enabled),
                 effort_section=effort_plan.prompt_section,
             )
@@ -563,7 +563,8 @@ class ConversationService:
                     supports_vision=supports_vision,
                     effort_plan=effort_plan,
                     # #607: the conversation OWNS its compaction threshold
-                    # (copied from the global default at creation); a lowered
+                    # (set at creation from the model's saved defaults or the global
+                    # default, #609); a lowered
                     # one compacts on this very turn.
                     compaction_threshold=conversation.compaction_threshold,
                     emit_events=True,
