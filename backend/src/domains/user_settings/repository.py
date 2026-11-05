@@ -8,7 +8,6 @@ from typing import Optional
 
 from sqlalchemy.orm import Session
 
-from src.agents.reasoning_effort import DEFAULT_REASONING_EFFORT
 from src.entities.UserSettings import (
     DEFAULT_INFERENCE_BACKEND,
     DEFAULT_LANGUAGE,
@@ -80,17 +79,6 @@ class User_Settings_Repository:
         self.db.refresh(settings)
         return settings
 
-    def get_default_reasoning_effort(self) -> str:
-        """The global default reasoning effort ("medium" until the user changes it).
-
-        Read-only, like ``get_web_search_enabled``: callers on hot paths
-        (conversation creation, arena turns) must not write, and a missing
-        singleton row IS the default.
-        """
-        settings = self.db.query(UserSettings).first()
-        value = settings.default_reasoning_effort if settings else None
-        return value or DEFAULT_REASONING_EFFORT
-
     def set_default_reasoning_effort(self, settings: UserSettings, value: str) -> UserSettings:
         """Update the global default reasoning effort (flushed, not committed).
 
@@ -102,9 +90,9 @@ class User_Settings_Repository:
             UserSettings: Updated entity.
 
         Note:
-            Existing conversations keep the level they copied at creation --
-            this only changes what the NEXT conversation inherits (and what
-            arena turns, which have no conversation row, run at).
+            Existing conversations keep the level they started at -- this
+            only changes what the NEXT conversation starts at (and what arena
+            panels run at) on a model without a saved level.
         """
         logger.info(f"Updating UserSettings.default_reasoning_effort = {value}")
         settings.default_reasoning_effort = value

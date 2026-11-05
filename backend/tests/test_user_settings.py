@@ -160,11 +160,18 @@ class TestUserSettingsRepository:
         test_db_session.commit()
         assert repo.get_or_create().default_reasoning_effort == "high"
 
-    def test_get_default_reasoning_effort_without_a_row(self, test_db_session):
-        # A missing singleton IS the default: the read must not write one.
+    def test_get_without_a_row_reads_none_and_writes_nothing(self, test_db_session):
+        # A missing singleton IS the defaults (the resolver's constants): the
+        # read conversation creation and arena turns make must not write one.
         repo = User_Settings_Repository(test_db_session)
-        assert repo.get_default_reasoning_effort() == "medium"
+        assert repo.get() is None
         assert test_db_session.query(UserSettings).count() == 0
+
+    def test_get_returns_the_row(self, test_db_session):
+        repo = User_Settings_Repository(test_db_session)
+        repo.set_default_reasoning_effort(repo.get_or_create(), "low")
+        test_db_session.commit()
+        assert repo.get().default_reasoning_effort == "low"
 
 
 # ============ Endpoints ============

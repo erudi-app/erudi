@@ -7,6 +7,9 @@
   command): the new model brings its saved values and, for creativity and
   diversity it has not saved, its recommendation; creativity and diversity in
   the same payload are ignored. The same ``llm_id`` re-applies nothing.
+- The Arena: a panel that sends no effort, creativity or diversity runs at the
+  model's saved values, else the Settings effort and the model's
+  recommendation.
 - Every conversation turn logs the values it runs with.
 """
 
@@ -15,13 +18,18 @@ from __future__ import annotations
 import logging
 
 import pytest
+from pydantic import ValidationError
 
+from src.agents.reasoning_effort import plan_reasoning_effort
 from src.core import config
+from src.domains.arena.schemas import ArenaQueryPayload
+from src.domains.arena.services import ArenaService
 from src.domains.conversations.schemas import ConversationQuery
 from src.domains.conversations.services import ConversationService
 from src.engines.base_engine import BaseEngine
 from src.entities.Llm import Llm
-from tests.test_user_settings import _plan_spy, _stream_spy
+from src.entities.ModelDefaults import ModelDefaults
+from tests.test_user_settings import _plan_spy, _stream_spy, _stub_stream
 
 pytestmark = pytest.mark.unit
 
@@ -357,3 +365,90 @@ async def test_the_turn_logs_the_payload_overrides(test_db_session, model_a, mon
     assert line.endswith("custom_prompt_chars=20")
     # The line says what the turn ran with.
     assert (stream_kwargs["params"].temperature, stream_kwargs["params"].top_p) == (1.2, 0.3)
+
+
+# ===================== the Arena =====================
+
+
+async def _arena_turn(db, llm_id, monkeypatch, **payload):
+    efforts: list = []
+
+    def _effort_spy(llm, level):
+        efforts.append(level)
+        return plan_reasoning_effort(llm, level)
+
+    monkeypatch.setattr("src.domains.arena.services.plan_reasoning_effort", _effort_spy)
+    monkeypatch.setattr("src.domains.arena.services.plan_turn", _plan_spy({}))
+    monkeypatch.setattr("src.domains.arena.services.detect_supports_vision", lambda link: False)
+    service = ArenaService(db)
+    stream_kwargs: dict = {}
+    monkeypatch.setattr(service.runner, "astream_text", _stream_spy(stream_kwargs))
+    async for _ in service.query_llm_stream(llm_id, ArenaQueryPayload(question="hi", **payload)):
+        pass
+    params = stream_kwargs["params"]
+    return efforts, (params.temperature, params.top_p)
+
+
+class TestArena:
+    def test_the_payload_accepts_null_and_refuses_an_unknown_effort(self):
+        payload = ArenaQueryPayload(question="q")
+        assert payload.reasoning_effort is None
+        assert ArenaQueryPayload(question="q", reasoning_effort="xhigh").reasoning_effort == "xhigh"
+        with pytest.raises(ValidationError):
+            ArenaQueryPayload(question="q", reasoning_effort="max")
+
+    async def test_null_values_take_the_saved_ones(self, test_db_session, model_b, monkeypatch):
+        test_db_session.add(ModelDefaults(llm_id=model_b.id, reasoning_effort="high", top_p=0.4))
+        test_db_session.commit()
+
+        efforts, sampling = await _arena_turn(test_db_session, model_b.id, monkeypatch)
+
+        assert efforts == ["high"]
+        assert sampling == (0.6, 0.4)  # recommended creativity, saved diversity
+
+    async def test_without_saved_values_the_settings_and_the_model_apply(
+        self, test_db_session, model_a, monkeypatch
+    ):
+        from src.domains.user_settings.repository import User_Settings_Repository
+
+        repo = User_Settings_Repository(test_db_session)
+        repo.set_default_reasoning_effort(repo.get_or_create(), "xhigh")
+        test_db_session.commit()
+
+        efforts, sampling = await _arena_turn(test_db_session, model_a.id, monkeypatch)
+
+        assert efforts == ["xhigh"]
+        assert sampling == (0.7, 0.8)
+
+    async def test_explicit_values_win(self, test_db_session, model_b, monkeypatch):
+        test_db_session.add(
+            ModelDefaults(llm_id=model_b.id, reasoning_effort="high", temperature=1.1, top_p=0.4)
+        )
+        test_db_session.commit()
+
+        efforts, sampling = await _arena_turn(
+            test_db_session,
+            model_b.id,
+            monkeypatch,
+            reasoning_effort="none",
+            temperature=0.3,
+            top_p=0.9,
+        )
+
+        assert efforts == ["none"]
+        assert sampling == (0.3, 0.9)
+
+    async def test_web_search_stays_the_global_setting(self, test_db_session, model_b, monkeypatch):
+        # Only effort and sampling follow the model in the Arena (#609).
+        test_db_session.add(ModelDefaults(llm_id=model_b.id, web_search_enabled=True))
+        test_db_session.commit()
+        captured: dict = {}
+        monkeypatch.setattr("src.domains.arena.services.plan_turn", _plan_spy(captured))
+        monkeypatch.setattr("src.domains.arena.services.detect_supports_vision", lambda link: False)
+        service = ArenaService(test_db_session)
+        monkeypatch.setattr(service.runner, "astream_text", _stub_stream)
+
+        async for _ in service.query_llm_stream(model_b.id, ArenaQueryPayload(question="hi")):
+            pass
+
+        assert captured["web_search_enabled"] is False
