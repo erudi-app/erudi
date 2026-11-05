@@ -3,16 +3,20 @@
 GET/PUT ``/erudi/user_settings/``: the app-wide settings the frontend's
 Settings page binds to: the global web-search default (#310), the
 interface language (#385), the three update switches (check, download,
-install, #563), the inference backend and the defaults new conversations copy
-(reasoning effort, compaction threshold). Follows the startup domain's layering (endpoints -> repository) — the resource is a
+install, #563), the inference backend, the defaults new conversations copy
+(reasoning effort, compaction threshold) and the idle unload delay (#619).
+Follows the startup domain's layering (endpoints -> repository) — the resource is a
 one-row singleton with no business logic beyond get-or-create. The inference
 backend rides here too: it is read once per boot by the lifespan, so changing
-it needs a backend restart, which the frontend triggers explicitly.
+it needs a backend restart, which the frontend triggers explicitly. The idle
+unload delay is read at boot too, and a PUT that carries it also applies it to
+the running engine, so it needs no restart.
 """
 
 from fastapi import Depends, APIRouter
 from sqlalchemy.orm import Session
 
+from src.core import config
 from src.database.core import get_db
 from src.domains.user_settings.repository import User_Settings_Repository
 from src.domains.user_settings.schemas import UserSettingsResponse, UserSettingsUpdate
@@ -41,7 +45,7 @@ async def get_user_settings(
         -> {"web_search_enabled": false, "language": "en", "auto_update_enabled": true,
             "auto_download_updates": false, "auto_install_updates": false,
             "inference_backend": "auto", "default_reasoning_effort": "medium",
-            "default_compaction_threshold": 80}
+            "default_compaction_threshold": 80, "idle_unload_minutes": 5}
     """
     try:
         settings = settings_repo.get_or_create()
@@ -65,7 +69,7 @@ async def update_user_settings(
         -> {"web_search_enabled": false, "language": "fr", "auto_update_enabled": true,
             "auto_download_updates": false, "auto_install_updates": false,
             "inference_backend": "auto", "default_reasoning_effort": "medium",
-            "default_compaction_threshold": 80}
+            "default_compaction_threshold": 80, "idle_unload_minutes": 5}
     """
     try:
         settings = settings_repo.get_or_create()
@@ -87,6 +91,8 @@ async def update_user_settings(
             settings_repo.set_default_compaction_threshold(
                 settings, payload.default_compaction_threshold
             )
+        if payload.idle_unload_minutes is not None:
+            settings_repo.set_idle_unload_minutes(settings, payload.idle_unload_minutes)
         db.commit()
         logger.info(
             "User settings updated: "
@@ -96,8 +102,13 @@ async def update_user_settings(
             f"auto_install_updates={settings.auto_install_updates} "
             f"inference_backend={settings.inference_backend} "
             f"default_reasoning_effort={settings.default_reasoning_effort} "
-            f"default_compaction_threshold={settings.default_compaction_threshold}"
+            f"default_compaction_threshold={settings.default_compaction_threshold} "
+            f"idle_unload_minutes={settings.idle_unload_minutes}"
         )
+        if payload.idle_unload_minutes is not None:
+            # The running engine takes the delay at once (its next idle tick
+            # reads it): no relaunch, whichever engine won at boot.
+            config.LLM_Engine.set_idle_unload_minutes(settings.idle_unload_minutes)
         return settings
     except Exception as e:
         db.rollback()

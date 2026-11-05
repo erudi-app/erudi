@@ -30,7 +30,11 @@
   "conversationHeader": {
     "chattingWith": "正在与 <model>{{model}}</model> 对话",
     "settings": "对话设置",
-    "pickerAttention": "请选择一个模型"
+    "pickerAttention": "请选择一个模型",
+    "unload": "卸载 {{model}}",
+    "unloadBusy": "模型正忙，请稍后再试。",
+    "unloadFailed": "无法卸载模型。",
+    "unloadModelChanged": "现在加载的是另一个模型。"
   },
   "commands": {
     "listLabel": "命令",
@@ -150,7 +154,8 @@
   "message": {
     "firstReplyHint": "首次回复可能会稍慢一些，因为模型正在加载到内存中...",
     "memoryReload": "已在您的电脑上释放内存；正在重新加载模型以继续对话…",
-    "idleReload": "模型在闲置几分钟后已被卸载；正在重新加载以继续对话…",
+    "idleReload": "模型因闲置已被卸载；正在重新加载以继续对话…",
+    "manualReload": "您已卸载模型；正在重新加载…",
     "compacting": "正在总结之前的消息以腾出空间…",
     "imagePlaceholder": "🖼 图片附件",
     "attachmentAlt": "附件 {{index}}",

@@ -27,6 +27,7 @@ Exception Hierarchy:
     ├── EngineException (500, LLM_ENGINE_FAILURE)
     ├── HardwareException (500, HARDWARE_ERROR)
     ├── EngineBusyException (409, ENGINE_BUSY)
+    ├── LoadedModelChangedException (409, LOADED_MODEL_CHANGED)
     ├── CompactionFailedException (503, COMPACTION_FAILED)
     └── CompactionSeparatorException (500, COMPACTION_SEPARATOR_NOT_SAVED)
 
@@ -89,6 +90,7 @@ Exception Categories:
     - InvalidInputException (422)
     - StateConflictException (400)
     - EngineBusyException (409)
+    - LoadedModelChangedException (409)
 
     **Server Errors (500):**
     - DatabaseException
@@ -879,6 +881,25 @@ class EngineBusyException(AppBaseException):
             message="The model is busy; try again in a moment.",
             status_code=status.HTTP_409_CONFLICT,
             erudi_code="ENGINE_BUSY",
+            trace=trace,
+        )
+
+
+class LoadedModelChangedException(AppBaseException):
+    """Exception raised when a manual unload names a model that is no longer
+    the loaded one.
+
+    ``BaseEngine.unload`` raises it: the header's Unload button read the
+    loaded model, and another one was loaded since (a model switch and a
+    turn). Unloading that other model is never what the user pressed, so
+    nothing is unloaded and the button reads the loaded model again.
+    """
+
+    def __init__(self, trace: Optional[str] = None):
+        super().__init__(
+            message="Another model is loaded now.",
+            status_code=status.HTTP_409_CONFLICT,
+            erudi_code="LOADED_MODEL_CHANGED",
             trace=trace,
         )
 

@@ -80,7 +80,8 @@ BRAKE_IDLE_INTERVAL_S = 60
 # few seconds short of it (scheduling jitter, the lock) is still the next
 # sample, not one to skip.
 IDLE_PACING_TOLERANCE_S = 5
-# Below the 300 s idle reap, above a reading pause.
+# Below the shortest idle reap (the five-minute Settings delay), above a
+# reading pause.
 WARNING_RELEASE_IDLE_S = 180
 RELOAD_GRACE_S = 600
 UNLOAD_MIN_SHARE = 0.05
@@ -114,6 +115,7 @@ SWAP_BURST_BYTES = 64 * 1024**2
 LLAMA_CTX_PAD_TOKENS = 256
 # A warning respawn is not worth a reload when the idle reap will unload the
 # child within this many seconds anyway (the cap applies at the next spawn).
+# With the idle delay at Never no reap is coming, and this never holds one back.
 LLAMA_REAP_MARGIN_S = 120
 
 

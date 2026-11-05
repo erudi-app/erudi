@@ -49,6 +49,9 @@ Endpoints:
     - GET / → List all LLMs
     - GET /local → List local (downloaded) LLMs
     - GET /remote → List remote (HuggingFace) LLMs
+    - GET /loaded → The model loaded in memory, or null (#619)
+    - POST /loaded/unload {"llm_id"} → Unload it now (204; 409 while busy or
+      when another model is loaded)
     - GET /{llm_id} → Get LLM details
     - GET|PUT /{llm_id}/conversation_defaults → Values saved for the model (#609)
     - GET /search?name=<query> → Search LLMs by name
@@ -100,7 +103,7 @@ import shutil
 from pathlib import Path
 from typing import List, Optional
 
-from fastapi import BackgroundTasks, Depends, APIRouter, status as http_status
+from fastapi import BackgroundTasks, Depends, APIRouter, Response, status as http_status
 from sqlalchemy.orm import Session
 from src.database.core import get_db, SessionLocal
 
@@ -114,6 +117,8 @@ from src.domains.llms.schemas import (
     HFDownloadRequest,
     DependentsResponse,
     RebindRequest,
+    LoadedModelResponse,
+    UnloadRequest,
     ConversationDefaultsResponse,
     ConversationDefaultsUpdate,
 )
@@ -628,6 +633,52 @@ async def search_huggingface_route(q: str, limit: int = 30):
     return search_huggingface(q, limit=limit)
 
 
+# The loaded model (#619). Declared before every ``/{llm_id}`` route, which
+# would otherwise read ``loaded`` as an id.
+@router.get("/loaded", response_model=Optional[LoadedModelResponse])
+async def get_loaded_llm(llm_repo: Llm_Repository = Depends(get_llm_repository)):
+    """The model whose inference child is up, or null.
+
+    The child's liveness is checked (``loaded_child_for``), not just the
+    engine's cached id: a child that died leaves nothing to unload. A child
+    whose model row is gone (a delete unloads first, so it does not happen)
+    has nothing to name and reads as null too.
+
+    Example:
+        GET /erudi/llms/loaded -> {"llm_id": 57, "name": "Qwen3-4B"} or null
+    """
+    engine = config.LLM_Engine
+    llm_id = engine._model_id
+    if llm_id is None or not engine.loaded_child_for(llm_id):
+        return None
+    llm = llm_repo.get_by_id(llm_id)
+    if llm is None:
+        return None
+    return LoadedModelResponse(llm_id=llm.id, name=llm.name)
+
+
+@router.post("/loaded/unload", status_code=http_status.HTTP_204_NO_CONTENT)
+async def unload_loaded_llm(payload: UnloadRequest) -> Response:
+    """Unload the model the Unload button names now (the header, #619).
+
+    The body carries the ``llm_id`` the button shows. 204 once the child is
+    gone, and 204 when nothing was loaded. 409 (``EngineBusyException``,
+    "The model is busy; try again in a moment.") when an answer, a reload, a
+    memory-brake sample or the idle check holds the engine for more than
+    2 s: nothing is interrupted. 409 (``LoadedModelChangedException``,
+    "Another model is loaded now.") when another model was loaded since the
+    button read it: nothing is unloaded. The next turn of the unloaded model
+    says the user unloaded it (``memory_reload`` with ``reason: "manual"``);
+    on llama.cpp the window the memory brake reduced recently stays reduced
+    at that reload, as after an idle unload.
+
+    Example:
+        POST /erudi/llms/loaded/unload {"llm_id": 57} -> 204
+    """
+    await config.LLM_Engine.unload(payload.llm_id)
+    return Response(status_code=http_status.HTTP_204_NO_CONTENT)
+
+
 def _conversation_defaults_response(db: Session, llm: Llm) -> ConversationDefaultsResponse:
     resolved = read_conversation_defaults(db, llm)
     return ConversationDefaultsResponse(
@@ -813,8 +864,9 @@ async def _unload_if_resident(llm_id: int) -> None:
     base model, on a path that no longer exists; for a KB assistant, on weights
     that belong to the base and survive. Either way the accelerator stays busy
     after the one action that should free it, and Diagnostics keeps naming a
-    model the user just deleted, until the idle sweep (300 s idle, checked
-    every 30 s) happens to notice (#521).
+    model the user just deleted, until the idle sweep (the Settings idle delay,
+    checked every 30 s; never with the delay at Never) happens to notice
+    (#521).
 
     Takes the same lock as that sweep, so it can never land under a generation.
     Called per delete branch rather than once up front: a delete refused with

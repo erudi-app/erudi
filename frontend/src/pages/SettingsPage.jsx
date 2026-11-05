@@ -1,5 +1,5 @@
 import React, { useCallback } from "react";
-import { Brain, Cpu, Globe, Languages, ScrollText, ShieldCheck } from "lucide-react";
+import { Brain, Cpu, Globe, Languages, ScrollText, ShieldCheck, Timer } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
 import SettingsCard from "../components/SettingsCard";
@@ -22,6 +22,11 @@ import {
 // every claim on it can point at the code that backs it. The window-open
 // handler in main.js routes target="_blank" links to the system browser.
 export const PRIVACY_PAGE_URL = "https://www.erudi.app/open-source/desktop/docs/privacy";
+
+// How long an unused model stays loaded, in minutes, in the order the card
+// offers them; 0 is Never (#619). The backend accepts exactly these.
+const IDLE_UNLOAD_MINUTES = [5, 15, 30, 60, 0];
+const DEFAULT_IDLE_UNLOAD_MINUTES = 5;
 
 /**
  * Whether the Inference engine card belongs on this machine (#511).
@@ -46,8 +51,9 @@ export function showsInferenceEngineSetting(backendType, inferenceBackend) {
  * App-wide settings page (gear icon in the sidebar rail).
  *
  * Sections: the global Web Search default (#310), the defaults new
- * conversations copy (reasoning effort, compaction threshold #607), the three
- * update switches (#563), the manual update controls (#571), the inference
+ * conversations copy (reasoning effort, compaction threshold #607), how long
+ * an unused model stays loaded (#619, applied by the backend at once), the
+ * three update switches (#563), the manual update controls (#571), the inference
  * engine and the application language (#385). Enabling web search lets
  * tool-capable models search the web; the searched query is sent to external
  * search engines, so it ships OFF by default and new conversations inherit
@@ -87,6 +93,7 @@ export default function SettingsPage() {
   const reasoningEffort = settings?.default_reasoning_effort ?? DEFAULT_REASONING_EFFORT;
   const compactionThreshold =
     settings?.default_compaction_threshold ?? DEFAULT_COMPACTION_THRESHOLD;
+  const idleUnloadMinutes = settings?.idle_unload_minutes ?? DEFAULT_IDLE_UNLOAD_MINUTES;
   const inferenceBackend = settings?.inference_backend ?? "auto";
   const showInferenceEngineSetting =
     engineSwitch.pending ||
@@ -118,6 +125,16 @@ export default function SettingsPage() {
     const next = Number(event.target.value);
     try {
       await updateSettings({ default_compaction_threshold: next });
+    } catch {
+      // Already recorded by the hook.
+    }
+  };
+
+  const handleIdleUnloadChange = async (event) => {
+    // The backend applies the delay to the running engine at once.
+    const next = Number(event.target.value);
+    try {
+      await updateSettings({ idle_unload_minutes: next });
     } catch {
       // Already recorded by the hook.
     }
@@ -208,6 +225,30 @@ export default function SettingsPage() {
                 {COMPACTION_THRESHOLDS.map((value) => (
                   <option key={value} value={value}>
                     {formatCompactionThreshold(value)}
+                  </option>
+                ))}
+              </select>
+            }
+          />
+
+          <SettingsCard
+            icon={<Timer className="w-5 h-5 text-[var(--fit-good)]" />}
+            title={t("settings:idleUnload.title")}
+            description={t("settings:idleUnload.description")}
+            note={t("settings:idleUnload.note")}
+            control={
+              <select
+                aria-label={t("settings:idleUnload.selectLabel")}
+                value={idleUnloadMinutes}
+                onChange={handleIdleUnloadChange}
+                disabled={loading}
+                className="text-[13px] rounded-lg border border-[var(--line)] bg-[var(--canvas)] text-[var(--ink)] px-3 py-1.5 focus:outline-none focus:border-[var(--fit-good)] transition-colors cursor-pointer disabled:opacity-50 disabled:cursor-not-allowed"
+              >
+                {IDLE_UNLOAD_MINUTES.map((minutes) => (
+                  <option key={minutes} value={minutes}>
+                    {minutes
+                      ? t("settings:idleUnload.minutes", { minutes })
+                      : t("settings:idleUnload.never")}
                   </option>
                 ))}
               </select>

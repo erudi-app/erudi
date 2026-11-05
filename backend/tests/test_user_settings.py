@@ -114,6 +114,26 @@ class TestUserSettingsEntity:
         with pytest.raises(ValueError):
             settings.default_reasoning_effort = "extra-high"
 
+    def test_default_idle_unload_delay_is_five_minutes(self, test_db_session):
+        # #619: five minutes is the delay every release before the setting had.
+        settings = UserSettings()
+        test_db_session.add(settings)
+        test_db_session.commit()
+        test_db_session.refresh(settings)
+        assert settings.idle_unload_minutes == 5
+
+    @pytest.mark.parametrize("minutes", [0, 5, 15, 30, 60])
+    def test_every_idle_unload_delay_is_accepted(self, minutes):
+        settings = UserSettings()
+        settings.idle_unload_minutes = minutes
+        assert settings.idle_unload_minutes == minutes
+
+    @pytest.mark.parametrize("minutes", [1, 10, 120, -5, None, "15", 15.0, True, False])
+    def test_idle_unload_validator_rejects_other_values(self, minutes):
+        settings = UserSettings()
+        with pytest.raises(ValueError):
+            settings.idle_unload_minutes = minutes
+
 
 # ============ Repository ============
 
@@ -189,6 +209,13 @@ class TestUserSettingsRepository:
         test_db_session.commit()
         assert repo.get_or_create().default_reasoning_effort == "high"
 
+    def test_set_idle_unload_minutes(self, test_db_session):
+        repo = User_Settings_Repository(test_db_session)
+        settings = repo.get_or_create()
+        repo.set_idle_unload_minutes(settings, 0)
+        test_db_session.commit()
+        assert repo.get_or_create().idle_unload_minutes == 0
+
     def test_get_without_a_row_reads_none_and_writes_nothing(self, test_db_session):
         # A missing singleton IS the defaults (the resolver's constants): the
         # read conversation creation and arena turns make must not write one.
@@ -219,6 +246,7 @@ class TestUserSettingsEndpoints:
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
+            "idle_unload_minutes": 5,
         }
 
     def test_put_updates_and_persists(self, client):
@@ -233,6 +261,7 @@ class TestUserSettingsEndpoints:
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
+            "idle_unload_minutes": 5,
         }
         assert client.get("/erudi/user_settings/").json() == {
             "web_search_enabled": True,
@@ -243,6 +272,7 @@ class TestUserSettingsEndpoints:
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
+            "idle_unload_minutes": 5,
         }
 
     def test_put_back_to_false(self, client):
@@ -273,6 +303,7 @@ class TestUserSettingsEndpoints:
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
+            "idle_unload_minutes": 5,
         }
 
     def test_put_web_search_leaves_language_untouched(self, client):
@@ -287,6 +318,7 @@ class TestUserSettingsEndpoints:
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
+            "idle_unload_minutes": 5,
         }
 
     @pytest.mark.parametrize("code", ["de", "EN", "fr-FR", "", 42])
@@ -321,6 +353,7 @@ class TestUserSettingsEndpoints:
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
+            "idle_unload_minutes": 5,
         }
 
     def test_put_auto_update_back_on(self, client):
@@ -355,6 +388,7 @@ class TestUserSettingsEndpoints:
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
+            "idle_unload_minutes": 5,
         }
 
     @pytest.mark.parametrize("field", ["auto_download_updates", "auto_install_updates"])
@@ -391,6 +425,7 @@ class TestUserSettingsEndpoints:
             "inference_backend": "cpu",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
+            "idle_unload_minutes": 5,
         }
 
     @pytest.mark.parametrize("value", ["gpu", "cuda", "CPU", "", 1])
@@ -424,6 +459,7 @@ class TestUserSettingsEndpoints:
             "inference_backend": "auto",
             "default_reasoning_effort": "none",
             "default_compaction_threshold": 80,
+            "idle_unload_minutes": 5,
         }
 
     def test_put_rejects_a_value_that_is_not_a_boolean(self, client):
@@ -432,6 +468,105 @@ class TestUserSettingsEndpoints:
         response = client.put("/erudi/user_settings/", json={"auto_update_enabled": "maybe"})
         assert response.status_code == 422
         assert client.get("/erudi/user_settings/").json()["auto_update_enabled"] is True
+
+
+# ============ Idle unload delay (#619) ============
+
+
+@pytest.fixture
+def engine_delay(monkeypatch):
+    """The running engine, a class of its own: the PUT must write the delay
+    on ``config.LLM_Engine`` (the engine left after the CUDA-to-CPU swap),
+    never on whatever ``BaseEngine.get_engine()`` detects, which the
+    assertions on this class would miss."""
+    from src.core import config
+    from src.engines.base_engine import BaseEngine
+
+    class _RunningEngine(BaseEngine):
+        pass
+
+    monkeypatch.setattr(config, "LLM_Engine", _RunningEngine)
+    detected = BaseEngine.get_engine()
+    before = detected._max_idle_time
+    monkeypatch.setattr(detected, "_max_idle_time", before)
+    yield _RunningEngine
+    # The detected engine was never the one to change.
+    assert detected._max_idle_time == before
+
+
+class TestIdleUnloadDelay:
+    def test_get_reports_five_minutes_by_default(self, client):
+        assert client.get("/erudi/user_settings/").json()["idle_unload_minutes"] == 5
+
+    @pytest.mark.parametrize("minutes", [0, 5, 15, 30, 60])
+    def test_put_round_trips_every_choice(self, client, engine_delay, minutes):
+        response = client.put("/erudi/user_settings/", json={"idle_unload_minutes": minutes})
+        assert response.status_code == 200, response.text
+        assert response.json()["idle_unload_minutes"] == minutes
+        assert client.get("/erudi/user_settings/").json()["idle_unload_minutes"] == minutes
+
+    @pytest.mark.parametrize("minutes", [1, 10, 120, -5, "15", 15.5, True, False])
+    def test_put_rejects_any_other_value(self, client, engine_delay, minutes):
+        response = client.put("/erudi/user_settings/", json={"idle_unload_minutes": minutes})
+        assert response.status_code == 422
+        assert client.get("/erudi/user_settings/").json()["idle_unload_minutes"] == 5
+        assert engine_delay._max_idle_time == 300
+
+    def test_put_applies_the_delay_to_the_running_engine_at_once(self, client, engine_delay):
+        client.put("/erudi/user_settings/", json={"idle_unload_minutes": 15})
+        assert engine_delay._max_idle_time == 900
+        client.put("/erudi/user_settings/", json={"idle_unload_minutes": 0})
+        assert engine_delay._max_idle_time is None
+        client.put("/erudi/user_settings/", json={"idle_unload_minutes": 5})
+        assert engine_delay._max_idle_time == 300
+
+    def test_another_setting_leaves_the_delay_and_the_engine_alone(self, client, engine_delay):
+        client.put("/erudi/user_settings/", json={"idle_unload_minutes": 30})
+        engine_delay._max_idle_time = 1800
+        response = client.put("/erudi/user_settings/", json={"language": "fr"})
+        assert response.json()["idle_unload_minutes"] == 30
+        assert engine_delay._max_idle_time == 1800
+
+
+class TestReadIdleUnloadMinutes:
+    """The lifespan's read, on a session of its own (no request session)."""
+
+    def test_reads_the_stored_delay(self, test_db_session, monkeypatch):
+        from src.domains.user_settings import repository
+
+        test_db_session.add(UserSettings(idle_unload_minutes=30))
+        test_db_session.flush()
+        monkeypatch.setattr("src.database.core.SessionLocal", lambda: _Unclosed(test_db_session))
+        assert repository.read_idle_unload_minutes() == 30
+
+    def test_a_missing_row_is_the_default(self, test_db_session, monkeypatch):
+        from src.domains.user_settings import repository
+
+        monkeypatch.setattr("src.database.core.SessionLocal", lambda: _Unclosed(test_db_session))
+        assert repository.read_idle_unload_minutes() == 5
+
+    def test_an_unreadable_database_is_the_default(self, monkeypatch):
+        from src.domains.user_settings import repository
+
+        def _broken():
+            raise RuntimeError("database not ready")
+
+        monkeypatch.setattr("src.database.core.SessionLocal", _broken)
+        assert repository.read_idle_unload_minutes() == 5
+
+
+class _Unclosed:
+    """The test session behind the lifespan's own-session read: its close()
+    must not end the test's outer transaction."""
+
+    def __init__(self, session):
+        self._session = session
+
+    def query(self, *args, **kwargs):
+        return self._session.query(*args, **kwargs)
+
+    def close(self):
+        pass
 
 
 # ============ Conversation inheritance + PATCH ============

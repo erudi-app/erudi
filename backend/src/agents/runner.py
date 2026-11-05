@@ -309,6 +309,11 @@ _BRAKE_WARNINGS = {
     NOTICE_EXTERNAL: {"t": "memory_warning", "reason": "pressure_external"},
 }
 
+# The ``memory_reload`` reason of a reload the memory brake caused (an unload
+# under pressure, or a respawn with a smaller window). The idle delay and the
+# Unload button carry theirs on the engine's record (``take_idle_reload``).
+RELOAD_REASON_MEMORY = "memory"
+
 
 def _brake_reload_pending(engine: Any, llm: Any) -> bool:
     """Whether this turn reloads a model the memory brake unloaded, read
@@ -317,11 +322,13 @@ def _brake_reload_pending(engine: Any, llm: Any) -> bool:
     return bool(probe(getattr(llm, "id", None))) if callable(probe) else False
 
 
-def _idle_reload_taken(engine: Any, llm: Any) -> bool:
-    """Whether this turn reloads a model the idle timeout unloaded (the record
+def _unload_reason_taken(engine: Any, llm: Any) -> Optional[str]:
+    """Why this turn reloads a model the idle delay (``"idle"``) or the
+    user's Unload button (``"manual"``) unloaded, None otherwise (the record
     is consumed), read defensively like the other engine probes."""
     probe = getattr(engine, "take_idle_reload", None)
-    return bool(probe(getattr(llm, "id", None))) if callable(probe) else False
+    reason = probe(getattr(llm, "id", None)) if callable(probe) else None
+    return reason if isinstance(reason, str) else None
 
 
 def _respawned(outcome: Any) -> bool:
@@ -1851,10 +1858,11 @@ class AgentRunner:
         never compacts (arena).
 
         ``announce_idle_reload``: whether this turn may tell the user the model
-        reloads because the idle timeout unloaded it (a conversation that
-        already has turns; a new one shows its first-reply hint). The idle
-        record is consumed either way, before the model is resolved, so a turn
-        cancelled before the load loses the notice.
+        reloads because the idle delay or the Unload button unloaded it (a
+        conversation that already has turns; a new one shows its first-reply
+        hint). The engine's unload record is consumed either way, before the
+        model is resolved, so a turn cancelled before the load loses the
+        notice.
         """
         # ``aclosing``: closing THIS generator closes the capture loop (and,
         # through it, LangGraph) right away, inside the generation guard.
@@ -1950,13 +1958,14 @@ class AgentRunner:
                 # are already out), before the model is resolved.
                 reload_announced = _brake_reload_pending(engine, llm)
                 if reload_announced:
-                    yield {"t": "memory_reload"}
-                elif _idle_reload_taken(engine, llm) and announce_idle_reload:
-                    # The idle timeout unloaded it (not the brake): same state
-                    # on the wire, with the reason the copy follows. The record
-                    # is taken first, whether or not this turn says it.
+                    yield {"t": "memory_reload", "reason": RELOAD_REASON_MEMORY}
+                elif (reason := _unload_reason_taken(engine, llm)) and announce_idle_reload:
+                    # The idle delay or the user's Unload button unloaded it
+                    # (not the brake): same state on the wire, with the
+                    # reason the copy follows. The record is taken first,
+                    # whether or not this turn says it.
                     reload_announced = True
-                    yield {"t": "memory_reload", "reason": "idle"}
+                    yield {"t": "memory_reload", "reason": reason}
                 # The brake's turn_start sample, for the child this turn will
                 # use, BEFORE the model is resolved: a shrink here applies to
                 # this very turn. Shielded: it may talk to the child.
@@ -1970,7 +1979,7 @@ class AgentRunner:
                     # and the model reloads now): this turn re-prefills the
                     # conversation, so the reload state is said in this turn.
                     if not reload_announced and _respawned(outcome):
-                        yield {"t": "memory_reload"}
+                        yield {"t": "memory_reload", "reason": RELOAD_REASON_MEMORY}
                 sampling = resolve_sampling_defaults(llm)
                 # No implicit tools (#129): callers own the tool list (built by
                 # ``plan_turn``); ``tools=None`` means a zero-tool agent.

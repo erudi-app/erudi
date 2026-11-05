@@ -423,8 +423,9 @@ class ConversationService:
         ``compaction`` (#614: ``phase: "start"`` while earlier messages are being
         summarized, ``phase: "done"`` with ``summarized``, ``reason``, ``summary``
         and ``summary_lost`` once they were), ``memory_reload``
-        (the model reloads: the memory brake unloaded it, or, with
-        ``reason: "idle"``, the idle timeout did) / ``memory_warning`` (this
+        (the model reloads; ``reason`` says why: ``memory`` the memory brake
+        unloaded or restarted it, ``idle`` the idle delay unloaded it,
+        ``manual`` the user did) / ``memory_warning`` (this
         machine's memory), ``error`` (the mapped ERROR
         sentinel), then a terminal ``done`` (#90).
 
@@ -661,7 +662,7 @@ class ConversationService:
                         yield _ndjson(event)
                     elif event["t"] == "memory_reload":
                         # Wire only, never persisted, for the same reason: the
-                        # memory brake or the idle timeout (``reason``)
+                        # memory brake, the idle delay or the user (``reason``)
                         # unloaded the model, and this turn reloads it -- a
                         # fact about this machine at this moment, not part of
                         # the conversation. ``reason`` passes through as is.
