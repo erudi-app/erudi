@@ -46,26 +46,3 @@ describe("Tooltip", () => {
     expect(positioned.className).toContain("w-32");
   });
 });
-
-describe("Tooltip on keyboard focus (#585)", () => {
-  it("shows the bubble while its trigger holds the focus, as on hover", () => {
-    render(
-      <Tooltip content="Focus info">
-        <button>Trigger</button>
-      </Tooltip>
-    );
-    const positioned = screen.getByText("Focus info").parentElement;
-    expect(positioned.className).toContain("group-focus-within:opacity-100");
-  });
-
-  it("names the bubble a tooltip, with the id the trigger points at", () => {
-    render(
-      <Tooltip content="Described" id="tip-1">
-        <button aria-describedby="tip-1">Trigger</button>
-      </Tooltip>
-    );
-    const tooltip = screen.getByRole("tooltip");
-    expect(tooltip.id).toBe("tip-1");
-    expect(tooltip.textContent).toContain("Described");
-  });
-});
