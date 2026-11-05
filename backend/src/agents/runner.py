@@ -517,22 +517,29 @@ def compaction_cutoff(
     pct: int,
     overhead: int = 0,
     allocated_window: Optional[int] = None,
+    keep_budget: Optional[int] = None,
+    futility: bool = True,
 ) -> int:
     """Index of the first message a compaction keeps (0: nothing to compact).
 
-    THE cutoff rule, pure: the summarization middleware uses it, and so does
-    the amber-warning projection (which has no middleware instance).
+    THE cutoff rule, pure: the summarization middleware uses it, and so do
+    the amber-warning projection (which has no middleware instance) and the
+    manual compaction (``manual_compaction_cutoff``).
     ``counter`` counts real tokens as sent; ``overhead`` is O, what the
     request carries beyond the state (system prompt, KB block, tool schemas),
     already scaled. ``pct`` is the conversation's compaction threshold: the
     keep budget and the futility guard read the trigger through it.
+    ``keep_budget`` (default: derived from the window) and ``futility``
+    (default: on) are the manual compaction's two levers.
 
     1. With a known window, the token cutoff alone: the earliest suffix that
        fits ``max(1, keep_token_budget(W, pct) - O)`` tokens, however many
        messages that is (token pressure is the only trigger there, so a
        count bound is not needed). Without a window, the message cutoff
        alone: the last ``SUMMARY_KEEP_MESSAGES`` messages, the fallback
-       paired with the ``SUMMARY_TRIGGER_MESSAGES`` trigger.
+       paired with the ``SUMMARY_TRIGGER_MESSAGES`` trigger. An explicit
+       ``keep_budget`` is the token cutoff's budget as is, with or without
+       a window (never the message cutoff).
     2. Never past the LAST user message: the question the current turn
        answers is never summarized away mid-turn (a tool round after it can
        be large on its own).
@@ -557,7 +564,7 @@ def compaction_cutoff(
     5. If only the previous summary would be summarized (cutoff <= 1 after a
        summary), nothing is: re-summarizing a summary alone adds nothing and
        would reset the prefix cache for nothing.
-    6. Futility guard -- only with a known window, where the token trigger is
+    6. Futility guard (``futility``) -- only with a known window, where the token trigger is
        the only trigger, and only when it fired (``count + O >=
        trigger_tokens(W, pct)``; the amber-warning projection also asks below
        it): a compaction whose gain ``count(all) - count(kept) -
@@ -591,8 +598,9 @@ def compaction_cutoff(
 
     safe_point = SummarizationMiddleware._find_safe_cutoff_point
     last_human = last_human_index(messages)
-    if _known_window(working_window):
-        keep_budget = max(1, keep_token_budget(working_window, pct) - overhead)
+    if keep_budget is not None or _known_window(working_window):
+        if keep_budget is None:
+            keep_budget = max(1, keep_token_budget(working_window, pct) - overhead)
         cutoff = _token_cutoff(messages, keep_budget, counter)
         if (
             last_human is not None
@@ -643,7 +651,7 @@ def compaction_cutoff(
             break
     if cutoff <= 1 and messages and _is_previous_summary(messages[0]):
         return 0
-    if cutoff > 0 and _known_window(working_window):
+    if futility and cutoff > 0 and _known_window(working_window):
         total = counter(messages)
         if total + overhead >= trigger_tokens(working_window, pct):
             gain = total - counter(messages[cutoff:]) - summary_cap(working_window)
@@ -657,6 +665,31 @@ def compaction_cutoff(
             if gain < POST_COMPACTION_MARGIN_TOKENS and not overflows:
                 return 0
     return cutoff
+
+
+# What a manual compaction keeps (``/compact``): one token. With rules 2-3
+# of ``compaction_cutoff`` the kept tail is then exactly the answer before the
+# last question onward -- ``[summary, previous answer, last question, last
+# answer]`` -- and rule 5 makes a single exchange, or a summary and one
+# exchange, nothing to compact.
+MANUAL_KEEP_BUDGET_TOKENS = 1
+
+
+def manual_compaction_cutoff(messages: list, pct: int) -> int:
+    """The cutoff of a manual compaction of a closed thread (0: nothing to
+    compact): ``compaction_cutoff`` with the one-token keep, no futility
+    guard and, the window being irrelevant to that budget, none at all --
+    so it is decided before any model is loaded. Messages are counted in
+    real tokens as the compaction counts them."""
+    weights, _ratio = frozen_weights(messages)
+    return compaction_cutoff(
+        messages,
+        None,
+        lambda part: real_token_count(part, weights),
+        pct=pct,
+        keep_budget=MANUAL_KEEP_BUDGET_TOKENS,
+        futility=False,
+    )
 
 
 def _token_cutoff(messages: list, budget: int, counter: Any) -> int:
