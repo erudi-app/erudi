@@ -484,22 +484,6 @@ async def update_conversation(
             compaction_threshold=payload.compaction_threshold,
         )
         db.commit()
-        updated_fields = [
-            field
-            for field, value in (
-                ("name", payload.name),
-                ("llm_id", payload.llm_id),
-                ("temperature", payload.temperature),
-                ("top_p", payload.top_p),
-                ("max_tokens", payload.max_tokens),
-                ("custom_prompt", payload.custom_prompt),
-                ("web_search_enabled", payload.web_search_enabled),
-                ("reasoning_effort", payload.reasoning_effort),
-                ("compaction_threshold", payload.compaction_threshold),
-            )
-            if value is not None
-        ]
-        logger.info(f"Conversation updated: id={conversation_id}, fields={updated_fields}")
         return result
     except Exception:
         db.rollback()

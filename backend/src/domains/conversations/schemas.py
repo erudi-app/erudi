@@ -58,9 +58,9 @@ from src.domains.user_settings.schemas import CompactionThreshold, ReasoningEffo
 from src.entities.Conversation import TEMPERATURE_MAX, TEMPERATURE_MIN, TOP_P_MAX, TOP_P_MIN
 
 # The conversation values a request may carry, with the bounds the entity
-# enforces (``src.entities.Conversation``). Shared by the conversation
-# creation, the Arena query and the per-model defaults
-# (``src.domains.llms.schemas.ConversationDefaultsUpdate``).
+# enforces (``src.entities.Conversation``), one bound per value on every path:
+# conversation creation, update and turn query, the Arena query and the
+# per-model defaults (``src.domains.llms.schemas.ConversationDefaultsUpdate``).
 Temperature = Annotated[float, Field(ge=TEMPERATURE_MIN, le=TEMPERATURE_MAX)]
 TopP = Annotated[float, Field(ge=TOP_P_MIN, le=TOP_P_MAX)]
 CUSTOM_PROMPT_MAX_CHARS = 4096
@@ -253,10 +253,10 @@ class ConversationUpdate(ConversationBase):
 
     llm_id: Optional[int] = None
     name: Optional[str] = None
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
+    temperature: Optional[Temperature] = None
+    top_p: Optional[TopP] = None
     max_tokens: Optional[int] = None
-    custom_prompt: Optional[str] = None
+    custom_prompt: Optional[CustomPrompt] = None
     web_search_enabled: Optional[bool] = None
     reasoning_effort: Optional[ReasoningEffort] = None
     compaction_threshold: Optional[CompactionThreshold] = None
@@ -327,14 +327,15 @@ class ConversationQuery(BaseModel):
         images: Optional base64 data-URL images attached to the question (vision models).
         image_paths: Local filesystem path of each image, parallel to ``images``.
         attachments: Local filesystem paths of documents/folders attached to the question.
-        temperature: Optional temperature override for this query only.
-        top_p: Optional top_p override for this query only.
+        temperature: Optional temperature override for this query only (0.0-2.0).
+        top_p: Optional top_p override for this query only (0.0-1.0).
         max_new_tokens: Accepted and ignored -- the output budget is computed per
             model call from the context window the model runs in
             (``src.agents.output_budget``), so nothing on the client sets it.
             The field stays on the schema so an older client is answered, not
             rejected with a 422.
-        custom_prompt: Optional system prompt override for this query only.
+        custom_prompt: Optional system prompt override for this query only
+            (max 4096 chars).
 
     Example:
         ::
@@ -361,10 +362,10 @@ class ConversationQuery(BaseModel):
             "to the question; read on this machine, never uploaded (#492)"
         ),
     )
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
+    temperature: Optional[Temperature] = None
+    top_p: Optional[TopP] = None
     max_new_tokens: Optional[int] = None
-    custom_prompt: Optional[str] = None
+    custom_prompt: Optional[CustomPrompt] = None
 
 
 class MessageStarRequest(BaseModel):

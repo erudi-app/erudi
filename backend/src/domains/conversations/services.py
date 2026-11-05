@@ -252,10 +252,17 @@ class ConversationService:
           ``temperature`` / ``top_p`` of this update are ignored;
         - ``reasoning_effort``, ``compaction_threshold``,
           ``web_search_enabled`` and ``custom_prompt`` it has not saved take
-          this update's value when it carries one, else stay as they are.
+          this update's value when it carries one, else stay as they are;
+        - ``max_tokens``, when this update does not carry one, takes the new
+          model's fallback budget (``resolve_sampling_defaults``), as at
+          creation.
 
         An update whose ``llm_id`` equals the stored one is an ordinary
         partial update: nothing of the model is re-applied.
+
+        Once the repository has written the update, one INFO line names the
+        fields written (``Conversation updated``), and a switch adds one
+        naming what the new model brought.
 
         Raises:
             ConversationNotFoundException: If the conversation does not exist.
@@ -264,39 +271,50 @@ class ConversationService:
         """
         logger.info(f"Updating conversation {conversation_id}")
         conversation = self.conversation_repo.get_conversation_by_id(conversation_id)
+        resolved = None
         if llm_id is not None and llm_id != conversation.llm_id:
-            resolved = read_conversation_defaults(
-                self.db, self.conversation_repo.get_llm_by_id(llm_id)
-            )
+            new_llm = self.conversation_repo.get_llm_by_id(llm_id)
+            resolved = read_conversation_defaults(self.db, new_llm)
             temperature = resolved["temperature"].value
             top_p = resolved["top_p"].value
-            saved = [f for f, r in resolved.items() if r.source == SOURCE_SAVED]
-            if "reasoning_effort" in saved:
+            if max_tokens is None:
+                max_tokens = resolve_sampling_defaults(new_llm).max_tokens
+            if resolved["reasoning_effort"].source == SOURCE_SAVED:
                 reasoning_effort = resolved["reasoning_effort"].value
-            if "compaction_threshold" in saved:
+            if resolved["compaction_threshold"].source == SOURCE_SAVED:
                 compaction_threshold = resolved["compaction_threshold"].value
-            if "web_search_enabled" in saved:
+            if resolved["web_search_enabled"].source == SOURCE_SAVED:
                 web_search_enabled = resolved["web_search_enabled"].value
-            if "custom_prompt" in saved:
+            if resolved["custom_prompt"].source == SOURCE_SAVED:
                 custom_prompt = resolved["custom_prompt"].value
+        written = {
+            "name": name,
+            "llm_id": llm_id,
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+            "custom_prompt": custom_prompt,
+            "web_search_enabled": web_search_enabled,
+            "reasoning_effort": reasoning_effort,
+            "compaction_threshold": compaction_threshold,
+        }
+        updated = self.conversation_repo.update_conversation(
+            conversation_id=conversation_id, **written
+        )
+        logger.info(
+            f"Conversation updated: id={conversation_id}, "
+            f"fields={[field for field, value in written.items() if value is not None]}"
+        )
+        if resolved is not None:
+            saved = [f for f, r in resolved.items() if r.source == SOURCE_SAVED]
             logger.info(
                 f"Conversation {conversation_id} switched to model {llm_id}: "
                 f"saved=[{', '.join(saved)}], "
                 f"temperature={temperature} ({resolved['temperature'].source}), "
-                f"top_p={top_p} ({resolved['top_p'].source})"
+                f"top_p={top_p} ({resolved['top_p'].source}), "
+                f"max_tokens={max_tokens}"
             )
-        return self.conversation_repo.update_conversation(
-            conversation_id=conversation_id,
-            name=name,
-            llm_id=llm_id,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            custom_prompt=custom_prompt,
-            web_search_enabled=web_search_enabled,
-            reasoning_effort=reasoning_effort,
-            compaction_threshold=compaction_threshold,
-        )
+        return updated
 
     # ===================== Deletion (DB + checkpointer thread) =====================
     async def delete_conversation(self, conversation_id: int) -> None:
@@ -519,7 +537,7 @@ class ConversationService:
                 f"Turn settings: conversation={conversation_id}, model={llm.id}, "
                 f"effort={conversation.reasoning_effort}, temperature={params.temperature}, "
                 f"top_p={params.top_p}, threshold={conversation.compaction_threshold}, "
-                f"web_search={bool(conversation.web_search_enabled)}, "
+                f"web_search_toggle={bool(conversation.web_search_enabled)}, "
                 f"custom_prompt_chars={len(payload.custom_prompt or '')}"
             )
 

@@ -80,8 +80,10 @@ Request body (`ConversationQuery`):
 
 `backend.log` records the values each turn runs with, overrides included, in one line:
 `Turn settings: conversation=<id>, model=<llm_id>, effort=<level>, temperature=<t>, top_p=<p>,
-threshold=<percent>, web_search=<True|False>, custom_prompt_chars=<n>` (the instructions' length,
-never their text).
+threshold=<percent>, web_search_toggle=<True|False>, custom_prompt_chars=<n>` (the instructions'
+length, never their text). `web_search_toggle` is the conversation's switch: the `web_search` tool
+rides the turn only when the model's tool calls also work on the engine (see
+[Web search](#web-search)).
 
 ### Output budget
 
@@ -448,11 +450,15 @@ values, in the same transaction, and returns the updated conversation:
 - `temperature` and `top_p` it has not saved take its recommendation; a `temperature` or `top_p` in
   the same PATCH is ignored;
 - `reasoning_effort`, `compaction_threshold`, `web_search_enabled` and `custom_prompt` it has not
-  saved take the PATCH's value when it carries one, and otherwise stay as they are.
+  saved take the PATCH's value when it carries one, and otherwise stay as they are;
+- `max_tokens`, unless the PATCH carries one, takes the new model's fallback budget, as at
+  creation.
 
 A PATCH with the same `llm_id` re-applies nothing. A switch to a model that does not exist is a 404
-and changes nothing. `backend.log` records each switch as `Conversation <id> switched to model
-<llm_id>: saved=[...], temperature=<value> (<source>), top_p=<value> (<source>)`.
+and changes nothing. Once the update is written, `backend.log` records the fields it wrote as
+`Conversation updated: id=<id>, fields=[...]` and, for a switch, what the new model brought as
+`Conversation <id> switched to model <llm_id>: saved=[...], temperature=<value> (<source>),
+top_p=<value> (<source>), max_tokens=<value>`.
 
 ### Conversation defaults per model
 
@@ -477,7 +483,10 @@ for the routes, the conversation creation, the model switch and the Arena.
 `PUT` is partial: a field left out is unchanged, an explicit `null` clears it, and empty or
 whitespace-only `custom_prompt` clears the saved instructions (empty instructions are never saved).
 It never touches another model's values and returns the resolved values. A value off its scale or an
-unknown field is a 422 and saves nothing; an unknown model is a 404.
+unknown field is a 422 and saves nothing; an unknown model is a 404, and a model that is not
+downloaded (a catalog entry, a download in progress) is a 400. The bounds are the same on every
+path: temperature 0.0–2.0, `top_p` 0.0–1.0 and instructions of at most 4096 characters, whether
+they are saved here, sent at creation, in a PATCH or with a turn.
 
 ### Star and unstar a message
 

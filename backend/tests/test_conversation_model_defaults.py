@@ -43,7 +43,10 @@ def _engine(monkeypatch):
     monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
 
 
-def _llm(db, name: str, temperature: float, top_p: float) -> Llm:
+def _llm(db, name: str, temperature: float, top_p: float, context_length=None) -> Llm:
+    hints = {"generation_config": {"temperature": temperature, "top_p": top_p, "do_sample": True}}
+    if context_length is not None:
+        hints["context_length"] = context_length
     llm = Llm(
         name=name,
         local=1,
@@ -51,9 +54,7 @@ def _llm(db, name: str, temperature: float, top_p: float) -> Llm:
         type="qwen",
         param_size=1.0,
         quantized=True,
-        generation_hints={
-            "generation_config": {"temperature": temperature, "top_p": top_p, "do_sample": True}
-        },
+        generation_hints=hints,
     )
     db.add(llm)
     db.commit()
@@ -284,17 +285,148 @@ class TestModelSwitch:
         assert stored["llm_id"] == model_a.id
         assert stored["temperature"] == 0.3
 
-    def test_the_switch_is_logged_with_what_it_applied(self, client, model_a, model_b, caplog):
+    def test_the_switch_logs_what_it_applied(self, client, model_a, model_b, caplog):
         conversation = self._start_on_a(client, model_a)
-        _save(client, model_b.id, reasoning_effort="high")
+        _save(client, model_b.id, reasoning_effort="high", temperature=1.1)
 
         with caplog.at_level(logging.INFO):
-            _patch(client, conversation["id"], llm_id=model_b.id)
+            _patch(client, conversation["id"], llm_id=model_b.id, temperature=0.33, top_p=0.44)
 
-        (line,) = [r.getMessage() for r in caplog.records if "switched to model" in r.getMessage()]
-        assert line.isascii()
-        assert f"Conversation {conversation['id']} switched to model {model_b.id}" in line
-        assert "saved=[reasoning_effort]" in line
+        messages = [r.getMessage() for r in caplog.records]
+        (switch,) = [m for m in messages if "switched to model" in m]
+        assert switch.isascii()
+        assert switch == (
+            f"Conversation {conversation['id']} switched to model {model_b.id}: "
+            "saved=[reasoning_effort, temperature], temperature=1.1 (saved), "
+            "top_p=0.95 (model), max_tokens=1024"
+        )
+        # The update line names what was written: the saved effort the PATCH
+        # did not carry, and creativity/diversity with the model's values.
+        (updated,) = [m for m in messages if m.startswith("Conversation updated")]
+        assert updated == (
+            f"Conversation updated: id={conversation['id']}, fields=['llm_id', 'temperature', "
+            "'top_p', 'max_tokens', 'reasoning_effort']"
+        )
+
+    def test_a_plain_update_logs_the_fields_it_carried(self, client, model_a, caplog):
+        conversation = self._start_on_a(client, model_a)
+
+        with caplog.at_level(logging.INFO):
+            _patch(client, conversation["id"], llm_id=model_a.id, name="Renamed", top_p=0.6)
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert not [m for m in messages if "switched to model" in m]
+        (updated,) = [m for m in messages if m.startswith("Conversation updated")]
+        assert updated == (
+            f"Conversation updated: id={conversation['id']}, fields=['name', 'llm_id', 'top_p']"
+        )
+
+    def test_a_failed_write_logs_no_switch(
+        self, test_db_session, model_a, model_b, monkeypatch, caplog
+    ):
+        from src.core.exceptions import DatabaseException
+
+        service = ConversationService(test_db_session)
+        conversation = service.create_conversation(llm_id=model_a.id)
+        test_db_session.commit()
+
+        def _refuse(**kwargs):
+            raise DatabaseException("Could not update conversation")
+
+        monkeypatch.setattr(service.conversation_repo, "update_conversation", _refuse)
+        with caplog.at_level(logging.INFO), pytest.raises(DatabaseException):
+            service.update_conversation(conversation.id, llm_id=model_b.id)
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert not [m for m in messages if "switched to model" in m]
+        assert not [m for m in messages if m.startswith("Conversation updated")]
+
+    def test_the_switch_resolves_the_fallback_budget_of_the_new_model(
+        self, client, test_db_session, model_a
+    ):
+        small = _llm(test_db_session, "model-small", 0.5, 0.9, context_length=512)
+        conversation = self._start_on_a(client, model_a)
+        assert conversation["max_tokens"] == 1024
+
+        switched = _patch(client, conversation["id"], llm_id=small.id).json()
+
+        assert switched["max_tokens"] == 512
+
+    def test_a_budget_sent_with_the_switch_wins(self, client, test_db_session, model_a):
+        small = _llm(test_db_session, "model-small", 0.5, 0.9, context_length=512)
+        conversation = self._start_on_a(client, model_a)
+
+        switched = _patch(client, conversation["id"], llm_id=small.id, max_tokens=300).json()
+
+        assert switched["max_tokens"] == 300
+
+
+# ===================== one bound per value, on every path =====================
+
+
+class TestValueBounds:
+    LONG = "x" * 5000
+
+    def test_creation_refuses_instructions_over_the_cap(self, client, model_a):
+        response = client.post(
+            "/erudi/conversations/", json={"llm_id": model_a.id, "custom_prompt": self.LONG}
+        )
+        assert response.status_code == 422
+
+    def test_saving_defaults_refuses_instructions_over_the_cap(self, client, model_a):
+        response = client.put(
+            f"/erudi/llms/{model_a.id}/conversation_defaults", json={"custom_prompt": self.LONG}
+        )
+        assert response.status_code == 422
+
+    @pytest.mark.parametrize(
+        "values",
+        [
+            {"custom_prompt": "x" * 5000},
+            {"temperature": 5.0},
+            {"temperature": -0.1},
+            {"top_p": 1.5},
+            {"top_p": -0.1},
+        ],
+    )
+    def test_a_patch_off_the_bounds_is_422_and_changes_nothing(self, client, model_a, values):
+        conversation = _create(client, model_a.id, custom_prompt="Mine.", temperature=0.3)
+
+        response = _patch(client, conversation["id"], **values)
+
+        assert response.status_code == 422, response.text
+        stored = client.get(f"/erudi/conversations/{conversation['id']}").json()
+        assert (stored["custom_prompt"], stored["temperature"]) == ("Mine.", 0.3)
+        assert stored["top_p"] == 0.8
+
+    def test_a_patch_at_the_bounds_is_accepted(self, client, model_a):
+        conversation = _create(client, model_a.id)
+        patched = _patch(
+            client, conversation["id"], temperature=2.0, top_p=1.0, custom_prompt="x" * 4096
+        )
+        assert patched.status_code == 200, patched.text
+
+    @pytest.mark.parametrize(
+        "values",
+        [
+            {"custom_prompt": "x" * 5000},
+            {"temperature": 5.0},
+            {"top_p": 1.5},
+        ],
+    )
+    def test_a_turn_off_the_bounds_is_422(self, client, model_a, values):
+        conversation = _create(client, model_a.id)
+        response = client.post(
+            f"/erudi/conversations/{conversation['id']}/query", json={"question": "hi", **values}
+        )
+        assert response.status_code == 422, response.text
+
+    def test_the_turn_payload_schema_carries_the_bounds(self):
+        with pytest.raises(ValidationError):
+            ConversationQuery(question="hi", custom_prompt="x" * 4097)
+        with pytest.raises(ValidationError):
+            ConversationQuery(question="hi", temperature=2.5)
+        assert ConversationQuery(question="hi", custom_prompt="x" * 4096).custom_prompt
 
 
 # ===================== the turn settings line =====================
@@ -341,7 +473,7 @@ async def test_the_turn_logs_the_conversations_values(
     assert line.isascii()
     assert line == (
         f"Turn settings: conversation={conversation.id}, model={model_a.id}, effort=high, "
-        "temperature=0.4, top_p=0.6, threshold=75, web_search=True, custom_prompt_chars=0"
+        "temperature=0.4, top_p=0.6, threshold=75, web_search_toggle=True, custom_prompt_chars=0"
     )
 
 
