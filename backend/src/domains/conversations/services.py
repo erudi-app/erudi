@@ -39,7 +39,13 @@ from src.domains.llms.repository import detect_supports_vision
 from src.domains.conversations.schemas import ConversationQuery
 from src.entities.Conversation import Conversation
 from src.entities.Llm import Llm
-from src.core.exceptions import ModelNotFoundException
+from src.entities.Message import Message
+from src.core.exceptions import (
+    CompactionSeparatorException,
+    DatabaseException,
+    ModelNotFoundException,
+    StateConflictException,
+)
 from src.utils.attachment_utils import (
     build_attachment_notice,
     prepend_attachment_block,
@@ -844,3 +850,151 @@ class ConversationService:
         )
         user_prompt = f"Create a 2-to-4-word title for:\n{question}"
         return f"{system_prompt}\n\n{user_prompt}"
+
+    # ===================== Manual compaction and context usage =====================
+    async def compact_conversation(self, conversation_id: int) -> dict:
+        """Summarize the conversation's history now (``/compact``, #585).
+
+        Returns ``{"summarized", "reason", "summary"}``, or ``{"summarized":
+        0}`` when there is nothing to compact (a single exchange, or nothing
+        new since the last manual compaction: nothing is loaded or stored).
+        Refused with a 409 when the conversation has no model (it is never
+        re-assigned one) or, read under the generation guard, ends with a
+        question that has no answer (an answer of any kind, a failed one
+        included, is accepted). The runner compacts (``AgentRunner.acompact``:
+        busy -> 409, a summary or a thread write that fails ->
+        ``CompactionFailedException``, the conversation deleted meanwhile ->
+        ``ConversationNotFoundException``); the separator -- the compaction's
+        ``done`` event, ``manual: True`` -- is appended to the trace of the
+        last answer read under the guard, once the checkpoint is rewritten. A
+        separator that cannot be saved then raises
+        ``CompactionSeparatorException`` (the history stays summarized).
+        """
+        conversation, llm = await run_in_threadpool(
+            self._load_conversation_and_llm_read_only, conversation_id
+        )
+        event = await self.runner.acompact(
+            llm=llm,
+            thread_id=str(conversation_id),
+            params=GenParams(
+                temperature=conversation.temperature,
+                top_p=conversation.top_p,
+                max_tokens=conversation.max_tokens or FALLBACK_MAX_TOKENS,
+            ),
+            compaction_threshold=conversation.compaction_threshold,
+            store=_ConversationCompactionStore(self, conversation_id),
+        )
+        return {key: event[key] for key in ("summarized", "reason", "summary") if key in event}
+
+    async def context_usage(self, conversation_id: int) -> dict:
+        """The conversation's context usage for the panel (``/context``, #608).
+
+        The NEXT request is planned the way a turn plans it -- the system
+        prompt with the conversation's own instructions (its column), its
+        starred messages and its reasoning-effort section, the tools its
+        mode carries -- without retrieving anything (``plan_turn``'s
+        ``context_count``): an assistant that searches its knowledge base on
+        every question is counted in that mode with no excerpts, which
+        ``kb_excerpts_excluded`` says. The runner counts it
+        (``AgentRunner.acontext_usage``). Read only: the conversation is
+        never re-assigned a model (409 asking to pick one first), nothing is
+        committed, the model is never loaded.
+        """
+        conversation, llm = await run_in_threadpool(
+            self._load_conversation_and_llm_read_only, conversation_id
+        )
+        starred = await run_in_threadpool(self.message_repo.get_starred_messages, conversation_id)
+        effort_plan = await run_in_threadpool(
+            plan_reasoning_effort, llm, conversation.reasoning_effort
+        )
+        plan = await run_in_threadpool(
+            plan_turn,
+            llm,
+            question="",
+            # Never called: the count retrieves nothing.
+            retrieve=list,
+            custom_prompt=conversation.custom_prompt,
+            starred_messages=starred,
+            web_search_enabled=bool(conversation.web_search_enabled),
+            effort_section=effort_plan.prompt_section,
+            context_count=True,
+        )
+        usage = await self.runner.acontext_usage(
+            llm=llm,
+            thread_id=str(conversation_id),
+            system_prompt=plan.system_prompt,
+            tools=plan.tools,
+            compaction_threshold=conversation.compaction_threshold,
+        )
+        return {**usage, "kb_excerpts_excluded": plan.systematic_kb}
+
+    def _load_conversation_and_llm_read_only(self, conversation_id: int):
+        """The conversation and its model, read only: never re-assigned, never
+        committed (unlike ``_load_conversation_and_llm``). A conversation
+        whose model was deleted is a 409 asking to pick a model first."""
+        conversation = self.conversation_repo.get_conversation_by_id(conversation_id)
+        if conversation.llm_id is not None:
+            try:
+                return conversation, self.conversation_repo.get_llm_by_id(conversation.llm_id)
+            except ModelNotFoundException:
+                pass  # the 409 below says what to do about it
+        raise StateConflictException(
+            "This conversation has no model; pick a model first.",
+            status_code=409,
+            detail={"reason": "no_model"},
+        )
+
+    def _append_to_answer_trace(self, answer_id: Optional[int], event: dict) -> None:
+        """Append ``event`` to the trace of the answer ``answer_id`` and
+        commit. Not re-capped (``_cap_trace``): the event is small, and a
+        compaction event is pinned by the cap anyway; a full trace may exceed
+        ``TRACE_MAX_BYTES`` by it."""
+        try:
+            answer = self.db.get(Message, answer_id) if answer_id is not None else None
+            if answer is None:
+                raise DatabaseException(f"No answer {answer_id} to hold the separator")
+            answer.trace = [*(answer.trace or []), event]
+            self.db.commit()
+        except Exception:
+            self.db.rollback()
+            raise
+
+    def _conversation_exists(self, conversation_id: int) -> bool:
+        return (
+            self.db.query(Conversation.id).filter(Conversation.id == conversation_id).first()
+            is not None
+        )
+
+
+class _ConversationCompactionStore:
+    """The messages table, as a manual compaction needs it
+    (``src.agents.runner.CompactionStore``). The conversation's last row is
+    read under the generation guard (``refuse_if_open``); the separator goes
+    on the answer read then."""
+
+    def __init__(self, service: ConversationService, conversation_id: int):
+        self._service = service
+        self._conversation_id = conversation_id
+        self._answer_id: Optional[int] = None
+
+    async def refuse_if_open(self) -> None:
+        last = await run_in_threadpool(
+            self._service.message_repo.get_last_message, self._conversation_id
+        )
+        if last is not None and last.sender == "user":
+            raise StateConflictException(
+                "The last question has no answer yet; it must be answered before the "
+                "conversation can be summarized.",
+                status_code=409,
+                detail={"reason": "unanswered_question"},
+            )
+        self._answer_id = last.id if last is not None else None
+
+    async def still_exists(self) -> bool:
+        return await run_in_threadpool(self._service._conversation_exists, self._conversation_id)
+
+    async def save_separator(self, event: dict) -> None:
+        try:
+            await run_in_threadpool(self._service._append_to_answer_trace, self._answer_id, event)
+        except Exception as exc:
+            raise CompactionSeparatorException() from exc
