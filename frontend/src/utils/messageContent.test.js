@@ -5,6 +5,8 @@ import {
   getAttachmentNames,
   getDisplayContent,
   getImagePaths,
+  GENERIC_ERROR_LINE,
+  isGenericFailure,
 } from "./messageContent";
 
 // #136 — stored message content can carry internal attachment markers
@@ -96,5 +98,48 @@ describe("marker paths carrying ] and %", () => {
   it("recovers the real image path for rehydration", () => {
     expect(getImagePaths(`Look [image_path:${STORED}]`)).toEqual([REAL]);
     expect(getImagePaths("Look [image]")).toEqual([]);
+  });
+});
+
+// #615 - a generic failure is stored as the English apology behind the
+// sentinel; the headline is translated when it is displayed.
+
+describe("generic failure (#615)", () => {
+  const cause = { t: "error_detail", text: "boom", request_id: "be-1" };
+
+  it("is the exact apology line the backend writes", () => {
+    expect(GENERIC_ERROR_LINE).toBe(
+      "[ERROR_MESSAGE_SYSTEM] I apologize, but I encountered an error while generating a response. Please try asking your question again."
+    );
+  });
+
+  it("is recognised by the trace's error_detail or by the exact stored line", () => {
+    expect(isGenericFailure("[ERROR_MESSAGE_SYSTEM] anything", [cause])).toBe(true);
+    expect(isGenericFailure(GENERIC_ERROR_LINE, null)).toBe(true);
+    expect(isGenericFailure(`Half an answer\n\n${GENERIC_ERROR_LINE}`, undefined)).toBe(true);
+    // Curated turns and ordinary messages are not.
+    expect(isGenericFailure("[ERROR_MESSAGE_SYSTEM] The model did not start.", null)).toBe(false);
+    expect(isGenericFailure("[ERROR_MESSAGE_SYSTEM] I apologize, but something else", [])).toBe(
+      false
+    );
+    expect(isGenericFailure("plain answer", [cause])).toBe(true);
+    expect(isGenericFailure("plain answer", null)).toBe(false);
+  });
+
+  it("shows the translated headline in place of the stored English line", () => {
+    expect(getDisplayContent(GENERIC_ERROR_LINE, "Je suis désolé")).toBe("❌ Je suis désolé");
+    expect(getDisplayContent(`Half an answer\n\n${GENERIC_ERROR_LINE}`, "Je suis désolé")).toBe(
+      "Half an answer\n\n❌ Je suis désolé"
+    );
+  });
+
+  it("leaves everything else as it was", () => {
+    expect(getDisplayContent(GENERIC_ERROR_LINE)).toBe(
+      GENERIC_ERROR_LINE.replace("[ERROR_MESSAGE_SYSTEM] ", "❌ ")
+    );
+    expect(getDisplayContent("[ERROR_MESSAGE_SYSTEM] The model did not start.", "Headline")).toBe(
+      "❌ The model did not start."
+    );
+    expect(getDisplayContent("Plain question", "Headline")).toBe("Plain question");
   });
 });

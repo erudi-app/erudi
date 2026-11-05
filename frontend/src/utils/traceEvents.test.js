@@ -1,5 +1,5 @@
 import { describe, it, expect } from "vitest";
-import { compactionMarkers, compactionsOnly, hasStripEvents } from "./traceEvents";
+import { compactionMarkers, errorDetailOf, errorTurnTrace, hasStripEvents } from "./traceEvents";
 
 const done = (summarized) => ({
   t: "compaction",
@@ -31,9 +31,25 @@ describe("trace events (#614)", () => {
     expect(compactionMarkers([null, "x", { t: "answer" }])).toEqual([]);
   });
 
-  it("keeps only the compactions of an error turn, or nothing", () => {
-    expect(compactionsOnly([done(1), { t: "thinking", text: "hm" }])).toEqual([done(1)]);
-    expect(compactionsOnly([{ t: "thinking", text: "hm" }])).toBeNull();
-    expect(compactionsOnly([])).toBeNull();
+  it("keeps only the compactions and the cause of an error turn, or nothing", () => {
+    const cause = { t: "error_detail", text: "boom", request_id: "be-1" };
+    expect(errorTurnTrace([done(1), { t: "thinking", text: "hm" }])).toEqual([done(1)]);
+    expect(errorTurnTrace([{ t: "thinking", text: "hm" }])).toBeNull();
+    expect(errorTurnTrace([])).toBeNull();
+    expect(errorTurnTrace([done(1), { t: "thinking", text: "hm" }, cause])).toEqual([
+      done(1),
+      cause,
+    ]);
+    expect(errorTurnTrace([cause])).toEqual([cause]);
+  });
+
+  it("reads the cause of a failed turn from its trace (#615)", () => {
+    const cause = { t: "error_detail", text: "boom", request_id: "be-1" };
+    expect(errorDetailOf([done(1), cause])).toEqual(cause);
+    expect(errorDetailOf([done(1)])).toBeNull();
+    expect(errorDetailOf([{ t: "error_detail", text: "" }])).toBeNull();
+    expect(errorDetailOf(null)).toBeNull();
+    // An error_detail never mounts the reasoning strip.
+    expect(hasStripEvents([cause])).toBe(false);
   });
 });

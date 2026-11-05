@@ -1,3 +1,26 @@
+import { errorDetailOf } from "./traceEvents";
+
+/**
+ * The apology line the backend stores for an unexpected failure
+ * (`ERROR_MESSAGE` in backend/src/agents/runner.py), sentinel included. It is
+ * matched exactly: a curated turn never reads like it.
+ */
+export const GENERIC_ERROR_LINE =
+  "[ERROR_MESSAGE_SYSTEM] I apologize, but I encountered an error while generating a response. Please try asking your question again.";
+
+/**
+ * Whether a message is an unexpected failure (#615): its trace holds the
+ * cleaned cause, or (turns stored before it existed) its content ends with
+ * the exact generic apology.
+ *
+ * @param {string} content - Raw message content as stored/streamed.
+ * @param {Array|null|undefined} trace - The message's trace.
+ * @returns {boolean}
+ */
+export function isGenericFailure(content, trace) {
+  return !!errorDetailOf(trace) || String(content || "").endsWith(GENERIC_ERROR_LINE);
+}
+
 /**
  * Turn a stored message's raw content into the readable text shown in the chat.
  *
@@ -17,11 +40,21 @@
  * (#136).
  *
  * @param {string} content - Raw message content as stored/streamed.
+ * @param {string} [genericHeadline] - The translated headline of a generic
+ *   failure; when given, it replaces the stored English apology at the end of
+ *   the content.
  * @returns {string} The human-readable text, markers removed.
  */
-export function getDisplayContent(content) {
+export function getDisplayContent(content, genericHeadline) {
   if (content.includes("[ERROR_MESSAGE_SYSTEM]")) {
-    return content.replace("[ERROR_MESSAGE_SYSTEM] ", "❌ ");
+    // A generic failure is stored as the English apology; its headline is
+    // translated here, at display time (#615), so it follows the interface
+    // language live, after a reload and after a language switch.
+    const shown =
+      genericHeadline && content.endsWith(GENERIC_ERROR_LINE)
+        ? `${content.slice(0, -GENERIC_ERROR_LINE.length)}[ERROR_MESSAGE_SYSTEM] ${genericHeadline}`
+        : content;
+    return shown.replace("[ERROR_MESSAGE_SYSTEM] ", "❌ ");
   }
   return content
     .replace(/\[image\]/g, "")

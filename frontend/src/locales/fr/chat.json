@@ -189,6 +189,12 @@
     "body": "Les modèles de base ont été massivement entraînés sur des données en anglais. Vous obtiendrez de bien meilleurs résultats en discutant en anglais.",
     "frenchAside": "Pour les français, ça vous fera de l'entraînement :)"
   },
+  "errorDetails": {
+    "show": "Détails",
+    "hide": "Masquer les détails",
+    "requestId": "Identifiant de requête",
+    "copyRequestId": "Copier l'identifiant de requête"
+  },
   "errors": {
     "network": "Erreur réseau",
     "loadModels": "Impossible de charger les modèles : {{error}}",
