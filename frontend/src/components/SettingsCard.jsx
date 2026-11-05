@@ -5,9 +5,11 @@ import PropTypes from "prop-types";
  * One settings card: icon, title, description, optional fine-print note and
  * the control on the right. Shared by every section of the Settings page so
  * they look identical, and by the cards that live in their own file because
- * they carry state of their own (see `UpdatesCard`).
+ * they carry state of their own (see `UpdatesCard`). A card with several
+ * controls (see `UpdatePreferencesCard`) passes them as children, laid out
+ * under the description, instead of one control on the right.
  */
-export default function SettingsCard({ icon, title, description, note, control }) {
+export default function SettingsCard({ icon, title, description, note, control, children }) {
   return (
     <section className="relative overflow-hidden rounded-2xl border border-[var(--line)] bg-[var(--surface)] rise">
       <div
@@ -34,8 +36,9 @@ export default function SettingsCard({ icon, title, description, note, control }
               )}
             </div>
           </div>
-          <div className="pt-1">{control}</div>
+          {control && <div className="pt-1">{control}</div>}
         </div>
+        {children && <div className="mt-5 pl-14">{children}</div>}
       </div>
     </section>
   );
@@ -46,5 +49,6 @@ SettingsCard.propTypes = {
   title: PropTypes.string.isRequired,
   description: PropTypes.string.isRequired,
   note: PropTypes.string,
-  control: PropTypes.node.isRequired,
+  control: PropTypes.node,
+  children: PropTypes.node,
 };

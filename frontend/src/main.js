@@ -22,6 +22,7 @@ const { singleFlight } = require("./utils/singleFlight");
 const { readAppLogTailResult } = require("./utils/appLogTail");
 const { describeProcessGone, formatMainRecord } = require("./utils/mainLog");
 const { createBackendStartTracker, requestStop } = require("./utils/backendStartTracker");
+const { configureUpdater, createUpdaterWiring } = require("./utils/updaterWiring");
 
 // electron-updater: only loaded in production to avoid dev noise.
 // Reads latest.yml / latest-mac.yml from GitHub Releases and handles
@@ -35,20 +36,23 @@ if (app.isPackaged) {
     autoUpdater = require("electron-updater").autoUpdater;
     autoUpdater.logger = require("electron-log");
     autoUpdater.logger.transports.file.level = "info";
+    // Before anything can run: both library flags off (its defaults are on)
+    // and its per-install identifier replaced by a constant.
+    configureUpdater(autoUpdater);
   } catch (e) {
     updaterLoadError = e;
     autoUpdater = null;
   }
 }
 
-// Automatic updates are refusable in Settings. The preference is persisted with
-// the other user settings, which only the renderer can read, so main starts out
-// not knowing it and does NOT check for updates until the renderer says so:
-// checking early would send a request the user may have declined. Enabled is
-// what the renderer reports when the setting cannot be read, so the shipped
-// behaviour is unchanged for anyone who never opens the setting.
-let autoUpdateEnabled = null;
-let updatePollTimer = null;
+// The update switches (#563) -- Check for updates, Download updates
+// automatically, Install downloaded updates when I quit -- are persisted with
+// the other user settings, which only the renderer can read, so main starts
+// out not knowing them and does NOT check for updates until the renderer says
+// so: checking early would send a request the user may have declined.
+// Everything the updater does lives in utils/updaterWiring.js (tested against
+// fakes of the library); this file only creates it and routes the IPC to it.
+let updaterWiring = null;
 
 // Renderer + preload entry resolution (replaces the @electron-forge/plugin-webpack
 // magic globals). Prod (packaged): load the built files that sit next to this
@@ -1121,172 +1125,146 @@ ipcMain.handle("data:clearAll", async () => {
 });
 
 // ── Auto-updater IPC ──────────────────────────────────────────────────────────
+// The renderer side of utils/updaterWiring.js. Without an updater (running
+// from source) every call answers "unavailable" and the cards say so.
+
 // The last thing the updater said, so a window that mounts after the events
 // fired is not blind -- the same contract as "backend:getInfo". The Settings
 // card reads it to recover an update that was staged hours ago (#571).
-// Phases: "idle" | "checking" | "available" | "up-to-date" | "downloading" |
-//         "downloaded" | "error".
 //
 // It lives in memory for the life of this process and is deliberately NOT
 // persisted across restarts: after a relaunch the card starts at "idle" and
-// the next check re-derives the truth -- the boot check when automatic
-// updates are on, the button when they are off. That check validates
-// electron-updater's own download cache and serves the file from it without
-// downloading anything again, which a version string we wrote to disk cannot
-// do: ours would still claim an update is staged after the cache was cleared,
-// the release was pulled, or the app was updated by other means.
-let updaterState = { phase: "idle", version: null, percent: 0 };
+// the next check re-derives the truth -- the boot check when Check for
+// updates is on, the button otherwise. A check does not look at
+// electron-updater's download cache; the download that follows it does
+// (automatic when Download updates automatically is on, the card's Download
+// button otherwise), and serves the file from the cache without downloading
+// anything again. A version string we wrote to disk cannot do that: it would
+// still claim an update is staged after the cache was cleared, the release
+// was pulled, or the app was updated by other means.
+ipcMain.handle("updater:get-state", () =>
+  updaterWiring
+    ? updaterWiring.getState()
+    : { available: false, phase: "idle", version: null, percent: 0, handedOff: false }
+);
 
-// Renderer can trigger an immediate install via "updater:install-now".
+// Install now: quits, installs and relaunches.
 ipcMain.handle("updater:install-now", () => {
-  if (autoUpdater) {
-    autoUpdater.quitAndInstall(false, true);
-  }
+  updaterWiring?.installNow();
 });
 
-ipcMain.handle("updater:get-state", () => ({
-  available: autoUpdater !== null,
-  ...updaterState,
-}));
-
-// A check the user asked for. It runs even when automatic updates are off:
-// that is the whole point of the button, and a refused preference is about
-// what the app does on its own, not about what the user asks it to do. What
-// stays off is everything automatic -- no download without a second click,
-// and `autoInstallOnAppQuit` is left exactly as the preference set it, so
-// this never re-arms the install-on-quit path the user turned down.
-ipcMain.handle("updater:check-now", async () => {
-  if (!autoUpdater) {
+// A check the user asked for, whatever Check for updates says.
+ipcMain.handle("updater:check-now", () => {
+  if (!updaterWiring) {
     return { ok: false, reason: "unavailable" };
   }
-  if (autoUpdateEnabled !== true) {
-    autoUpdater.autoDownload = false;
+  return updaterWiring.checkNow();
+});
+
+// The second click: download the update that a check found.
+ipcMain.handle("updater:download-now", () => {
+  if (!updaterWiring) {
+    return { ok: false, reason: "unavailable" };
   }
+  return updaterWiring.downloadNow();
+});
+
+// Renderer -> main: the three persisted update switches, sent at boot and on
+// every change ({check, download, install}, null for a switch the renderer
+// could not read).
+ipcMain.on("updater:set-preferences", (_event, snapshot) => {
+  updaterWiring?.setPreferences(snapshot);
+});
+
+// ── "Updated to X.Y.Z" (#572) ─────────────────────────────────────────────────
+// Two small files in the app's user data folder (not getDataDirectory(), which
+// names a macOS path on Linux): the release notes received with the last
+// update downloaded, kept so the first launch of that version can show them
+// offline, and the version the renderer's dialog last settled. The renderer
+// decides whether to show the dialog (utils/updateNotice.js); main only reads
+// and writes the files.
+const UPDATE_NOTES_FILE = "update-notes.json";
+const LAST_SEEN_VERSION_FILE = "last-seen-version";
+
+function userDataFile(name) {
+  return path.join(app.getPath("userData"), name);
+}
+
+// A missing file is the normal case (no update downloaded yet, a fresh
+// install), not a failure.
+function readUserDataFile(name) {
   try {
-    await autoUpdater.checkForUpdates();
+    return fs.readFileSync(userDataFile(name), "utf8");
+  } catch (err) {
+    if (err.code !== "ENOENT") {
+      logWarn(`Could not read ${name} in the user data folder`, err);
+    }
+    return null;
+  }
+}
+
+// `releaseNotes` is what the feed carried: an HTML string, one entry per
+// version, or nothing. It is stored as it came; the renderer turns it into
+// text before showing it.
+function keepReleaseNotes(info) {
+  try {
+    fs.writeFileSync(
+      userDataFile(UPDATE_NOTES_FILE),
+      JSON.stringify({ version: info.version, notes: info.releaseNotes ?? null })
+    );
+  } catch (err) {
+    // The dialog then shows the version and the release page link instead.
+    logWarn(`Updater: could not keep the release notes of v${info.version}`, err);
+  }
+}
+
+ipcMain.handle("updater:get-launch-state", () => {
+  const lastSeen = readUserDataFile(LAST_SEEN_VERSION_FILE)?.trim() || null;
+  let notes = null;
+  const rawNotes = readUserDataFile(UPDATE_NOTES_FILE);
+  if (rawNotes !== null) {
+    try {
+      notes = JSON.parse(rawNotes);
+    } catch (err) {
+      logWarn("The kept release notes are not valid JSON; the dialog shows the link only", err);
+    }
+  }
+  return { running_version: app.getVersion(), last_seen_version: lastSeen, notes };
+});
+
+// Records the version running now, never one the renderer names.
+ipcMain.handle("updater:mark-version-seen", () => {
+  try {
+    fs.writeFileSync(userDataFile(LAST_SEEN_VERSION_FILE), app.getVersion());
     return { ok: true };
   } catch (err) {
-    logWarn("Updater: a check the user asked for failed", err);
-    return { ok: false, reason: "error" };
+    // The dialog comes back at the next launch; nothing else depends on it.
+    logWarn("Could not record the running version as seen", err);
+    return { ok: false };
   }
 });
 
-// The second click: download the update that a check found. The card is the
-// only way to start this when automatic downloads are off.
-ipcMain.handle("updater:download-now", async () => {
-  if (!autoUpdater) {
-    return { ok: false, reason: "unavailable" };
+function sendUpdaterEvent(event, payload) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("updater-event", { event, ...payload });
   }
-  try {
-    await autoUpdater.downloadUpdate();
-    return { ok: true };
-  } catch (err) {
-    logWarn("Updater: a download the user asked for failed", err);
-    return { ok: false, reason: "error" };
-  }
-});
+}
 
 function setupAutoUpdater() {
   if (!autoUpdater) {
     return;
   }
-
-  const send = (event, payload) => {
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("updater-event", { event, ...payload });
-    }
-  };
-
-  // Every event both records the phase and is forwarded, including the two
-  // that used to be logged and dropped ("update-not-available", "error"):
-  // without them a manual check has no answer to show. UpdateBanner ignores
-  // the event types it does not know, so it is unaffected.
-  autoUpdater.on("checking-for-update", () => {
-    log("Updater: checking for update...");
-    updaterState = { phase: "checking", version: null, percent: 0 };
-    send("checking-for-update", {});
+  // No check yet: the wiring starts the first one once the renderer has
+  // reported the user's switches.
+  updaterWiring = createUpdaterWiring({
+    updater: autoUpdater,
+    nativeUpdater: process.platform === "darwin" ? require("electron").autoUpdater : null,
+    platform: process.platform,
+    send: sendUpdaterEvent,
+    log,
+    logWarn,
+    onDownloaded: keepReleaseNotes,
   });
-
-  autoUpdater.on("update-available", (info) => {
-    log(`Updater: update available - v${info.version}`);
-    updaterState = { phase: "available", version: info.version, percent: 0 };
-    send("update-available", { version: info.version, releaseNotes: info.releaseNotes || "" });
-  });
-
-  autoUpdater.on("update-not-available", () => {
-    log("Updater: already on latest version.");
-    updaterState = { phase: "up-to-date", version: null, percent: 0 };
-    send("update-not-available", {});
-  });
-
-  autoUpdater.on("download-progress", (progress) => {
-    const percent = Math.round(progress.percent);
-    log(`Updater: downloading... ${percent}%`);
-    updaterState = { phase: "downloading", version: updaterState.version, percent };
-    send("download-progress", { percent });
-  });
-
-  autoUpdater.on("update-downloaded", (info) => {
-    log(`Updater: v${info.version} downloaded, ready to install.`);
-    updaterState = { phase: "downloaded", version: info.version, percent: 100 };
-    send("update-downloaded", { version: info.version });
-  });
-
-  autoUpdater.on("error", (err) => {
-    // Never crash the app over an update failure: the feature is degraded,
-    // the app is not. The detail stays in the log; the renderer is told only
-    // that it failed, and shows it on the card the user is waiting on.
-    logWarn("Updater error (non-fatal)", err);
-    updaterState = { phase: "error", version: updaterState.version, percent: 0 };
-    send("error", {});
-  });
-
-  // No check yet: applyAutoUpdatePreference() starts the first one once the
-  // renderer has reported whether the user allows updates at all.
-}
-
-// Renderer -> main: the persisted "automatic updates" preference, sent at boot
-// and on every change. Off means off end to end: no check, no download, no
-// install on quit.
-ipcMain.on("updater:set-enabled", (_event, enabled) => {
-  autoUpdateEnabled = enabled !== false;
-  applyAutoUpdatePreference();
-});
-
-function applyAutoUpdatePreference() {
-  if (!autoUpdater || autoUpdateEnabled === null) {
-    return;
-  }
-
-  autoUpdater.autoDownload = autoUpdateEnabled;
-  autoUpdater.autoInstallOnAppQuit = autoUpdateEnabled;
-
-  if (!autoUpdateEnabled) {
-    if (updatePollTimer) {
-      clearInterval(updatePollTimer);
-      updatePollTimer = null;
-    }
-    log("Updater: automatic updates are turned off; no check will run");
-    return;
-  }
-
-  if (updatePollTimer) {
-    return; // already checking on its cadence
-  }
-
-  log("Updater: automatic updates are on; checking now, then every 4 hours");
-  autoUpdater.checkForUpdates().catch((err) => {
-    logWarn("Updater: initial check failed", err);
-  });
-
-  updatePollTimer = setInterval(
-    () => {
-      autoUpdater.checkForUpdates().catch((err) => {
-        logWarn("Updater: periodic check failed", err);
-      });
-    },
-    4 * 60 * 60 * 1000
-  );
 }
 
 app

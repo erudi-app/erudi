@@ -21,8 +21,12 @@ Example:
     vars = startup_repo.get_or_create()
 """
 
+from sqlalchemy import exists, select
 from sqlalchemy.orm import Session
 
+from src.entities.Conversation import Conversation
+from src.entities.KnowledgeBase import KnowledgeBase
+from src.entities.Llm import Llm
 from src.entities.StartupVariables import StartupVariables
 from src.core.logging import logger
 
@@ -73,6 +77,24 @@ class Startup_Variables_Repository:
             logger.info(f"Created StartupVariables {vars.id}")
 
         return vars
+
+    def has_user_data(self) -> bool:
+        """Whether the database holds anything the user made (#572).
+
+        True when at least one conversation or knowledge base exists, or one
+        model was downloaded (``llms.local = 1``). The catalog seeds ``local = 0`` rows on every
+        boot and an unfinished download is ``local = 2``, so neither counts.
+        Read-only, and independent of the welcome flag, which reading marks.
+
+        Returns:
+            bool: True for an install that was used, False for a fresh one.
+        """
+        statement = select(
+            exists().select_from(Conversation)
+            | exists().select_from(KnowledgeBase)
+            | exists().where(Llm.local == 1)
+        )
+        return bool(self.db.execute(statement).scalar())
 
     def get_welcome_popup_status(self) -> bool:
         """Check if welcome popup has already been displayed to user.

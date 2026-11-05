@@ -1,15 +1,12 @@
 /**
- * The main-process half of the manual update controls (#571).
+ * The main-process half of the update controls (#571, #563, #572).
  *
- * An update staged to install on quit is cancelled by the native installer
- * when the app reopens before the swap finishes, and nothing in the app is
- * told. The Settings card is the recovery path, and it can only work if main
- * forwards every updater event and answers a check, a download and a state
- * request on demand.
- *
- * main.js runs in the Electron main process and cannot be imported here, so
- * the contract is read from the source text, the way the CSP and crash-handler
- * tests read theirs.
+ * main.js runs in the Electron main process and cannot be imported here. What
+ * the updater does lives in utils/updaterWiring.js, tested behaviourally
+ * against fakes of the library; these tests pin, from the source text, that
+ * main.js only configures the updater right after loading it, hands it to the
+ * wiring and routes the IPC there, and that the "Updated to" files stay in
+ * the user data folder.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -18,129 +15,132 @@ import { fileURLToPath } from "node:url";
 const source = readFileSync(fileURLToPath(new URL("./main.js", import.meta.url)), "utf8");
 const preload = readFileSync(fileURLToPath(new URL("./preload.js", import.meta.url)), "utf8");
 
-/** The body of `setupAutoUpdater`, where every updater event is wired. */
-function setupBody() {
-  const start = source.indexOf("function setupAutoUpdater()");
-  expect(start, "setupAutoUpdater not found").toBeGreaterThan(-1);
-  return source.slice(start, source.indexOf('ipcMain.on("updater:set-enabled"', start));
+/** The body of a top-level `function <name>(`. */
+function functionBody(name) {
+  const start = source.indexOf(`function ${name}(`);
+  expect(start, `${name} not found`).toBeGreaterThan(-1);
+  return source.slice(start, source.indexOf("\n}\n", start));
 }
 
-/** The body of one `ipcMain.handle("<channel>", ...)` block. */
-function handlerBody(channel) {
-  const start = source.indexOf(`ipcMain.handle("${channel}"`);
+/** The body of one `ipcMain.handle|on("<channel>", ...)` block. */
+function handlerBody(channel, kind = "handle") {
+  const start = source.indexOf(`ipcMain.${kind}("${channel}"`);
   expect(start, `${channel} handler not found`).toBeGreaterThan(-1);
-  return source.slice(start, source.indexOf("\n});", start));
+  const end = source.indexOf("\n});", start);
+  const endExpr = source.indexOf("\n);", start);
+  return source.slice(start, Math.min(...[end, endExpr].filter((i) => i > -1)));
 }
 
-describe("updater events reaching the renderer", () => {
-  it("forwards every event, including the two that used to be logged and dropped", () => {
-    const body = setupBody();
-    for (const event of [
-      "checking-for-update",
-      "update-available",
-      "update-not-available",
-      "download-progress",
-      "update-downloaded",
-      "error",
-    ]) {
-      expect(body, event).toMatch(new RegExp(`send\\("${event}"`));
-    }
+describe("loading the updater", () => {
+  it("configures it right after the require, before anything can run", () => {
+    const load = source.slice(source.indexOf('require("electron-updater")'));
+    expect(load.slice(0, load.indexOf("} catch"))).toMatch(/configureUpdater\(autoUpdater\);/);
   });
 
-  it("sends them all on the one channel the renderer already listens to", () => {
-    expect(setupBody()).not.toMatch(/webContents\.send\("(?!updater-event)/);
-    expect(source).toMatch(
+  it("leaves every flag and header to the wiring", () => {
+    expect(source).not.toMatch(/autoUpdater\.(autoDownload|autoInstallOnAppQuit|requestHeaders) =/);
+    expect(source).not.toMatch(
+      /autoUpdater\.(checkForUpdates|downloadUpdate|quitAndInstall|addQuitHandler)\(/
+    );
+  });
+
+  it("hands the updater, and Squirrel.Mac on macOS, to the wiring", () => {
+    const body = functionBody("setupAutoUpdater");
+    expect(body).toMatch(/createUpdaterWiring\(\{/);
+    expect(body).toMatch(/updater: autoUpdater/);
+    expect(body).toMatch(
+      /nativeUpdater: process\.platform === "darwin" \? require\("electron"\)\.autoUpdater : null/
+    );
+    expect(body).toMatch(/send: sendUpdaterEvent/);
+    expect(body).toMatch(/onDownloaded: keepReleaseNotes/);
+  });
+});
+
+describe("the IPC routes to the wiring", () => {
+  it("answers unavailable without an updater", () => {
+    for (const channel of ["updater:check-now", "updater:download-now"]) {
+      expect(handlerBody(channel), channel).toMatch(
+        /if \(!updaterWiring\) \{\s*return \{ ok: false, reason: "unavailable" \}/
+      );
+    }
+    expect(handlerBody("updater:get-state")).toMatch(/available: false/);
+  });
+
+  it("routes each call", () => {
+    expect(handlerBody("updater:check-now")).toMatch(/updaterWiring\.checkNow\(\)/);
+    expect(handlerBody("updater:download-now")).toMatch(/updaterWiring\.downloadNow\(\)/);
+    expect(handlerBody("updater:install-now")).toMatch(/updaterWiring\?\.installNow\(\)/);
+    expect(handlerBody("updater:get-state")).toMatch(/updaterWiring\.getState\(\)/);
+    expect(handlerBody("updater:set-preferences", "on")).toMatch(
+      /updaterWiring\?\.setPreferences\(snapshot\)/
+    );
+  });
+
+  it("sends every updater event on the one channel the renderer listens to", () => {
+    expect(functionBody("sendUpdaterEvent")).toMatch(
       /mainWindow\.webContents\.send\("updater-event",\s*\{ event, \.\.\.payload \}\)/
     );
   });
 
-  it("keeps the updater's own error message out of the payload", () => {
-    // The detail belongs in the log. The card shows one translated line, and
-    // an updater error message is a URL and an HTTP status, not copy.
-    const errorHandler = setupBody().slice(setupBody().indexOf('autoUpdater.on("error"'));
-    expect(errorHandler).toMatch(/logWarn\(/);
-    expect(errorHandler).toMatch(/send\("error", \{\}\)/);
-  });
-
-  it("records the phase so a window that mounts late can catch up", () => {
-    expect(source).toMatch(/let updaterState = \{ phase: "idle", version: null, percent: 0 \}/);
-    const body = setupBody();
-    for (const phase of ["checking", "available", "up-to-date", "downloading", "downloaded"]) {
-      expect(body, phase).toMatch(new RegExp(`updaterState = \\{ phase: "${phase}"`));
-    }
+  it("never installs from the quit path", () => {
+    const beforeQuit = source.slice(source.indexOf('app.on("before-quit"'));
+    expect(beforeQuit.slice(0, beforeQuit.indexOf("\n});"))).not.toMatch(/install/i);
   });
 });
 
-describe("the manual check", () => {
-  it("answers something the renderer can render when there is no updater", () => {
-    expect(handlerBody("updater:check-now")).toMatch(
-      /if \(!autoUpdater\) \{\s*return \{ ok: false, reason: "unavailable" \}/
-    );
-    expect(handlerBody("updater:download-now")).toMatch(
-      /if \(!autoUpdater\) \{\s*return \{ ok: false, reason: "unavailable" \}/
-    );
+describe("the update notice files (#572)", () => {
+  it("live in the user data folder", () => {
+    expect(functionBody("userDataFile")).toMatch(/app\.getPath\("userData"\)/);
+    expect(source).toMatch(/const UPDATE_NOTES_FILE = "update-notes\.json";/);
+    expect(source).toMatch(/const LAST_SEEN_VERSION_FILE = "last-seen-version";/);
   });
 
-  it("runs even when the automatic-updates preference is off", () => {
-    const body = handlerBody("updater:check-now");
-    expect(body).toMatch(/autoUpdater\.checkForUpdates\(\)/);
-    // No early return on the preference: the button must work for someone who
-    // refused automatic updates -- that is who needs it most.
-    expect(body).not.toMatch(/if \(autoUpdateEnabled[^)]*\) \{\s*return \{ ok: false/);
-  });
-
-  it("does not download behind the back of a user who refused automatic updates", () => {
-    expect(handlerBody("updater:check-now")).toMatch(
-      /if \(autoUpdateEnabled !== true\) \{\s*autoUpdater\.autoDownload = false;/
+  it("keep the notes received with each download", () => {
+    expect(functionBody("keepReleaseNotes")).toMatch(
+      /JSON\.stringify\(\{ version: info\.version, notes: info\.releaseNotes \?\? null \}\)/
     );
   });
 
-  it("never re-arms the install-on-quit path the preference turned off", () => {
-    expect(handlerBody("updater:check-now")).not.toMatch(/autoInstallOnAppQuit/);
-    expect(handlerBody("updater:download-now")).not.toMatch(/autoInstallOnAppQuit/);
+  it("report the running version, the last one seen and the notes, with no network", () => {
+    const body = handlerBody("updater:get-launch-state");
+    expect(body).toMatch(/running_version: app\.getVersion\(\)/);
+    expect(body).toMatch(/last_seen_version: lastSeen/);
+    expect(body).not.toMatch(/https?:|net\.|fetch\(/);
   });
 
-  it("swallows the rejection instead of throwing it at the renderer", () => {
-    for (const channel of ["updater:check-now", "updater:download-now"]) {
-      const body = handlerBody(channel);
-      expect(body, channel).toMatch(/catch \(err\) \{/);
-      expect(body, channel).toMatch(/logWarn\(/);
-      expect(body, channel).toMatch(/return \{ ok: false, reason: "error" \}/);
-    }
-  });
-});
-
-describe("the state request", () => {
-  it("says whether an updater exists at all, and what it last did", () => {
-    expect(handlerBody("updater:get-state")).toMatch(/available: autoUpdater !== null/);
-    expect(handlerBody("updater:get-state")).toMatch(/\.\.\.updaterState/);
-  });
-});
-
-describe("what #571 must not disturb", () => {
-  it("leaves the install-on-quit path and the 4-hour cadence alone (#563 owns those)", () => {
-    expect(source).toMatch(/autoUpdater\.autoInstallOnAppQuit = autoUpdateEnabled;/);
-    expect(source).toMatch(/4 \* 60 \* 60 \* 1000/);
-    expect(source).toMatch(/autoUpdater\.quitAndInstall\(false, true\)/);
-  });
-
-  it("reports an update failure on the card, never in a dialog", () => {
-    const body = setupBody();
-    expect(body).not.toMatch(/dialog\./);
-    for (const channel of ["updater:check-now", "updater:download-now", "updater:get-state"]) {
-      expect(handlerBody(channel), channel).not.toMatch(/dialog\./);
-    }
+  it("record the running version, never one the renderer names", () => {
+    const body = handlerBody("updater:mark-version-seen");
+    expect(body).toMatch(/ipcMain\.handle\("updater:mark-version-seen", \(\) => \{/);
+    expect(body).toMatch(
+      /writeFileSync\(userDataFile\(LAST_SEEN_VERSION_FILE\), app\.getVersion\(\)\)/
+    );
   });
 });
 
 describe("the preload bridge", () => {
-  it("exposes the three new calls the card needs", () => {
+  it("exposes the calls the cards need", () => {
     expect(preload).toMatch(/checkNow: \(\) => ipcRenderer\.invoke\("updater:check-now"\)/);
     expect(preload).toMatch(/downloadNow: \(\) => ipcRenderer\.invoke\("updater:download-now"\)/);
     expect(preload).toMatch(/getState: \(\) => ipcRenderer\.invoke\("updater:get-state"\)/);
   });
 
-  it("removes only its own listener, so the banner and the card can coexist", () => {
+  it("carries the full snapshot of the three switches", () => {
+    expect(preload).toMatch(
+      /setPreferences: \(snapshot\) => ipcRenderer\.send\("updater:set-preferences", snapshot\)/
+    );
+    expect(preload).not.toMatch(/setAutoUpdateEnabled|updater:set-enabled/);
+  });
+
+  it("exposes the update notice calls", () => {
+    expect(preload).toMatch(
+      /getLaunchState: \(\) => ipcRenderer\.invoke\("updater:get-launch-state"\)/
+    );
+    expect(preload).toMatch(
+      /markVersionSeen: \(\) => ipcRenderer\.invoke\("updater:mark-version-seen"\)/
+    );
+  });
+
+  it("removes only its own listener, so the banner and the cards can coexist", () => {
     expect(preload).toMatch(/ipcRenderer\.removeListener\("updater-event", handler\)/);
     expect(preload).not.toMatch(/removeAllListeners\("updater-event"\)/);
   });
