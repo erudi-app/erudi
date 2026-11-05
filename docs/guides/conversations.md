@@ -464,36 +464,53 @@ closes the help alone. An engine failure that opens its dialog closes any comman
 - **`/compact`** first opens a confirmation (`frontend/src/components/modals/ConfirmDialog.jsx`)
   saying the earlier messages are replaced, for the model, by the same summary it writes on its
   own, that the latest exchange is kept word for word and the whole conversation stays on screen;
-  Cancel (which takes the focus), Escape or the close button compact nothing. Confirming sends
-  `POST /erudi/conversations/{id}/compact` (see [Compact a conversation now](#compact-a-conversation-now))
-  through `tracedFetch`, without the API client's 30-second timeout. While it runs a status row at
-  the end of the thread reads "Summarizing earlier messages to make room…", and the composer, the
-  commands and every header button are disabled; the header's Compact button itself stays usable
-  while an answer streams, so the backend can answer that the model is busy. A summary re-reads
-  the conversation, and the separator appears below the last answer. `{"summarized": 0}` shows
-  "Nothing to compact yet." for a few seconds and re-reads nothing. Every refusal or failure shows
-  its message above the composer until it is closed or the next command runs — the model is busy,
-  pick a model first, the last question has no answer yet, the conversation no longer exists, the
-  summary could not be written (nothing was changed), the separator could not be saved, or, for
-  any other answer or a request that failed, that the summary did not come back — and re-reads
-  the conversation, so a summary that succeeded on the server still shows its separator.
+  Cancel (which takes the focus), Escape or the close button compact nothing, and the dialog
+  confirms once per opening (a second click during its closing animation does nothing). Confirming
+  sends `POST /erudi/conversations/{id}/compact` (see [Compact a conversation now](#compact-a-conversation-now))
+  through `tracedFetch`, without the API client's 30-second timeout and with a ceiling of 10
+  minutes. One run per conversation: the runs are held for the whole window session
+  (`frontend/src/shared/compactingConversations.js`), so a second confirmation starts nothing, and
+  a conversation left and opened again while its summary runs is still locked with its status
+  row (a reload of the window forgets it; the backend still refuses a second run); when that run
+  ends, the page re-reads the conversation. While it runs a status row at the end of the thread
+  reads "Summarizing earlier messages to make room…", and the composer, the commands and every
+  header button are disabled; another conversation stays free, and the header's Compact button
+  stays usable while an answer streams, so the backend can answer that the model is busy. What
+  follows the answer happens only while the page still shows that conversation:
+  - A summary re-reads the conversation, the separator appears below the last answer, and the
+    `/context` panels go.
+  - `{"summarized": 0}` shows "Nothing to compact yet." for a few seconds and re-reads nothing.
+  - A conversation whose model is gone (`no_model`) is loaded again, so its header asks for a
+    model, and the notice says to pick one.
+  - A conversation deleted meanwhile (404) is left for the new-conversation page, which shows
+    "This conversation no longer exists." (no re-read: it could only fail).
+  - Every other refusal or failure shows its message above the composer until it is closed or the
+    next command runs — the model is busy, the last question has no answer yet, the summary could
+    not be written (nothing was changed), the separator could not be saved, "The summary failed:
+    <message>" for an error without its own copy that carries the server's message, or, for an
+    answer without one, a request that failed or the 10-minute ceiling, that the summary did not
+    come back — and re-reads the conversation, so a summary that succeeded on the server still
+    shows its separator.
 - **`/context`** reads `GET /erudi/conversations/{id}/context` (see [Context usage](#context-usage))
   and draws a panel at the end of the thread (`frontend/src/components/ContextUsagePanel.jsx`): a
-  grid of 100 small blocks, each about 1 % of the window, coloured per category — system prompt,
-  tools, messages, the summary when there is one, the free space as empty blocks and the
-  auto-compaction reserve as dashed ones — and a legend giving each category's tokens and share
-  of the window, labelled as estimates (`frontend/src/utils/contextUsage.js`: largest remainders,
-  so the blocks add up to the window, and a category that holds tokens always keeps at least one
-  block; past the window, what is used fills the grid). Notes say, as they apply, that this
+  grid of 100 small blocks coloured per category — system prompt, tools, messages, the summary
+  when there is one, the free space as empty blocks and the auto-compaction reserve as dashed
+  ones — and a legend giving each category's tokens and share of the window, labelled as
+  estimates (`frontend/src/utils/contextUsage.js`: the blocks are shared out, by largest
+  remainders, over what the categories hold together, which is the window while the request fits
+  and what is used past it; the grid always has 100 blocks when anything is counted, and a
+  category that holds tokens always keeps at least one). Notes say, as they apply, that this
   computer's memory limits the window the model supports, that a model not loaded is measured
   against its trained window (the window this computer allows is known once it loads), that a
   knowledge-base assistant's counts leave out the excerpts a question retrieves, that the
   conversation is past its compaction threshold or the next request would not fit the window
   (the next turn summarizes first), or that no window is known (counts without shares). Opening it
   never loads the model. The panels are a list of their own, never part of the messages and never
-  stored: each has a close button, and sending a message, re-reading the conversation, opening
-  another one or reloading the page removes them. A read that fails says the usage could not be
-  read (or to pick a model first, for a conversation without one).
+  stored: each has a close button, and sending a message, the re-read after `/compact`, opening
+  another conversation or reloading the page removes them; a usage read that lands after any of
+  these is dropped. A new panel brings the end of the thread into view; closing one never moves
+  it. A read that fails says the usage could not be read; for a conversation whose model is gone
+  it loads the conversation again and says to pick a model first.
 
 The new-conversation page carries the same header and commands, editing the draft the conversation
 is created from. `/compact` and `/context` are neither in its drop-up nor in its header panel;
