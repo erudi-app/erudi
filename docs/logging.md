@@ -265,7 +265,8 @@ these rules, in both processes.
   file skipped, an invalid value replaced by a default, a child that printed
   something alarming but kept running, a probe that timed out once. So is a
   curated failed turn (a prompt that does not fit the window, a model that
-  did not start in time, the tool-loop limit): the runner flags it
+  did not start answering in time or went silent mid-answer, the tool-loop
+  limit): the runner flags it
   `curated: true`, the stream's `error` event carries the flag and the page
   logs it at `WARNING`, so it does not badge the bug icon. A generic failure
   (and a model that fails to load) is an `ERROR`.

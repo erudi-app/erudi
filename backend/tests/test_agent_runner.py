@@ -1394,6 +1394,29 @@ async def test_events_generic_construction_error_carries_the_cleaned_detail(monk
     ]
 
 
+async def test_construction_error_message_is_sanitised(monkeypatch):
+    """The sentence of a curated construction failure is shown in the red line:
+    a path in it is reduced to its file name."""
+    from src.core.exceptions import EngineException
+
+    def _boom(llm, **kw):
+        raise EngineException(message="Model path not found: /Users/jane/models/x.gguf")
+
+    monkeypatch.setattr(runner_module, "build_chat_model", _boom)
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="d4",
+    )
+
+    assert events[0]["text"] == f"{ERROR_SENTINEL} Model path not found: x.gguf"
+
+
 async def test_events_curated_construction_error_carries_no_detail(monkeypatch):
     """An EngineException is already a curated sentence: no detail rides along."""
     from src.core.exceptions import EngineException
@@ -1561,6 +1584,7 @@ async def test_events_child_token_queue_timeout_maps_to_the_prefill_turn(monkeyp
     assert "MLX_VLM_TOKEN_QUEUE_TIMEOUT" not in text
     assert text != runner_module.ERROR_MESSAGE
     assert "Traceback" not in text
+    assert [e.get("curated") for e in events if e["t"] == "answer"] == [True]
 
 
 async def test_events_child_token_queue_timeout_logs_one_warning(monkeypatch, caplog):

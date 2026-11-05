@@ -12,10 +12,15 @@ streaming, the conversation service's last-resort handler) share one rule.
 
 import re
 from typing import Optional
+from urllib.parse import unquote
 
 from src.core.exceptions import AppBaseException
 
 MAX_DETAIL_CHARS = 300
+
+# What is read of a message: a cut path or a cut secret pair is still reduced or
+# masked, and the cost stays bounded whatever the exception carries.
+_MAX_INPUT_CHARS = 16 * 1024
 
 _MASK = "***"
 
@@ -31,9 +36,15 @@ _P_SEG = rf"(?:{_P_SPACED}|{_P_WORD})"
 _P_LEAF = r"[^\s/'\"<>:|*?]*"
 
 # Windows segments: the separator is one backslash, two (the form ``repr``
-# gives inside an exception message) or a slash.
+# gives inside an exception message) or a slash. A segment followed by a
+# backslash may hold spaces and apostrophes (O'Brien); one followed by a slash
+# is a plain word or a capitalised word run, so a "/" in the prose after a path
+# ("and/or", "docs/x.md") never extends it.
 _W_SEP = r"(?:\\{1,2}|/)"
-_W_SEG = rf"[^\\/:*?\"<>|\r\n]{{1,{_SEG_MAX}}}"
+_W_WORD = rf"[^\s\\/:*?\"<>|']{{1,{_SEG_MAX}}}"
+_W_SPACED = rf"(?=[A-Z0-9(]){_W_WORD}(?: (?=[A-Z0-9(]){_W_WORD}){{1,4}}"
+_W_SEG = rf"(?:[^\\/:*?\"<>|\r\n']|'(?![\s,\])])){{1,{_SEG_MAX}}}"
+_W_BODY = rf"(?:{_W_WORD}{_W_SEP}|{_W_SPACED}/|{_W_SEG}\\{{1,2}})*"
 _W_LEAF = r"[^\s\\/:*?\"<>|']*"
 
 _DB_URL = re.compile(
@@ -45,15 +56,20 @@ _DB_URL = re.compile(
 _URL_USERINFO = re.compile(r"(\b[a-z][a-z0-9+.\-]{0,30}://)[^/\s'\"<>]+@", re.IGNORECASE)
 _BEARER = re.compile(r"\b(Bearer|Basic)\s+[A-Za-z0-9._~+/=\-]+", re.IGNORECASE)
 _API_KEY_FLAG = re.compile(r"(--api-key)(=|\s+|['\"],\s*['\"])[^\s'\",\]]+")
+_SK_KEY = re.compile(r"\bsk-[A-Za-z0-9_\-]{20,}")
 _SECRET_PAIR = re.compile(
     r"\b([\w\-]{0,40}(?:api[_\-]?key|password|passwd|pwd|token|secret|authorization))"
     r"([\"']?\s*[=:]\s*)(?!(?:Bearer|Basic)\b)(\"[^\"]*\"|'[^']*'|[^\s&'\",}]+)",
     re.IGNORECASE,
 )
 _HF_TOKEN = re.compile(r"\bhf_[A-Za-z0-9]{30,}")
-_FILE_URL = re.compile(r"file://[^\s'\"<>]*", re.IGNORECASE)
-_WIN_PATH = re.compile(rf"(?<![A-Za-z0-9])[A-Za-z]:{_W_SEP}(?:{_W_SEG}{_W_SEP})*{_W_LEAF}")
-_UNC_PATH = re.compile(rf"(?<![\\\w])\\{{2,4}}[^\s\\'\"]+\\{{1,2}}(?:{_W_SEG}\\{{1,2}})*{_W_LEAF}")
+_FILE_URL = re.compile(r"file://([^\s'\"<>]*)", re.IGNORECASE)
+# A path written percent-encoded ("%2FUsers%2Fjane%2Fx.gguf").
+_ENCODED_PATH = re.compile(r"(?<![^\s'\"(=])%2F[^\s'\"<>]*", re.IGNORECASE)
+_WIN_PATH = re.compile(rf"(?<![A-Za-z0-9])[A-Za-z]:{_W_SEP}{_W_BODY}{_W_LEAF}")
+_UNC_PATH = re.compile(rf"(?<![\\\w])\\{{2,4}}[^\s\\'\"]+\\{{1,2}}{_W_BODY}{_W_LEAF}")
+# A Windows path whose drive was dropped ("\\Users\\jane\\x.gguf").
+_WIN_NODRIVE = re.compile(rf"(?<![\w\\:.\-])\\{{1,2}}Users\\{{1,2}}{_W_BODY}{_W_LEAF}")
 _POSIX_PATH = re.compile(rf"(?<![\w/.~\-])/(?:{_P_SEG}/)+{_P_LEAF}")
 
 # The first segment of a URL path the app itself serves or calls.
@@ -66,8 +82,11 @@ def _segments(path: str) -> list[str]:
 
 
 def _reduce_path(match: "re.Match[str]") -> str:
+    return _reduce(match.group(0))
+
+
+def _reduce(path: str) -> str:
     """A path becomes its file name; a home directory alone becomes ``~``."""
-    path = match.group(0)
     parts = _segments(path)
     if not parts:
         return path
@@ -82,10 +101,24 @@ def _reduce_path(match: "re.Match[str]") -> str:
     return parts[-1]
 
 
+_SECRET_LIKE = re.compile(r"[A-Za-z0-9._~+/=\-]{12,}")
+_ALWAYS_SECRET_TOKENS = ("access_token", "refresh_token", "id_token", "access-token")
+
+
 def _mask_pair(match: "re.Match[str]") -> str:
-    value = match.group(3)
+    key, value = match.group(1).lower(), match.group(3)
     quote = value[0] if value[0] in "\"'" else ""
+    if key.endswith("token") and not key.endswith(_ALWAYS_SECRET_TOKENS):
+        # A bare "token" is also tokenizer vocabulary (``<|im_end|>``,
+        # ``eos_token='</s>'``): only a value shaped like a secret is masked.
+        if not _SECRET_LIKE.fullmatch(value.strip("\"'")):
+            return match.group(0)
     return f"{match.group(1)}{match.group(2)}{quote}{_MASK}{quote}"
+
+
+def _decode_file_url(match: "re.Match[str]") -> str:
+    path = unquote(match.group(1))
+    return path[1:] if re.match(r"/[A-Za-z]:", path) else path
 
 
 def sanitize(text: str) -> str:
@@ -101,9 +134,13 @@ def sanitize(text: str) -> str:
     text = _API_KEY_FLAG.sub(lambda m: f"{m.group(1)}{m.group(2)}{_MASK}", text)
     text = _SECRET_PAIR.sub(_mask_pair, text)
     text = _HF_TOKEN.sub(f"hf_{_MASK}", text)
-    text = _FILE_URL.sub(lambda m: _segments(m.group(0))[-1] if _segments(m.group(0)) else "", text)
+    text = _SK_KEY.sub(f"sk-{_MASK}", text)
+    # Decoded to the path they spell, then reduced like any other path.
+    text = _FILE_URL.sub(_decode_file_url, text)
+    text = _ENCODED_PATH.sub(lambda m: unquote(m.group(0)), text)
     text = _WIN_PATH.sub(_reduce_path, text)
     text = _UNC_PATH.sub(_reduce_path, text)
+    text = _WIN_NODRIVE.sub(_reduce_path, text)
     text = _POSIX_PATH.sub(_reduce_path, text)
     return " ".join(text.split())
 
@@ -130,6 +167,28 @@ def _chain(exc: BaseException) -> list[BaseException]:
     return chain
 
 
+_ONLY_A_QUOTE = re.compile(r"'[^']*'|\"[^\"]*\"")
+
+
+def _message_of(exc: BaseException) -> str:
+    """The sanitised message of one exception, or "" when it says nothing.
+
+    Never raises: an exception whose ``str`` fails says nothing. A message that
+    is only a quoted key (``KeyError('choices')``) names its type; empty quotes
+    say nothing.
+    """
+    try:
+        raw = str(exc)[:_MAX_INPUT_CHARS]
+    except Exception:
+        return ""
+    message = sanitize(raw).strip()
+    if message in ("''", '""'):
+        return ""
+    if _ONLY_A_QUOTE.fullmatch(message):
+        return f"{type(exc).__name__}: {message}"
+    return message
+
+
 def error_detail(exc: BaseException) -> str:
     """The sanitised, single-line, at most ``MAX_DETAIL_CHARS`` cause of ``exc``.
 
@@ -139,7 +198,7 @@ def error_detail(exc: BaseException) -> str:
     chain = _chain(exc)
     message = ""
     for candidate in reversed(chain):
-        message = sanitize(str(candidate)).strip()
+        message = _message_of(candidate)
         if message:
             break
     else:

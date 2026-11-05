@@ -123,7 +123,7 @@ def test_leaf_cause_through_implicit_context():
         except KeyError:
             raise RuntimeError("while handling")
     except RuntimeError as exc:
-        assert error_detail(exc) == "'slot'"
+        assert error_detail(exc) == "KeyError: 'slot'"
 
 
 def test_suppressed_context_is_not_walked():
@@ -214,7 +214,7 @@ def test_a_failed_command_masks_the_key_and_the_user_name(binary, shown):
         ("OPENAI_API_KEY=sk-1 failed", "OPENAI_API_KEY=*** failed"),
         ("password=hunter2 refused", "password=*** refused"),
         ("PGPASSWORD=pw host=h", "PGPASSWORD=*** host=h"),
-        ("GET /x?token=abc&y=1", "GET /x?token=***&y=1"),
+        ("GET /x?token=abcdefghij1234&y=1", "GET /x?token=***&y=1"),
         ("access_token=abc secret=def", "access_token=*** secret=***"),
         ("bad hf_" + "a" * 34 + " given", "bad hf_*** given"),
         ("Authorization: Basic dXNlcjpwdw== sent", "Authorization: Basic *** sent"),
@@ -260,3 +260,110 @@ def test_cyclic_chain_terminates():
     a, b = ValueError("a"), ValueError("b")
     a.__cause__, b.__cause__ = b, a
     assert error_detail(a) in {"a", "b"}
+
+
+_TABLE_R2 = [
+    # Windows paths do not swallow the prose after them
+    (
+        r"Failed to open C:\Users\jane\a.gguf and/or fallback 3/4 shards",
+        "Failed to open a.gguf and/or fallback 3/4 shards",
+    ),
+    (
+        r"cannot load C:\Users\jane\a.gguf (use the CPU/GPU toggle)",
+        "cannot load a.gguf (use the CPU/GPU toggle)",
+    ),
+    (
+        r"Failed to open C:\Users\jane\a.gguf, see docs/errors.md for help",
+        "Failed to open a.gguf, see docs/errors.md for help",
+    ),
+    (r"C:\Users\O'Brien\x.gguf", "x.gguf"),
+    (r"C:\Users\Jane Doe\x.gguf", "x.gguf"),
+    (r"C:\Users/jane\x.gguf", "x.gguf"),
+    (r"C:/Users/Jane Doe/models/x.gguf", "x.gguf"),
+    (r"C:\Users\Jane Doe\OneDrive - Contoso Ltd\x.gguf", "x.gguf"),
+    # file:// URLs reduce like any path
+    ("file:///Users/jane", "~"),
+    ("file:///home/jane", "~"),
+    ("file:///C:/Users/jane/", "~"),
+    ("file:///Users/Jane%20Doe/x.gguf", "x.gguf"),
+    (
+        "cannot load file:///Users/Jane Doe/Library/Application Support/erudi/x.gguf",
+        "cannot load x.gguf",
+    ),
+    # tokenizer diagnostics stay readable, secret-like tokens do not
+    (
+        "special token: <|im_end|> not found in vocab",
+        "special token: <|im_end|> not found in vocab",
+    ),
+    (
+        "chat template error: eos_token='</s>' is missing",
+        "chat template error: eos_token='</s>' is missing",
+    ),
+    ("Unexpected token: '<' in JSON at position 0", "Unexpected token: '<' in JSON at position 0"),
+    ("token=abcdefghijkl1234 sent", "token=*** sent"),
+    # bare sk- keys, driveless and encoded paths
+    (
+        "Incorrect API key provided: sk-abcDEF1234567890secret.",
+        "Incorrect API key provided: sk-***.",
+    ),
+    (r"opening \Users\jane\x.gguf", "opening x.gguf"),
+    ("opening %2FUsers%2Fjane%2Fx.gguf", "opening x.gguf"),
+]
+
+
+@pytest.mark.parametrize(("raw", "expected"), _TABLE_R2)
+def test_second_round_table(raw, expected):
+    assert _detail(raw) == expected
+
+
+def test_the_argv_of_a_failed_windows_command_keeps_the_binary_and_flags():
+    out = error_detail(
+        subprocess.CalledProcessError(
+            1, [r"C:\Program Files\Erudi\llama-server.exe", "-m", r"models\x.gguf"]
+        )
+    )
+    assert (
+        out
+        == "Command '['llama-server.exe', '-m', 'models\\\\x.gguf']' returned non-zero exit status 1."
+    )
+
+
+def test_the_input_is_cut_before_it_is_sanitised():
+    import time
+
+    start = time.perf_counter()
+    out = _detail("x-" * 2_000_000)
+    assert time.perf_counter() - start < 2
+    assert len(out) <= MAX_DETAIL_CHARS
+
+
+def test_the_generic_apology_is_the_text_the_frontend_matches():
+    """The renderer recognises a generic failure by this exact line
+    (frontend/src/utils/messageContent.js, GENERIC_ERROR_LINE): rewording
+    ERROR_MESSAGE without the constant there stops the headline translation."""
+    from pathlib import Path
+
+    from src.agents.runner import ERROR_MESSAGE
+
+    frontend = Path(__file__).resolve().parents[2] / "frontend" / "src" / "utils"
+    assert ERROR_MESSAGE in (frontend / "messageContent.js").read_text(encoding="utf-8")
+
+
+def test_a_failing_str_never_raises():
+    class Unprintable(Exception):
+        def __str__(self):
+            raise RuntimeError("no str")
+
+    assert error_detail(Unprintable()) == "Unprintable"
+
+
+def test_a_quoted_key_names_its_exception_type():
+    assert error_detail(KeyError("choices")) == "KeyError: 'choices'"
+    assert error_detail(KeyError("")) == "KeyError"
+    try:
+        try:
+            raise KeyError("")
+        except KeyError as inner:
+            raise RuntimeError("meaningful wrapper") from inner
+    except RuntimeError as exc:
+        assert error_detail(exc) == "meaningful wrapper"

@@ -101,7 +101,7 @@ from src.agents.token_accounting import (
 from src.database.generation_hints import resolve_sampling_defaults, trained_context_window
 from src.agents.think_splitter import ThinkSplitter
 from src.core import config
-from src.core.error_detail import error_detail
+from src.core.error_detail import error_detail, sanitize
 from src.core.exceptions import (
     AppBaseException,
     CompactionFailedException,
@@ -1609,7 +1609,7 @@ def _construction_error_message(exc: Exception) -> str:
     ``EngineException`` messages are hand-written, not stringified stack traces.
     """
     if isinstance(exc, EngineException):
-        return f"{ERROR_SENTINEL} {exc}"
+        return f"{ERROR_SENTINEL} {sanitize(str(exc))}"
     return ERROR_MESSAGE
 
 
