@@ -960,7 +960,8 @@ export default function ConversationPage() {
             onCommand={setOpenCommand}
             saveFailed={conversationSettings.saveFailed}
           >
-            <UnloadModelButton />
+            {/* Re-read the loaded model when a turn ends or the model changes. */}
+            <UnloadModelButton refreshKey={`${loading}:${llmId}`} />
           </ConversationHeader>
         </div>
 

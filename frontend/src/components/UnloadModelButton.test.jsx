@@ -20,7 +20,11 @@ import UnloadModelButton from "./UnloadModelButton.jsx";
 const LOADED = { llm_id: 3, name: "Qwen3-4B" };
 const BUSY = "The model is busy; try again in a moment.";
 
-const httpError = (status) => Object.assign(new Error(`HTTP ${status}`), { status });
+const httpError = (status, type) =>
+  Object.assign(new Error(`HTTP ${status}`), {
+    status,
+    data: type ? { error: { type } } : {},
+  });
 
 beforeEach(() => {
   getMock.mockReset();
@@ -59,7 +63,7 @@ describe("UnloadModelButton", () => {
     render(<UnloadModelButton />);
     fireEvent.click(await screen.findByRole("button", { name: "Unload Qwen3-4B" }));
     await waitFor(() => expect(screen.queryByRole("button")).toBeNull());
-    expect(postMock).toHaveBeenCalledWith("/llms/loaded/unload");
+    expect(postMock).toHaveBeenCalledWith("/llms/loaded/unload", { llm_id: 3 });
     expect(getMock).toHaveBeenCalledTimes(2);
   });
 
@@ -109,5 +113,32 @@ describe("UnloadModelButton", () => {
     fireEvent.click(button);
     await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
     await waitFor(() => expect(screen.queryByRole("button")).toBeNull());
+  });
+
+  it("unloads only the model it names: another one loaded since is left alone", async () => {
+    // The button read Qwen3-4B; a model switch and a turn loaded Gemma since.
+    getMock.mockResolvedValueOnce(LOADED).mockResolvedValue({ llm_id: 8, name: "Gemma" });
+    postMock.mockRejectedValue(httpError(409, "LOADED_MODEL_CHANGED"));
+    render(<UnloadModelButton />);
+    fireEvent.click(await screen.findByRole("button", { name: "Unload Qwen3-4B" }));
+    expect(postMock).toHaveBeenCalledWith("/llms/loaded/unload", { llm_id: 3 });
+    expect((await screen.findByRole("alert")).textContent).toBe("Another model is loaded now.");
+    // It reads the loaded model again and names it.
+    expect(await screen.findByRole("button", { name: "Unload Gemma" })).toBeTruthy();
+  });
+
+  it("asks again when the page says a turn ended or the model changed", async () => {
+    getMock.mockResolvedValue(null);
+    const { rerender } = render(<UnloadModelButton refreshKey="idle:3" />);
+    await waitFor(() => expect(getMock).toHaveBeenCalledTimes(1));
+    expect(screen.queryByRole("button")).toBeNull();
+
+    getMock.mockResolvedValue(LOADED);
+    rerender(<UnloadModelButton refreshKey="idle:3" />);
+    expect(getMock).toHaveBeenCalledTimes(1);
+    rerender(<UnloadModelButton refreshKey="answering:3" />);
+    rerender(<UnloadModelButton refreshKey="idle:3" />);
+    expect(await screen.findByRole("button", { name: "Unload Qwen3-4B" })).toBeTruthy();
+    expect(getMock).toHaveBeenCalledTimes(3);
   });
 });

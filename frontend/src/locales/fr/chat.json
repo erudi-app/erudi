@@ -33,7 +33,8 @@
     "pickerAttention": "Veuillez sélectionner un modèle",
     "unload": "Décharger {{model}}",
     "unloadBusy": "Le modèle est occupé ; réessayez dans un instant.",
-    "unloadFailed": "Le modèle n'a pas pu être déchargé."
+    "unloadFailed": "Le modèle n'a pas pu être déchargé.",
+    "unloadModelChanged": "Un autre modèle est chargé maintenant."
   },
   "commands": {
     "listLabel": "Commandes",

@@ -33,7 +33,8 @@
     "pickerAttention": "Please select a model",
     "unload": "Unload {{model}}",
     "unloadBusy": "The model is busy; try again in a moment.",
-    "unloadFailed": "The model could not be unloaded."
+    "unloadFailed": "The model could not be unloaded.",
+    "unloadModelChanged": "Another model is loaded now."
   },
   "commands": {
     "listLabel": "Commands",

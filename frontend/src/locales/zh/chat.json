@@ -33,7 +33,8 @@
     "pickerAttention": "请选择一个模型",
     "unload": "卸载 {{model}}",
     "unloadBusy": "模型正忙，请稍后再试。",
-    "unloadFailed": "无法卸载模型。"
+    "unloadFailed": "无法卸载模型。",
+    "unloadModelChanged": "现在加载的是另一个模型。"
   },
   "commands": {
     "listLabel": "命令",

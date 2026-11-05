@@ -299,7 +299,8 @@ export default function ChatPage() {
               commands={COMMANDS}
               onCommand={setOpenCommand}
             >
-              <UnloadModelButton />
+              {/* Re-read the loaded model when the draft's model changes. */}
+              <UnloadModelButton refreshKey={llm?.id} />
             </ConversationHeader>
 
             {/* Question Input - Always visible */}

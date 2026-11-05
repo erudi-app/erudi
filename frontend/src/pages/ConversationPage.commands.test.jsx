@@ -197,6 +197,34 @@ describe("the header", () => {
     expect(await screen.findByRole("button", { name: "Unload Another Model" })).toBeTruthy();
   });
 
+  it("shows the Unload button once a turn has loaded the model, with the panel open", async () => {
+    let loaded = null;
+    getMock.mockImplementation(async (path) => (path === "/llms/loaded" ? loaded : []));
+    await renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith("/llms/loaded"));
+    expect(screen.queryByRole("button", { name: /^Unload/ })).toBeNull();
+
+    loaded = { llm_id: 1, name: "Qwen3-4B" };
+    typeAndEnter("Hello");
+    expect(await screen.findByRole("button", { name: "Unload Qwen3-4B" })).toBeTruthy();
+  });
+
+  it("names the newly loaded model after a /model switch, with the panel open", async () => {
+    let loaded = { llm_id: 1, name: "Qwen3-4B" };
+    getMock.mockImplementation(async (path) => (path === "/llms/loaded" ? loaded : []));
+    patchMock.mockImplementation(async () => ({ ...detail, llm_id: 2 }));
+    await renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
+    expect(await screen.findByRole("button", { name: "Unload Qwen3-4B" })).toBeTruthy();
+
+    loaded = { llm_id: 2, name: "Gemma-3-4B" };
+    typeAndEnter("/model");
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.click(within(dialog).getByRole("button", { name: /Gemma-3-4B/ }));
+    expect(await screen.findByRole("button", { name: "Unload Gemma-3-4B" })).toBeTruthy();
+  });
+
   it("shows no Unload button when no model is loaded", async () => {
     getMock.mockImplementation(async (path) => (path === "/llms/loaded" ? null : []));
     await renderPage();
