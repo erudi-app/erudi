@@ -173,3 +173,9 @@ class TestConversationWireEvent:
         """Existing clients read `{t, text}`; nothing extra appears for them."""
         event = self._error_event({"t": "answer", "text": f"{runner_module.ERROR_SENTINEL} boom"})
         assert event == {"t": "error", "text": f"{runner_module.ERROR_SENTINEL} boom"}
+
+    def test_the_curated_flag_rides_only_when_the_runner_set_it(self):
+        event = self._error_event(
+            {"t": "answer", "text": f"{runner_module.ERROR_SENTINEL} boom", "curated": True}
+        )
+        assert event["curated"] is True

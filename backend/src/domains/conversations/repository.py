@@ -8,6 +8,7 @@ from typing import List, Optional
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
+from src.agents.runner import ERROR_SENTINEL
 from src.agents.reasoning_effort import DEFAULT_REASONING_EFFORT
 from src.engines.working_window import DEFAULT_COMPACTION_THRESHOLD
 from src.database.generation_hints import (
@@ -364,7 +365,8 @@ class MessageRepository:
             conversation_id: ID of the conversation
 
         Returns:
-            List of starred message contents
+            List of starred message contents. A failed turn (its content holds the
+            error sentinel) is never one: its apology is not context for the model.
         """
         try:
             messages = (
@@ -375,7 +377,7 @@ class MessageRepository:
                 )
                 .all()
             )
-            return [msg.content for msg in messages]
+            return [msg.content for msg in messages if ERROR_SENTINEL not in msg.content]
         except SQLAlchemyError as e:
             # Degraded, not failed: the turn goes on without the starred
             # context, and the traceback says why it was missing.

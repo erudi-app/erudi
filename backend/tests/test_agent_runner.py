@@ -223,9 +223,12 @@ async def test_recursion_limit_loop_no_result_yields_loop_message(monkeypatch, c
                 params=_PARAMS,
                 thread_id="c1",
                 tools=[blank_tool],
+                emit_events=True,
             )
         ]
-    joined = "".join(out)
+    answers = [e for e in out if e["t"] == "answer"]
+    assert [e.get("curated") for e in answers] == [True]
+    joined = "".join(e["text"] for e in answers)
     assert ERROR_SENTINEL in joined
     assert "rephrasing" in joined
     assert any("recursion limit" in r.message for r in caplog.records)
@@ -1357,6 +1360,90 @@ async def test_events_construction_error_is_sentinel_answer(monkeypatch):
     assert "/secret/path" not in events[0]["text"]
 
 
+async def test_events_generic_construction_error_carries_the_cleaned_detail(monkeypatch):
+    """#615: an unexpected construction failure keeps the generic headline and
+    carries the sanitised leaf cause and the request id on the same event."""
+    from src.core.request_context import request_id_var
+
+    def _boom(llm, **kw):
+        raise RuntimeError("model load failed: /secret/path/q4.gguf")
+
+    monkeypatch.setattr(runner_module, "build_chat_model", _boom)
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    token = request_id_var.set("be-test0001")
+    try:
+        events = await _events(
+            runner,
+            llm=_Llm(),
+            user_message="hi",
+            system_prompt="s",
+            params=_PARAMS,
+            thread_id="d1",
+        )
+    finally:
+        request_id_var.reset(token)
+
+    assert events == [
+        {
+            "t": "answer",
+            "text": runner_module.ERROR_MESSAGE,
+            "detail": "model load failed: q4.gguf",
+            "request_id": "be-test0001",
+        }
+    ]
+
+
+async def test_construction_error_message_is_sanitised(monkeypatch):
+    """The sentence of a curated construction failure is shown in the red line:
+    a path in it is reduced to its file name."""
+    from src.core.exceptions import EngineException
+
+    def _boom(llm, **kw):
+        raise EngineException(message="Model path not found: /Users/jane/models/x.gguf")
+
+    monkeypatch.setattr(runner_module, "build_chat_model", _boom)
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="d4",
+    )
+
+    assert events[0]["text"] == f"{ERROR_SENTINEL} Model path not found: x.gguf"
+
+
+async def test_events_curated_construction_error_carries_no_detail(monkeypatch):
+    """An EngineException is already a curated sentence: no detail rides along."""
+    from src.core.exceptions import EngineException
+
+    def _boom(llm, **kw):
+        raise EngineException(message="The model folder is missing")
+
+    monkeypatch.setattr(runner_module, "build_chat_model", _boom)
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    events = await _events(
+        runner,
+        llm=_Llm(),
+        user_message="hi",
+        system_prompt="s",
+        params=_PARAMS,
+        thread_id="d2",
+    )
+
+    assert len(events) == 1
+    assert "detail" not in events[0] and "request_id" not in events[0]
+    # A construction failure is a real failure, not a curated turn: the
+    # renderer counts it as a bug.
+    assert "curated" not in events[0]
+    assert events[0]["text"].endswith("The model folder is missing")
+
+
 # ===== Streaming budgets (#573) =====
 
 
@@ -1427,6 +1514,7 @@ async def test_events_inter_chunk_timeout_says_the_model_went_silent(monkeypatch
     assert ERROR_SENTINEL in text
     assert text != runner_module.ERROR_MESSAGE
     assert "start answering" not in text
+    assert [e.get("curated") for e in events if e["t"] == "answer"] == [True]
 
 
 async def test_events_stream_timeout_logs_one_warning_with_the_budget(monkeypatch, caplog):
@@ -1496,6 +1584,7 @@ async def test_events_child_token_queue_timeout_maps_to_the_prefill_turn(monkeyp
     assert "MLX_VLM_TOKEN_QUEUE_TIMEOUT" not in text
     assert text != runner_module.ERROR_MESSAGE
     assert "Traceback" not in text
+    assert [e.get("curated") for e in events if e["t"] == "answer"] == [True]
 
 
 async def test_events_child_token_queue_timeout_logs_one_warning(monkeypatch, caplog):
@@ -1584,6 +1673,7 @@ async def test_events_llama_overflow_yields_curated_turn_with_numbers(monkeypatc
     assert "8192" in text
     assert "Traceback" not in text
     assert text != runner_module.ERROR_MESSAGE
+    assert [e.get("curated") for e in events if e["t"] == "answer"] == [True]
 
 
 async def test_events_mlx_overflow_yields_curated_turn_with_numbers(monkeypatch):
@@ -1785,6 +1875,38 @@ async def test_events_unrelated_bad_request_error_keeps_generic_error(monkeypatc
     )
 
     assert _answers(events) == runner_module.ERROR_MESSAGE
+
+
+async def test_events_generic_stream_failure_carries_the_cleaned_detail(monkeypatch):
+    """#615: the generic streaming failure keeps its headline and carries the
+    leaf cause, sanitised, plus the request id."""
+    from src.core.request_context import request_id_var
+
+    class _BrokenModel(_OverflowRaisingModel):
+        overflow_exc: ClassVar[Exception] = RuntimeError(
+            "upstream said no at /private/tmp/erudi/child.sock"
+        )
+
+    _patch_model(monkeypatch, _BrokenModel(messages=iter([])))
+    runner = AgentRunner(checkpointer=InMemorySaver())
+
+    token = request_id_var.set("be-test0002")
+    try:
+        events = await _events(
+            runner,
+            llm=_Llm(),
+            user_message="hi",
+            system_prompt="s",
+            params=_PARAMS,
+            thread_id="d3",
+        )
+    finally:
+        request_id_var.reset(token)
+
+    failure = [e for e in events if e["t"] == "answer"][-1]
+    assert failure["text"] == runner_module.ERROR_MESSAGE
+    assert failure["detail"] == "upstream said no at child.sock"
+    assert failure["request_id"] == "be-test0002"
 
 
 async def test_events_overflow_logs_one_warning_with_the_numbers(monkeypatch, caplog):

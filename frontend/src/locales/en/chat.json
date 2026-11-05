@@ -189,6 +189,12 @@
     "body": "Base models have been massively trained on English data. You will get significantly better results by chatting in English.",
     "frenchAside": "Pour les français, ça vous fera de l'entraînement :)"
   },
+  "errorDetails": {
+    "show": "Details",
+    "hide": "Hide details",
+    "requestId": "Request id",
+    "copy": "Copy details"
+  },
   "errors": {
     "network": "Network error",
     "loadModels": "Failed to load models: {{error}}",
