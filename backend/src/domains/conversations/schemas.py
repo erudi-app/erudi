@@ -20,7 +20,7 @@ Validation Rules:
     - Temperature: 0.0-2.0
     - Top-p: 0.0-1.0
     - Max tokens: 1-32768
-    - Custom prompt: Max 4096 characters
+    - Custom prompt: no character cap (the model's context window bounds it)
     - A field left out of a creation is resolved per model
       (``src.domains.llms.conversation_defaults``)
 
@@ -63,8 +63,10 @@ from src.entities.Conversation import TEMPERATURE_MAX, TEMPERATURE_MIN, TOP_P_MA
 # per-model defaults (``src.domains.llms.schemas.ConversationDefaultsUpdate``).
 Temperature = Annotated[float, Field(ge=TEMPERATURE_MIN, le=TEMPERATURE_MAX)]
 TopP = Annotated[float, Field(ge=TOP_P_MIN, le=TOP_P_MAX)]
-CUSTOM_PROMPT_MAX_CHARS = 4096
-CustomPrompt = Annotated[str, Field(max_length=CUSTOM_PROMPT_MAX_CHARS)]
+# Custom instructions have no character cap: the model's context window is
+# their bound (an oversized prompt gets the honest overflow answer, #599), and
+# instructions stored before the per-model defaults may be of any length.
+CustomPrompt = str
 
 
 class MessageBase(BaseModel):
@@ -150,7 +152,7 @@ class ConversationCreate(ConversationBase):
         max_tokens: Legacy fallback ceiling, used ONLY when the engine
             cannot report a context window; with a window, the output
             budget is automatic and this value is ignored.
-        custom_prompt: Custom system prompt (max 4096 chars).
+        custom_prompt: Custom system prompt (no character cap).
         web_search_enabled, reasoning_effort, compaction_threshold: The
             conversation's own settings.
 
@@ -334,8 +336,7 @@ class ConversationQuery(BaseModel):
             (``src.agents.output_budget``), so nothing on the client sets it.
             The field stays on the schema so an older client is answered, not
             rejected with a 422.
-        custom_prompt: Optional system prompt override for this query only
-            (max 4096 chars).
+        custom_prompt: Optional system prompt override for this query only.
 
     Example:
         ::

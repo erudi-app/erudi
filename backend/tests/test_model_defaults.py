@@ -267,6 +267,12 @@ class TestTheRoutes:
         )
         assert flat["custom_prompt"] == ("  Be brief.\n", "saved")
 
+    def test_long_instructions_are_saved_whole(self, client, hinted_llm):
+        # No character cap: the model's context window is the bound.
+        long = "x" * 5000
+        flat = _flat(client.put(_url(hinted_llm.id), json={"custom_prompt": long}).json())
+        assert flat["custom_prompt"] == (long, "saved")
+
     def test_an_empty_payload_changes_nothing(self, client, hinted_llm):
         client.put(_url(hinted_llm.id), json={"top_p": 0.3})
         flat = _flat(client.put(_url(hinted_llm.id), json={}).json())
@@ -283,8 +289,6 @@ class TestTheRoutes:
             {"compaction_threshold": True},
             {"compaction_threshold": 45},
             {"web_search_enabled": "sometimes"},
-            {"custom_prompt": "x" * 4097},
-            {"custom_prompt": "x" * 5000},
             {"max_tokens": 512},
         ],
     )

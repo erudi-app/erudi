@@ -28,7 +28,7 @@ out, is resolved for that model rather than hard-coded. The first value that exi
 | `temperature` | float, 0.0–2.0 | saved for the model, else the model's recommendation (`sampling_defaults`), else 0.2 |
 | `top_p` | float, 0.0–1.0 | saved for the model, else the model's recommendation, else 0.95 |
 | `max_tokens` | int, 1–32768 | resolved from the model's own defaults — see [Output budget](#output-budget) |
-| `custom_prompt` | string, ≤ 4096 chars | saved for the model, else empty |
+| `custom_prompt` | string, no character cap | saved for the model, else empty |
 | `web_search_enabled` | bool | saved for the model, else the global default from `GET /erudi/user_settings/` |
 | `reasoning_effort` | `none` \| `low` \| `medium` \| `high` \| `xhigh` | saved for the model, else the global default from `GET /erudi/user_settings/` |
 | `compaction_threshold` | int, 50–90 in steps of 5 (percent) | saved for the model, else the global default from `GET /erudi/user_settings/` — see [compaction](#how-conversation-state-is-kept) |
@@ -485,8 +485,10 @@ whitespace-only `custom_prompt` clears the saved instructions (empty instruction
 It never touches another model's values and returns the resolved values. A value off its scale or an
 unknown field is a 422 and saves nothing; an unknown model is a 404, and a model that is not
 downloaded (a catalog entry, a download in progress) is a 400. The bounds are the same on every
-path: temperature 0.0–2.0, `top_p` 0.0–1.0 and instructions of at most 4096 characters, whether
-they are saved here, sent at creation, in a PATCH or with a turn.
+path: temperature 0.0–2.0 and `top_p` 0.0–1.0, whether they are saved here, sent at creation, in a
+PATCH or with a turn. Custom instructions have no character cap on any path: the model's context
+window bounds them, and a prompt that does not fit gets the overflow answer (see
+[When the prompt no longer fits the context window](#when-the-prompt-no-longer-fits-the-context-window)).
 
 ### Star and unstar a message
 

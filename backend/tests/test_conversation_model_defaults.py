@@ -361,28 +361,61 @@ class TestModelSwitch:
         assert switched["max_tokens"] == 300
 
 
-# ===================== one bound per value, on every path =====================
+# ===================== the bounds, on every path =====================
 
 
 class TestValueBounds:
+    """Temperature and top_p have one bound on every path. Custom instructions
+    have none: the model's context window is their bound (an oversized prompt
+    gets the honest overflow answer), and instructions stored before 1.1.4
+    may already be longer than any fixed cap."""
+
     LONG = "x" * 5000
 
-    def test_creation_refuses_instructions_over_the_cap(self, client, model_a):
-        response = client.post(
-            "/erudi/conversations/", json={"llm_id": model_a.id, "custom_prompt": self.LONG}
-        )
-        assert response.status_code == 422
+    def test_creation_keeps_long_instructions_whole(self, client, model_a):
+        conversation = _create(client, model_a.id, custom_prompt=self.LONG)
+        assert conversation["custom_prompt"] == self.LONG
 
-    def test_saving_defaults_refuses_instructions_over_the_cap(self, client, model_a):
-        response = client.put(
-            f"/erudi/llms/{model_a.id}/conversation_defaults", json={"custom_prompt": self.LONG}
+    def test_a_patch_keeps_long_instructions_whole(self, client, model_a):
+        conversation = _create(client, model_a.id)
+        patched = _patch(client, conversation["id"], custom_prompt=self.LONG)
+        assert patched.status_code == 200, patched.text
+        stored = client.get(f"/erudi/conversations/{conversation['id']}").json()
+        assert stored["custom_prompt"] == self.LONG
+
+    def test_saved_long_instructions_open_a_conversation_whole(self, client, model_a):
+        _save(client, model_a.id, custom_prompt=self.LONG)
+        assert _create(client, model_a.id)["custom_prompt"] == self.LONG
+
+    def test_the_turn_payload_accepts_long_instructions(self):
+        assert ConversationQuery(question="hi", custom_prompt=self.LONG).custom_prompt == self.LONG
+
+    async def test_a_turn_with_long_stored_instructions_uses_them_whole(
+        self, test_db_session, model_a, monkeypatch, caplog
+    ):
+        service = ConversationService(test_db_session)
+        conversation = service.create_conversation(llm_id=model_a.id, custom_prompt=self.LONG)
+        test_db_session.commit()
+        plan_kwargs: dict = {}
+        monkeypatch.setattr("src.domains.conversations.services.plan_turn", _plan_spy(plan_kwargs))
+        monkeypatch.setattr(
+            "src.domains.conversations.services.detect_supports_vision", lambda link: False
         )
-        assert response.status_code == 422
+        monkeypatch.setattr(service.runner, "astream_text", _stream_spy({}))
+
+        with caplog.at_level(logging.INFO):
+            async for _ in service.query_and_respond_stream(
+                conversation.id,
+                ConversationQuery(question="hi", custom_prompt=conversation.custom_prompt),
+            ):
+                pass
+
+        assert plan_kwargs["custom_prompt"] == self.LONG
+        assert _turn_line(caplog).endswith("custom_prompt_chars=5000")
 
     @pytest.mark.parametrize(
         "values",
         [
-            {"custom_prompt": "x" * 5000},
             {"temperature": 5.0},
             {"temperature": -0.1},
             {"top_p": 1.5},
@@ -401,19 +434,10 @@ class TestValueBounds:
 
     def test_a_patch_at_the_bounds_is_accepted(self, client, model_a):
         conversation = _create(client, model_a.id)
-        patched = _patch(
-            client, conversation["id"], temperature=2.0, top_p=1.0, custom_prompt="x" * 4096
-        )
+        patched = _patch(client, conversation["id"], temperature=2.0, top_p=1.0)
         assert patched.status_code == 200, patched.text
 
-    @pytest.mark.parametrize(
-        "values",
-        [
-            {"custom_prompt": "x" * 5000},
-            {"temperature": 5.0},
-            {"top_p": 1.5},
-        ],
-    )
+    @pytest.mark.parametrize("values", [{"temperature": 5.0}, {"top_p": 1.5}])
     def test_a_turn_off_the_bounds_is_422(self, client, model_a, values):
         conversation = _create(client, model_a.id)
         response = client.post(
@@ -423,10 +447,9 @@ class TestValueBounds:
 
     def test_the_turn_payload_schema_carries_the_bounds(self):
         with pytest.raises(ValidationError):
-            ConversationQuery(question="hi", custom_prompt="x" * 4097)
-        with pytest.raises(ValidationError):
             ConversationQuery(question="hi", temperature=2.5)
-        assert ConversationQuery(question="hi", custom_prompt="x" * 4096).custom_prompt
+        with pytest.raises(ValidationError):
+            ConversationQuery(question="hi", top_p=1.01)
 
 
 # ===================== the turn settings line =====================
