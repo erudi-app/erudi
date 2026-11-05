@@ -12,6 +12,8 @@
  *   on; Squirrel emits its own `update-downloaded` once it holds it.
  * - `checkForUpdates()` emits `update-available` and starts a download only
  *   while `autoDownload` is on, returning its cancellation token.
+ * - `downloadUpdate()` joins a download already in flight and ignores the
+ *   token it is given (AppUpdater `downloadUpdate`).
  */
 import { EventEmitter } from "node:events";
 import { describe, it, expect, vi } from "vitest";
@@ -70,14 +72,27 @@ class FakeUpdater extends EventEmitter {
   }
 
   download(token) {
+    if (this.pending && !this.pending.settled) {
+      // The library returns the download in flight; the new token is unused.
+      return this.pending.promise;
+    }
     let resolve;
     let reject;
     const promise = new Promise((res, rej) => {
       resolve = res;
       reject = rej;
     });
-    this.pending = { info: this.available, resolve, reject };
-    token.onCancel(() => reject(new Error("cancelled")));
+    const pending = { info: this.available, promise, settled: false };
+    pending.resolve = (value) => {
+      pending.settled = true;
+      resolve(value);
+    };
+    pending.reject = (error) => {
+      pending.settled = true;
+      reject(error);
+    };
+    this.pending = pending;
+    token.onCancel(() => pending.reject(new Error("cancelled")));
     return promise;
   }
 
@@ -259,6 +274,26 @@ describe("turning Check or Download off during an automatic download (P3-9)", ()
     wiring.setPreferences(next);
     await flush();
 
+    expect(sent("download-cancelled")).toEqual([{ version: "1.2.0" }]);
+    expect(wiring.getState()).toMatchObject({ phase: "available", version: "1.2.0" });
+  });
+
+  it("still cancels it after a periodic check landed during the download (P3-A)", async () => {
+    const { updater, wiring, sent, timers } = setup();
+    wiring.setPreferences(WITH_DOWNLOAD);
+    await flush();
+    updater.progress(20);
+
+    // The 4-hourly tick: the library joins the download in flight.
+    await timers.setInterval.mock.calls[0][0]();
+    await flush();
+    expect(wiring.getState()).toMatchObject({ phase: "downloading", version: "1.2.0" });
+    expect(sent("update-available").at(-1)).toEqual({ version: "1.2.0", downloading: true });
+
+    wiring.setPreferences(CHECK_ONLY);
+    await flush();
+
+    expect(updater.pending.settled).toBe(true);
     expect(sent("download-cancelled")).toEqual([{ version: "1.2.0" }]);
     expect(wiring.getState()).toMatchObject({ phase: "available", version: "1.2.0" });
   });

@@ -43,7 +43,7 @@ export async function syncUpdatePreferencesWithMain(client) {
   try {
     snapshot = updatePreferencesFrom(await client.get("/user_settings/"));
   } catch (error) {
-    log.warn("Could not read the update settings; nothing will download or install", error);
+    log.warn("Could not read the update settings; nothing will check, download or install", error);
   }
   notifyUpdatePreferences(snapshot);
   return snapshot;

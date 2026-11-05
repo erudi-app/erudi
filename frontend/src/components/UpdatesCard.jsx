@@ -48,6 +48,12 @@ export default function UpdatesCard() {
   // A download the user started failed: said on the card, which offers it again.
   const [downloadFailed, setDownloadFailed] = useState(false);
   const { phase, version: offeredVersion, percent } = updater;
+  // What the card said before a check, to go back to when a background check
+  // (not one this user started) fails.
+  const beforeCheck = useRef(IDLE);
+  useEffect(() => {
+    if (phase !== "checking") beforeCheck.current = updater;
+  }, [phase, updater]);
   // A flow this user started. An updater error is only ever shown inside one,
   // and nothing renders from it, so it is a ref: flipping it must not redraw.
   const engaged = useRef(false);
@@ -109,7 +115,9 @@ export default function UpdatesCard() {
         engaged.current = false;
         setUpdater((prev) => {
           const next = updaterStateAfter(prev, payload);
-          return next.phase === "error" && !wasEngaged ? prev : next;
+          if (next.phase !== "error" || wasEngaged) return next;
+          // Never left on a disabled "Checking..." by a check nobody asked for.
+          return prev.phase === "checking" ? beforeCheck.current : prev;
         });
         if (wasEngaged) setDownloadFailed(true);
         return;

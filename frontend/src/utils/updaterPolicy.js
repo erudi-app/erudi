@@ -181,7 +181,9 @@ export function bannerStateAfter(state, payload) {
  * "error". Once a version is on disk (`downloadedVersion`), the periodic
  * check cannot take it back to "available" for that same version, nor to
  * "checking", "up-to-date" or "error": the update can still be installed.
- * A download that fails or is cancelled goes back to "available".
+ * A check during a download of that same version leaves it downloading (the
+ * library joins the download in flight). A download that fails or is
+ * cancelled goes back to "available".
  *
  * @param {{phase: string, version: string | null, percent: number,
  *   downloadedVersion: string | null}} state
@@ -192,8 +194,11 @@ export function updaterStateAfter(state, payload) {
   const onDisk = state.downloadedVersion ?? null;
   switch (payload.event) {
     case "checking-for-update":
-      return onDisk ? state : { ...state, phase: "checking" };
+      return onDisk || state.phase === "downloading" ? state : { ...state, phase: "checking" };
     case "update-available":
+      if (state.phase === "downloading" && payload.version === state.version) {
+        return state;
+      }
       if (onDisk && payload.version === onDisk) {
         return state.phase === "downloaded"
           ? state

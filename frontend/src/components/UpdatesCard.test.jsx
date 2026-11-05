@@ -241,6 +241,31 @@ describe("UpdatesCard — failures stay on the card", () => {
     expect(screen.getByRole("button", { name: "Check for updates" }).disabled).toBe(false);
   });
 
+  it("leaves Checking when a background check fails while the card is open (P3-B)", async () => {
+    render(<UpdatesCard />);
+    await screen.findByRole("button", { name: "Check for updates" });
+
+    emit({ event: "checking-for-update" });
+    expect(screen.getByRole("button", { name: "Checking…" }).disabled).toBe(true);
+    emit({ event: "error" });
+
+    expect(screen.getByRole("button", { name: "Check for updates" }).disabled).toBe(false);
+    expect(screen.queryByText(/could not be checked/i)).toBeNull();
+  });
+
+  it("goes back to what it said before a background check that fails", async () => {
+    render(<UpdatesCard />);
+    fireEvent.click(await screen.findByRole("button", { name: "Check for updates" }));
+    emit({ event: "update-not-available" });
+    expect(screen.getByText("You are on the latest version.")).toBeTruthy();
+
+    emit({ event: "checking-for-update" });
+    emit({ event: "error" });
+
+    expect(screen.getByText("You are on the latest version.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Check for updates" }).disabled).toBe(false);
+  });
+
   it("stays quiet when a background check fails behind the user's back", async () => {
     render(<UpdatesCard />);
     await screen.findByRole("button", { name: "Check for updates" });

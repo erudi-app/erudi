@@ -120,7 +120,11 @@ const BLOCK_TAGS = new Set([
   "tr",
   "hr",
 ]);
-const DROPPED_WITH_CONTENT = new Set(["script", "style"]);
+// Their closing tags, searched from a given index (sticky search, built once).
+const CLOSING_TAG = new Map([
+  ["script", /<\/script/gi],
+  ["style", /<\/style/gi],
+]);
 
 const isLetter = (char) => (char >= "a" && char <= "z") || (char >= "A" && char <= "Z");
 
@@ -167,8 +171,8 @@ function htmlToLines(html) {
     while (nameEnd < gt && /[a-zA-Z0-9]/.test(html[nameEnd])) nameEnd += 1;
     const name = html.slice(nameStart, nameEnd).toLowerCase();
     const closing = nameStart === lt + 2;
-    if (!closing && DROPPED_WITH_CONTENT.has(name)) {
-      const close = new RegExp(`</${name}`, "gi");
+    if (!closing && CLOSING_TAG.has(name)) {
+      const close = CLOSING_TAG.get(name);
       close.lastIndex = i;
       const found = close.exec(html);
       if (!found) break;

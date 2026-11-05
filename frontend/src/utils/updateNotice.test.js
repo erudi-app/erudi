@@ -248,6 +248,10 @@ describe("releaseNotesToLines: bounded work on any input (P3-3)", () => {
     expect(releaseNotesToLines("<p>Kept</p><script>alert(1)<p>gone</p>")).toEqual(["Kept"]);
   });
 
+  it("reads tags named like built-in properties as plain tags", () => {
+    expect(releaseNotesToLines("<p><constructor>a</constructor><toString>b</p>")).toEqual(["ab"]);
+  });
+
   it("keeps a lone angle bracket as text", () => {
     expect(releaseNotesToLines("<p>1 < 2 and <3</p>")).toEqual(["1 < 2 and <3"]);
   });

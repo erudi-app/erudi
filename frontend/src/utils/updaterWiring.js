@@ -156,7 +156,10 @@ export function createUpdaterWiring({
   });
 
   const trackAutomaticDownload = (result) => {
-    if (!result?.downloadPromise) return;
+    // A check during a download joins it (AppUpdater `downloadUpdate` returns
+    // the download in flight and ignores the new token): the first token is
+    // still the one that stops it.
+    if (!result?.downloadPromise || automaticDownload !== null) return;
     const token = result.cancellationToken;
     automaticDownload = token;
     result.downloadPromise.then(

@@ -402,6 +402,22 @@ describe("updaterStateAfter: the state main and the Update Erudi card keep", () 
     }
   });
 
+  it("keeps a download in flight when a check finds the same version (P3-A)", () => {
+    const downloading = {
+      phase: "downloading",
+      version: "1.2.0",
+      percent: 40,
+      downloadedVersion: null,
+    };
+    expect(updaterStateAfter(downloading, { event: "update-available", version: "1.2.0" })).toBe(
+      downloading
+    );
+    expect(updaterStateAfter(downloading, { event: "checking-for-update" })).toBe(downloading);
+    expect(
+      updaterStateAfter(downloading, { event: "update-available", version: "1.3.0" })
+    ).toMatchObject({ phase: "available", version: "1.3.0" });
+  });
+
   it("moves on to a newer version found after a download", () => {
     expect(
       updaterStateAfter(DOWNLOADED, { event: "update-available", version: "1.3.0" })
