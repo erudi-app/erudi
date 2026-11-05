@@ -175,3 +175,24 @@ describe("ArenaPage stop generation (#136 H)", () => {
     expect(screen.queryByText(/\[Erreur\]/)).toBeNull();
   });
 });
+
+describe("ArenaPage animation timers (#532)", () => {
+  it("clears the add-panel animation timers when the page unmounts", async () => {
+    apiClient.get.mockResolvedValue([{ id: 1, name: "m1" }]);
+    const { unmount } = render(<ArenaPage />);
+    await screen.findAllByText("panel:m1");
+    vi.useFakeTimers();
+    try {
+      fireEvent.click(screen.getByTitle("Add chat panel"));
+      const pending = vi.getTimerCount();
+      expect(pending).toBeGreaterThan(0);
+      unmount();
+      // Every animation timer the click scheduled is gone with the page: none
+      // can fire into an unmounted tree after the test environment is torn down.
+      expect(vi.getTimerCount()).toBeLessThan(pending);
+      vi.runOnlyPendingTimers();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});

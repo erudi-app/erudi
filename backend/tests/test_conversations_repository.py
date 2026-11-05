@@ -219,6 +219,17 @@ class TestMessageRepository:
         assert test_db_session.get(Message, message.id).starred is False
         assert msg_repo.get_starred_messages(conversation.id) == []
 
+    def test_a_starred_error_turn_is_not_a_starred_context(self, msg_repo, conversation):
+        """The system prompt's starred block never carries a failed turn."""
+        from src.agents.runner import ERROR_MESSAGE
+
+        kept = msg_repo.create_message(conversation.id, "important", "llm")
+        failed = msg_repo.create_message(conversation.id, f"Half\n\n{ERROR_MESSAGE}", "llm")
+        msg_repo.star_message(kept.id)
+        msg_repo.star_message(failed.id)
+
+        assert msg_repo.get_starred_messages(conversation.id) == ["important"]
+
     def test_star_unknown_message_raises(self, msg_repo):
         with pytest.raises(MessageNotFoundException):
             msg_repo.star_message(987654321)

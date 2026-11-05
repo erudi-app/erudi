@@ -249,6 +249,12 @@
     "body": "基础模型主要使用英文数据训练。用英文聊天会获得明显更好的效果。",
     "frenchAside": "对中文用户来说，这也是练习英文的好机会 :)"
   },
+  "errorDetails": {
+    "show": "详细信息",
+    "hide": "隐藏详细信息",
+    "requestId": "请求 ID",
+    "copy": "复制详细信息"
+  },
   "errors": {
     "network": "网络错误",
     "loadModels": "加载模型失败：{{error}}",

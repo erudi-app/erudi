@@ -49,6 +49,7 @@ vi.mock("../components/MarkdownRenderer", () => ({
 vi.mock("../components/modals/EngineFailureModal", () => ({ default: () => null }));
 
 import ConversationPage from "./ConversationPage.jsx";
+import { GENERIC_ERROR_LINE } from "../utils/messageContent";
 
 const MODELS = [
   { id: 1, name: "Qwen3-4B", supports_tools: true, supports_tools_wire: true },
@@ -389,6 +390,26 @@ describe("the separators of a reloaded conversation", () => {
     render(<ConversationPage />);
     const answer = await screen.findByText(/Timed out\./);
     expect(before(answer, screen.getByText("You summarized 2 earlier messages."))).toBe(true);
+  });
+
+  it("keeps the automatic one above and the /compact one below a failure that carries its Details", async () => {
+    const cause = {
+      t: "error_detail",
+      text: "ReadTimeout: model did not answer",
+      request_id: "be-9",
+    };
+    messages = [
+      ...HISTORY.slice(0, 3),
+      { id: 4, sender: "llm", content: GENERIC_ERROR_LINE, trace: [automatic, cause, manual] },
+    ];
+    render(<ConversationPage />);
+    const details = await screen.findByRole("button", { name: "Details" });
+    const above = screen.getByText(/6 earlier messages were summarized/);
+    const below = screen.getByText("You summarized 2 earlier messages.");
+    expect(before(above, details)).toBe(true);
+    expect(before(details, below)).toBe(true);
+    fireEvent.click(details);
+    expect(screen.getByText("ReadTimeout: model did not answer")).toBeTruthy();
   });
 });
 

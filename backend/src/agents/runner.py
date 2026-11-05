@@ -101,6 +101,7 @@ from src.agents.token_accounting import (
 from src.database.generation_hints import resolve_sampling_defaults, trained_context_window
 from src.agents.think_splitter import ThinkSplitter
 from src.core import config
+from src.core.error_detail import error_detail, sanitize
 from src.core.exceptions import (
     AppBaseException,
     CompactionFailedException,
@@ -110,6 +111,7 @@ from src.core.exceptions import (
     log_level_for_status,
 )
 from src.core.logging import logger
+from src.core.request_context import get_request_id
 from src.engines.base_engine import BaseEngine, run_reset_shielded, wait_shielded
 from src.engines.memory_brake import (
     NOTICE_ACTED,
@@ -906,6 +908,9 @@ def _summary_placeholder(previous: Any, max_tokens: Optional[int] = None) -> str
 # history is rewritten -- the conversation service keeps that one in the
 # turn's trace, so the thread marks where the summary took over.
 COMPACTION_EVENT = "compaction"
+# Trace event of a turn that failed unexpectedly (#615): the cleaned cause and the
+# request id of the failing request, persisted with the failed message.
+ERROR_DETAIL_EVENT = "error_detail"
 _COMPACTION_PHASES = frozenset({"start", "done"})
 # Why a compaction happened, as ``done`` says it: the computer's memory bounds
 # the working window, or the conversation outgrew the model's own window.
@@ -1604,8 +1609,24 @@ def _construction_error_message(exc: Exception) -> str:
     ``EngineException`` messages are hand-written, not stringified stack traces.
     """
     if isinstance(exc, EngineException):
-        return f"{ERROR_SENTINEL} {exc}"
+        return f"{ERROR_SENTINEL} {sanitize(str(exc))}"
     return ERROR_MESSAGE
+
+
+def _curated_answer(text: str) -> dict:
+    """The answer event of a curated failed turn: words the app chose (a prompt
+    that does not fit, a model that went silent, the tool-loop limit), not an
+    unexpected failure. ``curated`` rides to the wire ``error`` event, where the
+    renderer logs it at WARNING instead of ERROR."""
+    return {"t": "answer", "text": text, "curated": True}
+
+
+def _generic_failure_detail(exc: BaseException) -> dict:
+    """What a generic failure carries next to its headline (#615): the cleaned
+    leaf cause and the id of the failing request, so the interface can show
+    both under the red message and the matching Diagnostics entry is findable.
+    Built where the exception is caught."""
+    return {"detail": error_detail(exc), "request_id": get_request_id()}
 
 
 def _construction_error_event(exc: Exception) -> dict:
@@ -1625,6 +1646,8 @@ def _construction_error_event(exc: Exception) -> dict:
     the stream it has always seen.
     """
     event: dict = {"t": "answer", "text": _construction_error_message(exc)}
+    if not isinstance(exc, EngineException):
+        event.update(_generic_failure_detail(exc))
     code = getattr(exc, "engine_code", None)
     if code:
         event["code"] = code
@@ -2421,7 +2444,7 @@ class AgentRunner:
                                 char_count += len(last_tool_result)
                                 yield _record({"t": "answer", "text": last_tool_result})
                             else:
-                                yield _record({"t": "answer", "text": LOOP_LIMIT_MESSAGE})
+                                yield _record(_curated_answer(LOOP_LIMIT_MESSAGE))
                         if stateful:
                             await self._repair_alternation(agent, run_config)
                     except GenerationTimeoutException as exc:
@@ -2443,7 +2466,7 @@ class AgentRunner:
                         for text in hop_text_buffer:
                             yield _record({"t": "answer", "text": text})
                         hop_text_buffer.clear()
-                        yield _record({"t": "answer", "text": _stream_timeout_message(exc)})
+                        yield _record(_curated_answer(_stream_timeout_message(exc)))
                     except Exception as exc:
                         overflow = parse_context_overflow(exc)
                         if overflow is not None:
@@ -2463,12 +2486,9 @@ class AgentRunner:
                                 yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
                             yield _record(
-                                {
-                                    "t": "answer",
-                                    "text": _context_overflow_message(
-                                        overflow, _memory_bound_of(engine)
-                                    ),
-                                }
+                                _curated_answer(
+                                    _context_overflow_message(overflow, _memory_bound_of(engine))
+                                )
                             )
                         elif is_child_prefill_timeout(exc):
                             # Defense in depth (#573 alignment): the MLX child's
@@ -2495,13 +2515,12 @@ class AgentRunner:
                             hop_text_buffer.clear()
                             # Reuse the parent watchdog's curated first-chunk turn.
                             yield _record(
-                                {
-                                    "t": "answer",
-                                    "text": PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
+                                _curated_answer(
+                                    PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
                                         sentinel=ERROR_SENTINEL,
                                         minutes=max(1, round(ceiling / 60)),
-                                    ),
-                                }
+                                    )
+                                )
                             )
                         else:
                             # A stream that breaks because the inference child died shows
@@ -2520,7 +2539,13 @@ class AgentRunner:
                             for text in hop_text_buffer:
                                 yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
-                            yield _record({"t": "answer", "text": ERROR_MESSAGE})
+                            yield _record(
+                                {
+                                    "t": "answer",
+                                    "text": ERROR_MESSAGE,
+                                    **_generic_failure_detail(exc),
+                                }
+                            )
             except BaseException as exit_in_flight:
                 _flag_abandoned(abandon_hook)
                 # Synchronous on purpose: the exit in flight (a closed

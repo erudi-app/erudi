@@ -7,6 +7,8 @@
 // turn ran, rendered as separators above the bubble, never inside the strip.
 // A /compact run (#585) saves its own `done` event, `manual: true`, on the
 // last answer it found: that separator renders below the bubble.
+// A failed turn also holds {"t":"error_detail","text","request_id"} (#615): the
+// cleaned cause, shown under the red headline.
 
 const STRIP_KINDS = new Set(["thinking", "tool_call", "tool_result"]);
 
@@ -31,9 +33,21 @@ export function manualCompactions(trace) {
   return compactionMarkers(trace).filter((e) => e.manual === true);
 }
 
-/** What an error turn keeps of its trace: its compactions (the compaction was
- * checkpointed before the model call failed), or nothing. */
-export function compactionsOnly(trace) {
-  const kept = compactionMarkers(trace);
+const isErrorDetail = (e) =>
+  isEvent(e) && e.t === "error_detail" && typeof e.text === "string" && e.text !== "";
+
+/** The cleaned cause of an unexpectedly failed turn (#615):
+ * {"t":"error_detail","text","request_id"}, or null. */
+export function errorDetailOf(trace) {
+  return (Array.isArray(trace) && trace.find(isErrorDetail)) || null;
+}
+
+/** What an error turn keeps of its trace: its compactions (checkpointed before
+ * the model call failed) and the cause of its failure, or nothing. */
+export function errorTurnTrace(trace) {
+  if (!Array.isArray(trace)) {
+    return null;
+  }
+  const kept = trace.filter((e) => isCompactionDone(e) || isErrorDetail(e));
   return kept.length > 0 ? kept : null;
 }

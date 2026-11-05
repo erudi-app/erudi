@@ -57,6 +57,17 @@ export default function ArenaPage() {
   const streamingPanels = useRef(new Set());
   const buffersRef = useRef({});
   const flushIntervalRef = useRef(null);
+  // The short animation timers (add/remove a panel). Cleared on unmount: a
+  // timer that fires after the page is gone would set state on an unmounted
+  // tree (#532).
+  const animationTimersRef = useRef(new Set());
+  const afterAnimation = useCallback((fn, ms) => {
+    const id = setTimeout(() => {
+      animationTimersRef.current.delete(id);
+      fn();
+    }, ms);
+    animationTimersRef.current.add(id);
+  }, []);
   // One controller per ask: all panel streams share it so Stop aborts the
   // whole comparison at once (#136 H).
   const abortRef = useRef(null);
@@ -96,10 +107,13 @@ export default function ArenaPage() {
   }, []);
 
   useEffect(() => {
+    const animationTimers = animationTimersRef.current;
     return () => {
       if (flushIntervalRef.current) {
         clearInterval(flushIntervalRef.current);
       }
+      animationTimers.forEach((id) => clearTimeout(id));
+      animationTimers.clear();
     };
   }, []);
 
@@ -305,7 +319,7 @@ export default function ArenaPage() {
 
     // Animate the button
     setAddButtonAnimating(true);
-    setTimeout(() => setAddButtonAnimating(false), 200);
+    afterAnimation(() => setAddButtonAnimating(false), 200);
 
     const nextId = panels.length ? Math.max(...panels.map((p) => p.id)) + 1 : 0;
     const defaultModel = models[panels.length % models.length]?.name || "";
@@ -321,7 +335,7 @@ export default function ArenaPage() {
     );
 
     // Trigger animation
-    setTimeout(() => {
+    afterAnimation(() => {
       setPanels((prev) => prev.map((p) => (p.id === nextId ? { ...p, isAnimating: false } : p)));
     }, 50);
   };
@@ -333,7 +347,7 @@ export default function ArenaPage() {
 
     setPanels((prev) => prev.map((p) => (p.id === panelId ? { ...p, isRemoving: true } : p)));
 
-    setTimeout(() => {
+    afterAnimation(() => {
       setPanels((prev) => prev.filter((p) => p.id !== panelId));
     }, 300);
   };

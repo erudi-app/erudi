@@ -1,7 +1,8 @@
 import { describe, it, expect } from "vitest";
 import {
   automaticCompactions,
-  compactionsOnly,
+  errorDetailOf,
+  errorTurnTrace,
   hasStripEvents,
   manualCompactions,
 } from "./traceEvents";
@@ -46,12 +47,32 @@ describe("trace events (#614)", () => {
     expect(manualCompactions(undefined)).toEqual([]);
   });
 
-  it("keeps only the compactions of an error turn, or nothing", () => {
-    expect(compactionsOnly([done(1), { t: "thinking", text: "hm" }])).toEqual([done(1)]);
-    // A /compact run on a failed turn is kept too.
+  it("keeps only the compactions and the cause of an error turn, or nothing", () => {
+    const cause = { t: "error_detail", text: "boom", request_id: "be-1" };
+    expect(errorTurnTrace([done(1), { t: "thinking", text: "hm" }])).toEqual([done(1)]);
+    expect(errorTurnTrace([{ t: "thinking", text: "hm" }])).toBeNull();
+    expect(errorTurnTrace([])).toBeNull();
+    expect(errorTurnTrace([done(1), { t: "thinking", text: "hm" }, cause])).toEqual([
+      done(1),
+      cause,
+    ]);
+    expect(errorTurnTrace([cause])).toEqual([cause]);
+    // A /compact run on a failed turn is kept beside its cause (#585).
     const manual = { ...done(2), manual: true };
-    expect(compactionsOnly([manual])).toEqual([manual]);
-    expect(compactionsOnly([{ t: "thinking", text: "hm" }])).toBeNull();
-    expect(compactionsOnly([])).toBeNull();
+    expect(errorTurnTrace([done(1), cause, { t: "thinking", text: "hm" }, manual])).toEqual([
+      done(1),
+      cause,
+      manual,
+    ]);
+  });
+
+  it("reads the cause of a failed turn from its trace (#615)", () => {
+    const cause = { t: "error_detail", text: "boom", request_id: "be-1" };
+    expect(errorDetailOf([done(1), cause])).toEqual(cause);
+    expect(errorDetailOf([done(1)])).toBeNull();
+    expect(errorDetailOf([{ t: "error_detail", text: "" }])).toBeNull();
+    expect(errorDetailOf(null)).toBeNull();
+    // An error_detail never mounts the reasoning strip.
+    expect(hasStripEvents([cause])).toBe(false);
   });
 });
