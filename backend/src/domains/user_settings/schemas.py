@@ -43,19 +43,20 @@ class UserSettingsResponse(BaseModel):
 
     Attributes:
         web_search_enabled: Global default for the web_search agent tool.
-            New conversations copy this value at creation; the per-conversation
-            toggle owns it afterwards.
+            New conversations on a model without a saved value copy it at
+            creation; the per-conversation toggle owns it afterwards. Arena
+            panels follow it.
         language: Interface language code the frontend renders in.
         auto_update_enabled: Whether the Electron main process may check for,
             download and install a new version on its own.
         inference_backend: "auto" to let hardware detection pick the engine,
             "cpu" to run models on the CPU build regardless of the GPU.
         default_reasoning_effort: Global default for how much a model may
-            deliberate before answering. New conversations copy it at
-            creation; arena turns read it directly.
+            deliberate before answering. New conversations and arena panels
+            on a model without a saved level start at it.
         default_compaction_threshold: Global default for the share of the
             working window, in percent, at which a conversation compacts. New
-            conversations copy it at creation.
+            conversations on a model without a saved threshold copy it.
     """
 
     web_search_enabled: bool = Field(

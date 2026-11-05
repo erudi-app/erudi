@@ -69,8 +69,10 @@ Routers are mounted under the `/erudi` prefix in `register_routers`
   `GET /erudi/llms/search/huggingface`, `POST /erudi/llms/{llm_id}/download`,
   `POST /erudi/llms/download/huggingface`, the `downloads/*` job routes,
   `DELETE /erudi/llms/{id}`, `GET /erudi/llms/{llm_id}/dependents`,
-  `POST /erudi/llms/{assistant_id}/rebind`
-- **Entities**: `Llm`, `DownloadJob`
+  `POST /erudi/llms/{assistant_id}/rebind`,
+  `GET|PUT /erudi/llms/{llm_id}/conversation_defaults` (the conversation values saved for a
+  model with `/config global`, read by conversation creation, the model switch and the Arena)
+- **Entities**: `Llm`, `DownloadJob`, `ModelDefaults`
 - **Features**: Hugging Face integration, download of pre-built quants only, KB attachment
 - [Reference](reference/llms.md)
 

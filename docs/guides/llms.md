@@ -284,6 +284,8 @@ Regenerated from `backend/src/domains/llms/endpoints.py`.
 | `GET` | `/erudi/llms/search/huggingface?q=&limit=` | Live Hugging Face search in the engine's format |
 | `GET` | `/erudi/llms/{llm_id}` | One model |
 | `GET` | `/erudi/llms/{llm_id}/dependents` | KB assistants and conversation counts a delete would affect |
+| `GET` | `/erudi/llms/{llm_id}/conversation_defaults` | The values a new conversation on the model starts from, with their source |
+| `PUT` | `/erudi/llms/{llm_id}/conversation_defaults` | Save or clear values for the model (`/config global`) — see [Conversation defaults per model](conversations.md#conversation-defaults-per-model) |
 | `PUT` | `/erudi/llms/{llm_id}` | Update metadata (`LLMCreate` body) |
 | `DELETE` | `/erudi/llms/{llm_id}?orphan_dependents=` | Delete, guarded by the dependents check |
 | `POST` | `/erudi/llms/{assistant_id}/rebind` | Re-point an orphaned KB assistant (`{"new_base_llm_id": ...}`) |

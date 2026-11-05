@@ -17,10 +17,12 @@ Schema Hierarchy:
 Validation Rules:
     - Message content: non-empty, no length cap
     - Message sender: Must be "user" or "assistant"
-    - Temperature: 0.0-2.0 (default 0.2)
-    - Top-p: 0.0-1.0 (default 0.5)
-    - Max tokens: 1-32768 (default 1024)
-    - Custom prompt: Max 4096 characters
+    - Temperature: 0.0-2.0
+    - Top-p: 0.0-1.0
+    - Max tokens: 1-32768
+    - Custom prompt: no character cap (the model's context window bounds it)
+    - A field left out of a creation is resolved per model
+      (``src.domains.llms.conversation_defaults``)
 
 Example:
     Create conversation request::
@@ -50,9 +52,21 @@ Pydantic schemas for conversation-related data validation.
 """
 from pydantic import BaseModel, Field, validator
 from datetime import datetime
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
 from src.domains.user_settings.schemas import CompactionThreshold, ReasoningEffort
+from src.entities.Conversation import TEMPERATURE_MAX, TEMPERATURE_MIN, TOP_P_MAX, TOP_P_MIN
+
+# The conversation values a request may carry, with the bounds the entity
+# enforces (``src.entities.Conversation``), one bound per value on every path:
+# conversation creation, update and turn query, the Arena query and the
+# per-model defaults (``src.domains.llms.schemas.ConversationDefaultsUpdate``).
+Temperature = Annotated[float, Field(ge=TEMPERATURE_MIN, le=TEMPERATURE_MAX)]
+TopP = Annotated[float, Field(ge=TOP_P_MIN, le=TOP_P_MAX)]
+# Custom instructions have no character cap: the model's context window is
+# their bound (an oversized prompt gets the honest overflow answer, #599), and
+# instructions stored before the per-model defaults may be of any length.
+CustomPrompt = str
 
 
 class MessageBase(BaseModel):
@@ -133,12 +147,17 @@ class ConversationCreate(ConversationBase):
 
     Attributes:
         llm_id: Inherited from ConversationBase.
-        temperature: Sampling temperature (0.0-2.0, default 0.2).
-        top_p: Nucleus sampling threshold (0.0-1.0, default 0.5).
+        temperature: Sampling temperature (0.0-2.0).
+        top_p: Nucleus sampling threshold (0.0-1.0).
         max_tokens: Legacy fallback ceiling, used ONLY when the engine
             cannot report a context window; with a window, the output
             budget is automatic and this value is ignored.
-        custom_prompt: Custom system prompt override (max 4096 chars).
+        custom_prompt: Custom system prompt (no character cap).
+        web_search_enabled, reasoning_effort, compaction_threshold: The
+            conversation's own settings.
+
+        Every field but ``llm_id`` is optional; one left out (None) is
+        resolved per model, see the field comments below.
 
     Example:
         ::
@@ -153,20 +172,18 @@ class ConversationCreate(ConversationBase):
     """
 
     """Schema for creating new conversations."""
-    # None = "use the model's own defaults" (#388): the service resolves them
-    # from the Llm row (captured generation_config, else the neutral constants).
-    # An explicit value always wins (the pre-conversation settings panel).
-    temperature: Optional[float] = Field(
+    # None = "resolve it" (#388, #609): every field the client leaves out is
+    # resolved by ``src.domains.llms.conversation_defaults`` -- the value saved
+    # for the model with ``/config global``, else the user settings (effort,
+    # web search, threshold) or the model's recommendation (temperature,
+    # top_p), else a constant. An explicit value always wins.
+    temperature: Optional[Temperature] = Field(
         default=None,
-        ge=0.0,
-        le=2.0,
-        description="Sampling temperature; None resolves the model's default (#388)",
+        description="Sampling temperature; None resolves the model's saved or recommended value",
     )
-    top_p: Optional[float] = Field(
+    top_p: Optional[TopP] = Field(
         default=None,
-        ge=0.0,
-        le=1.0,
-        description="Nucleus sampling threshold; None resolves the model's default (#388)",
+        description="Nucleus sampling threshold; None resolves the model's saved or recommended value",
     )
     max_tokens: Optional[int] = Field(
         default=None,
@@ -174,31 +191,36 @@ class ConversationCreate(ConversationBase):
         le=32768,
         description="Maximum number of tokens to generate; None resolves the model's default (#388)",
     )
-    custom_prompt: Optional[str] = Field(
-        default="", max_length=4096, description="Custom system prompt override"
+    custom_prompt: Optional[CustomPrompt] = Field(
+        default=None,
+        description=(
+            "Custom system prompt. None resolves the instructions saved for the "
+            "model (#609), else empty; an explicit value, empty included, wins."
+        ),
     )
     web_search_enabled: Optional[bool] = Field(
         default=None,
         description=(
-            "Per-conversation web-search toggle (#310). None (default) copies "
-            "the global user-settings default at creation; an explicit value "
-            "wins (pre-conversation settings panel)."
+            "Per-conversation web-search toggle (#310). None resolves the value "
+            "saved for the model, else the global user-settings default; an "
+            "explicit value wins."
         ),
     )
     reasoning_effort: Optional[ReasoningEffort] = Field(
         default=None,
         description=(
-            "How much the model may deliberate before answering. None "
-            "(default) copies the global user-settings default at creation; "
-            "an explicit value wins."
+            "How much the model may deliberate before answering. None resolves "
+            "the level saved for the model, else the global user-settings "
+            "default; an explicit value wins."
         ),
     )
     compaction_threshold: Optional[CompactionThreshold] = Field(
         default=None,
         description=(
             "Share of the working window, in percent (50-90, step 5), at which "
-            "the conversation compacts (#607). None (default) copies the global "
-            "user-settings default at creation; an explicit value wins."
+            "the conversation compacts (#607). None resolves the threshold saved "
+            "for the model, else the global user-settings default; an explicit "
+            "value wins."
         ),
     )
 
@@ -207,7 +229,9 @@ class ConversationUpdate(ConversationBase):
     """Schema for partial conversation updates (PATCH operations).
 
     All fields are optional to support partial updates. Only provided
-    fields will be updated in the database.
+    fields will be updated in the database. A different ``llm_id`` switches
+    the model and applies its saved values and recommended sampling
+    (``ConversationService.update_conversation``).
 
     Attributes:
         llm_id: Optional LLM ID override.
@@ -231,10 +255,10 @@ class ConversationUpdate(ConversationBase):
 
     llm_id: Optional[int] = None
     name: Optional[str] = None
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
+    temperature: Optional[Temperature] = None
+    top_p: Optional[TopP] = None
     max_tokens: Optional[int] = None
-    custom_prompt: Optional[str] = None
+    custom_prompt: Optional[CustomPrompt] = None
     web_search_enabled: Optional[bool] = None
     reasoning_effort: Optional[ReasoningEffort] = None
     compaction_threshold: Optional[CompactionThreshold] = None
@@ -305,8 +329,8 @@ class ConversationQuery(BaseModel):
         images: Optional base64 data-URL images attached to the question (vision models).
         image_paths: Local filesystem path of each image, parallel to ``images``.
         attachments: Local filesystem paths of documents/folders attached to the question.
-        temperature: Optional temperature override for this query only.
-        top_p: Optional top_p override for this query only.
+        temperature: Optional temperature override for this query only (0.0-2.0).
+        top_p: Optional top_p override for this query only (0.0-1.0).
         max_new_tokens: Accepted and ignored -- the output budget is computed per
             model call from the context window the model runs in
             (``src.agents.output_budget``), so nothing on the client sets it.
@@ -339,10 +363,10 @@ class ConversationQuery(BaseModel):
             "to the question; read on this machine, never uploaded (#492)"
         ),
     )
-    temperature: Optional[float] = None
-    top_p: Optional[float] = None
+    temperature: Optional[Temperature] = None
+    top_p: Optional[TopP] = None
     max_new_tokens: Optional[int] = None
-    custom_prompt: Optional[str] = None
+    custom_prompt: Optional[CustomPrompt] = None
 
 
 class MessageStarRequest(BaseModel):

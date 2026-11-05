@@ -16,6 +16,8 @@
 
 ::: src.entities.Message
 
+::: src.entities.ModelDefaults
+
 ::: src.entities.StartupVariables
 
 ::: src.entities.HardwareProfile

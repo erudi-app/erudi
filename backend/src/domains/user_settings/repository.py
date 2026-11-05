@@ -4,10 +4,10 @@ Mirrors ``Startup_Variables_Repository``: get-or-create on a one-row table,
 mutations flushed (not committed) so the caller controls the transaction.
 """
 
+from typing import Optional
+
 from sqlalchemy.orm import Session
 
-from src.agents.reasoning_effort import DEFAULT_REASONING_EFFORT
-from src.engines.working_window import DEFAULT_COMPACTION_THRESHOLD
 from src.entities.UserSettings import (
     DEFAULT_INFERENCE_BACKEND,
     DEFAULT_LANGUAGE,
@@ -45,6 +45,15 @@ class User_Settings_Repository:
             self.db.refresh(settings)
         return settings
 
+    def get(self) -> Optional[UserSettings]:
+        """The singleton row, or None when it does not exist yet.
+
+        Read-only: conversation creation and arena turns resolve their
+        defaults from it (``src.domains.llms.conversation_defaults``) and must
+        not write; a missing row means every setting is at its default.
+        """
+        return self.db.query(UserSettings).first()
+
     def get_web_search_enabled(self) -> bool:
         """The global web-search default (False until the user opts in).
 
@@ -70,17 +79,6 @@ class User_Settings_Repository:
         self.db.refresh(settings)
         return settings
 
-    def get_default_reasoning_effort(self) -> str:
-        """The global default reasoning effort ("medium" until the user changes it).
-
-        Read-only, like ``get_web_search_enabled``: callers on hot paths
-        (conversation creation, arena turns) must not write, and a missing
-        singleton row IS the default.
-        """
-        settings = self.db.query(UserSettings).first()
-        value = settings.default_reasoning_effort if settings else None
-        return value or DEFAULT_REASONING_EFFORT
-
     def set_default_reasoning_effort(self, settings: UserSettings, value: str) -> UserSettings:
         """Update the global default reasoning effort (flushed, not committed).
 
@@ -92,26 +90,15 @@ class User_Settings_Repository:
             UserSettings: Updated entity.
 
         Note:
-            Existing conversations keep the level they copied at creation --
-            this only changes what the NEXT conversation inherits (and what
-            arena turns, which have no conversation row, run at).
+            Existing conversations keep the level they started at -- this
+            only changes what the NEXT conversation starts at (and what arena
+            panels run at) on a model without a saved level.
         """
         logger.info(f"Updating UserSettings.default_reasoning_effort = {value}")
         settings.default_reasoning_effort = value
         self.db.flush()
         self.db.refresh(settings)
         return settings
-
-    def get_default_compaction_threshold(self) -> int:
-        """The global default compaction threshold, in percent (80 until the
-        user changes it).
-
-        Read-only, like ``get_default_reasoning_effort``: conversation
-        creation must not write, and a missing singleton row IS the default.
-        """
-        settings = self.db.query(UserSettings).first()
-        value = settings.default_compaction_threshold if settings else None
-        return value or DEFAULT_COMPACTION_THRESHOLD
 
     def set_default_compaction_threshold(self, settings: UserSettings, value: int) -> UserSettings:
         """Update the global default compaction threshold (flushed, not committed).

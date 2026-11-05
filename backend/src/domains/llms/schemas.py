@@ -28,9 +28,12 @@ Example:
         return db.create(llm)
 """
 
-from pydantic import BaseModel, Field, computed_field
-from typing import Any, Dict, List, Optional
+from pydantic import BaseModel, ConfigDict, Field, computed_field, field_validator
+from typing import Any, Dict, Generic, List, Literal, Optional, TypeVar
 from datetime import datetime
+
+from src.domains.conversations.schemas import CustomPrompt, Temperature, TopP
+from src.domains.user_settings.schemas import CompactionThreshold, ReasoningEffort
 
 
 class SamplingDefaultsResponse(BaseModel):
@@ -421,3 +424,62 @@ class DownloadJobResponse(BaseModel):
 
         from_attributes = True
         validate_by_name = True
+
+
+# ---------------------------------------------------------------------------
+# Per-model conversation defaults (#609)
+# ---------------------------------------------------------------------------
+
+DefaultSource = Literal["saved", "settings", "model", "fallback"]
+_T = TypeVar("_T")
+
+
+class ResolvedDefault(BaseModel, Generic[_T]):
+    """One resolved conversation value and where it came from: ``saved`` (with
+    ``/config global``), ``settings`` (the user settings), ``model`` (the
+    publisher's recommendation) or ``fallback`` (a constant)."""
+
+    value: _T
+    source: DefaultSource
+
+
+class ConversationDefaultsResponse(BaseModel):
+    """The values a new conversation on ``llm_id`` starts from, per field
+    (``src.domains.llms.conversation_defaults``)."""
+
+    llm_id: int
+    reasoning_effort: ResolvedDefault[ReasoningEffort]
+    temperature: ResolvedDefault[float]
+    top_p: ResolvedDefault[float]
+    compaction_threshold: ResolvedDefault[int]
+    web_search_enabled: ResolvedDefault[bool]
+    custom_prompt: ResolvedDefault[str]
+
+
+class ConversationDefaultsUpdate(BaseModel):
+    """Body of ``PUT /llms/{llm_id}/conversation_defaults``: a partial update.
+
+    A field left out is unchanged; an explicit ``null`` clears the saved
+    value (the field then resolves from the settings or the model). Empty or
+    whitespace-only ``custom_prompt`` clears the saved instructions: empty
+    instructions are never saved. The bounds are the conversation's own; an
+    unknown field is refused (422) rather than silently dropped.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    reasoning_effort: Optional[ReasoningEffort] = None
+    temperature: Optional[Temperature] = None
+    top_p: Optional[TopP] = None
+    compaction_threshold: Optional[CompactionThreshold] = None
+    web_search_enabled: Optional[bool] = None
+    custom_prompt: Optional[CustomPrompt] = None
+
+    @field_validator("custom_prompt")
+    @classmethod
+    def _empty_instructions_clear(cls, value: Optional[str]) -> Optional[str]:
+        return value if value is not None and value.strip() else None
+
+    def changes(self) -> Dict[str, Any]:
+        """The fields the request carried (``model_fields_set``), None = clear."""
+        return {field: getattr(self, field) for field in self.model_fields_set}

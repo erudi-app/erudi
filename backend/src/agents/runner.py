@@ -125,8 +125,9 @@ if TYPE_CHECKING:
 
 
 # Auto-summarization (compaction) fires at the conversation's compaction
-# threshold (#607: a whole percent from 50 to 90, 80 by default, copied from
-# the global default at creation) of the WORKING window, through ONE helper
+# threshold (#607: a whole percent from 50 to 90, 80 by default, set at
+# creation from the model's saved defaults or the global default) of the
+# WORKING window, through ONE helper
 # (``src.engines.working_window.trigger_tokens``, which also always leaves the
 # answer the output budget's floor and margin). The working window is the
 # smaller of two values recomputed PER TURN (``_build_middleware`` runs after

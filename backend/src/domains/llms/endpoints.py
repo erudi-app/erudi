@@ -50,6 +50,7 @@ Endpoints:
     - GET /local → List local (downloaded) LLMs
     - GET /remote → List remote (HuggingFace) LLMs
     - GET /{llm_id} → Get LLM details
+    - GET|PUT /{llm_id}/conversation_defaults → Values saved for the model (#609)
     - GET /search?name=<query> → Search LLMs by name
     - POST /{llm_id}/download → Start model download
     - DELETE /{llm_id} → Delete local model files
@@ -113,10 +114,17 @@ from src.domains.llms.schemas import (
     HFDownloadRequest,
     DependentsResponse,
     RebindRequest,
+    ConversationDefaultsResponse,
+    ConversationDefaultsUpdate,
 )
+from src.domains.llms.conversation_defaults import read_conversation_defaults
 from src.domains.llms.services import DownloadCancelled, download_llm, cancel_download_job
 from src.domains.llms.hf_search import search_huggingface
-from src.domains.llms.repository import Llm_Repository, Download_Job_Repository
+from src.domains.llms.repository import (
+    Llm_Repository,
+    Download_Job_Repository,
+    Model_Defaults_Repository,
+)
 from src.domains.knowledge_base.repository import COPIED_FIELDS
 from src.utils.hf_model_metadata import (
     BYTES_PER_GB,
@@ -618,6 +626,84 @@ async def search_huggingface_route(q: str, limit: int = 30):
         List[HFSearchResult]: Downloadable matches with metadata + category.
     """
     return search_huggingface(q, limit=limit)
+
+
+def _conversation_defaults_response(db: Session, llm: Llm) -> ConversationDefaultsResponse:
+    resolved = read_conversation_defaults(db, llm)
+    return ConversationDefaultsResponse(
+        llm_id=llm.id,
+        **{field: {"value": r.value, "source": r.source} for field, r in resolved.items()},
+    )
+
+
+# Declared before ``/{llm_id}``: the literal segment after the id never
+# reaches the bare-id route, and the order keeps it that way.
+@router.get("/{llm_id}/conversation_defaults", response_model=ConversationDefaultsResponse)
+def get_conversation_defaults(
+    llm_id: int,
+    llm_repo: Llm_Repository = Depends(get_llm_repository),
+    db: Session = Depends(get_db),
+):
+    """The values a new conversation on this model starts from (#609).
+
+    One entry per value (effort, temperature, top_p, compaction threshold,
+    web search, custom instructions), each with its ``source``: ``saved``
+    with ``/config global``, ``settings`` (the user settings), ``model`` (the
+    publisher's recommendation) or ``fallback`` (a constant). Read-only.
+
+    Raises:
+        ModelNotFoundException: If the model does not exist (404).
+    """
+    llm = llm_repo.get_by_id(llm_id)
+    if not llm:
+        raise ModelNotFoundException(f"LLM {llm_id}")
+    return _conversation_defaults_response(db, llm)
+
+
+@router.put("/{llm_id}/conversation_defaults", response_model=ConversationDefaultsResponse)
+def put_conversation_defaults(
+    llm_id: int,
+    payload: ConversationDefaultsUpdate,
+    llm_repo: Llm_Repository = Depends(get_llm_repository),
+    db: Session = Depends(get_db),
+):
+    """Save conversation values as this model's defaults (``/config global``).
+
+    Partial: a field left out is unchanged, an explicit ``null`` clears it,
+    and empty or whitespace-only ``custom_prompt`` clears the saved
+    instructions. Another model's values are never touched. A value off its
+    scale or an unknown field is a 422 and nothing is saved.
+
+    Returns:
+        ConversationDefaultsResponse: The resolved values after the save.
+
+    Raises:
+        ModelNotFoundException: If the model does not exist (404).
+        StateConflictException: If the model is not downloaded (``local`` is
+            not 1: a catalog entry or a download in progress), 400.
+    """
+    llm = llm_repo.get_by_id(llm_id)
+    if not llm:
+        raise ModelNotFoundException(f"LLM {llm_id}")
+    if llm.local != 1:
+        # A catalog entry or a download placeholder never backs a
+        # conversation, and a download creates a new row anyway.
+        raise StateConflictException(
+            f"Cannot save conversation defaults for LLM {llm_id}: it is not downloaded"
+        )
+    changes = payload.changes()
+    try:
+        Model_Defaults_Repository(db).save(llm_id, changes)
+        db.commit()
+    except Exception:
+        db.rollback()
+        raise
+    logger.info(
+        f"Conversation defaults saved for model {llm_id}: "
+        f"set={sorted(f for f, v in changes.items() if v is not None)}, "
+        f"cleared={sorted(f for f, v in changes.items() if v is None)}"
+    )
+    return _conversation_defaults_response(db, llm)
 
 
 @router.get("/{llm_id}", response_model=LLMResponse)
