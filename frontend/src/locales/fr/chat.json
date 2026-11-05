@@ -193,7 +193,7 @@
     "show": "Détails",
     "hide": "Masquer les détails",
     "requestId": "Identifiant de requête",
-    "copyRequestId": "Copier l'identifiant de requête"
+    "copy": "Copier les détails"
   },
   "errors": {
     "network": "Erreur réseau",

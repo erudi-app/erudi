@@ -44,7 +44,11 @@ const ERROR_SENTINEL = "[ERROR_MESSAGE_SYSTEM]";
 
 // The red line of a failed turn goes below whatever the model had already
 // written, as the backend stores it (a paragraph of its own).
-const joinFailure = (partial, failure) => (partial ? `${partial}\n\n${failure}` : failure);
+const joinFailure = (partial, failure) => {
+  // Exactly one blank line: a notice already ends with one.
+  const head = partial.replace(/\n+$/, "");
+  return head ? `${head}\n\n${failure}` : failure;
+};
 
 // Presentation-only tokens kept out of the JSX tree (they are class names and
 // CSS, not copy).

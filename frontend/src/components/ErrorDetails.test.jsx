@@ -29,6 +29,7 @@ describe("ErrorDetails", () => {
     fireEvent.click(toggle);
 
     expect(toggle.getAttribute("aria-expanded")).toBe("true");
+    expect(toggle.textContent).toBe("Hide details");
     expect(screen.getByText(cause.text)).toBeTruthy();
     expect(screen.getByText("be-1f2e3d4c")).toBeTruthy();
     expect(screen.getByText("Request id")).toBeTruthy();
@@ -37,15 +38,51 @@ describe("ErrorDetails", () => {
     expect(screen.queryByText(cause.text)).toBeNull();
   });
 
-  it("copies the request id", async () => {
+  it("copies the cause and the request id together", async () => {
     const writeText = vi.fn(() => Promise.resolve());
     Object.assign(navigator, { clipboard: { writeText } });
     render(<ErrorDetails detail={cause} />);
 
     fireEvent.click(screen.getByRole("button", { name: "Details" }));
-    fireEvent.click(screen.getByRole("button", { name: "Copy request id" }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy details" }));
 
-    await waitFor(() => expect(writeText).toHaveBeenCalledWith("be-1f2e3d4c"));
+    await waitFor(() =>
+      expect(writeText).toHaveBeenCalledWith(`${cause.text}\nrequest_id: be-1f2e3d4c`)
+    );
+  });
+
+  it("copies the cause alone when the request had no id", async () => {
+    const writeText = vi.fn(() => Promise.resolve());
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(<ErrorDetails detail={{ ...cause, request_id: "-" }} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Details" }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy details" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalledWith(cause.text));
+  });
+
+  it("survives a clipboard that refuses", async () => {
+    const writeText = vi.fn(() => Promise.reject(new Error("denied")));
+    Object.assign(navigator, { clipboard: { writeText } });
+    render(<ErrorDetails detail={cause} />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Details" }));
+    fireEvent.click(screen.getByRole("button", { name: "Copy details" }));
+
+    await waitFor(() => expect(writeText).toHaveBeenCalled());
+    expect(screen.getByRole("button", { name: "Copy details" })).toBeTruthy();
+  });
+
+  it("points aria-controls at the panel only while the panel exists", () => {
+    render(<ErrorDetails detail={cause} />);
+    const toggle = screen.getByRole("button", { name: "Details" });
+    expect(toggle.getAttribute("aria-controls")).toBeNull();
+
+    fireEvent.click(toggle);
+
+    const panelId = toggle.getAttribute("aria-controls");
+    expect(document.getElementById(panelId)).not.toBeNull();
   });
 
   it("omits the request id line when the request had none", () => {

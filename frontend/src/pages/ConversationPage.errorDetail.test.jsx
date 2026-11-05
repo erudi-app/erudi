@@ -164,6 +164,35 @@ describe("a generic failure, live", () => {
     expect(screen.getByRole("button", { name: "Details" })).toBeTruthy();
   });
 
+  it("shows the headline in the interface language, not the stored English line", async () => {
+    await i18n.changeLanguage("fr");
+    tracedFetchMock.mockImplementation(
+      routeFetch({ query: () => streamOf(genericWire, { t: "done" }) })
+    );
+    await renderAndSettle();
+
+    await send();
+
+    expect(await screen.findByText(`❌ ${APOLOGY_FR}`)).toBeTruthy();
+    expect(screen.queryByText(`❌ ${APOLOGY_EN}`)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Détails" }));
+    expect(screen.getByText(CAUSE)).toBeTruthy();
+  });
+
+  it("puts the red line after one blank line when a notice ended the partial reply", async () => {
+    tracedFetchMock.mockImplementation(
+      routeFetch({
+        query: () => streamOf({ t: "answer", text: "*A notice.*\n\n" }, genericWire, { t: "done" }),
+      })
+    );
+    await renderAndSettle();
+
+    await send();
+
+    const bubble = await screen.findByText(/A notice/);
+    expect(bubble.textContent).toBe(`*A notice.*\n\n❌ ${APOLOGY_EN}`);
+  });
+
   it("logs a generic failure at ERROR", async () => {
     tracedFetchMock.mockImplementation(
       routeFetch({ query: () => streamOf(genericWire, { t: "done" }) })

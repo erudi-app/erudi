@@ -193,7 +193,7 @@
     "show": "Details",
     "hide": "Hide details",
     "requestId": "Request id",
-    "copyRequestId": "Copy request id"
+    "copy": "Copy details"
   },
   "errors": {
     "network": "Network error",

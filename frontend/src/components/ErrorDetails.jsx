@@ -8,7 +8,7 @@ import { useTranslation } from "react-i18next";
 // Collapsed by default. Opened, it quotes the cleaned cause exactly as the
 // backend wrote it (never translated: it is what a bug report needs) and the
 // id of the failing request, copyable, which is the id of the matching entry
-// in Diagnostics. The backend uses "-" for a request id it never had; that is
+// in Diagnostics. One button copies both, for a bug report. The backend uses "-" for a request id it never had; that is
 // not an id worth showing.
 
 const NO_REQUEST_ID = "-";
@@ -21,11 +21,18 @@ export default function ErrorDetails({ detail }) {
   const requestId =
     detail.request_id && detail.request_id !== NO_REQUEST_ID ? detail.request_id : null;
 
-  const copyRequestId = () => {
-    navigator.clipboard.writeText(requestId).then(() => {
-      setCopied(true);
-      setTimeout(() => setCopied(false), 1000);
-    });
+  const copyDetails = () => {
+    const text = requestId ? `${detail.text}\nrequest_id: ${requestId}` : detail.text;
+    navigator.clipboard
+      .writeText(text)
+      .then(() => {
+        setCopied(true);
+        setTimeout(() => setCopied(false), 1000);
+      })
+      .catch(() => {
+        // The clipboard refused (permission, focus): nothing is lost, the text
+        // stays selectable on screen, so the control just does not tick.
+      });
   };
 
   return (
@@ -34,7 +41,7 @@ export default function ErrorDetails({ detail }) {
         type="button"
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        aria-controls={panelId}
+        aria-controls={open ? panelId : undefined}
         className="flex w-fit items-center gap-1 transition-colors hover:text-[var(--ink)]"
       >
         {open ? (
@@ -42,7 +49,7 @@ export default function ErrorDetails({ detail }) {
         ) : (
           <ChevronRight className="h-3.5 w-3.5 shrink-0" aria-hidden="true" />
         )}
-        <span>{t("chat:errorDetails.show")}</span>
+        <span>{open ? t("chat:errorDetails.hide") : t("chat:errorDetails.show")}</span>
       </button>
       {open && (
         <div
@@ -54,21 +61,21 @@ export default function ErrorDetails({ detail }) {
             <span className="flex items-center gap-2">
               <span>{t("chat:errorDetails.requestId")}</span>
               <span className="font-mono">{requestId}</span>
-              <button
-                type="button"
-                onClick={copyRequestId}
-                aria-label={t("chat:errorDetails.copyRequestId")}
-                title={t("chat:errorDetails.copyRequestId")}
-                className="transition-colors hover:text-[var(--ink)]"
-              >
-                {copied ? (
-                  <Check className="h-3.5 w-3.5 text-green-400" aria-hidden="true" />
-                ) : (
-                  <Copy className="h-3.5 w-3.5" aria-hidden="true" />
-                )}
-              </button>
             </span>
           )}
+          <button
+            type="button"
+            onClick={copyDetails}
+            aria-label={t("chat:errorDetails.copy")}
+            title={t("chat:errorDetails.copy")}
+            className="w-fit transition-colors hover:text-[var(--ink)]"
+          >
+            {copied ? (
+              <Check className="h-3.5 w-3.5 text-green-400" aria-hidden="true" />
+            ) : (
+              <Copy className="h-3.5 w-3.5" aria-hidden="true" />
+            )}
+          </button>
         </div>
       )}
     </div>

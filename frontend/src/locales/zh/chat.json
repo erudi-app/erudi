@@ -193,7 +193,7 @@
     "show": "详细信息",
     "hide": "隐藏详细信息",
     "requestId": "请求 ID",
-    "copyRequestId": "复制请求 ID"
+    "copy": "复制详细信息"
   },
   "errors": {
     "network": "网络错误",
