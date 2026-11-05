@@ -530,7 +530,10 @@ and the next turn compacts first; past the window (`over_window: true`) every bl
 no window known at all, both are 0.
 
 The request takes no lock, never loads the model and never writes: a conversation whose model was
-deleted is a 409 (`detail.reason: "no_model"`) and is never re-assigned one.
+deleted is a 409 (`detail.reason: "no_model"`) and is never re-assigned one. Without the lock, the
+loaded model is read once: its handle is checked to serve this conversation's model, and the
+allocated window, the memory bound and the memory ceiling all come from that one snapshot, so a
+model swapped meanwhile never lends its window to the panel.
 
 ### Record a failed generation
 

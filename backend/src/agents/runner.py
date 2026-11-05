@@ -484,6 +484,11 @@ def _known_window(window: Any) -> bool:
     return isinstance(window, int) and not isinstance(window, bool) and window > 0
 
 
+def _positive_window(window: Any) -> Optional[int]:
+    """``window`` when it is a known window (``_known_window``), else ``None``."""
+    return window if _known_window(window) else None
+
+
 def summary_cap(working_window: int) -> int:
     """The summary's token cap for this working window: ``W // 8`` clamped
     to [128, 1024]. Also the summary size the keep budget and the amber
@@ -933,7 +938,15 @@ def compaction_reason(
     window unknown (the compact-as-early-as-possible clamp). The
     message-count fallback, with no window at all, is ``length``.
     """
-    if _memory_bound_of(engine) is not None:
+    return _compaction_reason_of(_memory_bound_of(engine), working_window, allocated_window)
+
+
+def _compaction_reason_of(
+    memory_bound: Optional[int], working_window: Optional[int], allocated_window: Optional[int]
+) -> str:
+    """``compaction_reason`` from the facts themselves (``memory_bound``: the
+    child's ``memory_bound_tokens``, or ``None``)."""
+    if memory_bound is not None:
         return COMPACTION_REASON_MEMORY
     if _known_window(working_window) and (
         not _known_window(allocated_window) or working_window < allocated_window
@@ -2734,17 +2747,36 @@ class AgentRunner:
         blocks add up to ``W`` while ``used <= W`` (``over_window`` past it).
         Unknown ``W``: both are 0. ``reduced_by_memory`` says the machine's
         memory bounds the loaded child's window (``compaction_reason``).
+
+        The loaded child is read ONCE: its handle is taken, checked to serve
+        this conversation's model (``loaded_child_for``) and to still be the
+        engine's handle after that check, and the allocated window, the
+        memory bound and the memory budget all come from that one snapshot --
+        a model swapped meanwhile never lends its window to this one.
         """
         engine = config.LLM_Engine
         messages = await self._committed_messages({"configurable": {"thread_id": thread_id}})
         trained = trained_context_window(llm)
+        handle = getattr(engine, "_model", None)
         probe = getattr(engine, "loaded_child_for", None)
-        loaded = bool(probe(getattr(llm, "id", None))) if callable(probe) else False
+        loaded = (
+            isinstance(handle, dict)
+            and callable(probe)
+            and bool(probe(getattr(llm, "id", None)))
+            and getattr(engine, "_model", None) is handle
+        )
         allocated, working, reduced = None, None, False
         if loaded:
-            budget = await run_in_threadpool(MemoryBudget.from_engine, engine)
-            allocated, working = self._compaction_windows(budget)
-            reduced = compaction_reason(engine, working, allocated) == COMPACTION_REASON_MEMORY
+            budget = await run_in_threadpool(MemoryBudget.from_engine, engine, handle)
+            allocated, working = self._fold_windows(
+                _positive_window(handle.get("context_tokens")), budget
+            )
+            bound = (
+                _positive_window(handle.get("memory_bound_tokens"))
+                if allocated is not None
+                else None
+            )
+            reduced = _compaction_reason_of(bound, working, allocated) == COMPACTION_REASON_MEMORY
         window = working if _known_window(working) else trained
         overhead = request_overhead(system_prompt, None, "", tools)
         projection = project_next_request(
@@ -2929,11 +2961,19 @@ class AgentRunner:
 
         The allocated window is the loaded child's (``effective_context_tokens``);
         the working window folds it with the memory ceiling into the ONE
-        canonical value the memory consumers share.
+        canonical value the memory consumers share (``_fold_windows``).
         """
         engine = config.LLM_Engine
         window_probe = getattr(engine, "effective_context_tokens", None)
         effective_window = window_probe() if callable(window_probe) else None
+        return AgentRunner._fold_windows(effective_window, memory_budget)
+
+    @staticmethod
+    def _fold_windows(
+        effective_window: Optional[int], memory_budget=None
+    ) -> tuple[Optional[int], Optional[int]]:
+        """``(allocated window, working window)`` from an allocated window and
+        a memory budget (``None``: no memory ceiling)."""
         memory_token_ceiling = (
             memory_budget.tokens_at_ceiling() if memory_budget is not None else None
         )

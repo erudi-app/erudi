@@ -14,7 +14,6 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import ClassVar
 
 import pytest
 from langchain_core.messages import AIMessage, HumanMessage
@@ -48,25 +47,18 @@ _TRAINED = 32_768
 
 
 class _Engine(BaseEngine):
-    """An engine whose loaded child (``loaded_id``) runs ``window`` tokens;
-    building a client or reading the memory budget is a test failure unless
-    allowed."""
-
-    loaded_id: ClassVar = None
-    window: ClassVar = 8192
-    bound: ClassVar = None
+    """An engine whose loaded child is the handle ``_model`` serving
+    ``_model_id``; its window and memory bound live on that handle, as on
+    the real engines."""
 
     @classmethod
     def loaded_child_for(cls, llm_id):
-        return cls.loaded_id is not None and cls.loaded_id == llm_id
+        return isinstance(cls._model, dict) and cls._model_id == llm_id
 
-    @classmethod
-    def effective_context_tokens(cls):
-        return cls.window if cls.loaded_id is not None else None
 
-    @classmethod
-    def memory_bound_tokens(cls):
-        return cls.bound
+def _load(llm_id=7, window=8192, bound=None):
+    _Engine._model = {"context_tokens": window, "memory_bound_tokens": bound}
+    _Engine._model_id = llm_id
 
 
 class _NoBudget:
@@ -76,9 +68,8 @@ class _NoBudget:
 
 @pytest.fixture(autouse=True)
 def _engine(monkeypatch):
-    _Engine.loaded_id = None
-    _Engine.window = 8192
-    _Engine.bound = None
+    monkeypatch.setattr(_Engine, "_model", None)
+    monkeypatch.setattr(_Engine, "_model_id", None)
     monkeypatch.setattr(config, "LLM_Engine", _Engine)
 
     def _no_build(*a, **kw):
@@ -86,7 +77,9 @@ def _engine(monkeypatch):
 
     monkeypatch.setattr(runner_module, "build_chat_model", _no_build)
     monkeypatch.setattr(
-        runner_module, "MemoryBudget", SimpleNamespace(from_engine=lambda engine: _NoBudget())
+        runner_module,
+        "MemoryBudget",
+        SimpleNamespace(from_engine=lambda engine, handle=None: _NoBudget()),
     )
 
 
@@ -169,8 +162,7 @@ async def test_under_the_threshold_the_blocks_fill_the_window():
 
 
 async def test_past_the_threshold_free_is_zero_and_the_reserve_shrinks():
-    _Engine.loaded_id = 7
-    _Engine.window = 4096
+    _load(window=4096)
     usage = await _usage(_alternating(8, 400))
 
     categories = usage["categories"]
@@ -184,8 +176,7 @@ async def test_past_the_threshold_free_is_zero_and_the_reserve_shrinks():
 
 
 async def test_past_the_window_every_block_is_used():
-    _Engine.loaded_id = 7
-    _Engine.window = 4096
+    _load(window=4096)
     usage = await _usage(_alternating(20, 400))
 
     categories = usage["categories"]
@@ -214,14 +205,14 @@ async def test_not_loaded_the_trained_window_is_the_denominator():
 
 
 async def test_another_loaded_model_is_not_this_conversations():
-    _Engine.loaded_id = 99
+    _load(llm_id=99)
     usage = await _usage(_alternating(4, 100))
     assert usage["window"]["model_loaded"] is False
     assert usage["window"]["working"] == _TRAINED
 
 
 async def test_loaded_the_allocated_window_is_the_denominator():
-    _Engine.loaded_id = 7
+    _load()
     usage = await _usage(_alternating(4, 100))
 
     assert usage["window"] == {
@@ -234,8 +225,7 @@ async def test_loaded_the_allocated_window_is_the_denominator():
 
 
 async def test_loaded_and_bounded_by_memory_says_so():
-    _Engine.loaded_id = 7
-    _Engine.bound = 8192
+    _load(bound=8192)
     usage = await _usage(_alternating(4, 100))
     assert usage["window"]["reduced_by_memory"] is True
 
@@ -246,13 +236,155 @@ async def test_loaded_the_memory_ceiling_folds_the_working_window(monkeypatch):
             return 6000
 
     monkeypatch.setattr(
-        runner_module, "MemoryBudget", SimpleNamespace(from_engine=lambda engine: _Ceiling())
+        runner_module,
+        "MemoryBudget",
+        SimpleNamespace(from_engine=lambda engine, handle=None: _Ceiling()),
     )
-    _Engine.loaded_id = 7
+    _load()
     usage = await _usage(_alternating(4, 100))
 
     assert usage["window"]["working"] == 6000
     assert usage["window"]["allocated"] == 8192
+    assert usage["window"]["reduced_by_memory"] is True
+
+
+async def test_a_model_swapped_during_the_check_is_not_this_conversations(monkeypatch):
+    _load()
+    real_probe = _Engine.loaded_child_for.__func__
+
+    def _swapping_probe(cls, llm_id):
+        loaded = real_probe(cls, llm_id)
+        _load(llm_id=99, window=2048)  # another model replaces it right after
+        return loaded
+
+    monkeypatch.setattr(_Engine, "loaded_child_for", classmethod(_swapping_probe))
+    usage = await _usage(_alternating(4, 100))
+
+    assert usage["window"]["model_loaded"] is False
+    assert usage["window"]["allocated"] is None
+    assert usage["window"]["working"] == _TRAINED
+
+
+async def test_the_window_comes_from_one_snapshot_of_the_handle(monkeypatch):
+    _load(window=8192, bound=None)
+    seen: list = []
+
+    def _swapping_budget(engine, handle=None):
+        seen.append(handle)
+        _load(llm_id=7, window=2048, bound=2048)  # a reload after the snapshot
+        return _NoBudget()
+
+    monkeypatch.setattr(
+        runner_module, "MemoryBudget", SimpleNamespace(from_engine=_swapping_budget)
+    )
+    usage = await _usage(_alternating(4, 100))
+
+    assert seen[0] == {"context_tokens": 8192, "memory_bound_tokens": None}
+    assert usage["window"]["allocated"] == 8192
+    assert usage["window"]["working"] == 8192
+    assert usage["window"]["reduced_by_memory"] is False
+
+
+# ----- the real engines' read path (no mocked probe nor budget) -----
+
+
+class _AliveProc:
+    """A child that is running, for ``poll()`` (llama.cpp) and ``is_alive()`` (MLX)."""
+
+    def poll(self):
+        return None
+
+    def is_alive(self):
+        return True
+
+
+async def test_the_real_cpu_engine_read_path(monkeypatch):
+    from src.engines.cpu_engine import CPU_Engine
+    from src.engines.memory_budget import MemoryBudget
+
+    class _Cpu(CPU_Engine):
+        pass
+
+    monkeypatch.setattr(runner_module, "MemoryBudget", MemoryBudget)
+    monkeypatch.setattr(config, "LLM_Engine", _Cpu)
+    handle = {"proc": _AliveProc(), "context_tokens": 12_288, "memory_bound_tokens": 12_288}
+    monkeypatch.setattr(_Cpu, "_model", handle)
+    monkeypatch.setattr(_Cpu, "_model_id", 7)
+
+    usage = await _usage(_alternating(4, 100))
+
+    assert usage["window"] == {
+        "working": 12_288,
+        "allocated": 12_288,
+        "trained": _TRAINED,
+        "reduced_by_memory": True,
+        "model_loaded": True,
+    }
+    assert _Cpu._model is handle and set(handle) == {
+        "proc",
+        "context_tokens",
+        "memory_bound_tokens",
+    }
+
+
+async def test_the_real_cpu_engine_with_a_dead_child_is_not_loaded(monkeypatch):
+    from src.engines.cpu_engine import CPU_Engine
+    from src.engines.memory_budget import MemoryBudget
+
+    class _Cpu(CPU_Engine):
+        pass
+
+    class _DeadProc:
+        def poll(self):
+            return 1
+
+    monkeypatch.setattr(runner_module, "MemoryBudget", MemoryBudget)
+    monkeypatch.setattr(config, "LLM_Engine", _Cpu)
+    monkeypatch.setattr(_Cpu, "_model", {"proc": _DeadProc(), "context_tokens": 12_288})
+    monkeypatch.setattr(_Cpu, "_model_id", 7)
+
+    usage = await _usage(_alternating(4, 100))
+
+    assert usage["window"]["model_loaded"] is False
+    assert usage["window"]["working"] == _TRAINED
+
+
+async def test_the_real_mlx_engine_folds_its_memory_ceiling(monkeypatch):
+    from src.engines.memory_budget import MLX_PREFILL_STEP_TOKENS, MemoryBudget
+    from src.engines.mlx_engine import MLX_Engine
+
+    gib = 1024**3
+
+    class _Mlx(MLX_Engine):
+        @classmethod
+        def max_recommended_working_set_bytes(cls):
+            return 12 * gib
+
+    handle = {
+        "proc": _AliveProc(),
+        "context_tokens": 32_768,
+        "base_footprint_bytes": 6 * gib,
+        "memory_facts": {
+            "weights_bytes": 5 * gib,
+            "kv_token_bytes": 160 * 1024,
+            "vocab_size": 151_936,
+            "prefill_step": MLX_PREFILL_STEP_TOKENS,
+            "working_set_bytes": 12 * gib,
+            "model_type": "qwen3",
+        },
+    }
+    monkeypatch.setattr(runner_module, "MemoryBudget", MemoryBudget)
+    monkeypatch.setattr(config, "LLM_Engine", _Mlx)
+    monkeypatch.setattr(_Mlx, "_model", handle)
+    monkeypatch.setattr(_Mlx, "_model_id", 7)
+    ceiling = MemoryBudget.from_handle(_Mlx, handle).tokens_at_ceiling()
+    assert ceiling is not None and 1 < ceiling < 32_768
+
+    usage = await _usage(_alternating(4, 100))
+
+    assert usage["window"]["model_loaded"] is True
+    assert usage["window"]["allocated"] == 32_768
+    assert usage["window"]["working"] == ceiling
     assert usage["window"]["reduced_by_memory"] is True
 
 
