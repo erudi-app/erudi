@@ -27,6 +27,14 @@
     "note": "80 % par défaut. Plus bas : résume plus tôt et plus souvent, ce qui garde la conversation plus courte. Plus haut : en garde davantage mot pour mot et résume moins souvent.",
     "selectLabel": "Seuil de compaction par défaut"
   },
+  "idleUnload": {
+    "title": "Décharger le modèle inutilisé",
+    "description": "Un modèle inutilisé quitte la mémoire après ce délai, ce qui la libère pour vos autres applications, et se recharge à votre prochain message. Le délai part de la dernière réponse du modèle et s'applique immédiatement, sans redémarrer Erudi.",
+    "note": "5 minutes par défaut. Jamais garde le modèle chargé quelle que soit la durée d'inactivité ; le modèle est tout de même déchargé quand votre ordinateur manque de mémoire, et le bouton Décharger des réglages d'une conversation le décharge à tout moment. Le modèle de recherche des bases de connaissances a son propre délai.",
+    "selectLabel": "Décharger le modèle inutilisé",
+    "minutes": "{{minutes}} minutes",
+    "never": "Jamais"
+  },
   "updatePreferences": {
     "title": "Mises à jour",
     "description": "Ce qu'Erudi fait de lui-même quand une nouvelle version est publiée. La carte « Mettre à jour Erudi » ci-dessous recherche, télécharge et installe à la demande, quoi que vous choisissiez ici.",

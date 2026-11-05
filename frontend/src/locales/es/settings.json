@@ -27,6 +27,14 @@
     "note": "80 % por defecto. Más bajo: resume antes y con más frecuencia, lo que mantiene la conversación más corta. Más alto: conserva más de ella palabra por palabra y resume con menos frecuencia.",
     "selectLabel": "Umbral de compactación predeterminado"
   },
+  "idleUnload": {
+    "title": "Descargar el modelo sin uso",
+    "description": "Un modelo sin usar sale de la memoria tras este tiempo, lo que la libera para sus otras aplicaciones, y se recarga con su siguiente mensaje. El tiempo cuenta desde la última respuesta del modelo y se aplica al momento, sin reiniciar Erudi.",
+    "note": "5 minutos por defecto. Nunca mantiene el modelo cargado por mucho tiempo que pase sin usarse; el modelo se descarga igualmente cuando a su equipo le falta memoria, y el botón Descargar de los ajustes de una conversación lo descarga en cualquier momento. El modelo de búsqueda de las bases de conocimiento tiene su propio tiempo.",
+    "selectLabel": "Descargar el modelo sin uso",
+    "minutes": "{{minutes}} minutos",
+    "never": "Nunca"
+  },
   "updatePreferences": {
     "title": "Actualizaciones",
     "description": "Lo que Erudi hace por su cuenta cuando se publica una versión nueva. La tarjeta «Actualizar Erudi» de abajo busca, descarga e instala cuando lo pides, elijas lo que elijas aquí.",
