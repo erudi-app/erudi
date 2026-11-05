@@ -185,12 +185,9 @@ class LLMResponse(LLMBase):
         survives restarts and machines, unlike ``allocated_context_window``
         below. First-class here so the UI does not dig through the hints blob.
         """
-        hints = self.generation_hints
-        if isinstance(hints, dict):
-            window = hints.get("context_length")
-            if isinstance(window, int) and not isinstance(window, bool) and window > 0:
-                return window
-        return None
+        from src.database.generation_hints import trained_context_window
+
+        return trained_context_window(self)
 
     @computed_field
     @property

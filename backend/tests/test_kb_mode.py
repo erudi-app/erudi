@@ -13,6 +13,7 @@ from types import SimpleNamespace
 import pytest
 
 from src.agents.kb_mode import plan_turn, should_use_kb
+from src.agents.prompts import build_kb_system_prompt
 from src.agents.tools import calculator, search_knowledge_base
 from src.core.config import parse_kb_agentic_flag
 from src.utils.kb_utils import KbExcerpt
@@ -399,3 +400,66 @@ def test_a_kb_context_block_always_comes_with_a_zero_tool_agent(monkeypatch, fla
         )
         if plan.kb_context_block is not None:
             assert plan.tools == [], (attached, tools, wire, web, found)
+
+
+# ───────────── the /context count (#608): KB mode without excerpts ─────────────
+
+
+def _must_not_retrieve_when_counting():
+    raise AssertionError("the /context count never retrieves")
+
+
+class TestContextCount:
+    def test_a_systematic_assistant_is_counted_in_kb_mode_with_no_excerpt_block(self):
+        llm = _llm(is_attached_to_kb=True, kb_id=5, supports_tools=False)
+        plan = plan_turn(
+            llm,
+            question="",
+            retrieve=_must_not_retrieve_when_counting,
+            custom_prompt="Be brief.",
+            context_count=True,
+        )
+        assert plan.systematic_kb is True
+        assert plan.tools == []
+        assert plan.kb_context_block is None and plan.kb_language_line == ""
+        assert plan.system_prompt == build_kb_system_prompt(llm, custom_prompt="Be brief.")
+
+    def test_an_agentic_assistant_is_counted_like_its_turn(self, monkeypatch):
+        from src.core import config
+
+        monkeypatch.setattr(config, "KB_AGENTIC_MODE", None)
+        llm = _llm(is_attached_to_kb=True, kb_id=5, supports_tools=True, supports_tools_wire=True)
+        plan = plan_turn(
+            llm, question="", retrieve=_must_not_retrieve_when_counting, context_count=True
+        )
+        assert plan.systematic_kb is False
+        assert search_knowledge_base in plan.tools
+
+    def test_a_plain_conversation_is_counted_like_its_turn(self):
+        plan = plan_turn(
+            _llm(), question="", retrieve=_must_not_retrieve_when_counting, context_count=True
+        )
+        assert plan.systematic_kb is False
+        assert plan.tools == []
+
+    def test_a_turn_with_excerpts_is_systematic(self):
+        excerpts = [KbExcerpt(source_file="d.pdf", text="x")]
+        plan = plan_turn(
+            _llm(is_attached_to_kb=True, kb_id=5, supports_tools=False),
+            question="q",
+            retrieve=lambda: excerpts,
+        )
+        assert plan.systematic_kb is True
+
+    def test_counting_logs_no_turn_mode(self, caplog):
+        import logging
+
+        with caplog.at_level(logging.INFO):
+            plan_turn(
+                _llm(is_attached_to_kb=True, kb_id=5, supports_tools=False),
+                question="",
+                retrieve=_must_not_retrieve_when_counting,
+                web_search_enabled=True,
+                context_count=True,
+            )
+        assert not [r for r in caplog.records if "Turn " in r.getMessage()]
