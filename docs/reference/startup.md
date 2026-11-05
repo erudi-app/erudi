@@ -3,7 +3,8 @@
 First-run seeding, startup variables and job cleanup served by the `/erudi/startup` routes.
 
 `GET /erudi/startup/install_state` answers `{"has_user_data": bool}`: whether the
-database holds at least one conversation or one downloaded model (`llms.local = 1`; the
+database holds at least one conversation, one knowledge base or one downloaded model
+(`llms.local = 1`; the
 catalog rows the boot seeds are `local = 0` and do not count). It only reads. The renderer
 asks it at the first launch of a version that recorded no last-seen version, to tell an
 install updated from an earlier version (shown an "Updated to" dialog) from a fresh one,

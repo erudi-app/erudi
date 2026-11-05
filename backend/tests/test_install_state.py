@@ -2,7 +2,7 @@
 
 The renderer asks it once, at the first launch of a version that has never
 recorded a "last seen version" (#572): an install that already holds a
-conversation or a downloaded model was updated from an earlier version and is
+conversation, a knowledge base or a downloaded model was updated from an earlier version and is
 told what changed; a fresh one (or one after "Clear all data") is not. The
 catalog seeds ``llms`` rows on every boot (``local = 0``), so only a
 downloaded model (``local = 1``) counts. The route only reads: unlike
@@ -12,6 +12,7 @@ downloaded model (``local = 1``) counts. The route only reads: unlike
 import pytest
 
 from src.entities.Conversation import Conversation
+from src.entities.KnowledgeBase import KnowledgeBase
 from src.entities.Llm import Llm
 from src.entities.StartupVariables import StartupVariables
 
@@ -50,6 +51,14 @@ def test_a_conversation_is_user_data(client, test_db_session):
     # The model may have been deleted since: the conversation still counts.
     llm = _llm(test_db_session, local=0, name="Gone")
     test_db_session.add(Conversation(llm_id=llm.id, name="Old chat"))
+    test_db_session.commit()
+
+    assert client.get("/erudi/startup/install_state").json() == {"has_user_data": True}
+
+
+def test_a_knowledge_base_is_user_data(client, test_db_session):
+    # A user who only built a knowledge base still updated an install in use.
+    test_db_session.add(KnowledgeBase())
     test_db_session.commit()
 
     assert client.get("/erudi/startup/install_state").json() == {"has_user_data": True}

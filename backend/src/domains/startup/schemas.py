@@ -53,13 +53,13 @@ class InstallStateResponse(BaseModel):
     """Response schema for ``GET /startup/install_state`` (#572).
 
     Attributes:
-        has_user_data: True when the database holds at least one conversation
-            or one downloaded model. The renderer reads it at the first launch
+        has_user_data: True when the database holds at least one
+            conversation, knowledge base or downloaded model. The renderer reads it at the first launch
             of a version that recorded no "last seen version": True means the
             install was updated from an earlier version, False a fresh install
             (or one after "Clear all data").
     """
 
     has_user_data: bool = Field(
-        ..., description="True if a conversation or a downloaded model exists"
+        ..., description="True if a conversation, a knowledge base or a downloaded model exists"
     )

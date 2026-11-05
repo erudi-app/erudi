@@ -103,8 +103,8 @@ async def get_install_state(
 
     The renderer asks it once, at the first launch of a version with no
     recorded "last seen version", to tell an install updated from an earlier
-    version (a conversation or a downloaded model exists: it is told what
-    changed) from a fresh one (nothing to say). Unlike ``/welcome-popup`` it
+    version (a conversation, a knowledge base or a downloaded model exists:
+    it is told what changed) from a fresh one (nothing to say). Unlike ``/welcome-popup`` it
     writes nothing.
 
     Raises:

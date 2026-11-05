@@ -107,8 +107,9 @@ Routers are mounted under the `/erudi` prefix in `register_routers`
 
 - `GET /erudi/startup/welcome-popup` drives first-run UI state (`StartupVariables`).
 - `GET /erudi/startup/install_state` reports, read-only, whether the database
-  holds a conversation or a downloaded model; the renderer uses it to tell an
-  updated install from a fresh one at the first launch of a version.
+  holds a conversation, a knowledge base or a downloaded model; the renderer
+  uses it to tell an updated install from a fresh one at the first launch of a
+  version.
 - `GET|PUT /erudi/user_settings/` reads and writes the UI language, the global
   web-search default, the three update switches (check, download, install),
   the default reasoning effort and the default compaction threshold
