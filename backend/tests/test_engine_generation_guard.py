@@ -321,7 +321,7 @@ async def test_try_guard_enters_a_free_engine_and_holds_the_lock():
         async with _GuardEngine.try_generation_guard():
             assert _GuardEngine._generation_lock_for_running_loop().locked()
         assert not _GuardEngine._generation_lock_for_running_loop().locked()
-        assert BaseEngine._generation_demand == 0
+        assert BaseEngine._generation_lock.demand == 0
     finally:
         _reset()
 
@@ -336,7 +336,7 @@ async def test_try_guard_refuses_when_the_lock_stays_held(_short_busy_wait):
                 async with _GuardEngine.try_generation_guard():
                     entered = True
         assert entered is False
-        assert BaseEngine._generation_demand == 0
+        assert BaseEngine._generation_lock.demand == 0
     finally:
         _reset()
 
@@ -376,7 +376,7 @@ async def test_try_guard_never_jumps_ahead_of_a_queued_turn(_short_busy_wait):
         async with _GuardEngine._acquire_generation_lock():
             turn = asyncio.create_task(queued_turn())
             await asyncio.sleep(0.01)
-            assert BaseEngine._generation_demand == 2
+            assert BaseEngine._generation_lock.demand == 2
         # Released: asyncio hands the lock to the queued turn, which has not
         # run yet -- the lock may read free, the demand does not.
         with pytest.raises(EngineBusyException):
@@ -384,7 +384,7 @@ async def test_try_guard_never_jumps_ahead_of_a_queued_turn(_short_busy_wait):
                 order.append("compact")
         await turn
         assert order == ["turn"]
-        assert BaseEngine._generation_demand == 0
+        assert BaseEngine._generation_lock.demand == 0
     finally:
         _reset()
 
@@ -398,12 +398,12 @@ async def test_a_cancelled_queued_acquirer_leaves_no_demand_behind():
         async with _GuardEngine._acquire_generation_lock():
             waiter = asyncio.create_task(queued())
             await asyncio.sleep(0.01)
-            assert BaseEngine._generation_demand == 2
+            assert BaseEngine._generation_lock.demand == 2
             waiter.cancel()
             with pytest.raises(asyncio.CancelledError):
                 await waiter
-            assert BaseEngine._generation_demand == 1
-        assert BaseEngine._generation_demand == 0
+            assert BaseEngine._generation_lock.demand == 1
+        assert BaseEngine._generation_lock.demand == 0
         async with _GuardEngine.try_generation_guard():
             pass
     finally:
@@ -411,13 +411,66 @@ async def test_a_cancelled_queued_acquirer_leaves_no_demand_behind():
 
 
 async def test_the_demand_counter_is_recreated_with_the_lock_per_loop():
-    BaseEngine._generation_demand = 3
+    old = _GuardEngine._generation_lock_for_running_loop()
+    old.demand = 3
     BaseEngine._generation_lock_loop = object()  # a loop that is not this one
     try:
-        _GuardEngine._generation_lock_for_running_loop()
-        assert BaseEngine._generation_demand == 0
+        new = _GuardEngine._generation_lock_for_running_loop()
+        assert new is not old
+        assert new.demand == 0
     finally:
         _reset()
+
+
+def test_a_holder_of_an_older_loop_never_touches_the_new_loops_demand():
+    """The lock (and its demand) is recreated for each event loop: a holder
+    that unwinds on the old loop after the new lock exists lowers the old
+    lock's counter, never the new one's -- which would mask a waiter."""
+    loop_a = asyncio.new_event_loop()
+    try:
+        release = loop_a.run_until_complete(_make_event())
+        holding = loop_a.run_until_complete(_make_event())
+
+        async def hold():
+            async with _GuardEngine._acquire_generation_lock():
+                holding.set()
+                await release.wait()
+
+        holder = loop_a.create_task(hold())
+        loop_a.run_until_complete(holding.wait())
+        old_lock = BaseEngine._generation_lock
+        assert old_lock.demand == 1
+
+        async def on_loop_b():
+            return _GuardEngine._generation_lock_for_running_loop()
+
+        new_lock = asyncio.run(on_loop_b())
+        assert new_lock is not old_lock and new_lock.demand == 0
+
+        release.set()
+        loop_a.run_until_complete(holder)
+        assert old_lock.demand == 0
+        assert new_lock.demand == 0
+    finally:
+        loop_a.close()
+        _reset()
+
+
+def test_the_demand_counter_never_goes_below_zero():
+    async def unwind_twice():
+        lock = _GuardEngine._generation_lock_for_running_loop()
+        async with _GuardEngine._acquire_generation_lock():
+            lock.demand = 0  # as if it had been recreated under the holder
+        return lock.demand
+
+    try:
+        assert asyncio.run(unwind_twice()) == 0
+    finally:
+        _reset()
+
+
+async def _make_event():
+    return asyncio.Event()
 
 
 async def test_try_guard_drains_a_pending_reset_before_entering():
@@ -465,6 +518,6 @@ async def test_try_guard_releases_the_lock_on_an_exception():
             async with _GuardEngine.try_generation_guard():
                 raise ValueError("boom")
         assert not _GuardEngine._generation_lock_for_running_loop().locked()
-        assert BaseEngine._generation_demand == 0
+        assert BaseEngine._generation_lock.demand == 0
     finally:
         _reset()

@@ -786,8 +786,10 @@ single-model subprocess, and the idle-cleanup tick shares that same lock, so a m
 never be reaped mid-stream. On exit the idle clock restarts from the end of the
 generation. Both take the lock through one helper, `_acquire_generation_lock`, which
 first drains a prefix-cache reset an earlier holder left running (next section), and
-counts every holder and waiter in `_generation_demand` (raised before the acquire,
-lowered in a `finally`, so a request cancelled while queued leaves nothing behind).
+counts every holder and waiter in the lock's own `demand` (raised before the acquire,
+lowered in a `finally` on the same lock object and never below zero, so a request
+cancelled while queued leaves nothing behind, and a holder of a lock recreated for another
+event loop never touches the new lock's count).
 
 An action that must not queue behind an answer — a manual compaction (`POST
 /conversations/{id}/compact`) — takes `try_generation_guard()` instead. The engine is busy

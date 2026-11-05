@@ -348,7 +348,7 @@ async def test_a_summary_that_cannot_be_written_changes_nothing(monkeypatch, scr
     assert _BrakeEngine.rewrites == []
     # The turn-end sample is still taken, and the lock is free again.
     assert _BrakeEngine.points[-1] == (POINT_TURN_END, None)
-    assert BaseEngine._generation_demand == 0
+    assert BaseEngine._generation_lock.demand == 0
 
 
 class _SlowSummaryModel(_ScriptedSummaryModel):
@@ -423,7 +423,7 @@ async def test_a_client_gone_during_the_summary_releases_the_lock_with_nothing_w
 
     assert [m.id for m in await _state(cp, "c1")] == ["h1", "a1", "h2", "a2"]
     assert marker.events == []
-    assert BaseEngine._generation_demand == 0
+    assert BaseEngine._generation_lock.demand == 0
     assert not _BrakeEngine._generation_lock_for_running_loop().locked()
 
 
@@ -444,7 +444,7 @@ async def test_a_client_gone_while_the_stores_are_written_never_half_writes(monk
     state = await _state(cp, "c2")
     assert state[0].additional_kwargs.get("lc_source") == "summarization"
     assert len(marker.events) == 1
-    assert BaseEngine._generation_demand == 0
+    assert BaseEngine._generation_lock.demand == 0
 
 
 async def test_a_store_failing_after_the_client_went_away_is_logged_once(monkeypatch, caplog):

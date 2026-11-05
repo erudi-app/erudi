@@ -76,6 +76,19 @@ GENERATION_BUSY_WAIT_S = 2.0
 _GENERATION_BUSY_POLL_S = 0.05
 
 
+class _GenerationLock(asyncio.Lock):
+    """The engine's generation lock, with its ``demand``: how many holders
+    and waiters it has right now (raised before every acquisition through
+    ``BaseEngine._acquire_generation_lock``, lowered when it ends: released,
+    or cancelled while queued). ``locked()`` alone cannot say "busy":
+    asyncio hands a released lock to the next waiter, which reads as free
+    until that waiter runs."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.demand = 0
+
+
 def _log_monitor_death(task: "asyncio.Task") -> None:
     """Done callback of a background monitor (the idle cleanup, the memory
     pressure monitor): a death nobody awaits is logged, under the task's name."""
@@ -256,14 +269,10 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     # Serializes a full generation (model resolution + stream) on the
     # single-model engine. Lazily created and rebound per running loop so each
     # test (own loop) stays isolated; production has one loop -> one lock.
+    # A ``_GenerationLock``: its ``demand`` lives on it, so each loop's lock
+    # counts its own holders and waiters.
     _generation_lock = None
     _generation_lock_loop = None
-    # How many holders and waiters the lock has right now: raised before
-    # every acquisition through ``_acquire_generation_lock``, lowered when it
-    # ends (released, or cancelled while queued). ``locked()`` alone cannot
-    # say "busy": asyncio hands a released lock to the next waiter, which
-    # reads as free until that waiter runs. Recreated with the lock.
-    _generation_demand: int = 0
 
     # The in-flight prefix-cache reset (an ``asyncio.Task`` around its worker
     # thread), or None. Class-level on ``BaseEngine`` like the lock it
@@ -998,18 +1007,18 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         return cls._model, cls._tokenizer
 
     @classmethod
-    def _generation_lock_for_running_loop(cls) -> "asyncio.Lock":
-        """Return an ``asyncio.Lock`` bound to the current running loop.
+    def _generation_lock_for_running_loop(cls) -> "_GenerationLock":
+        """Return the generation lock bound to the current running loop.
 
         Recreated if the running loop changed so tests (each with their own
         loop) stay isolated; in production there is exactly one loop, so the
-        lock is created once and shared across all engine classes.
+        lock is created once and shared across all engine classes. Its
+        demand counter is recreated with it.
         """
         loop = asyncio.get_running_loop()
         if BaseEngine._generation_lock is None or BaseEngine._generation_lock_loop is not loop:
-            BaseEngine._generation_lock = asyncio.Lock()
+            BaseEngine._generation_lock = _GenerationLock()
             BaseEngine._generation_lock_loop = loop
-            BaseEngine._generation_demand = 0
         return BaseEngine._generation_lock
 
     @classmethod
@@ -1023,19 +1032,20 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         the new holder gets control -- so no prefill, title, model swap or
         reap can start while an orphan reset thread still talks to the child.
 
-        The demand counter covers the whole acquisition, queued time
-        included: raised before the acquire, lowered in a ``finally`` -- a
-        turn cancelled while queued (a client disconnect) never leaves it
-        raised.
+        The lock's demand counter covers the whole acquisition, queued time
+        included: raised before the acquire, lowered in a ``finally`` on the
+        SAME lock object -- a turn cancelled while queued (a client
+        disconnect) never leaves it raised, and a holder of an older loop's
+        lock never lowers the current one's. It never goes below zero.
         """
         lock = cls._generation_lock_for_running_loop()
-        BaseEngine._generation_demand += 1
+        lock.demand += 1
         try:
             async with lock:
                 await drain_pending_reset()
                 yield
         finally:
-            BaseEngine._generation_demand -= 1
+            lock.demand = max(0, lock.demand - 1)
 
     @classmethod
     @asynccontextmanager
@@ -1090,7 +1100,7 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         """``generation_guard`` for an action that must not queue behind one.
 
         The engine is busy while the lock is held OR anyone waits for it
-        (``_generation_demand``): a turn queued behind the holder is handed
+        (the lock's ``demand``): a turn queued behind the holder is handed
         the lock on release and must not be overtaken. Busy is waited out
         for at most ``GENERATION_BUSY_WAIT_S`` (the sub-second holds of the
         eviction-gauge and pressure ticks), then refused with
@@ -1107,7 +1117,7 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         lock = cls._generation_lock_for_running_loop()
         loop = asyncio.get_running_loop()
         deadline = loop.time() + GENERATION_BUSY_WAIT_S
-        while lock.locked() or BaseEngine._generation_demand > 0:
+        while lock.locked() or lock.demand > 0:
             remaining = deadline - loop.time()
             if remaining <= 0:
                 raise EngineBusyException()
