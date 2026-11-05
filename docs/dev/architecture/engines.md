@@ -785,7 +785,20 @@ The guard serializes concurrent requests on one asyncio lock so they cannot thra
 single-model subprocess, and the idle-cleanup tick shares that same lock, so a model can
 never be reaped mid-stream. On exit the idle clock restarts from the end of the
 generation. Both take the lock through one helper, `_acquire_generation_lock`, which
-first drains a prefix-cache reset an earlier holder left running (next section).
+first drains a prefix-cache reset an earlier holder left running (next section), and
+counts every holder and waiter in `_generation_demand` (raised before the acquire,
+lowered in a `finally`, so a request cancelled while queued leaves nothing behind).
+
+An action that must not queue behind an answer — a manual compaction (`POST
+/conversations/{id}/compact`) — takes `try_generation_guard()` instead. The engine is busy
+while the lock is held or anyone waits for it: `locked()` alone reads free at the instant
+asyncio hands a released lock to the next waiter, and that waiter must not be overtaken.
+Busy is waited out for at most `GENERATION_BUSY_WAIT_S` (2 seconds, which absorbs the
+sub-second holds of the pressure and eviction-gauge ticks), then refused with
+`EngineBusyException` (409, "The model is busy; try again in a moment."). Otherwise it
+behaves like `generation_guard`, except that on exit the idle clock restarts only when a
+model is still loaded. The lock is not reentrant: nothing inside either guard may enter
+the other.
 
 ## Prefix cache (MLX)
 

@@ -44,7 +44,7 @@ from abc import ABC, abstractmethod, ABCMeta
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from src.core.exceptions import EngineException
+from src.core.exceptions import EngineBusyException, EngineException
 from src.core.logging import logger
 from src.engines.memory_brake import BrakeOutcome
 
@@ -66,6 +66,14 @@ class EngineMeta(ABCMeta):
 # driver. Compared by name so the CPU build, which may not ship pynvml at all,
 # never has to import it to know them.
 _NO_NVIDIA_DRIVER_ERRORS = frozenset({"NVMLError_LibraryNotFound", "NVMLError_DriverNotLoaded"})
+
+# How long ``try_generation_guard`` waits for the generation lock before it
+# refuses (``EngineBusyException``): long enough to absorb the sub-second holds
+# of the eviction-gauge and memory-pressure ticks, short enough that a refusal
+# while an answer streams comes back at once. Its poll interval: the lock has
+# no "free and nobody queued" event to wait on.
+GENERATION_BUSY_WAIT_S = 2.0
+_GENERATION_BUSY_POLL_S = 0.05
 
 
 def _log_monitor_death(task: "asyncio.Task") -> None:
@@ -250,6 +258,12 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     # test (own loop) stays isolated; production has one loop -> one lock.
     _generation_lock = None
     _generation_lock_loop = None
+    # How many holders and waiters the lock has right now: raised before
+    # every acquisition through ``_acquire_generation_lock``, lowered when it
+    # ends (released, or cancelled while queued). ``locked()`` alone cannot
+    # say "busy": asyncio hands a released lock to the next waiter, which
+    # reads as free until that waiter runs. Recreated with the lock.
+    _generation_demand: int = 0
 
     # The in-flight prefix-cache reset (an ``asyncio.Task`` around its worker
     # thread), or None. Class-level on ``BaseEngine`` like the lock it
@@ -995,6 +1009,7 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         if BaseEngine._generation_lock is None or BaseEngine._generation_lock_loop is not loop:
             BaseEngine._generation_lock = asyncio.Lock()
             BaseEngine._generation_lock_loop = loop
+            BaseEngine._generation_demand = 0
         return BaseEngine._generation_lock
 
     @classmethod
@@ -1002,15 +1017,25 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     async def _acquire_generation_lock(cls):
         """THE way to take the generation lock: acquire, then drain.
 
-        Used by ``generation_guard`` and by the idle tick alike. Right after
-        acquiring, an in-flight prefix-cache reset left by an earlier holder
-        is drained (``drain_pending_reset``) before the new holder gets
-        control -- so no prefill, title, model swap or reap can start while
-        an orphan reset thread still talks to the child.
+        Used by ``generation_guard``, ``try_generation_guard`` and the idle
+        tick alike. Right after acquiring, an in-flight prefix-cache reset
+        left by an earlier holder is drained (``drain_pending_reset``) before
+        the new holder gets control -- so no prefill, title, model swap or
+        reap can start while an orphan reset thread still talks to the child.
+
+        The demand counter covers the whole acquisition, queued time
+        included: raised before the acquire, lowered in a ``finally`` -- a
+        turn cancelled while queued (a client disconnect) never leaves it
+        raised.
         """
-        async with cls._generation_lock_for_running_loop():
-            await drain_pending_reset()
-            yield
+        lock = cls._generation_lock_for_running_loop()
+        BaseEngine._generation_demand += 1
+        try:
+            async with lock:
+                await drain_pending_reset()
+                yield
+        finally:
+            BaseEngine._generation_demand -= 1
 
     @classmethod
     @asynccontextmanager
@@ -1056,6 +1081,49 @@ class BaseEngine(ABC, metaclass=EngineMeta):
                 held_ms = (time.perf_counter() - held_start_s) * 1000
                 logger.info(
                     f"[{cls.__name__}] generation_guard released "
+                    f"(model={cls._model_id}, held {held_ms:.0f}ms)"
+                )
+
+    @classmethod
+    @asynccontextmanager
+    async def try_generation_guard(cls):
+        """``generation_guard`` for an action that must not queue behind one.
+
+        The engine is busy while the lock is held OR anyone waits for it
+        (``_generation_demand``): a turn queued behind the holder is handed
+        the lock on release and must not be overtaken. Busy is waited out
+        for at most ``GENERATION_BUSY_WAIT_S`` (the sub-second holds of the
+        eviction-gauge and pressure ticks), then refused with
+        ``EngineBusyException`` (409). Free, the lock is taken through
+        ``_acquire_generation_lock`` -- the acquire does not yield on a free
+        lock, so nobody slips in between the check and it --, which drains a
+        pending prefix-cache reset first.
+
+        On exit the idle clock restarts only when a model is still loaded:
+        a holder that unloaded it leaves nothing for the idle check to time.
+        ``asyncio.Lock`` is not reentrant: nothing inside may call
+        ``generation_guard``.
+        """
+        lock = cls._generation_lock_for_running_loop()
+        loop = asyncio.get_running_loop()
+        deadline = loop.time() + GENERATION_BUSY_WAIT_S
+        while lock.locked() or BaseEngine._generation_demand > 0:
+            remaining = deadline - loop.time()
+            if remaining <= 0:
+                raise EngineBusyException()
+            await asyncio.sleep(min(_GENERATION_BUSY_POLL_S, remaining))
+        async with cls._acquire_generation_lock():
+            logger.info(f"[{cls.__name__}] try_generation_guard acquired (model={cls._model_id})")
+            held_start_s = time.perf_counter()
+            try:
+                yield
+            finally:
+                if cls._model is not None:
+                    cls._last_used = datetime.now()
+                    cls._generation_ended_at = time.monotonic()
+                held_ms = (time.perf_counter() - held_start_s) * 1000
+                logger.info(
+                    f"[{cls.__name__}] try_generation_guard released "
                     f"(model={cls._model_id}, held {held_ms:.0f}ms)"
                 )
 

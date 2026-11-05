@@ -287,3 +287,184 @@ def test_should_cleanup_reads_the_idle_clock_once(monkeypatch):
     finally:
         monkeypatch.undo()
         _reset()
+
+
+# ──────────────── non-blocking guard (/compact, unload: busy -> 409) ────────────────
+
+
+@pytest.fixture
+def _short_busy_wait(monkeypatch):
+    """The 2 s busy wait, shortened so a refusal is quick to observe."""
+    from src.engines import base_engine
+
+    monkeypatch.setattr(base_engine, "GENERATION_BUSY_WAIT_S", 0.05)
+
+
+def test_the_busy_wait_is_two_seconds():
+    from src.engines import base_engine
+
+    assert base_engine.GENERATION_BUSY_WAIT_S == 2.0
+
+
+def test_engine_busy_is_a_409_with_a_neutral_message():
+    from src.core.exceptions import AppBaseException, EngineBusyException
+
+    exc = EngineBusyException()
+    assert isinstance(exc, AppBaseException)
+    assert exc.status_code == 409
+    assert exc.erudi_code == "ENGINE_BUSY"
+    assert exc.message == "The model is busy; try again in a moment."
+
+
+async def test_try_guard_enters_a_free_engine_and_holds_the_lock():
+    try:
+        async with _GuardEngine.try_generation_guard():
+            assert _GuardEngine._generation_lock_for_running_loop().locked()
+        assert not _GuardEngine._generation_lock_for_running_loop().locked()
+        assert BaseEngine._generation_demand == 0
+    finally:
+        _reset()
+
+
+async def test_try_guard_refuses_when_the_lock_stays_held(_short_busy_wait):
+    from src.core.exceptions import EngineBusyException
+
+    entered = False
+    try:
+        async with _GuardEngine.generation_guard():
+            with pytest.raises(EngineBusyException):
+                async with _GuardEngine.try_generation_guard():
+                    entered = True
+        assert entered is False
+        assert BaseEngine._generation_demand == 0
+    finally:
+        _reset()
+
+
+async def test_try_guard_waits_for_a_short_hold_to_end():
+    """A sub-second hold (a contention or pressure tick) is absorbed."""
+    released = asyncio.Event()
+
+    async def short_holder():
+        async with _GuardEngine._acquire_generation_lock():
+            await asyncio.sleep(0.05)
+        released.set()
+
+    try:
+        holder = asyncio.create_task(short_holder())
+        await asyncio.sleep(0)
+        async with _GuardEngine.try_generation_guard():
+            assert released.is_set()
+        await holder
+    finally:
+        _reset()
+
+
+async def test_try_guard_never_jumps_ahead_of_a_queued_turn(_short_busy_wait):
+    """Busy is the lock held OR an acquirer waiting: a turn queued behind a
+    holder keeps the engine busy even at the instant the lock reads free."""
+    from src.core.exceptions import EngineBusyException
+
+    order: list = []
+
+    async def queued_turn():
+        async with _GuardEngine.generation_guard():
+            order.append("turn")
+            await asyncio.sleep(0.2)
+
+    try:
+        async with _GuardEngine._acquire_generation_lock():
+            turn = asyncio.create_task(queued_turn())
+            await asyncio.sleep(0.01)
+            assert BaseEngine._generation_demand == 2
+        # Released: asyncio hands the lock to the queued turn, which has not
+        # run yet -- the lock may read free, the demand does not.
+        with pytest.raises(EngineBusyException):
+            async with _GuardEngine.try_generation_guard():
+                order.append("compact")
+        await turn
+        assert order == ["turn"]
+        assert BaseEngine._generation_demand == 0
+    finally:
+        _reset()
+
+
+async def test_a_cancelled_queued_acquirer_leaves_no_demand_behind():
+    async def queued():
+        async with _GuardEngine.generation_guard():
+            pass
+
+    try:
+        async with _GuardEngine._acquire_generation_lock():
+            waiter = asyncio.create_task(queued())
+            await asyncio.sleep(0.01)
+            assert BaseEngine._generation_demand == 2
+            waiter.cancel()
+            with pytest.raises(asyncio.CancelledError):
+                await waiter
+            assert BaseEngine._generation_demand == 1
+        assert BaseEngine._generation_demand == 0
+        async with _GuardEngine.try_generation_guard():
+            pass
+    finally:
+        _reset()
+
+
+async def test_the_demand_counter_is_recreated_with_the_lock_per_loop():
+    BaseEngine._generation_demand = 3
+    BaseEngine._generation_lock_loop = object()  # a loop that is not this one
+    try:
+        _GuardEngine._generation_lock_for_running_loop()
+        assert BaseEngine._generation_demand == 0
+    finally:
+        _reset()
+
+
+async def test_try_guard_drains_a_pending_reset_before_entering():
+    finished: list = []
+
+    async def reset():
+        await asyncio.sleep(0.05)
+        finished.append("reset")
+
+    BaseEngine._pending_reset = asyncio.get_running_loop().create_task(reset())
+    try:
+        async with _GuardEngine.try_generation_guard():
+            assert finished == ["reset"]
+        assert BaseEngine._pending_reset is None
+    finally:
+        _reset()
+
+
+async def test_try_guard_stamps_the_idle_clock_when_a_model_is_loaded_at_exit():
+    _GuardEngine._model = object()
+    _GuardEngine._model_id = "x"
+    _GuardEngine._last_used = datetime.now() - timedelta(seconds=10_000)
+    try:
+        async with _GuardEngine.try_generation_guard():
+            pass
+        assert _GuardEngine._should_cleanup() is False
+    finally:
+        _reset()
+
+
+async def test_try_guard_does_not_stamp_the_idle_clock_after_an_unload():
+    _GuardEngine._model = object()
+    _GuardEngine._model_id = "x"
+    try:
+        async with _GuardEngine.try_generation_guard():
+            _GuardEngine.cleanup()
+        assert _GuardEngine._last_used is None
+    finally:
+        _reset()
+
+
+async def test_try_guard_releases_the_lock_on_an_exception():
+    try:
+        with pytest.raises(ValueError):
+            async with _GuardEngine.try_generation_guard():
+                raise ValueError("boom")
+        assert not _GuardEngine._generation_lock_for_running_loop().locked()
+        assert BaseEngine._generation_demand == 0
+    finally:
+        _reset()

@@ -24,7 +24,9 @@ Exception Hierarchy:
     ├── DownloadJobNotFoundException (404, DOWNLOAD_JOB_NOT_FOUND)
     ├── TokenizationException (500, TOKENIZATION_ERROR)
     ├── ConfigurationException (500, CONFIGURATION_ERROR)
-    └── EngineException (500, LLM_ENGINE_FAILURE)
+    ├── EngineException (500, LLM_ENGINE_FAILURE)
+    ├── HardwareException (500, HARDWARE_ERROR)
+    └── EngineBusyException (409, ENGINE_BUSY)
 
 Fonctionnalités:
 - Structured exception hierarchy with status codes
@@ -81,9 +83,10 @@ Exception Categories:
     - MessageNotFoundException
     - DownloadJobNotFoundException
 
-    **Client Errors (400, 422):**
+    **Client Errors (400, 409, 422):**
     - InvalidInputException (422)
     - StateConflictException (400)
+    - EngineBusyException (409)
 
     **Server Errors (500):**
     - DatabaseException
@@ -853,6 +856,25 @@ class HardwareException(AppBaseException):
             message=message,
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             erudi_code="HARDWARE_ERROR",
+            trace=trace,
+        )
+
+
+class EngineBusyException(AppBaseException):
+    """Exception raised when an action that must not queue finds the engine busy.
+
+    ``BaseEngine.try_generation_guard`` raises it after waiting at most
+    ``GENERATION_BUSY_WAIT_S`` for the generation lock: an answer, a model
+    reload, a memory-brake sample or the idle check holds it, or a turn is
+    queued for it. The wording is neutral because the holder can be any of
+    them.
+    """
+
+    def __init__(self, trace: Optional[str] = None):
+        super().__init__(
+            message="The model is busy; try again in a moment.",
+            status_code=status.HTTP_409_CONFLICT,
+            erudi_code="ENGINE_BUSY",
             trace=trace,
         )
 
