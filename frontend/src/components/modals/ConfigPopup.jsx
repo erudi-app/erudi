@@ -14,7 +14,7 @@ import { hasNoPublisherRecommendation } from "../../utils/samplingDefaults";
 const TWO_DECIMALS = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
 
 // What a read-out shows while its value is not known yet.
-const NO_VALUE = "\u2013";
+export const NO_VALUE = "\u2013";
 
 const WEB_SEARCH_REASON_KEYS = {
   incapable: "chat:config.webSearch.unavailable",
@@ -101,7 +101,16 @@ export default function ConfigPopup({ isOpen, onClose, settings, model }) {
   const setTopP = (e) => setField("top_p", parseFloat(e.target.value));
   const setWebSearch = (next) => setField("web_search_enabled", next);
   const setThreshold = (e) => setField("compaction_threshold", Number(e.target.value));
-  const saveInstructions = () => setField("custom_prompt", instructions);
+  // The instructions are saved on Save, when the editor loses the focus, and
+  // when the popup closes with an edit in it: never lost on close.
+  const edited = values.custom_prompt !== null && instructions !== values.custom_prompt;
+  const saveInstructions = () => {
+    if (edited) setField("custom_prompt", instructions);
+  };
+  const close = () => {
+    saveInstructions();
+    onClose();
+  };
 
   const effortLabel = t("chat:config.effort.label");
   const webSearchLabel = t("chat:config.webSearch.label");
@@ -113,7 +122,7 @@ export default function ConfigPopup({ isOpen, onClose, settings, model }) {
   return (
     <ModalShell
       isOpen={isOpen}
-      onClose={onClose}
+      onClose={close}
       title={t("chat:config.title")}
       subtitle={isDraft ? t("chat:config.subtitleDraft") : t("chat:config.subtitle")}
       width="max-w-2xl"
@@ -239,6 +248,7 @@ export default function ConfigPopup({ isOpen, onClose, settings, model }) {
               value={instructions}
               disabled={values.custom_prompt === null}
               onChange={(e) => setInstructions(e.target.value)}
+              onBlur={saveInstructions}
               placeholder={t("chat:config.instructions.placeholder")}
               className={[
                 "w-full h-28 rounded-2xl resize-none",

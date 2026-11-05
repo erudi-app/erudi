@@ -2,6 +2,7 @@ import React, { useCallback, useEffect, useState } from "react";
 import PropTypes from "prop-types";
 import { useTranslation } from "react-i18next";
 import ModalShell from "./ModalShell";
+import { NO_VALUE } from "./ConfigPopup";
 import { formatNumber } from "../../i18n/format";
 import { formatCompactionThreshold } from "../../utils/compactionThreshold";
 import { createLogger } from "../../utils/logger";
@@ -38,18 +39,35 @@ export default function ConfigGlobalPopup({ isOpen, onClose, settings, model }) 
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [isOpen]);
 
+  // A value not known yet reads as a dash, never as a made-up one.
+  const shown = (value, format) =>
+    value === null || value === undefined ? NO_VALUE : format(value);
   const rows = [
-    [t("chat:config.effort.label"), t(`chat:config.effort.levels.${values.reasoning_effort}`)],
+    [
+      t("chat:config.effort.label"),
+      shown(values.reasoning_effort, (level) => t(`chat:config.effort.levels.${level}`)),
+    ],
     [
       t("chat:config.webSearch.label"),
-      values.web_search_enabled ? t("chat:config.global.on") : t("chat:config.global.off"),
+      shown(values.web_search_enabled, (on) =>
+        on ? t("chat:config.global.on") : t("chat:config.global.off")
+      ),
     ],
-    [t("chat:config.creativity.label"), formatNumber(values.temperature ?? 0, TWO_DECIMALS)],
-    [t("chat:config.diversity.label"), formatNumber(values.top_p ?? 0, TWO_DECIMALS)],
-    [t("chat:config.threshold.label"), formatCompactionThreshold(values.compaction_threshold)],
+    [
+      t("chat:config.creativity.label"),
+      shown(values.temperature, (value) => formatNumber(value, TWO_DECIMALS)),
+    ],
+    [
+      t("chat:config.diversity.label"),
+      shown(values.top_p, (value) => formatNumber(value, TWO_DECIMALS)),
+    ],
+    [
+      t("chat:config.threshold.label"),
+      shown(values.compaction_threshold, formatCompactionThreshold),
+    ],
     [
       t("chat:config.instructions.label"),
-      values.custom_prompt ? values.custom_prompt : t("chat:config.global.noInstructions"),
+      shown(values.custom_prompt, (text) => text || t("chat:config.global.noInstructions")),
     ],
   ];
 

@@ -44,13 +44,19 @@ const TOOL_MODEL = {
 
 let hookRef;
 
-function Harness({ Popup = ConfigPopup, model = TOOL_MODEL, conversation = CONVERSATION }) {
-  const settings = useConversationSettings(7);
+function Harness({
+  Popup = ConfigPopup,
+  model = TOOL_MODEL,
+  conversation = CONVERSATION,
+  onClose = () => {},
+  id = 7,
+}) {
+  const settings = useConversationSettings(id);
   hookRef = settings;
   React.useEffect(() => {
-    settings.adopt(conversation);
+    if (conversation) settings.adopt(conversation);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
-  return <Popup isOpen onClose={() => {}} settings={settings} model={model} />;
+  return <Popup isOpen onClose={onClose} settings={settings} model={model} />;
 }
 
 beforeEach(() => {
@@ -171,6 +177,38 @@ describe("ConfigPopup", () => {
     expect(patchMock).toHaveBeenCalledWith("/conversations/7", { custom_prompt: "" });
   });
 
+  it("saves edited instructions when the editor loses the focus", async () => {
+    render(<Harness />);
+    await settle();
+    const editor = screen.getByRole("textbox", { name: "Custom instructions" });
+    fireEvent.change(editor, { target: { value: "Answer in French" } });
+    fireEvent.blur(editor);
+    await act(async () => hookRef.flush());
+    expect(patchMock).toHaveBeenCalledWith("/conversations/7", {
+      custom_prompt: "Answer in French",
+    });
+  });
+
+  it("does not save unchanged instructions on blur", async () => {
+    render(<Harness />);
+    await settle();
+    fireEvent.blur(screen.getByRole("textbox", { name: "Custom instructions" }));
+    await act(async () => hookRef.flush());
+    expect(patchMock).not.toHaveBeenCalled();
+  });
+
+  it("saves edited instructions when the popup closes (Escape)", async () => {
+    const onClose = vi.fn();
+    render(<Harness onClose={onClose} />);
+    await settle();
+    const editor = screen.getByRole("textbox", { name: "Custom instructions" });
+    fireEvent.change(editor, { target: { value: "Be terse" } });
+    fireEvent.keyDown(editor, { key: "Escape" });
+    await act(async () => hookRef.flush());
+    expect(onClose).toHaveBeenCalledTimes(1);
+    expect(patchMock).toHaveBeenCalledWith("/conversations/7", { custom_prompt: "Be terse" });
+  });
+
   it("puts a control back and says so when its save fails", async () => {
     patchMock.mockRejectedValueOnce(new Error("offline"));
     render(<Harness />);
@@ -261,6 +299,19 @@ describe("EffortPopup", () => {
 });
 
 describe("ConfigGlobalPopup (/config global)", () => {
+  it("shows a dash for a value not known yet, never a raw key, 0.00 or 0 %", async () => {
+    render(<Harness Popup={ConfigGlobalPopup} conversation={null} />);
+    await settle();
+    await settle();
+    const dialog = screen.getByRole("dialog");
+    expect(dialog.textContent).not.toMatch(/chat:config/);
+    expect(dialog.textContent).not.toMatch(/0\.00/);
+    expect(dialog.textContent).not.toMatch(/0\s?%/);
+    const dashes = Array.from(dialog.querySelectorAll("dd")).map((dd) => dd.textContent);
+    expect(dashes.slice(0, 5)).toEqual(["\u2013", "\u2013", "\u2013", "\u2013", "\u2013"]);
+    expect(putMock).not.toHaveBeenCalled();
+  });
+
   it("saves the six values for the current model and names it", async () => {
     putMock.mockResolvedValue({});
     render(
