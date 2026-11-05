@@ -227,6 +227,34 @@ describe("the new-conversation page", () => {
   });
 });
 
+describe("/compact and /context before the conversation exists (#585)", () => {
+  it("offers neither in the drop-up nor in the header panel", async () => {
+    await renderPage();
+    fireEvent.change(composer(), { target: { value: "/" } });
+    const names = screen.getAllByRole("option").map((o) => o.getAttribute("data-command"));
+    expect(names).toEqual(["config", "effort", "model"]);
+    fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
+    expect(screen.queryByRole("button", { name: /^Compact/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Context/ })).toBeNull();
+  });
+
+  it.each(["/compact", "/context"])(
+    "sends nothing for an exact %s, and says it works once the conversation exists",
+    async (command) => {
+      await renderPage();
+      typeAndEnter(command);
+      expect(
+        await screen.findByText(
+          `${command} works once the conversation exists: send a first message.`
+        )
+      ).toBeTruthy();
+      expect(createCalls()).toHaveLength(0);
+      expect(navigateMock).not.toHaveBeenCalled();
+      expect(composer().value).toBe("");
+    }
+  );
+});
+
 describe("a model whose weights are missing (#376)", () => {
   const ORPHAN = { id: 9, name: "Orphan assistant", weights_available: false };
 

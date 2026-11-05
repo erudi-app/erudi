@@ -3,6 +3,7 @@ import {
   COMMAND_SCOPES,
   SLASH_COMMANDS,
   commandsFor,
+  commandsOutside,
   headerCommands,
   matchCommands,
   parseSlashCommand,
@@ -14,10 +15,18 @@ import {
 const ALL = commandsFor(COMMAND_SCOPES.CONVERSATION);
 
 describe("the registry", () => {
-  it("offers /config, /effort and /model on both pages", () => {
-    expect(SLASH_COMMANDS.map((c) => c.name)).toEqual(["config", "effort", "model"]);
+  it("offers the five commands in a conversation, and three on the new-conversation page", () => {
+    expect(SLASH_COMMANDS.map((c) => c.name)).toEqual([
+      "config",
+      "context",
+      "compact",
+      "effort",
+      "model",
+    ]);
     expect(commandsFor(COMMAND_SCOPES.CONVERSATION).map((c) => c.name)).toEqual([
       "config",
+      "context",
+      "compact",
       "effort",
       "model",
     ]);
@@ -29,28 +38,14 @@ describe("the registry", () => {
   });
 
   it("keeps two explicit orders: the drop-up's (the registry's) and the header panel's", () => {
-    expect(matchCommands("/", ALL).map((c) => c.name)).toEqual(["config", "effort", "model"]);
-    expect(headerCommands(ALL).map((c) => c.name)).toEqual(["model", "config", "effort"]);
-  });
-
-  it("slots later commands into both orders as the spec lists them", () => {
-    const both = [COMMAND_SCOPES.CONVERSATION];
-    const registry = [
-      { name: "config", args: ["global"], scopes: both, headerOrder: 2 },
-      { name: "context", args: [], scopes: both, headerOrder: 5 },
-      { name: "compact", args: [], scopes: both, headerOrder: 4 },
-      { name: "effort", args: [], scopes: both, headerOrder: 3 },
-      { name: "model", args: [], scopes: both, headerOrder: 1 },
-    ];
-    const offered = commandsFor(COMMAND_SCOPES.CONVERSATION, registry);
-    expect(matchCommands("/", offered).map((c) => c.name)).toEqual([
+    expect(matchCommands("/", ALL).map((c) => c.name)).toEqual([
       "config",
       "context",
       "compact",
       "effort",
       "model",
     ]);
-    expect(headerCommands(offered).map((c) => c.name)).toEqual([
+    expect(headerCommands(ALL).map((c) => c.name)).toEqual([
       "model",
       "config",
       "effort",
@@ -58,7 +53,15 @@ describe("the registry", () => {
       "context",
     ]);
     // headerCommands never reorders the list it is given.
-    expect(offered.map((c) => c.name)[0]).toBe("config");
+    expect(ALL.map((c) => c.name)[0]).toBe("config");
+  });
+
+  it("names the commands a page does not offer: /compact and /context before a conversation exists", () => {
+    expect(commandsOutside(COMMAND_SCOPES.DRAFT).map((c) => c.name)).toEqual([
+      "context",
+      "compact",
+    ]);
+    expect(commandsOutside(COMMAND_SCOPES.CONVERSATION)).toEqual([]);
   });
 
   it("filters an entry out of a page it is not scoped to", () => {
@@ -67,6 +70,7 @@ describe("the registry", () => {
       { name: "effort", args: [], scopes: [COMMAND_SCOPES.CONVERSATION, COMMAND_SCOPES.DRAFT] },
     ];
     expect(commandsFor(COMMAND_SCOPES.DRAFT, registry).map((c) => c.name)).toEqual(["effort"]);
+    expect(commandsOutside(COMMAND_SCOPES.DRAFT, registry).map((c) => c.name)).toEqual(["config"]);
   });
 });
 
@@ -76,6 +80,8 @@ describe("parseSlashCommand: exact match only", () => {
     ["/config global", { name: "config", arg: "global" }],
     ["/effort", { name: "effort", arg: null }],
     ["/model", { name: "model", arg: null }],
+    ["/compact", { name: "compact", arg: null }],
+    ["/context", { name: "context", arg: null }],
     ["  /model  ", { name: "model", arg: null }],
   ])("%j runs a command", (text, expected) => {
     expect(parseSlashCommand(text, ALL)).toEqual(expected);
@@ -87,6 +93,9 @@ describe("parseSlashCommand: exact match only", () => {
     ["/config everything"],
     ["/config global now"],
     ["/effort high"],
+    ["/compact now"],
+    ["/context full"],
+    ["please /compact this for me"],
     ["/model qwen"],
     ["/Config"],
     ["config"],
@@ -105,11 +114,18 @@ describe("parseSlashCommand: exact match only", () => {
 
 describe("matchCommands: the drop-up list", () => {
   it("lists every command for a bare slash", () => {
-    expect(matchCommands("/", ALL).map((c) => c.name)).toEqual(["config", "effort", "model"]);
+    expect(matchCommands("/", ALL).map((c) => c.name)).toEqual([
+      "config",
+      "context",
+      "compact",
+      "effort",
+      "model",
+    ]);
   });
 
   it("narrows by prefix", () => {
-    expect(matchCommands("/con", ALL).map((c) => c.name)).toEqual(["config"]);
+    expect(matchCommands("/con", ALL).map((c) => c.name)).toEqual(["config", "context"]);
+    expect(matchCommands("/com", ALL).map((c) => c.name)).toEqual(["compact"]);
     expect(matchCommands("/m", ALL).map((c) => c.name)).toEqual(["model"]);
   });
 

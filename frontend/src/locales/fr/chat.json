@@ -45,7 +45,17 @@
     "model": {
       "label": "Modèle",
       "description": "Passer à un autre modèle installé"
-    }
+    },
+    "compact": {
+      "label": "Compacter",
+      "description": "Résumer maintenant les messages précédents pour libérer du contexte"
+    },
+    "context": {
+      "label": "Contexte",
+      "description": "Voir quelle part du contexte du modèle cette conversation occupe"
+    },
+    "needsConversation": "{{command}} fonctionne une fois la conversation créée : envoyez un premier message.",
+    "pickModelFirst": "Cette conversation n'a pas de modèle : choisissez-en d'abord un avec Modèle."
   },
   "config": {
     "title": "Réglages de la conversation",
@@ -161,7 +171,56 @@
     "lost": "Les messages précédents n'ont pas pu être résumés et ont été retirés de ce que voit le modèle.",
     "showSummary": "Afficher le résumé",
     "showKeptSummary": "Afficher le résumé que le modèle conserve",
-    "hideSummary": "Masquer le résumé"
+    "hideSummary": "Masquer le résumé",
+    "manual_one": "Vous avez résumé {{count}} message précédent.",
+    "manual_other": "Vous avez résumé {{count}} messages précédents.",
+    "manualNoCount": "Vous avez résumé les messages précédents."
+  },
+  "compactDialog": {
+    "title": "Résumer les messages précédents ?",
+    "body": "Pour le modèle, les messages précédents de cette conversation sont remplacés par un résumé : le même que celui qu'il écrit de lui-même quand la conversation remplit son contexte. Votre dernier échange est conservé mot pour mot et toute la conversation reste à l'écran. Le modèle ne voit plus les détails que le résumé omet.",
+    "confirm": "Résumer"
+  },
+  "compact": {
+    "nothingToCompact": "Rien à compacter pour l'instant.",
+    "errors": {
+      "busy": "Le modèle est occupé ; réessayez dans un instant.",
+      "unansweredQuestion": "La dernière question n'a pas encore de réponse ; renvoyez-la ou posez d'abord une nouvelle question.",
+      "notFound": "Cette conversation n'existe plus.",
+      "failed": "Le résumé n'a pas pu être écrit ; rien n'a été modifié.",
+      "separatorNotSaved": "Les messages précédents ont été résumés, mais le séparateur n'a pas pu être enregistré.",
+      "unknown": "Le résumé n'est pas revenu ; la conversation montre où elle en est."
+    }
+  },
+  "context": {
+    "title": "Utilisation du contexte",
+    "estimates": "Estimations, sur une fenêtre de {{window}} tokens",
+    "estimatesNoWindow": "Estimations",
+    "gridLabel": "Utilisation du contexte : {{used}} tokens utilisés sur {{window}}",
+    "legendLabel": "Utilisation du contexte par catégorie",
+    "dismiss": "Fermer l'utilisation du contexte",
+    "categories": {
+      "system_prompt": "Prompt système",
+      "tools": "Outils",
+      "messages": "Messages",
+      "summary": "Résumé",
+      "free": "Espace libre",
+      "autocompaction_buffer": "Réserve de compaction automatique"
+    },
+    "value_one": "{{tokens}} token · {{share}}",
+    "value_other": "{{tokens}} tokens · {{share}}",
+    "valueNoShare_one": "{{tokens}} token",
+    "valueNoShare_other": "{{tokens}} tokens",
+    "notes": {
+      "reducedByMemory": "Le modèle accepte jusqu'à {{trained}} tokens ; la mémoire de cet ordinateur limite cette conversation à {{working}}.",
+      "reducedByMemoryNoTrained": "La mémoire de cet ordinateur limite cette conversation à {{working}} tokens.",
+      "notLoaded": "Le modèle n'est pas chargé : voici la fenêtre pour laquelle il a été entraîné. La fenêtre que permet cet ordinateur est connue une fois le modèle chargé.",
+      "unknownWindow": "La fenêtre du modèle est inconnue, aucune part n'est donc affichée.",
+      "kbExcluded": "Les décomptes n'incluent pas les extraits de la base de connaissances que chaque question récupère.",
+      "pastThreshold": "La conversation a dépassé son seuil de compaction : le prochain tour résumera d'abord les messages précédents.",
+      "overWindow": "La prochaine requête ne tiendrait pas dans la fenêtre du modèle : le prochain tour résumera d'abord les messages précédents."
+    },
+    "failed": "L'utilisation du contexte n'a pas pu être lue."
   },
   "trace": {
     "summary": "Raisonnement",

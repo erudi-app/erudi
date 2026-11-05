@@ -45,7 +45,17 @@
     "model": {
       "label": "模型",
       "description": "切换到另一个已安装的模型"
-    }
+    },
+    "compact": {
+      "label": "压缩",
+      "description": "立即总结之前的消息以释放上下文"
+    },
+    "context": {
+      "label": "上下文",
+      "description": "查看此对话占用了模型上下文的多少"
+    },
+    "needsConversation": "{{command}} 需在对话创建后才能使用：请先发送第一条消息。",
+    "pickModelFirst": "此对话没有模型：请先通过“模型”选择一个。"
   },
   "config": {
     "title": "对话设置",
@@ -161,7 +171,56 @@
     "lost": "之前的消息无法总结，已从模型可见的内容中移除。",
     "showSummary": "显示摘要",
     "showKeptSummary": "显示模型保留的摘要",
-    "hideSummary": "隐藏摘要"
+    "hideSummary": "隐藏摘要",
+    "manual_one": "您已将 {{count}} 条之前的消息总结为摘要。",
+    "manual_other": "您已将 {{count}} 条之前的消息总结为摘要。",
+    "manualNoCount": "您已将之前的消息总结为摘要。"
+  },
+  "compactDialog": {
+    "title": "总结之前的消息？",
+    "body": "对模型而言，此对话之前的消息将被一份摘要取代：与对话占满上下文时它自动撰写的摘要相同。您最近的一轮对话会逐字保留，整个对话仍显示在屏幕上。摘要未包含的细节，模型将不再看到。",
+    "confirm": "总结"
+  },
+  "compact": {
+    "nothingToCompact": "暂时没有可压缩的内容。",
+    "errors": {
+      "busy": "模型正忙，请稍后再试。",
+      "unansweredQuestion": "最后一个问题还没有回答；请重新发送，或先提出新问题。",
+      "notFound": "此对话已不存在。",
+      "failed": "无法写入摘要；没有任何更改。",
+      "separatorNotSaved": "之前的消息已总结，但无法保存分隔线。",
+      "unknown": "摘要没有返回；对话显示了当前的状态。"
+    }
+  },
+  "context": {
+    "title": "上下文使用情况",
+    "estimates": "估算值，窗口为 {{window}} 个 token",
+    "estimatesNoWindow": "估算值",
+    "gridLabel": "上下文使用情况：已使用 {{window}} 个 token 中的 {{used}} 个",
+    "legendLabel": "按类别的上下文使用情况",
+    "dismiss": "关闭上下文使用情况",
+    "categories": {
+      "system_prompt": "系统提示词",
+      "tools": "工具",
+      "messages": "消息",
+      "summary": "摘要",
+      "free": "可用空间",
+      "autocompaction_buffer": "自动压缩预留"
+    },
+    "value_one": "{{tokens}} 个 token · {{share}}",
+    "value_other": "{{tokens}} 个 token · {{share}}",
+    "valueNoShare_one": "{{tokens}} 个 token",
+    "valueNoShare_other": "{{tokens}} 个 token",
+    "notes": {
+      "reducedByMemory": "模型最多支持 {{trained}} 个 token；这台电脑的内存将此对话限制为 {{working}} 个。",
+      "reducedByMemoryNoTrained": "这台电脑的内存将此对话限制为 {{working}} 个 token。",
+      "notLoaded": "模型尚未加载：这是它训练时的窗口。加载模型后才能知道这台电脑允许的窗口。",
+      "unknownWindow": "模型的窗口未知，因此不显示占比。",
+      "kbExcluded": "计数不包括每个问题检索到的知识库片段。",
+      "pastThreshold": "对话已超过压缩阈值：下一轮会先总结之前的消息。",
+      "overWindow": "下一次请求将超出模型的窗口：下一轮会先总结之前的消息。"
+    },
+    "failed": "无法读取上下文使用情况。"
   },
   "trace": {
     "summary": "推理过程",

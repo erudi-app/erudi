@@ -6,6 +6,8 @@ import ChatCollapsibleSection from "../components/ChatCollapsibleSection";
 import QuestionInput from "../components/QuestionInput";
 import ConversationHeader from "../components/ConversationHeader";
 import CommandPopups from "../components/CommandPopups";
+import CommandNotice from "../components/CommandNotice";
+import ContextUsagePanel from "../components/ContextUsagePanel";
 import EngineFailureModal from "../components/modals/EngineFailureModal";
 import { AlertTriangle, Copy, Check, FileText, Star } from "lucide-react";
 import TypingIndicator from "../components/TypingIndicator";
@@ -26,7 +28,12 @@ import {
   getImagePaths,
 } from "../utils/messageContent";
 import { formatBytes } from "../utils/formatBytes";
-import { compactionMarkers, compactionsOnly, hasStripEvents } from "../utils/traceEvents";
+import {
+  automaticCompactions,
+  compactionsOnly,
+  hasStripEvents,
+  manualCompactions,
+} from "../utils/traceEvents";
 
 const log = createLogger("ConversationPage");
 
@@ -53,6 +60,23 @@ const GPU_CONTENTION_POLL_MS = 10_000;
 const COMMANDS = commandsFor(COMMAND_SCOPES.CONVERSATION);
 // Switching model while an answer streams waits for the answer to end.
 const COMMANDS_DISABLED_WHILE_ANSWERING = ["model"];
+// Every command waits while /compact runs.
+const ALL_COMMAND_NAMES = COMMANDS.map((command) => command.name);
+// What a /compact refusal or failure says, by the backend's `detail.reason`
+// or error type (#585); anything else (no answer, an unknown error) is
+// `unknown`, and the conversation read again shows where it stands.
+const COMPACT_ERROR_KEYS = {
+  no_model: "chat:commands.pickModelFirst",
+  unanswered_question: "chat:compact.errors.unansweredQuestion",
+  ENGINE_BUSY: "chat:compact.errors.busy",
+  CONVERSATION_NOT_FOUND: "chat:compact.errors.notFound",
+  COMPACTION_FAILED: "chat:compact.errors.failed",
+  COMPACTION_SEPARATOR_NOT_SAVED: "chat:compact.errors.separatorNotSaved",
+};
+const compactErrorKey = (error) =>
+  COMPACT_ERROR_KEYS[error?.detail?.reason] ??
+  COMPACT_ERROR_KEYS[error?.type] ??
+  "chat:compact.errors.unknown";
 const alignmentClassFor = (isUser) => (isUser ? "items-end" : "items-start");
 const bubbleClassFor = (isUser, isError) => {
   if (isUser) {
@@ -131,6 +155,18 @@ export default function ConversationPage() {
   // stream event, or null. Transient by design — never persisted, never in
   // the message content — and cleared by the next turn that carries none.
   const [memoryWarning, setMemoryWarning] = useState(null);
+  // /compact (#585): the conversation it runs on (its status row shows there
+  // only), and the one-line outcome of a command above the composer.
+  const [compactingId, setCompactingId] = useState(null);
+  const [commandNotice, setCommandNotice] = useState(null);
+  // /context (#608): the usage snapshots drawn at the end of the thread. A
+  // list of their own, never in `messages` (whose image carry-over goes by
+  // index) and never stored: gone at the next send, re-read or reload.
+  const [contextPanels, setContextPanels] = useState([]);
+  const contextPanelSeqRef = useRef(0);
+  // The conversation on screen now, for a command's answer that lands later.
+  const idRef = useRef(id);
+  idRef.current = id;
 
   // A memory warning is about ONE conversation on THIS machine right now:
   // switching conversations must never show conversation A's warning over B.
@@ -138,6 +174,8 @@ export default function ConversationPage() {
     setMemoryWarning(null);
     setOpenCommand(null);
     setLoadFailed(false);
+    setCommandNotice(null);
+    setContextPanels([]);
   }, [id]);
   // A ref, not state: the scroll handler updates it on every scroll event, and
   // reading it from the auto-scroll effect must NOT re-run that effect. As state
@@ -279,6 +317,7 @@ export default function ConversationPage() {
       });
       loadedConvIdRef.current = id;
       setConversations(convs);
+      setContextPanels([]);
     } catch (err) {
       log.error("Failed to fetch messages and conversations", err);
     }
@@ -839,6 +878,15 @@ export default function ConversationPage() {
     };
   }, []);
 
+  // A /context panel or the /compact status row the user just asked for
+  // shows at the end of the thread: bring it into view.
+  const compactingHere = compactingId !== null && compactingId === id;
+  useEffect(() => {
+    if ((contextPanels.length > 0 || compactingHere) && scrollRef.current) {
+      scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
+    }
+  }, [contextPanels.length, compactingHere]);
+
   // Auto-scroll only when streaming is done or user hasn't scrolled up
   useEffect(() => {
     // Only auto-scroll if user hasn't manually scrolled up
@@ -907,6 +955,100 @@ export default function ConversationPage() {
     modelsLoaded &&
     (llmId === null || !assignedModel || assignedModel.weights_available === false);
 
+  const errorNotice = (key) => ({ tone: "error", text: t(key) });
+
+  // /context (#608): GET the usage of the next request and draw it at the end
+  // of the thread. Never loads the model; a conversation without a usable
+  // model is told to pick one, and nothing is asked.
+  const showContextUsage = async () => {
+    const conversationId = id;
+    try {
+      const usage = await apiClient.get(`/conversations/${conversationId}/context`);
+      if (idRef.current !== conversationId) return;
+      contextPanelSeqRef.current += 1;
+      const key = contextPanelSeqRef.current;
+      setContextPanels((prev) => [...prev, { key, usage }]);
+    } catch (err) {
+      // The API client wrote the request's record at the level of its status.
+      if (idRef.current !== conversationId) return;
+      setCommandNotice(
+        errorNotice(
+          err?.data?.error?.detail?.reason === "no_model"
+            ? "chat:commands.pickModelFirst"
+            : "chat:context.failed"
+        )
+      );
+    }
+  };
+
+  // /compact (#585), once confirmed: POST through tracedFetch, which has no
+  // client timeout (a summary can outlast the API client's 30 s). The status
+  // row shows meanwhile; the conversation is read again after a summary and
+  // after any failure (a summary that succeeded on the server still shows
+  // its separator), never after "nothing to compact".
+  const compactConversation = async () => {
+    const conversationId = id;
+    setCompactingId(conversationId);
+    let notice = null;
+    try {
+      const res = await tracedFetch(`${API_BASE_URL}/conversations/${conversationId}/compact`, {
+        method: "POST",
+      });
+      let body = null;
+      try {
+        body = await res.json();
+      } catch {
+        // No JSON body: the outcome is unknown; the record below says so.
+      }
+      if (res.ok && body?.summarized === 0) {
+        notice = { tone: "info", text: t("chat:compact.nothingToCompact") };
+      } else if (!res.ok || !(body?.summarized > 0)) {
+        notice = errorNotice(compactErrorKey(body?.error));
+        // The backend refused (4xx, its own INFO record) or failed (its WARNING
+        // or ERROR record); this side records that the page told the user.
+        const write = res.status >= 500 ? log.warn : log.info;
+        write(`Manual compaction of conversation ${conversationId} ended in HTTP ${res.status}`, {
+          type: body?.error?.type ?? null,
+          reason: body?.error?.detail?.reason ?? null,
+        });
+      }
+    } catch {
+      // tracedFetch wrote the request's api.failure record.
+      notice = errorNotice("chat:compact.errors.unknown");
+    }
+    if (idRef.current === conversationId) {
+      if (notice?.tone !== "info") {
+        await fetchMessagesAndConversations();
+      }
+      setCommandNotice(notice);
+    }
+    setCompactingId((current) => (current === conversationId ? null : current));
+  };
+
+  // A command from the composer or the header panel. /context draws its
+  // panel; every other one opens its popup (/compact: its confirmation). A
+  // conversation without a usable model is told to pick one for /compact and
+  // /context, which would only fail.
+  const runCommand = (command) => {
+    setCommandNotice(null);
+    if ((command.name === "compact" || command.name === "context") && isModelOrphaned) {
+      setCommandNotice(errorNotice("chat:commands.pickModelFirst"));
+      return;
+    }
+    if (command.name === "context") {
+      showContextUsage();
+      return;
+    }
+    setOpenCommand(command);
+  };
+
+  // A sent message makes the /context snapshots stale.
+  const sendMessage = (...args) => {
+    setContextPanels([]);
+    setCommandNotice(null);
+    return handleAsk(...args);
+  };
+
   return (
     <div className="flex h-screen overflow-hidden">
       <Sidebar
@@ -947,8 +1089,10 @@ export default function ConversationPage() {
             modelName={assignedModel?.name ?? ""}
             attention={isModelOrphaned}
             commands={COMMANDS}
-            disabledCommands={loading ? COMMANDS_DISABLED_WHILE_ANSWERING : []}
-            onCommand={setOpenCommand}
+            disabledCommands={
+              compactingHere ? ALL_COMMAND_NAMES : loading ? COMMANDS_DISABLED_WHILE_ANSWERING : []
+            }
+            onCommand={runCommand}
             saveFailed={conversationSettings.saveFailed}
           />
         </div>
@@ -978,8 +1122,10 @@ export default function ConversationPage() {
               const showTrace = !isUser && !isError && hasStripEvents(traceEvents);
               const traceLive = showTrace && !!msg.streaming && !msg.content;
               // Where a compaction took over (#614): separators above the
-              // strip and the bubble, error turns included.
-              const compactions = !isUser ? compactionMarkers(traceEvents) : [];
+              // strip and the bubble, error turns included; a /compact run
+              // saved on this answer (#585) below it.
+              const compactions = !isUser ? automaticCompactions(traceEvents) : [];
+              const manualRuns = !isUser ? manualCompactions(traceEvents) : [];
 
               // Show TypingIndicator for assistant messages that are loading, but
               // not once the live trace strip has taken over the pre-answer wait.
@@ -1165,9 +1311,28 @@ export default function ConversationPage() {
                       />
                     </button>
                   </div>
+                  {manualRuns.length > 0 && <CompactionMarker events={manualRuns} below />}
                 </div>
               );
             })}
+            {contextPanels.map((panel) => (
+              <ContextUsagePanel
+                key={panel.key}
+                usage={panel.usage}
+                onDismiss={() =>
+                  setContextPanels((prev) => prev.filter((p) => p.key !== panel.key))
+                }
+              />
+            ))}
+            {compactingHere && (
+              <div
+                role="status"
+                className="flex items-center justify-center gap-2 text-xs italic text-gray-400"
+              >
+                <TypingIndicator size={6} />
+                <span>{t("chat:message.compacting")}</span>
+              </div>
+            )}
           </div>
         </div>
         <div className="sticky bottom-0 left-0 right-0 px-10 py-10 backdrop-blur-md flex justify-center w-full">
@@ -1211,21 +1376,26 @@ export default function ConversationPage() {
                 </button>
               </div>
             )}
+            <CommandNotice notice={commandNotice} onDismiss={() => setCommandNotice(null)} />
             <QuestionInput
-              onSend={handleAsk}
+              onSend={sendMessage}
               // Locked until the conversation's values are loaded: a turn
-              // carries its instructions and sampling.
-              disabled={loading || isModelOrphaned || !conversationSettings.loaded}
+              // carries its instructions and sampling. Locked while /compact
+              // runs too, its commands with it.
+              disabled={
+                loading || compactingHere || isModelOrphaned || !conversationSettings.loaded
+              }
               canAttachImages={canAttachImages(assignedModel)}
               maxImages={maxImagesForModel(assignedModel)}
               commands={COMMANDS}
-              onCommand={setOpenCommand}
+              onCommand={runCommand}
             />
           </div>
         </div>
       </main>
 
-      {/* The popup of the command being run (/config, /effort, /model). */}
+      {/* The popup of the command being run (/config, /effort, /model, and
+          /compact's confirmation). */}
       <CommandPopups
         command={openCommand}
         onClose={() => setOpenCommand(null)}
@@ -1233,6 +1403,7 @@ export default function ConversationPage() {
         model={assignedModel}
         models={models}
         onPickModel={(model) => changeModel(model.id)}
+        onCompact={compactConversation}
       />
 
       {/* The turn failed for a reason the app can act on. */}

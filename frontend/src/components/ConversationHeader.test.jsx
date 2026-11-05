@@ -30,25 +30,35 @@ describe("ConversationHeader", () => {
     render(<ConversationHeader modelName="Qwen3-4B" commands={COMMANDS} onCommand={onCommand} />);
     expect(screen.queryByRole("button", { name: /Config/ })).toBeNull();
     openPanel();
-    const buttons = ["Config", "Effort", "Model"].map((label) =>
+    const buttons = ["Config", "Effort", "Model", "Compact", "Context"].map((label) =>
       screen.getByRole("button", { name: new RegExp(`^${label}`) })
     );
     fireEvent.click(buttons[0]);
     fireEvent.click(buttons[2]);
+    fireEvent.click(buttons[3]);
+    fireEvent.click(buttons[4]);
     expect(onCommand.mock.calls).toEqual([
       [{ name: "config", arg: null }],
       [{ name: "model", arg: null }],
+      [{ name: "compact", arg: null }],
+      [{ name: "context", arg: null }],
     ]);
   });
 
-  it("orders the panel's buttons Model, Config, Effort", () => {
+  it("orders the panel's buttons Model, Config, Effort, Compact, Context", () => {
     render(<ConversationHeader modelName="Qwen3-4B" commands={COMMANDS} onCommand={vi.fn()} />);
     openPanel();
     const labels = screen
       .getAllByRole("button")
       .map((b) => b.textContent)
       .filter((text) => text.includes("/"));
-    expect(labels).toEqual(["Model/model", "Config/config", "Effort/effort"]);
+    expect(labels).toEqual([
+      "Model/model",
+      "Config/config",
+      "Effort/effort",
+      "Compact/compact",
+      "Context/context",
+    ]);
   });
 
   it("disables a command the page says is unavailable", () => {

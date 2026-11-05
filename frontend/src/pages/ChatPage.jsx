@@ -18,14 +18,17 @@ import { createLogger } from "../utils/logger";
 import { conversationPath } from "../utils/routes";
 import { canAttachImages } from "../utils/modelCapabilities";
 import { hasMissingWeights } from "../utils/modelWeights";
-import { COMMAND_SCOPES, commandsFor } from "../utils/slashCommands";
+import { COMMAND_SCOPES, commandsFor, commandsOutside } from "../utils/slashCommands";
 import useConversationSettings, { DRAFT } from "../shared/hooks/useConversationSettings";
+import CommandNotice from "../components/CommandNotice";
 
 const log = createLogger("ChatPage");
 
 // The slash commands the new-conversation page offers: they edit the draft
-// the conversation is created from.
+// the conversation is created from. /compact and /context need a
+// conversation: typed here, they send nothing and a notice says why.
 const COMMANDS = commandsFor(COMMAND_SCOPES.DRAFT);
+const NEEDS_CONVERSATION = commandsOutside(COMMAND_SCOPES.DRAFT);
 
 export default function ChatPage() {
   const { t } = useTranslation();
@@ -48,6 +51,17 @@ export default function ChatPage() {
   const { selectModel, ready, createPayload } = draft;
   // The command being run (its popup is open), or null.
   const [openCommand, setOpenCommand] = useState(null);
+  // Why a command typed here did nothing, or null.
+  const [commandNotice, setCommandNotice] = useState(null);
+  const runCommand = (command) => {
+    setCommandNotice(null);
+    setOpenCommand(command);
+  };
+  const explainUnavailable = (command) =>
+    setCommandNotice({
+      tone: "info",
+      text: t("chat:commands.needsConversation", { command: `/${command.name}` }),
+    });
 
   const toggleSidebar = () => {
     setCollapsed((prev) => !prev);
@@ -296,18 +310,21 @@ export default function ChatPage() {
               modelName={selectedModel}
               attention={!selectedModel}
               commands={COMMANDS}
-              onCommand={setOpenCommand}
+              onCommand={runCommand}
             />
 
             {/* Question Input - Always visible */}
             <div className="mt-6">
+              <CommandNotice notice={commandNotice} onDismiss={() => setCommandNotice(null)} />
               <QuestionInput
                 onSend={handleAsk}
                 disabled={!selectedModel}
                 placeholder={t("chat:composer.placeholderNew")}
                 canAttachImages={canAttachImages(llm)}
                 commands={COMMANDS}
-                onCommand={setOpenCommand}
+                onCommand={runCommand}
+                unavailableCommands={NEEDS_CONVERSATION}
+                onUnavailableCommand={explainUnavailable}
               />
             </div>
             {/* Language Warning */}

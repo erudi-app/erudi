@@ -8,7 +8,7 @@ import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 // and running one keeps the attachments for the next message.
 
 import QuestionInput from "./QuestionInput.jsx";
-import { COMMAND_SCOPES, commandsFor } from "../utils/slashCommands";
+import { COMMAND_SCOPES, commandsFor, commandsOutside } from "../utils/slashCommands";
 
 const COMMANDS = commandsFor(COMMAND_SCOPES.CONVERSATION);
 
@@ -74,7 +74,7 @@ describe("the drop-up", () => {
     type("/");
     const listbox = screen.getByRole("listbox");
     expect(listbox).toBeTruthy();
-    expect(optionNames()).toEqual(["config", "effort", "model"]);
+    expect(optionNames()).toEqual(["config", "context", "compact", "effort", "model"]);
     expect(screen.getByText("/config")).toBeTruthy();
     expect(screen.getByText("Adjust this conversation's settings")).toBeTruthy();
   });
@@ -101,8 +101,8 @@ describe("the drop-up", () => {
     expect(options()[1].getAttribute("aria-selected")).toBe("true");
     key("ArrowUp");
     key("ArrowUp");
-    expect(options()[2].getAttribute("aria-selected")).toBe("true");
-    expect(textarea().getAttribute("aria-activedescendant")).toBe(options()[2].id);
+    expect(options()[4].getAttribute("aria-selected")).toBe("true");
+    expect(textarea().getAttribute("aria-activedescendant")).toBe(options()[4].id);
   });
 
   it("runs the highlighted command on Enter for a partial name, and clears the composer", () => {
@@ -110,7 +110,7 @@ describe("the drop-up", () => {
     type("/");
     key("ArrowDown");
     key("Enter");
-    expect(onCommand).toHaveBeenCalledWith({ name: "effort", arg: null });
+    expect(onCommand).toHaveBeenCalledWith({ name: "context", arg: null });
     expect(onSend).not.toHaveBeenCalled();
     expect(textarea().value).toBe("");
     expect(screen.queryByRole("listbox")).toBeNull();
@@ -151,7 +151,7 @@ describe("the drop-up", () => {
   it("runs a clicked command", () => {
     renderComposer();
     type("/");
-    fireEvent.click(options()[2]);
+    fireEvent.click(options()[4]);
     expect(onCommand).toHaveBeenCalledWith({ name: "model", arg: null });
   });
 
@@ -204,6 +204,50 @@ describe("sending an exact command", () => {
       expect(onSend).toHaveBeenCalledWith(text, [], [], []);
     }
   );
+
+  it.each(["/compact", "/context", "  /context  "])(
+    "sends nothing for %j on a page that does not offer it, and says so",
+    (text) => {
+      const onUnavailableCommand = vi.fn();
+      renderComposer({
+        commands: commandsFor(COMMAND_SCOPES.DRAFT),
+        unavailableCommands: commandsOutside(COMMAND_SCOPES.DRAFT),
+        onUnavailableCommand,
+      });
+      type(text);
+      expect(screen.queryByRole("listbox")).toBeNull();
+      key("Enter");
+      expect(onSend).not.toHaveBeenCalled();
+      expect(onCommand).not.toHaveBeenCalled();
+      expect(onUnavailableCommand).toHaveBeenCalledWith({ name: text.trim().slice(1), arg: null });
+      expect(textarea().value).toBe("");
+    }
+  );
+
+  it("never lists a command the page does not offer", () => {
+    renderComposer({
+      commands: commandsFor(COMMAND_SCOPES.DRAFT),
+      unavailableCommands: commandsOutside(COMMAND_SCOPES.DRAFT),
+      onUnavailableCommand: vi.fn(),
+    });
+    type("/");
+    expect(optionNames()).toEqual(["config", "effort", "model"]);
+    type("/co");
+    expect(optionNames()).toEqual(["config"]);
+  });
+
+  it("sends a command the page does not offer with an argument as a normal message", () => {
+    const onUnavailableCommand = vi.fn();
+    renderComposer({
+      commands: commandsFor(COMMAND_SCOPES.DRAFT),
+      unavailableCommands: commandsOutside(COMMAND_SCOPES.DRAFT),
+      onUnavailableCommand,
+    });
+    type("/compact now");
+    key("Enter");
+    expect(onUnavailableCommand).not.toHaveBeenCalled();
+    expect(onSend).toHaveBeenCalledWith("/compact now", [], [], []);
+  });
 
   it("keeps the attachments for the next message", () => {
     renderComposer();

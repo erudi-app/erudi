@@ -45,7 +45,17 @@
     "model": {
       "label": "Modelo",
       "description": "Cambiar a otro modelo instalado"
-    }
+    },
+    "compact": {
+      "label": "Compactar",
+      "description": "Resumir ahora los mensajes anteriores para liberar contexto"
+    },
+    "context": {
+      "label": "Contexto",
+      "description": "Ver cuánto del contexto del modelo ocupa esta conversación"
+    },
+    "needsConversation": "{{command}} funciona cuando la conversación ya existe: envía un primer mensaje.",
+    "pickModelFirst": "Esta conversación no tiene modelo: elige uno primero con Modelo."
   },
   "config": {
     "title": "Ajustes de la conversación",
@@ -161,7 +171,56 @@
     "lost": "Los mensajes anteriores no se pudieron resumir y se retiraron de lo que ve el modelo.",
     "showSummary": "Mostrar resumen",
     "showKeptSummary": "Mostrar el resumen que conserva el modelo",
-    "hideSummary": "Ocultar resumen"
+    "hideSummary": "Ocultar resumen",
+    "manual_one": "Resumiste {{count}} mensaje anterior.",
+    "manual_other": "Resumiste {{count}} mensajes anteriores.",
+    "manualNoCount": "Resumiste los mensajes anteriores."
+  },
+  "compactDialog": {
+    "title": "¿Resumir los mensajes anteriores?",
+    "body": "Para el modelo, los mensajes anteriores de esta conversación se sustituyen por un resumen: el mismo que escribe por su cuenta cuando la conversación llena su contexto. Tu último intercambio se conserva palabra por palabra y toda la conversación sigue en pantalla. El modelo deja de ver los detalles que el resumen omite.",
+    "confirm": "Resumir"
+  },
+  "compact": {
+    "nothingToCompact": "Todavía no hay nada que compactar.",
+    "errors": {
+      "busy": "El modelo está ocupado; inténtalo de nuevo en un momento.",
+      "unansweredQuestion": "La última pregunta aún no tiene respuesta; vuelve a enviarla o haz antes una pregunta nueva.",
+      "notFound": "Esta conversación ya no existe.",
+      "failed": "No se pudo escribir el resumen; no se cambió nada.",
+      "separatorNotSaved": "Los mensajes anteriores se resumieron, pero no se pudo guardar el separador.",
+      "unknown": "El resumen no volvió; la conversación muestra en qué punto está."
+    }
+  },
+  "context": {
+    "title": "Uso del contexto",
+    "estimates": "Estimaciones, sobre una ventana de {{window}} tokens",
+    "estimatesNoWindow": "Estimaciones",
+    "gridLabel": "Uso del contexto: {{used}} de {{window}} tokens usados",
+    "legendLabel": "Uso del contexto por categoría",
+    "dismiss": "Cerrar el uso del contexto",
+    "categories": {
+      "system_prompt": "Prompt del sistema",
+      "tools": "Herramientas",
+      "messages": "Mensajes",
+      "summary": "Resumen",
+      "free": "Espacio libre",
+      "autocompaction_buffer": "Reserva de compactación automática"
+    },
+    "value_one": "{{tokens}} token · {{share}}",
+    "value_other": "{{tokens}} tokens · {{share}}",
+    "valueNoShare_one": "{{tokens}} token",
+    "valueNoShare_other": "{{tokens}} tokens",
+    "notes": {
+      "reducedByMemory": "El modelo admite hasta {{trained}} tokens; la memoria de este ordenador limita esta conversación a {{working}}.",
+      "reducedByMemoryNoTrained": "La memoria de este ordenador limita esta conversación a {{working}} tokens.",
+      "notLoaded": "El modelo no está cargado: esta es la ventana para la que se entrenó. La ventana que permite este ordenador se conoce una vez cargado el modelo.",
+      "unknownWindow": "No se conoce la ventana del modelo, así que no se muestra ningún porcentaje.",
+      "kbExcluded": "Los recuentos no incluyen los fragmentos de la base de conocimiento que recupera cada pregunta.",
+      "pastThreshold": "La conversación superó su umbral de compactación: el próximo turno resumirá primero los mensajes anteriores.",
+      "overWindow": "La próxima solicitud no cabría en la ventana del modelo: el próximo turno resumirá primero los mensajes anteriores."
+    },
+    "failed": "No se pudo leer el uso del contexto."
   },
   "trace": {
     "summary": "Razonamiento",

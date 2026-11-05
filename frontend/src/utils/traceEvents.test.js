@@ -1,5 +1,10 @@
 import { describe, it, expect } from "vitest";
-import { compactionMarkers, compactionsOnly, hasStripEvents } from "./traceEvents";
+import {
+  automaticCompactions,
+  compactionsOnly,
+  hasStripEvents,
+  manualCompactions,
+} from "./traceEvents";
 
 const done = (summarized) => ({
   t: "compaction",
@@ -22,17 +27,30 @@ describe("trace events (#614)", () => {
     expect(hasStripEvents(undefined)).toBe(false);
   });
 
-  it("lists the compaction markers in order, done events only", () => {
+  it("lists the automatic compaction markers in order, done events only", () => {
     const trace = [done(1), { t: "thinking", text: "hm" }, { t: "compaction", phase: "start" }];
     trace.push(done(2));
 
-    expect(compactionMarkers(trace)).toEqual([done(1), done(2)]);
-    expect(compactionMarkers(null)).toEqual([]);
-    expect(compactionMarkers([null, "x", { t: "answer" }])).toEqual([]);
+    expect(automaticCompactions(trace)).toEqual([done(1), done(2)]);
+    expect(automaticCompactions(null)).toEqual([]);
+    expect(automaticCompactions([null, "x", { t: "answer" }])).toEqual([]);
+  });
+
+  it("sorts a /compact separator (manual: true) apart from the automatic ones (#585)", () => {
+    const manual = { ...done(4), manual: true };
+    const trace = [done(1), { t: "thinking", text: "hm" }, manual];
+
+    expect(automaticCompactions(trace)).toEqual([done(1)]);
+    expect(manualCompactions(trace)).toEqual([manual]);
+    expect(manualCompactions([done(1)])).toEqual([]);
+    expect(manualCompactions(undefined)).toEqual([]);
   });
 
   it("keeps only the compactions of an error turn, or nothing", () => {
     expect(compactionsOnly([done(1), { t: "thinking", text: "hm" }])).toEqual([done(1)]);
+    // A /compact run on a failed turn is kept too.
+    const manual = { ...done(2), manual: true };
+    expect(compactionsOnly([manual])).toEqual([manual]);
     expect(compactionsOnly([{ t: "thinking", text: "hm" }])).toBeNull();
     expect(compactionsOnly([])).toBeNull();
   });

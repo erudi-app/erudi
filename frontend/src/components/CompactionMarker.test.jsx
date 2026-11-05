@@ -117,6 +117,29 @@ describe("CompactionMarker", () => {
     expect(screen.queryByRole("button")).toBeNull();
   });
 
+  it.each([
+    [4, "You summarized 4 earlier messages."],
+    [1, "You summarized 1 earlier message."],
+    [0, "You summarized earlier messages."],
+  ])("says a /compact run summarized %i messages, whatever its reason (#585)", (n, copy) => {
+    render(<CompactionMarker events={[done({ manual: true, reason: "memory", summarized: n })]} />);
+
+    expect(screen.getByText(copy)).toBeTruthy();
+    expect(screen.queryByText(/to fit this computer's memory/)).toBeNull();
+    fireEvent.click(screen.getByRole("button", { name: "Show summary" }));
+    expect(screen.getByText("Ada lives in Lyon.")).toBeTruthy();
+    expect(screen.getByRole("button", { name: "Hide summary" })).toBeTruthy();
+  });
+
+  it("spaces itself from the bubble it sits above, or below", () => {
+    const { container, rerender } = render(<CompactionMarker events={[done()]} />);
+    expect(container.firstChild.className).toContain("mb-2");
+
+    rerender(<CompactionMarker events={[done({ manual: true })]} below />);
+    expect(container.firstChild.className).toContain("mt-2");
+    expect(container.firstChild.className).not.toContain("mb-2");
+  });
+
   it("renders nothing without a compaction", () => {
     const { container } = render(<CompactionMarker events={[]} />);
 
