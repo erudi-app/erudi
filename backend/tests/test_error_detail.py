@@ -1,5 +1,7 @@
 """``error_detail``: the cleaned, one-line cause shown under a generic failure (#615)."""
 
+import subprocess
+
 import pytest
 
 from src.core.error_detail import MAX_DETAIL_CHARS, error_detail
@@ -134,15 +136,114 @@ def test_suppressed_context_is_not_walked():
         assert error_detail(exc) == "clean"
 
 
-def test_empty_message_falls_back_to_the_type_name():
+def test_a_bare_exception_falls_back_to_its_type_name():
     assert error_detail(TimeoutError()) == "TimeoutError"
+
+
+def test_nothing_with_a_message_in_the_chain_names_the_outermost_type():
     try:
         try:
             raise TimeoutError()
         except TimeoutError as inner:
-            raise RuntimeError("wrapper") from inner
+            raise RuntimeError() from inner
     except RuntimeError as exc:
-        assert error_detail(exc) == "TimeoutError"
+        assert error_detail(exc) == "RuntimeError"
+
+
+def test_an_empty_leaf_does_not_replace_a_meaningful_wrapper():
+    # openai.APITimeoutError("Request timed out.") <- httpx.ReadTimeout("") <- TimeoutError()
+    try:
+        try:
+            try:
+                raise TimeoutError()
+            except TimeoutError as deepest:
+                raise ConnectionError("") from deepest
+        except ConnectionError as middle:
+            raise RuntimeError("Request timed out.") from middle
+    except RuntimeError as exc:
+        assert error_detail(exc) == "Request timed out."
+
+
+def test_a_cancellation_leaf_does_not_replace_the_wrapper():
+    import asyncio
+
+    try:
+        try:
+            raise asyncio.CancelledError()
+        except asyncio.CancelledError as inner:
+            raise RuntimeError("Stream ended unexpectedly") from inner
+    except RuntimeError as exc:
+        assert error_detail(exc) == "Stream ended unexpectedly"
+
+
+# --- real exception strings (the form a path actually takes in a message) ---
+
+_WIN_MODEL = r"C:\Users\John Doe\AppData\Roaming\Erudi\models\x.gguf"
+_POSIX_MODEL = "/Users/John Doe/Library/Application Support/Erudi/models/x.gguf"
+
+
+@pytest.mark.parametrize("model", [_WIN_MODEL, _POSIX_MODEL])
+def test_a_file_not_found_never_leaks_the_user_name(model):
+    out = error_detail(FileNotFoundError(2, "No such file or directory", model))
+    assert out == "[Errno 2] No such file or directory: 'x.gguf'"
+
+
+@pytest.mark.parametrize(
+    "path", [r"C:\Users\jdoe\AppData\Local\Temp\x", "/home/jdoe/.cache/erudi/x"]
+)
+def test_a_permission_error_never_leaks_the_user_name(path):
+    out = error_detail(PermissionError(13, "Permission denied", path))
+    assert out == "[Errno 13] Permission denied: 'x'"
+
+
+@pytest.mark.parametrize(
+    ("binary", "shown"),
+    [
+        (r"C:\Users\john\llama-server.exe", "llama-server.exe"),
+        ("/home/john/llama-server", "llama-server"),
+    ],
+)
+def test_a_failed_command_masks_the_key_and_the_user_name(binary, shown):
+    out = error_detail(subprocess.CalledProcessError(1, [binary, "--api-key", "k3y"]))
+    assert out == f"Command '['{shown}', '--api-key', '***']' returned non-zero exit status 1."
+
+
+@pytest.mark.parametrize(
+    ("raw", "expected"),
+    [
+        ("OPENAI_API_KEY=sk-1 failed", "OPENAI_API_KEY=*** failed"),
+        ("password=hunter2 refused", "password=*** refused"),
+        ("PGPASSWORD=pw host=h", "PGPASSWORD=*** host=h"),
+        ("GET /x?token=abc&y=1", "GET /x?token=***&y=1"),
+        ("access_token=abc secret=def", "access_token=*** secret=***"),
+        ("bad hf_" + "a" * 34 + " given", "bad hf_*** given"),
+        ("Authorization: Basic dXNlcjpwdw== sent", "Authorization: Basic *** sent"),
+        ("headers {'authorization': 'abc def'}", "headers {'authorization': '***'}"),
+        ("GET https://bob:p@ss@host.example/x", "GET https://***@host.example/x"),
+        # prose keeps its words
+        (
+            "Failed to open /Users/rayan/models/a.gguf and/or fallback 3/4 shards",
+            "Failed to open a.gguf and/or fallback 3/4 shards",
+        ),
+        ("HTTP 404 /v1/chat/completions not found", "HTTP 404 /v1/chat/completions not found"),
+        # a home directory alone is never the user name
+        ("in '/home/john'", "in '~'"),
+        ("in /Users/john/ now", "in ~ now"),
+        ("in C:\\Users\\john now", "in ~ now"),
+        ("cwd:/Users/john/work/x.gguf", "cwd:x.gguf"),
+    ],
+)
+def test_more_secrets_and_path_shapes(raw, expected):
+    assert _detail(raw) == expected
+
+
+def test_adversarial_input_stays_fast():
+    import time
+
+    start = time.perf_counter()
+    for payload in ("a-" * 150_000, "/ " * 100_000, "\\\\" * 100_000, "C:\\" + "a b\\" * 50_000):
+        _detail(payload)
+    assert time.perf_counter() - start < 5
 
 
 def test_engine_exception_message_is_the_detail_and_stops_the_walk():
