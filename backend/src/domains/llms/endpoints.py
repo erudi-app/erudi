@@ -50,7 +50,8 @@ Endpoints:
     - GET /local → List local (downloaded) LLMs
     - GET /remote → List remote (HuggingFace) LLMs
     - GET /loaded → The model loaded in memory, or null (#619)
-    - POST /loaded/unload → Unload it now (204; 409 while busy)
+    - POST /loaded/unload {"llm_id"} → Unload it now (204; 409 while busy or
+      when another model is loaded)
     - GET /{llm_id} → Get LLM details
     - GET|PUT /{llm_id}/conversation_defaults → Values saved for the model (#609)
     - GET /search?name=<query> → Search LLMs by name
@@ -117,6 +118,7 @@ from src.domains.llms.schemas import (
     DependentsResponse,
     RebindRequest,
     LoadedModelResponse,
+    UnloadRequest,
     ConversationDefaultsResponse,
     ConversationDefaultsUpdate,
 )
@@ -656,18 +658,24 @@ async def get_loaded_llm(llm_repo: Llm_Repository = Depends(get_llm_repository))
 
 
 @router.post("/loaded/unload", status_code=http_status.HTTP_204_NO_CONTENT)
-async def unload_loaded_llm() -> Response:
-    """Unload the loaded model now (the header's Unload button, #619).
+async def unload_loaded_llm(payload: UnloadRequest) -> Response:
+    """Unload the model the Unload button names now (the header, #619).
 
-    204 once the child is gone, and 204 when nothing was loaded. 409
-    (``EngineBusyException``, "The model is busy; try again in a moment.")
-    when an answer, a reload, a memory-brake sample or the idle check holds
-    the engine for more than 2 s: nothing is interrupted. The next turn of
-    the unloaded model says the user unloaded it (``memory_reload`` with
-    ``reason: "manual"``); on llama.cpp the window the memory brake reduced
-    recently stays reduced at that reload, as after an idle unload.
+    The body carries the ``llm_id`` the button shows. 204 once the child is
+    gone, and 204 when nothing was loaded. 409 (``EngineBusyException``,
+    "The model is busy; try again in a moment.") when an answer, a reload, a
+    memory-brake sample or the idle check holds the engine for more than
+    2 s: nothing is interrupted. 409 (``LoadedModelChangedException``,
+    "Another model is loaded now.") when another model was loaded since the
+    button read it: nothing is unloaded. The next turn of the unloaded model
+    says the user unloaded it (``memory_reload`` with ``reason: "manual"``);
+    on llama.cpp the window the memory brake reduced recently stays reduced
+    at that reload, as after an idle unload.
+
+    Example:
+        POST /erudi/llms/loaded/unload {"llm_id": 57} -> 204
     """
-    await config.LLM_Engine.unload()
+    await config.LLM_Engine.unload(payload.llm_id)
     return Response(status_code=http_status.HTTP_204_NO_CONTENT)
 
 

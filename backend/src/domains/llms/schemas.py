@@ -376,6 +376,13 @@ class LoadedModelResponse(BaseModel):
     name: str
 
 
+class UnloadRequest(BaseModel):
+    """Body for POST /llms/loaded/unload (#619): the model the Unload button
+    names. Strict: a string, a bool or a float is refused."""
+
+    llm_id: int = Field(..., strict=True, description="Id of the model to unload")
+
+
 class RebindRequest(BaseModel):
     """Body for POST /llms/{assistant_id}/rebind -- re-point an orphaned KB
     assistant at a new base model whose weights exist."""

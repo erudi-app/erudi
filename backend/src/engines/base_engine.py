@@ -44,7 +44,7 @@ from abc import ABC, abstractmethod, ABCMeta
 from contextlib import asynccontextmanager
 from pathlib import Path
 
-from src.core.exceptions import EngineBusyException, EngineException
+from src.core.exceptions import EngineBusyException, EngineException, LoadedModelChangedException
 from src.core.logging import logger
 from src.engines.memory_brake import BrakeOutcome
 
@@ -1213,24 +1213,40 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         """Unload the model and leave the reload record with ``reason``.
 
         The caller holds the generation lock. ``cleanup()`` (which kills the
-        child) runs off the event loop; the record is written after it,
-        since ``cleanup()`` clears it.
+        child) runs off the event loop, shielded like a prefix-cache reset
+        (``wait_shielded``): a cancelled caller (a request cancelled by the
+        shutdown or a disconnect) keeps the lock until the thread is done,
+        so no turn can spawn a child the thread would then reset. The record
+        is written after it, since ``cleanup()`` clears it, and only when
+        the cleanup went through; a cancellation is raised after that, a
+        failed cleanup's exception too.
         """
         unloaded_id = cls._model_id
-        await asyncio.to_thread(cls.cleanup)
-        cls._idle_unload = {"model_id": unloaded_id, "reason": reason}
+        task = asyncio.get_running_loop().create_task(asyncio.to_thread(cls.cleanup))
+        cancelled = await wait_shielded(task)
+        failure = None if task.cancelled() else task.exception()
+        if not task.cancelled() and failure is None:
+            cls._idle_unload = {"model_id": unloaded_id, "reason": reason}
+        if cancelled:
+            raise asyncio.CancelledError()
+        if failure is not None:
+            raise failure
 
     @classmethod
-    async def unload(cls) -> Optional[Any]:
-        """Unload the model now (the header's Unload button, #619).
+    async def unload(cls, llm_id: Any) -> Optional[Any]:
+        """Unload ``llm_id`` now (the header's Unload button, #619).
 
         Taken through ``try_generation_guard``: while an answer, a reload, a
         brake sample or the idle check holds the engine it is refused with
-        ``EngineBusyException`` (409) and nothing is interrupted. Otherwise
-        the model goes exactly as on an idle reap (same ``cleanup()``, so on
-        llama.cpp the per-model window memory survives and the next load
-        keeps a recent brake reduction), and the record says ``manual`` so
-        the next turn of that model says the user unloaded it.
+        ``EngineBusyException`` (409) and nothing is interrupted. When
+        another model is loaded than the one the button named (a model
+        switch and a turn since it read it), it is refused with
+        ``LoadedModelChangedException`` (409) and nothing is unloaded.
+        Otherwise the model goes exactly as on an idle reap (same
+        ``cleanup()``, so on llama.cpp the per-model window memory survives
+        and the next load keeps a recent brake reduction), and the record
+        says ``manual`` so the next turn of that model says the user
+        unloaded it.
 
         Returns:
             The unloaded model's id, or None when nothing was loaded (a no-op
@@ -1239,6 +1255,8 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         async with cls.try_generation_guard():
             if cls._model is None:
                 return None
+            if cls._model_id != llm_id:
+                raise LoadedModelChangedException()
             unloaded_id = cls._model_id
             await cls._unload_and_record(UNLOAD_REASON_MANUAL)
         logger.info(f"Unloaded model {unloaded_id} on request")

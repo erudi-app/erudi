@@ -798,11 +798,13 @@ async def test_a_manual_unload_keeps_the_window_memory_like_an_idle_reap(world):
     reap: a window the brake reduced recently stays reduced at the next load."""
     _load(world)
     CPU_Engine._window_memory["erudi-7"] = {"cap": 20_480, "faulty": 30_720, "at": time.time()}
-    assert await CPU_Engine.unload() == 7
-    assert CPU_Engine._model is None
-    assert CPU_Engine._idle_unload == {"model_id": 7, "reason": "manual"}
-    assert "erudi-7" in CPU_Engine._window_memory
-    handle = _load(world)
-    assert handle["context_tokens"] == 20_480
-    assert handle["brake"].cap == 20_480
-    CPU_Engine._idle_unload = None
+    try:
+        assert await CPU_Engine.unload(7) == 7
+        assert CPU_Engine._model is None
+        assert CPU_Engine._idle_unload == {"model_id": 7, "reason": "manual"}
+        assert "erudi-7" in CPU_Engine._window_memory
+        handle = _load(world)
+        assert handle["context_tokens"] == 20_480
+        assert handle["brake"].cap == 20_480
+    finally:
+        CPU_Engine._idle_unload = None

@@ -2,8 +2,9 @@
 
 ``GET /erudi/llms/loaded`` names the model whose inference child is up (the
 child's liveness is checked, not just the cached id) or answers null.
-``POST /erudi/llms/loaded/unload`` unloads it under ``try_generation_guard``:
-204 (also when nothing is loaded), 409 while the engine is busy. Both routes
+``POST /erudi/llms/loaded/unload`` with ``{"llm_id"}`` unloads that model
+under ``try_generation_guard``: 204 (also when nothing is loaded), 409 while
+the engine is busy or when another model is loaded now. Both routes
 are declared before every ``/{llm_id}`` route, which would otherwise read
 ``loaded`` as an id.
 """
@@ -105,7 +106,7 @@ def test_a_loaded_model_without_its_row_is_not_named(client):
 
 def test_unload_frees_the_model_and_records_a_manual_reload(client, mock_llm):
     _load(mock_llm.id)
-    response = client.post(UNLOAD)
+    response = client.post(UNLOAD, json={"llm_id": mock_llm.id})
     assert response.status_code == 204, response.text
     assert response.content == b""
     assert _Engine._model is None
@@ -115,10 +116,31 @@ def test_unload_frees_the_model_and_records_a_manual_reload(client, mock_llm):
 
 
 def test_unload_with_nothing_loaded_is_a_204_no_op(client):
-    response = client.post(UNLOAD)
+    response = client.post(UNLOAD, json={"llm_id": 3})
     assert response.status_code == 204, response.text
     assert _Engine.cleanups == 0
     assert _Engine._idle_unload is None
+
+
+def test_unload_of_a_model_that_is_no_longer_loaded_is_a_409(client, mock_llm):
+    # The button still names the model it read; another one was loaded since.
+    _load(mock_llm.id)
+    response = client.post(UNLOAD, json={"llm_id": mock_llm.id + 1})
+    assert response.status_code == 409, response.text
+    error = response.json()["error"]
+    assert error["type"] == "LOADED_MODEL_CHANGED"
+    assert error["message"] == "Another model is loaded now."
+    assert _Engine._model is not None
+    assert _Engine._model_id == mock_llm.id
+    assert _Engine.cleanups == 0
+
+
+@pytest.mark.parametrize("body", [None, {}, {"llm_id": "3"}, {"llm_id": True}, {"llm_id": 3.5}])
+def test_unload_names_the_model_it_unloads(client, mock_llm, body):
+    _load(mock_llm.id)
+    response = client.post(UNLOAD, json=body)
+    assert response.status_code == 422, response.text
+    assert _Engine._model is not None
 
 
 def test_unload_while_the_engine_is_busy_is_a_409(client, mock_llm, monkeypatch):
@@ -140,7 +162,7 @@ def test_unload_while_the_engine_is_busy_is_a_409(client, mock_llm, monkeypatch)
     portal.start_task_soon(_hold)
     portal.call(asyncio.sleep, 0.05)
 
-    response = client.post(UNLOAD)
+    response = client.post(UNLOAD, json={"llm_id": mock_llm.id})
 
     portal.call(release.set)
     portal.call(asyncio.sleep, 0.05)

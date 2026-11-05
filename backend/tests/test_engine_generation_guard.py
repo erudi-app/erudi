@@ -228,7 +228,7 @@ def test_take_idle_reload_without_a_record_is_none():
 async def test_a_manual_unload_reaps_the_model_and_records_why():
     _load_idle("x", idle_s=1)
     try:
-        assert await asyncio.wait_for(_GuardEngine.unload(), timeout=5) == "x"
+        assert await asyncio.wait_for(_GuardEngine.unload("x"), timeout=5) == "x"
         assert _GuardEngine._model is None
         assert _GuardEngine._last_used is None
         assert _GuardEngine._idle_unload == {"model_id": "x", "reason": "manual"}
@@ -241,7 +241,7 @@ async def test_a_manual_unload_reaps_the_model_and_records_why():
 async def test_a_manual_unload_with_nothing_loaded_does_nothing():
     _GuardEngine._idle_unload = {"model_id": "x", "reason": "idle"}
     try:
-        assert await asyncio.wait_for(_GuardEngine.unload(), timeout=5) is None
+        assert await asyncio.wait_for(_GuardEngine.unload("x"), timeout=5) is None
         # An earlier idle record still says why that model reloads.
         assert _GuardEngine._idle_unload == {"model_id": "x", "reason": "idle"}
     finally:
@@ -255,11 +255,70 @@ async def test_a_manual_unload_is_refused_while_a_generation_runs(_short_busy_wa
     try:
         async with _GuardEngine.generation_guard():
             with pytest.raises(EngineBusyException):
-                await _GuardEngine.unload()
+                await _GuardEngine.unload("x")
             assert _GuardEngine._model is not None
         assert _GuardEngine._idle_unload is None
         assert BaseEngine._generation_lock.demand == 0
     finally:
+        _reset()
+
+
+async def test_a_manual_unload_of_a_model_no_longer_loaded_is_refused():
+    """The button named A; B was loaded since (a /model switch and a send):
+    the press must not unload B."""
+    from src.core.exceptions import LoadedModelChangedException
+
+    _load_idle("b", idle_s=1)
+    try:
+        with pytest.raises(LoadedModelChangedException) as raised:
+            await _GuardEngine.unload("a")
+        assert raised.value.status_code == 409
+        assert raised.value.erudi_code == "LOADED_MODEL_CHANGED"
+        assert raised.value.message == "Another model is loaded now."
+        assert _GuardEngine._model is not None
+        assert _GuardEngine._model_id == "b"
+        assert _GuardEngine._idle_unload is None
+        assert not _GuardEngine._generation_lock_for_running_loop().locked()
+    finally:
+        _reset()
+
+
+async def test_a_cancelled_manual_unload_finishes_the_cleanup_under_the_lock(monkeypatch):
+    """A request cancelled mid-unload (shutdown, a disconnect) never releases
+    the lock while the cleanup thread still kills the child and resets the
+    engine: the cleanup ends, the record is written, then the cancellation
+    is raised."""
+    import threading
+
+    started = threading.Event()
+    release = threading.Event()
+    real_cleanup = _GuardEngine.cleanup
+
+    def _slow_cleanup():
+        started.set()
+        release.wait(5)
+        real_cleanup()
+
+    monkeypatch.setattr(_GuardEngine, "cleanup", staticmethod(_slow_cleanup))
+    _load_idle("x", idle_s=1)
+    try:
+        request = asyncio.create_task(_GuardEngine.unload("x"))
+        while not started.is_set():
+            await asyncio.sleep(0.01)
+        request.cancel()
+        await asyncio.sleep(0.05)
+        # Still cleaning: the request has not ended and the lock is held.
+        assert not request.done()
+        assert _GuardEngine._generation_lock_for_running_loop().locked()
+        release.set()
+        with pytest.raises(asyncio.CancelledError):
+            await asyncio.wait_for(request, timeout=5)
+        assert _GuardEngine._model is None
+        assert _GuardEngine._idle_unload == {"model_id": "x", "reason": "manual"}
+        assert not _GuardEngine._generation_lock_for_running_loop().locked()
+        assert BaseEngine._generation_lock.demand == 0
+    finally:
+        release.set()
         _reset()
 
 
@@ -312,7 +371,7 @@ async def test_never_still_lets_the_button_unload(_restore_idle_delay):
     _GuardEngine.set_idle_unload_minutes(0)
     _load_idle("x", idle_s=1)
     try:
-        assert await _GuardEngine.unload() == "x"
+        assert await _GuardEngine.unload("x") == "x"
         assert _GuardEngine._model is None
     finally:
         _reset()
