@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useEffect, useState, useCallback, useRef, useSyncExternalStore } from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
@@ -21,6 +21,13 @@ import { conversationPath } from "../utils/routes";
 import { canAttachImages, maxImagesForModel } from "../utils/modelCapabilities";
 import { COMMAND_SCOPES, commandsFor } from "../utils/slashCommands";
 import useConversationSettings from "../shared/hooks/useConversationSettings";
+import {
+  compactingVersion,
+  finishCompacting,
+  isCompacting,
+  startCompacting,
+  subscribeCompacting,
+} from "../shared/compactingConversations";
 import {
   baseName,
   getAttachmentNames,
@@ -62,21 +69,72 @@ const COMMANDS = commandsFor(COMMAND_SCOPES.CONVERSATION);
 const COMMANDS_DISABLED_WHILE_ANSWERING = ["model"];
 // Every command waits while /compact runs.
 const ALL_COMMAND_NAMES = COMMANDS.map((command) => command.name);
-// What a /compact refusal or failure says, by the backend's `detail.reason`
-// or error type (#585); anything else (no answer, an unknown error) is
-// `unknown`, and the conversation read again shows where it stands.
-const COMPACT_ERROR_KEYS = {
-  no_model: "chat:commands.pickModelFirst",
-  unanswered_question: "chat:compact.errors.unansweredQuestion",
-  ENGINE_BUSY: "chat:compact.errors.busy",
-  CONVERSATION_NOT_FOUND: "chat:compact.errors.notFound",
-  COMPACTION_FAILED: "chat:compact.errors.failed",
-  COMPACTION_SEPARATOR_NOT_SAVED: "chat:compact.errors.separatorNotSaved",
+// A /compact the backend has not answered after this long is given up (the
+// summary is bounded server-side; a model load that hangs is not).
+const COMPACT_CEILING_MS = 10 * 60 * 1000;
+// What follows a /compact answer (#585): nothing more, the conversation's
+// messages read again (its separator, or where it stands after a failure),
+// the whole conversation loaded again (its model is gone: the header turns
+// to "Please select a model"), or the page left (the conversation is gone).
+const AFTER_COMPACT = Object.freeze({
+  NONE: "none",
+  REREAD: "reread",
+  RELOAD: "reload",
+  LEAVE: "leave",
+});
+// The refusals and failures with their own copy, by the backend's
+// `detail.reason` or error type, and what follows each.
+const COMPACT_ERRORS = {
+  no_model: { key: "chat:commands.pickModelFirst", after: AFTER_COMPACT.RELOAD },
+  unanswered_question: {
+    key: "chat:compact.errors.unansweredQuestion",
+    after: AFTER_COMPACT.REREAD,
+  },
+  ENGINE_BUSY: { key: "chat:compact.errors.busy", after: AFTER_COMPACT.REREAD },
+  CONVERSATION_NOT_FOUND: { key: "chat:compact.errors.notFound", after: AFTER_COMPACT.LEAVE },
+  COMPACTION_FAILED: { key: "chat:compact.errors.failed", after: AFTER_COMPACT.REREAD },
+  COMPACTION_SEPARATOR_NOT_SAVED: {
+    key: "chat:compact.errors.separatorNotSaved",
+    after: AFTER_COMPACT.REREAD,
+  },
 };
-const compactErrorKey = (error) =>
-  COMPACT_ERROR_KEYS[error?.detail?.reason] ??
-  COMPACT_ERROR_KEYS[error?.type] ??
-  "chat:compact.errors.unknown";
+
+/**
+ * What a /compact answer (`ok`, its JSON `body` or null) says and what
+ * follows it: `{ notice: { tone, key, values } | null, after }`. An error
+ * without its own copy says the server's message when it sent one ("The
+ * summary failed: ..."), else that the summary did not come back.
+ */
+function compactOutcome(ok, body) {
+  if (ok && body?.summarized === 0) {
+    return {
+      notice: { tone: "info", key: "chat:compact.nothingToCompact" },
+      after: AFTER_COMPACT.NONE,
+    };
+  }
+  if (ok && body?.summarized > 0) {
+    return { notice: null, after: AFTER_COMPACT.REREAD };
+  }
+  const error = body?.error;
+  const known = COMPACT_ERRORS[error?.detail?.reason] ?? COMPACT_ERRORS[error?.type];
+  if (known) {
+    return { notice: { tone: "error", key: known.key }, after: known.after };
+  }
+  if (!ok && typeof error?.message === "string" && error.message.trim()) {
+    return {
+      notice: {
+        tone: "error",
+        key: "chat:compact.errors.failedWithMessage",
+        values: { message: error.message.trim() },
+      },
+      after: AFTER_COMPACT.REREAD,
+    };
+  }
+  return {
+    notice: { tone: "error", key: "chat:compact.errors.unknown" },
+    after: AFTER_COMPACT.REREAD,
+  };
+}
 const alignmentClassFor = (isUser) => (isUser ? "items-end" : "items-start");
 const bubbleClassFor = (isUser, isError) => {
   if (isUser) {
@@ -155,18 +213,36 @@ export default function ConversationPage() {
   // stream event, or null. Transient by design — never persisted, never in
   // the message content — and cleared by the next turn that carries none.
   const [memoryWarning, setMemoryWarning] = useState(null);
-  // /compact (#585): the conversation it runs on (its status row shows there
-  // only), and the one-line outcome of a command above the composer.
-  const [compactingId, setCompactingId] = useState(null);
+  // /compact (#585): whether one runs for this conversation (the session's
+  // store, so leaving the page and coming back still shows it locked), the
+  // runs this page started, and the one-line outcome of a command above the
+  // composer.
+  useSyncExternalStore(subscribeCompacting, compactingVersion);
+  const compactingHere = isCompacting(id);
+  const startedHereRef = useRef(new Set());
   const [commandNotice, setCommandNotice] = useState(null);
   // /context (#608): the usage snapshots drawn at the end of the thread. A
   // list of their own, never in `messages` (whose image carry-over goes by
-  // index) and never stored: gone at the next send, re-read or reload.
+  // index) and never stored: gone at the next send, re-read after /compact,
+  // conversation switch or reload. The epoch moves at each of those, and a
+  // usage read under an older epoch is dropped.
   const [contextPanels, setContextPanels] = useState([]);
   const contextPanelSeqRef = useRef(0);
-  // The conversation on screen now, for a command's answer that lands later.
+  const contextEpochRef = useRef(0);
+  const clearContextPanels = useCallback(() => {
+    contextEpochRef.current += 1;
+    setContextPanels([]);
+  }, []);
+  // The conversation on screen now, for an answer that lands later; null once
+  // the page is gone.
   const idRef = useRef(id);
   idRef.current = id;
+  useEffect(() => {
+    idRef.current = id;
+    return () => {
+      idRef.current = null;
+    };
+  }, [id]);
 
   // A memory warning is about ONE conversation on THIS machine right now:
   // switching conversations must never show conversation A's warning over B.
@@ -175,8 +251,8 @@ export default function ConversationPage() {
     setOpenCommand(null);
     setLoadFailed(false);
     setCommandNotice(null);
-    setContextPanels([]);
-  }, [id]);
+    clearContextPanels();
+  }, [id, clearContextPanels]);
   // A ref, not state: the scroll handler updates it on every scroll event, and
   // reading it from the auto-scroll effect must NOT re-run that effect. As state
   // it did (the effect depended on it), so toggling it near the bottom snapped
@@ -297,6 +373,10 @@ export default function ConversationPage() {
         tracedFetch(`${API_BASE_URL}/conversations/`),
       ]);
       const msgs = await msgRes.json();
+      const convs = await convRes.json();
+      // A read of a conversation the page has left (or a page that is gone)
+      // lands nowhere: its rows would replace the other conversation's.
+      if (idRef.current !== id) return;
       // initialize starred state from backend
       const starredMap = {};
       msgs.forEach((m) => {
@@ -305,7 +385,6 @@ export default function ConversationPage() {
         }
       });
       setStarredIds(starredMap);
-      const convs = await convRes.json();
       convs.sort((a, b) => new Date(b.last_message_time) - new Date(a.last_message_time));
       setMessages((prev) => {
         const sameConv = loadedConvIdRef.current === id;
@@ -317,7 +396,6 @@ export default function ConversationPage() {
       });
       loadedConvIdRef.current = id;
       setConversations(convs);
-      setContextPanels([]);
     } catch (err) {
       log.error("Failed to fetch messages and conversations", err);
     }
@@ -879,13 +957,34 @@ export default function ConversationPage() {
   }, []);
 
   // A /context panel or the /compact status row the user just asked for
-  // shows at the end of the thread: bring it into view.
-  const compactingHere = compactingId !== null && compactingId === id;
+  // shows at the end of the thread: bring it into view. Only when the thread
+  // grows: closing a panel never moves the view.
+  const scrolledForRef = useRef({ panels: 0, compacting: false });
   useEffect(() => {
-    if ((contextPanels.length > 0 || compactingHere) && scrollRef.current) {
+    const previous = scrolledForRef.current;
+    const grew = contextPanels.length > previous.panels || (compactingHere && !previous.compacting);
+    scrolledForRef.current = { panels: contextPanels.length, compacting: compactingHere };
+    if (grew && scrollRef.current) {
       scrollRef.current.scrollTo({ top: scrollRef.current.scrollHeight, behavior: "smooth" });
     }
   }, [contextPanels.length, compactingHere]);
+
+  // A /compact this page did not start (one started before the user left
+  // the page and came back) re-reads the conversation when it ends, so its
+  // separator shows.
+  const rereadRef = useRef(fetchMessagesAndConversations);
+  rereadRef.current = fetchMessagesAndConversations;
+  useEffect(() => {
+    return subscribeCompacting((conversationId) => {
+      if (
+        conversationId === String(idRef.current) &&
+        !isCompacting(conversationId) &&
+        !startedHereRef.current.has(conversationId)
+      ) {
+        rereadRef.current?.();
+      }
+    });
+  }, []);
 
   // Auto-scroll only when streaming is done or user hasn't scrolled up
   useEffect(() => {
@@ -958,52 +1057,60 @@ export default function ConversationPage() {
   const errorNotice = (key) => ({ tone: "error", text: t(key) });
 
   // /context (#608): GET the usage of the next request and draw it at the end
-  // of the thread. Never loads the model; a conversation without a usable
-  // model is told to pick one, and nothing is asked.
+  // of the thread. Never loads the model. An answer for a conversation the
+  // page has left, or read before a send or a re-read since, is dropped. A
+  // conversation whose model is gone is loaded again (its header then asks
+  // for a model) and told to pick one.
   const showContextUsage = async () => {
     const conversationId = id;
+    const epoch = contextEpochRef.current;
+    const current = () => idRef.current === conversationId && contextEpochRef.current === epoch;
     try {
       const usage = await apiClient.get(`/conversations/${conversationId}/context`);
-      if (idRef.current !== conversationId) return;
+      if (!current()) return;
       contextPanelSeqRef.current += 1;
       const key = contextPanelSeqRef.current;
       setContextPanels((prev) => [...prev, { key, usage }]);
     } catch (err) {
       // The API client wrote the request's record at the level of its status.
-      if (idRef.current !== conversationId) return;
-      setCommandNotice(
-        errorNotice(
-          err?.data?.error?.detail?.reason === "no_model"
-            ? "chat:commands.pickModelFirst"
-            : "chat:context.failed"
-        )
-      );
+      if (!current()) return;
+      if (err?.data?.error?.detail?.reason === "no_model") {
+        setLoadAttempt((n) => n + 1);
+        setCommandNotice(errorNotice("chat:commands.pickModelFirst"));
+      } else {
+        setCommandNotice(errorNotice("chat:context.failed"));
+      }
     }
   };
 
-  // /compact (#585), once confirmed: POST through tracedFetch, which has no
-  // client timeout (a summary can outlast the API client's 30 s). The status
-  // row shows meanwhile; the conversation is read again after a summary and
-  // after any failure (a summary that succeeded on the server still shows
-  // its separator), never after "nothing to compact".
+  // /compact (#585), once confirmed. One run per conversation (a second
+  // confirmation while it runs starts nothing), held in the session's store
+  // so the conversation stays locked, its status row shown, wherever the
+  // user goes meanwhile. POST through tracedFetch: no 30 s client timeout (a
+  // summary can outlast it), a ceiling of 10 minutes instead. What follows
+  // the answer (`compactOutcome`) happens only while the page still shows
+  // this conversation, checked again after every wait.
   const compactConversation = async () => {
     const conversationId = id;
-    setCompactingId(conversationId);
-    let notice = null;
+    if (!startCompacting(conversationId)) return;
+    startedHereRef.current.add(conversationId);
+    const here = () => idRef.current === conversationId;
+    const controller = new AbortController();
+    const ceiling = setTimeout(() => controller.abort(), COMPACT_CEILING_MS);
+    let outcome;
     try {
       const res = await tracedFetch(`${API_BASE_URL}/conversations/${conversationId}/compact`, {
         method: "POST",
+        signal: controller.signal,
       });
       let body = null;
       try {
         body = await res.json();
       } catch {
-        // No JSON body: the outcome is unknown; the record below says so.
+        // No JSON body: the outcome is unknown; compactOutcome says so.
       }
-      if (res.ok && body?.summarized === 0) {
-        notice = { tone: "info", text: t("chat:compact.nothingToCompact") };
-      } else if (!res.ok || !(body?.summarized > 0)) {
-        notice = errorNotice(compactErrorKey(body?.error));
+      outcome = compactOutcome(res.ok, body);
+      if (outcome.notice?.tone === "error") {
         // The backend refused (4xx, its own INFO record) or failed (its WARNING
         // or ERROR record); this side records that the page told the user.
         const write = res.status >= 500 ? log.warn : log.info;
@@ -1013,16 +1120,44 @@ export default function ConversationPage() {
         });
       }
     } catch {
-      // tracedFetch wrote the request's api.failure record.
-      notice = errorNotice("chat:compact.errors.unknown");
+      if (controller.signal.aborted) {
+        log.warn(
+          `Manual compaction of conversation ${conversationId} had no answer after ${COMPACT_CEILING_MS / 60000} min; gave up`
+        );
+      }
+      // Otherwise tracedFetch wrote the request's api.failure record.
+      outcome = {
+        notice: { tone: "error", key: "chat:compact.errors.unknown" },
+        after: AFTER_COMPACT.REREAD,
+      };
+    } finally {
+      clearTimeout(ceiling);
     }
-    if (idRef.current === conversationId) {
-      if (notice?.tone !== "info") {
+    try {
+      if (!here()) return;
+      const notice = outcome.notice
+        ? { tone: outcome.notice.tone, text: t(outcome.notice.key, outcome.notice.values) }
+        : null;
+      if (outcome.after === AFTER_COMPACT.LEAVE) {
+        // The conversation is gone: no re-read (it would only fail); the
+        // new-conversation page shows the notice and the current list.
+        navigate("/erudi/chat", { state: { notice } });
+        return;
+      }
+      if (outcome.after === AFTER_COMPACT.RELOAD) {
+        setLoadAttempt((n) => n + 1);
+      } else if (outcome.after === AFTER_COMPACT.REREAD) {
         await fetchMessagesAndConversations();
+        if (!here()) return;
+        clearContextPanels();
       }
       setCommandNotice(notice);
+    } finally {
+      // Ended first, then forgotten as this page's own run: the page's
+      // listener must not take it for another page's run and re-read again.
+      finishCompacting(conversationId);
+      startedHereRef.current.delete(conversationId);
     }
-    setCompactingId((current) => (current === conversationId ? null : current));
   };
 
   // A command from the composer or the header panel. /context draws its
@@ -1042,9 +1177,10 @@ export default function ConversationPage() {
     setOpenCommand(command);
   };
 
-  // A sent message makes the /context snapshots stale.
+  // A sent message makes the /context snapshots stale, and drops any still
+  // on its way.
   const sendMessage = (...args) => {
-    setContextPanels([]);
+    clearContextPanels();
     setCommandNotice(null);
     return handleAsk(...args);
   };

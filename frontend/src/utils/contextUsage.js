@@ -25,22 +25,25 @@ const tokensOf = (categories, key) => {
 };
 
 /**
- * The grid's blocks for `rows` ({key, tokens}) out of `total` tokens: each
- * row gets its share of `CONTEXT_GRID_BLOCKS` (largest remainders, so the
- * blocks add up exactly), and a row that holds tokens never rounds down to no
- * block at all -- it takes one from the largest. Returns the block keys in
- * row order.
+ * The grid's blocks for `rows` ({key, tokens}), out of what the rows hold
+ * together: each row gets its share of `CONTEXT_GRID_BLOCKS` (largest
+ * remainders, handed out until the blocks add up exactly), and a row that
+ * holds tokens never rounds down to no block at all -- it takes one from the
+ * largest. With the backend's payloads the rows add up to the window (or to
+ * what is used, past it); a payload that does not still fills the grid.
+ * Returns the block keys in row order, none when the rows hold nothing.
  */
-function allocateBlocks(rows, total) {
+function allocateBlocks(rows) {
+  const total = rows.reduce((sum, r) => sum + r.tokens, 0);
+  if (total <= 0) return [];
   const exact = rows.map((r) => (r.tokens / total) * CONTEXT_GRID_BLOCKS);
   const counts = exact.map(Math.floor);
   let left = CONTEXT_GRID_BLOCKS - counts.reduce((a, b) => a + b, 0);
   const byRemainder = exact
     .map((value, i) => ({ i, rest: value - counts[i] }))
     .sort((a, b) => b.rest - a.rest);
-  for (const { i } of byRemainder) {
-    if (left <= 0) break;
-    counts[i] += 1;
+  for (let k = 0; left > 0; k = (k + 1) % byRemainder.length) {
+    counts[byRemainder[k].i] += 1;
     left -= 1;
   }
   rows.forEach((r, i) => {
@@ -73,8 +76,7 @@ export function contextUsageView(usage) {
     const tokens = tokensOf(categories, key);
     return { key, tokens, share: window ? tokens / window : null };
   });
-  const total = rows.reduce((sum, r) => sum + r.tokens, 0);
-  const blocks = window ? allocateBlocks(rows, Math.max(window, total)) : [];
+  const blocks = window ? allocateBlocks(rows) : [];
   return {
     window,
     used,

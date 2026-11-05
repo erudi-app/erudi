@@ -112,6 +112,46 @@ describe("contextUsageView", () => {
     expect(contextUsageView(usage(DOC_EXAMPLE)).pastThreshold).toBe(false);
   });
 
+  it("always draws exactly 100 blocks, even for payloads that do not add up to the window", () => {
+    // A small deterministic generator: the same cases on every run.
+    let seed = 42;
+    const random = () => {
+      seed = (seed * 1103515245 + 12345) % 2147483648;
+      return seed / 2147483648;
+    };
+    const amount = () => (random() < 0.3 ? 0 : Math.floor(random() * 10 ** (1 + random() * 5)));
+    for (let i = 0; i < 2000; i++) {
+      const categories = {
+        system_prompt: amount(),
+        tools: amount(),
+        messages: amount(),
+        summary: amount(),
+        free: amount(),
+        autocompaction_buffer: amount(),
+      };
+      const working = 1 + Math.floor(random() * 200000);
+      const { blocks, rows } = contextUsageView(usage(categories, { working }));
+      const held = rows.filter((r) => r.tokens > 0);
+      if (held.length === 0) {
+        expect(blocks).toEqual([]);
+        continue;
+      }
+      expect(blocks).toHaveLength(CONTEXT_GRID_BLOCKS);
+      for (const r of held) {
+        expect(count(blocks, r.key), JSON.stringify({ categories, working })).toBeGreaterThan(0);
+      }
+    }
+  });
+
+  it("fills the grid when the categories add up to far less than the window", () => {
+    const { blocks } = contextUsageView(
+      usage({ system_prompt: 5, messages: 15 }, { working: 1000 })
+    );
+    expect(blocks).toHaveLength(CONTEXT_GRID_BLOCKS);
+    expect(count(blocks, "system_prompt")).toBe(25);
+    expect(count(blocks, "messages")).toBe(75);
+  });
+
   it("has no grid and no shares when no window is known", () => {
     const view = contextUsageView(
       usage({ system_prompt: 400, messages: 600 }, { working: null, trained: null })

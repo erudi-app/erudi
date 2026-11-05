@@ -255,6 +255,25 @@ describe("/compact and /context before the conversation exists (#585)", () => {
   );
 });
 
+describe("arriving from a conversation that no longer exists", () => {
+  it("shows the notice the conversation page handed over", async () => {
+    render(
+      <MemoryRouter
+        initialEntries={[
+          {
+            pathname: "/erudi/chat",
+            state: { notice: { tone: "error", text: "This conversation no longer exists." } },
+          },
+        ]}
+      >
+        <ChatPage />
+      </MemoryRouter>
+    );
+    const notice = await screen.findByText("This conversation no longer exists.");
+    expect(notice.closest('[role="alert"]')).toBeTruthy();
+  });
+});
+
 describe("a model whose weights are missing (#376)", () => {
   const ORPHAN = { id: 9, name: "Orphan assistant", weights_available: false };
 

@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
 import ChatCollapsibleSection from "../components/ChatCollapsibleSection";
@@ -34,6 +34,7 @@ export default function ChatPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const location = useLocation();
   const { completionCount } = useDownloadModal();
 
   const [models, setModels] = useState([]);
@@ -51,8 +52,10 @@ export default function ChatPage() {
   const { selectModel, ready, createPayload } = draft;
   // The command being run (its popup is open), or null.
   const [openCommand, setOpenCommand] = useState(null);
-  // Why a command typed here did nothing, or null.
-  const [commandNotice, setCommandNotice] = useState(null);
+  // Why a command typed here did nothing, or null; first, the notice a
+  // conversation page handed over when it sent the user here (a /compact
+  // that found its conversation deleted).
+  const [commandNotice, setCommandNotice] = useState(() => location.state?.notice ?? null);
   const runCommand = (command) => {
     setCommandNotice(null);
     setOpenCommand(command);

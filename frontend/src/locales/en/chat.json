@@ -189,6 +189,7 @@
       "notFound": "This conversation no longer exists.",
       "failed": "The summary could not be written; nothing was changed.",
       "separatorNotSaved": "The earlier messages were summarized, but the separator could not be saved.",
+      "failedWithMessage": "The summary failed: {{message}}",
       "unknown": "The summary did not come back; the conversation shows where it stands."
     }
   },

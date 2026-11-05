@@ -224,6 +224,24 @@ describe("sending an exact command", () => {
     }
   );
 
+  it("keeps the attachments when a command the page does not offer sends nothing", () => {
+    renderComposer({
+      commands: commandsFor(COMMAND_SCOPES.DRAFT),
+      unavailableCommands: commandsOutside(COMMAND_SCOPES.DRAFT),
+      onUnavailableCommand: vi.fn(),
+    });
+    fireEvent.change(document.querySelector('input[type="file"]'), {
+      target: { files: [pdfFile()] },
+    });
+    type("/compact");
+    key("Enter");
+    expect(screen.getByText("report.pdf")).toBeTruthy();
+
+    type("Summarize it");
+    fireEvent.click(screen.getByLabelText("Send"));
+    expect(onSend).toHaveBeenCalledWith("Summarize it", [], [], ["/docs/report.pdf"]);
+  });
+
   it("never lists a command the page does not offer", () => {
     renderComposer({
       commands: commandsFor(COMMAND_SCOPES.DRAFT),

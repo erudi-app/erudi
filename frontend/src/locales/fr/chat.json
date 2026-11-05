@@ -189,6 +189,7 @@
       "notFound": "Cette conversation n'existe plus.",
       "failed": "Le résumé n'a pas pu être écrit ; rien n'a été modifié.",
       "separatorNotSaved": "Les messages précédents ont été résumés, mais le séparateur n'a pas pu être enregistré.",
+      "failedWithMessage": "Le résumé a échoué : {{message}}",
       "unknown": "Le résumé n'est pas revenu ; la conversation montre où elle en est."
     }
   },

@@ -189,6 +189,7 @@
       "notFound": "Esta conversación ya no existe.",
       "failed": "No se pudo escribir el resumen; no se cambió nada.",
       "separatorNotSaved": "Los mensajes anteriores se resumieron, pero no se pudo guardar el separador.",
+      "failedWithMessage": "El resumen falló: {{message}}",
       "unknown": "El resumen no volvió; la conversación muestra en qué punto está."
     }
   },

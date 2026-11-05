@@ -34,7 +34,14 @@ vi.mock("react-router-dom", () => ({
 }));
 
 vi.mock("../components/Sidebar", () => ({ default: () => null }));
-vi.mock("../components/ChatCollapsibleSection", () => ({ default: () => null }));
+// The history list, reduced to a trigger for deleting another conversation.
+vi.mock("../components/ChatCollapsibleSection", () => ({
+  default: ({ onDelete }) => (
+    <button type="button" onClick={() => onDelete(99)}>
+      delete-other-conversation
+    </button>
+  ),
+}));
 vi.mock("../components/TypingIndicator", () => ({ default: () => null }));
 vi.mock("../components/MarkdownRenderer", () => ({
   default: ({ content }) => <div>{content}</div>,
@@ -139,9 +146,9 @@ let messages;
 // What POST /compact answers (a function of nothing, so a test can gate it).
 let compactAnswer;
 
-const routeFetch = async (url) => {
+const routeFetch = async (url, opts = {}) => {
   const u = String(url);
-  if (u.endsWith("/compact")) return compactAnswer();
+  if (u.endsWith("/compact")) return compactAnswer(opts);
   if (u.includes("generate_title")) return emptyStream();
   if (u.includes("/query")) return answerStream();
   if (u.endsWith("/llms/local")) return { ok: true, json: async () => MODELS };
@@ -223,14 +230,16 @@ describe("/compact asks first", () => {
     expect(await screen.findByRole("dialog", { name: "Summarize earlier messages?" })).toBeTruthy();
   });
 
-  it("posts once confirmed, with no client-side timeout", async () => {
+  it("posts once confirmed, through tracedFetch with its own ceiling, not the 30 s one", async () => {
     await renderPage();
     await confirmCompact();
     await waitFor(() => expect(compactCalls()).toHaveLength(1));
     const [url, opts] = compactCalls()[0];
     expect(String(url)).toMatch(/\/conversations\/7\/compact$/);
     expect(opts.method).toBe("POST");
-    expect(opts.signal).toBeUndefined();
+    // Its own signal (the 10-minute ceiling, see below), not the API client's.
+    expect(opts.signal).toBeInstanceOf(AbortSignal);
+    expect(opts.signal.aborted).toBe(false);
   });
 });
 
@@ -303,11 +312,6 @@ describe("what /compact answers", () => {
       "The last question has no answer yet; send it again or ask something new first.",
     ],
     [
-      "the conversation was deleted",
-      () => appError(404, "CONVERSATION_NOT_FOUND", "Conversation with ID 7 not found"),
-      "This conversation no longer exists.",
-    ],
-    [
       "the summary could not be written",
       () => appError(503, "COMPACTION_FAILED", "The summary could not be written."),
       "The summary could not be written; nothing was changed.",
@@ -318,7 +322,12 @@ describe("what /compact answers", () => {
       "The earlier messages were summarized, but the separator could not be saved.",
     ],
     [
-      "the answer is not one it knows",
+      "the server failed in a way it does not map",
+      () => appError(500, "MODEL_LOADING_ERROR", "The model could not be loaded."),
+      "The summary failed: The model could not be loaded.",
+    ],
+    [
+      "the server answered without an error body",
       () => jsonResponse(502, null),
       "The summary did not come back; the conversation shows where it stands.",
     ],
@@ -491,4 +500,327 @@ describe("an orphaned conversation", () => {
       expect(patchMock).not.toHaveBeenCalled();
     }
   );
+});
+
+// Review round (#687): races, stale answers and edge payloads.
+
+/** A streaming answer that stays open until end(). */
+function openStream() {
+  let finish;
+  const done = new Promise((resolve) => {
+    finish = resolve;
+  });
+  let sent = false;
+  return {
+    response: {
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: async () => {
+            if (!sent) {
+              sent = true;
+              return { done: false, value: encoder.encode('{"t":"answer","text":"Long"}\n') };
+            }
+            await done;
+            return { done: true, value: undefined };
+          },
+        }),
+      },
+    },
+    end: () => finish(),
+  };
+}
+
+const switchTo = (rerender, conversationId) => {
+  paramsMock.id = conversationId;
+  rerender(<ConversationPage />);
+};
+const readsOf = (conversationId) =>
+  tracedFetchMock.mock.calls.filter(([u]) =>
+    String(u).endsWith(`/conversations/${conversationId}/fetch_messages`)
+  ).length;
+
+describe("a /compact already running", () => {
+  it("sends one POST for a double click on Summarize, its status row staying until it ends", async () => {
+    const gate = deferred();
+    compactAnswer = async () => {
+      await gate.promise;
+      return jsonResponse(200, { summarized: 0 });
+    };
+    await renderPage();
+    typeAndEnter("/compact");
+    const dialog = await screen.findByRole("dialog", { name: "Summarize earlier messages?" });
+    const confirm = within(dialog).getByRole("button", { name: "Summarize" });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    await screen.findByRole("status");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(compactCalls()).toHaveLength(1);
+    expect(screen.getByRole("status").textContent).toContain("Summarizing");
+
+    gate.resolve();
+    await screen.findByText("Nothing to compact yet.");
+    expect(screen.queryByText(/Summarizing/)).toBeNull();
+  });
+
+  it("stays locked after leaving the page and coming back while it runs", async () => {
+    const gate = deferred();
+    compactAnswer = async () => {
+      await gate.promise;
+      messages = withSeparator();
+      return jsonResponse(200, { summarized: 2, reason: "length", summary: "S." });
+    };
+    const first = render(<ConversationPage />);
+    await screen.findByText("Lyon is lovely.");
+    await waitFor(() => expect(composer().disabled).toBe(false));
+    await confirmCompact();
+    await screen.findByRole("status");
+    first.unmount();
+
+    render(<ConversationPage />);
+    await screen.findByText("Lyon is lovely.");
+    expect(screen.getByRole("status").textContent).toContain("Summarizing");
+    expect(composer().disabled).toBe(true);
+
+    gate.resolve();
+    expect(await screen.findByText("You summarized 2 earlier messages.")).toBeTruthy();
+    await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+    expect(composer().disabled).toBe(false);
+  });
+
+  it("leaves Compact usable while an answer streams, so the backend can say it is busy", async () => {
+    const stream = openStream();
+    tracedFetchMock.mockImplementation(async (url, opts) =>
+      String(url).includes("/query") ? stream.response : routeFetch(url, opts)
+    );
+    compactAnswer = async () =>
+      appError(409, "ENGINE_BUSY", "The model is busy; try again in a moment.");
+    await renderPage();
+    typeAndEnter("A long answer please");
+    await waitFor(() => expect(composer().disabled).toBe(true));
+    openSettings();
+    const compact = screen.getByRole("button", { name: /^Compact/ });
+    expect(compact.disabled).toBe(false);
+    fireEvent.click(compact);
+    const dialog = await screen.findByRole("dialog", { name: "Summarize earlier messages?" });
+    fireEvent.click(within(dialog).getByRole("button", { name: "Summarize" }));
+    expect(await screen.findByText("The model is busy; try again in a moment.")).toBeTruthy();
+    stream.end();
+    await waitFor(() => expect(composer().disabled).toBe(false));
+  });
+});
+
+describe("switching conversation while a command runs", () => {
+  it("never brings A's /compact outcome or rows into B, and B is not locked", async () => {
+    const gate = deferred();
+    compactAnswer = async () => {
+      await gate.promise;
+      return appError(503, "COMPACTION_FAILED", "The summary could not be written.");
+    };
+    const { rerender } = render(<ConversationPage />);
+    await screen.findByText("Lyon is lovely.");
+    await waitFor(() => expect(composer().disabled).toBe(false));
+    await confirmCompact();
+    await screen.findByRole("status");
+
+    const readsOfA = readsOf(7);
+    messages = [{ id: 20, sender: "user", content: "B's own question" }];
+    switchTo(rerender, "8");
+    await screen.findByText("B's own question");
+    await waitFor(() => expect(composer().disabled).toBe(false));
+    expect(screen.queryByRole("status")).toBeNull();
+
+    gate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByText(/could not be written/)).toBeNull();
+    expect(screen.getByText("B's own question")).toBeTruthy();
+    expect(readsOf(7)).toBe(readsOfA);
+  });
+
+  it("drops A's /context answer once B is shown", async () => {
+    const gate = deferred();
+    getMock.mockImplementation(async (path) => {
+      if (path.endsWith("/context")) {
+        await gate.promise;
+        return USAGE;
+      }
+      return path.endsWith("/fetch_messages") ? messages : [];
+    });
+    const { rerender } = render(<ConversationPage />);
+    await screen.findByText("Lyon is lovely.");
+    await waitFor(() => expect(composer().disabled).toBe(false));
+    typeAndEnter("/context");
+    await waitFor(() => expect(contextReads()).toHaveLength(1));
+    switchTo(rerender, "8");
+    gate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(contextPanel()).toBeNull();
+  });
+
+  it("drops a re-read of A that lands once B is shown", async () => {
+    const gate = deferred();
+    compactAnswer = async () => appError(503, "COMPACTION_FAILED", "failed");
+    const { rerender } = render(<ConversationPage />);
+    await screen.findByText("Lyon is lovely.");
+    await waitFor(() => expect(composer().disabled).toBe(false));
+    // A's re-read after the failure waits; B opens meanwhile.
+    tracedFetchMock.mockImplementation(async (url, opts) => {
+      if (String(url).endsWith("/conversations/7/fetch_messages")) {
+        await gate.promise;
+      }
+      return routeFetch(url, opts);
+    });
+    await confirmCompact();
+    await waitFor(() => expect(compactCalls()).toHaveLength(1));
+    const bRows = [{ id: 20, sender: "user", content: "B's own question" }];
+    messages = bRows;
+    switchTo(rerender, "8");
+    await screen.findByText("B's own question");
+
+    messages = HISTORY;
+    gate.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.queryByText("Lyon is lovely.")).toBeNull();
+    expect(screen.getByText("B's own question")).toBeTruthy();
+    expect(screen.queryByText(/could not be written/)).toBeNull();
+  });
+});
+
+describe("a /context answer that lands late", () => {
+  it("is dropped when a message was sent meanwhile", async () => {
+    const gate = deferred();
+    getMock.mockImplementation(async (path) => {
+      if (path.endsWith("/context")) {
+        await gate.promise;
+        return USAGE;
+      }
+      return path.endsWith("/fetch_messages") ? messages : [];
+    });
+    await renderPage();
+    typeAndEnter("/context");
+    await waitFor(() => expect(contextReads()).toHaveLength(1));
+    typeAndEnter("And now?");
+    gate.resolve();
+    await screen.findByText("And now?");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(contextPanel()).toBeNull();
+  });
+});
+
+describe("panels and re-reads", () => {
+  it("are cleared by the re-read after a successful /compact", async () => {
+    compactAnswer = async () => {
+      messages = withSeparator();
+      return jsonResponse(200, { summarized: 2, reason: "length", summary: "S." });
+    };
+    await renderPage();
+    typeAndEnter("/context");
+    await screen.findByRole("region", { name: "Context usage" });
+    await confirmCompact();
+    await screen.findByText("You summarized 2 earlier messages.");
+    await waitFor(() => expect(contextPanel()).toBeNull());
+  });
+
+  it("are kept when another conversation is deleted from the history", async () => {
+    await renderPage();
+    typeAndEnter("/context");
+    await screen.findByRole("region", { name: "Context usage" });
+    fireEvent.click(screen.getByRole("button", { name: "delete-other-conversation" }));
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(contextPanel()).toBeTruthy();
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
+
+  it("scroll the thread when one is added, never when one is closed", async () => {
+    const scrollTo = vi.fn();
+    Element.prototype.scrollTo = scrollTo;
+    await renderPage();
+    typeAndEnter("/context");
+    await screen.findByRole("region", { name: "Context usage" });
+    typeAndEnter("/context");
+    await waitFor(() =>
+      expect(screen.getAllByRole("region", { name: "Context usage" })).toHaveLength(2)
+    );
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    const calls = scrollTo.mock.calls.length;
+    expect(calls).toBeGreaterThan(0);
+    fireEvent.click(screen.getAllByRole("button", { name: "Close context usage" })[0]);
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(screen.getAllByRole("region", { name: "Context usage" })).toHaveLength(1);
+    expect(scrollTo.mock.calls.length).toBe(calls);
+  });
+});
+
+describe("a /compact refusal that changes the page", () => {
+  it("reads the whole conversation again when it has no model any more", async () => {
+    compactAnswer = async () => {
+      detail = { ...DETAIL, llm_id: null };
+      return appError(409, "STATE_CONFLICT", "no model", { reason: "no_model" });
+    };
+    await renderPage();
+    await confirmCompact();
+    await screen.findByText("This conversation has no model: pick one with Model first.");
+    await waitFor(() => expect(header().textContent).toBe("Please select a model"));
+  });
+
+  it("does the same for /context", async () => {
+    getMock.mockImplementation(async (path) => {
+      if (path.endsWith("/context")) {
+        detail = { ...DETAIL, llm_id: null };
+        const error = new Error("no model");
+        error.status = 409;
+        error.data = { error: { type: "STATE_CONFLICT", detail: { reason: "no_model" } } };
+        throw error;
+      }
+      return path.endsWith("/fetch_messages") ? messages : [];
+    });
+    await renderPage();
+    typeAndEnter("/context");
+    await waitFor(() => expect(header().textContent).toBe("Please select a model"));
+  });
+
+  it("leaves a conversation deleted meanwhile for the new-conversation page, with the notice", async () => {
+    compactAnswer = async () =>
+      appError(404, "CONVERSATION_NOT_FOUND", "Conversation with ID 7 not found");
+    await renderPage();
+    const reads = messageReads();
+    await confirmCompact();
+    await waitFor(() =>
+      expect(navigateMock).toHaveBeenCalledWith("/erudi/chat", {
+        state: { notice: { tone: "error", text: "This conversation no longer exists." } },
+      })
+    );
+    expect(messageReads()).toBe(reads);
+  });
+});
+
+describe("a /compact that never answers", () => {
+  it("gives up after ten minutes, says the summary did not come back, and re-reads", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+    try {
+      compactAnswer = (opts) =>
+        new Promise((_resolve, reject) => {
+          opts.signal.addEventListener("abort", () =>
+            reject(new DOMException("The operation was aborted.", "AbortError"))
+          );
+        });
+      await renderPage();
+      const reads = messageReads();
+      await confirmCompact();
+      await screen.findByRole("status");
+      vi.advanceTimersByTime(9 * 60 * 1000);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(screen.getByRole("status")).toBeTruthy();
+      vi.advanceTimersByTime(60 * 1000);
+      expect(
+        await screen.findByText(
+          "The summary did not come back; the conversation shows where it stands."
+        )
+      ).toBeTruthy();
+      await waitFor(() => expect(messageReads()).toBeGreaterThan(reads));
+      expect(screen.queryByRole("status")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
 });

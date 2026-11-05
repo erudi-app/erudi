@@ -189,6 +189,7 @@
       "notFound": "此对话已不存在。",
       "failed": "无法写入摘要；没有任何更改。",
       "separatorNotSaved": "之前的消息已总结，但无法保存分隔线。",
+      "failedWithMessage": "摘要失败：{{message}}",
       "unknown": "摘要没有返回；对话显示了当前的状态。"
     }
   },

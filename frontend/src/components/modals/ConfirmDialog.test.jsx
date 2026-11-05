@@ -48,6 +48,39 @@ describe("ConfirmDialog", () => {
     expect(onClose).not.toHaveBeenCalled();
   });
 
+  it("confirms once per opening, whatever the clicks during its closing", () => {
+    const { rerender } = renderDialog();
+    const confirm = screen.getByRole("button", { name: "Do it" });
+    fireEvent.click(confirm);
+    fireEvent.click(confirm);
+    rerender(
+      <ConfirmDialog
+        isOpen={false}
+        title="Do the thing?"
+        message="The thing cannot be undone."
+        confirmLabel="Do it"
+        onConfirm={onConfirm}
+        onClose={onClose}
+      />
+    );
+    // The closing dialog may still be on screen for its exit animation.
+    if (confirm.isConnected) fireEvent.click(confirm);
+    expect(onConfirm).toHaveBeenCalledTimes(1);
+
+    rerender(
+      <ConfirmDialog
+        isOpen
+        title="Do the thing?"
+        message="The thing cannot be undone."
+        confirmLabel="Do it"
+        onConfirm={onConfirm}
+        onClose={onClose}
+      />
+    );
+    fireEvent.click(screen.getByRole("button", { name: "Do it" }));
+    expect(onConfirm).toHaveBeenCalledTimes(2);
+  });
+
   it("puts the focus on Cancel, so Enter right away backs out", () => {
     renderDialog();
     expect(document.activeElement).toBe(screen.getByRole("button", { name: "Cancel" }));
