@@ -1,23 +1,25 @@
 // @vitest-environment jsdom
 /**
- * Handing the persisted automatic-update preference to the Electron main
- * process.
+ * Handing the persisted update switches to the Electron main process (#563).
  *
- * Main owns electron-updater but has no database; the renderer owns the
- * setting. If the preference never reaches main, one of two failures follows:
- * a user who refused updates keeps getting them, or -- worse for everyone else
- * -- a hiccup reading the setting silently strands the app on its current
- * version. So the bridge is told something on every path, and "enabled" is what
- * an unreadable setting resolves to.
+ * Main owns electron-updater but has no database; the renderer owns the three
+ * switches (Check for updates, Download automatically, Install when I quit).
+ * Main is told the full snapshot on every path, and a value that could not be
+ * read travels as `null`: main's policy (`updaterPolicy.js`) then downloads
+ * and installs nothing.
  */
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { syncAutoUpdateWithMain } from "./autoUpdate";
+import {
+  notifyUpdatePreferences,
+  syncUpdatePreferencesWithMain,
+  updatePreferencesFrom,
+} from "./autoUpdate";
 
-let setAutoUpdateEnabled;
+let setPreferences;
 
 beforeEach(() => {
-  setAutoUpdateEnabled = vi.fn();
-  window.updaterAPI = { setAutoUpdateEnabled };
+  setPreferences = vi.fn();
+  window.updaterAPI = { setPreferences };
 });
 
 afterEach(() => {
@@ -25,44 +27,71 @@ afterEach(() => {
   vi.clearAllMocks();
 });
 
-describe("syncAutoUpdateWithMain", () => {
-  it("lets updates through when the user has not refused them", async () => {
-    const client = { get: vi.fn().mockResolvedValue({ auto_update_enabled: true }) };
+describe("updatePreferencesFrom", () => {
+  it("reads the three switches from the user settings", () => {
+    expect(
+      updatePreferencesFrom({
+        auto_update_enabled: true,
+        auto_download_updates: false,
+        auto_install_updates: true,
+      })
+    ).toEqual({ check: true, download: false, install: true });
+  });
 
-    await expect(syncAutoUpdateWithMain(client)).resolves.toBe(true);
+  it("carries null for a switch it cannot read", () => {
+    expect(updatePreferencesFrom({ auto_update_enabled: false })).toEqual({
+      check: false,
+      download: null,
+      install: null,
+    });
+    expect(updatePreferencesFrom(null)).toEqual({ check: null, download: null, install: null });
+    expect(updatePreferencesFrom({ auto_download_updates: "yes" }).download).toBeNull();
+  });
+});
+
+describe("syncUpdatePreferencesWithMain", () => {
+  it("hands main the full snapshot it read", async () => {
+    const client = {
+      get: vi.fn().mockResolvedValue({
+        auto_update_enabled: true,
+        auto_download_updates: true,
+        auto_install_updates: false,
+      }),
+    };
+
+    await expect(syncUpdatePreferencesWithMain(client)).resolves.toEqual({
+      check: true,
+      download: true,
+      install: false,
+    });
 
     expect(client.get).toHaveBeenCalledWith("/user_settings/");
-    expect(setAutoUpdateEnabled).toHaveBeenCalledWith(true);
+    expect(setPreferences).toHaveBeenCalledWith({ check: true, download: true, install: false });
   });
 
-  it("tells main to stop when the user refused them", async () => {
-    const client = { get: vi.fn().mockResolvedValue({ auto_update_enabled: false }) };
-
-    await expect(syncAutoUpdateWithMain(client)).resolves.toBe(false);
-
-    expect(setAutoUpdateEnabled).toHaveBeenCalledWith(false);
-  });
-
-  it("keeps updates on when the settings request fails", async () => {
+  it("tells main it knows nothing when the settings request fails", async () => {
     const client = { get: vi.fn().mockRejectedValue(new Error("backend down")) };
 
-    await expect(syncAutoUpdateWithMain(client)).resolves.toBe(true);
+    await syncUpdatePreferencesWithMain(client);
 
-    expect(setAutoUpdateEnabled).toHaveBeenCalledWith(true);
-  });
-
-  it("keeps updates on when the backend answers without the field", async () => {
-    const client = { get: vi.fn().mockResolvedValue({ language: "en" }) };
-
-    await expect(syncAutoUpdateWithMain(client)).resolves.toBe(true);
-
-    expect(setAutoUpdateEnabled).toHaveBeenCalledWith(true);
+    expect(setPreferences).toHaveBeenCalledWith({ check: null, download: null, install: null });
   });
 
   it("does not throw outside Electron, where there is no bridge", async () => {
     delete window.updaterAPI;
     const client = { get: vi.fn().mockResolvedValue({ auto_update_enabled: false }) };
 
-    await expect(syncAutoUpdateWithMain(client)).resolves.toBe(false);
+    await expect(syncUpdatePreferencesWithMain(client)).resolves.toEqual({
+      check: false,
+      download: null,
+      install: null,
+    });
+  });
+});
+
+describe("notifyUpdatePreferences", () => {
+  it("pushes the snapshot to main as it is", () => {
+    notifyUpdatePreferences({ check: true, download: false, install: true });
+    expect(setPreferences).toHaveBeenCalledWith({ check: true, download: false, install: true });
   });
 });

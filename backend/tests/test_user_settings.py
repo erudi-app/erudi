@@ -79,6 +79,21 @@ class TestUserSettingsEntity:
         with pytest.raises(ValueError):
             settings.auto_update_enabled = "yes"
 
+    def test_update_opt_ins_default_off(self, test_db_session):
+        # #563: downloading and installing an update are explicit consent.
+        settings = UserSettings()
+        test_db_session.add(settings)
+        test_db_session.commit()
+        test_db_session.refresh(settings)
+        assert settings.auto_download_updates is False
+        assert settings.auto_install_updates is False
+
+    @pytest.mark.parametrize("field", ["auto_download_updates", "auto_install_updates"])
+    def test_update_opt_in_validator_rejects_non_boolean(self, field):
+        settings = UserSettings()
+        with pytest.raises(ValueError):
+            setattr(settings, field, "yes")
+
     def test_default_reasoning_effort_is_medium(self, test_db_session):
         # medium is the level at which a model that reasons naturally behaves
         # exactly as it did before the setting existed.
@@ -146,6 +161,20 @@ class TestUserSettingsRepository:
         test_db_session.commit()
         assert repo.get_or_create().auto_update_enabled is False
 
+    def test_set_auto_download_updates(self, test_db_session):
+        repo = User_Settings_Repository(test_db_session)
+        settings = repo.get_or_create()
+        repo.set_auto_download_updates(settings, True)
+        test_db_session.commit()
+        assert repo.get_or_create().auto_download_updates is True
+
+    def test_set_auto_install_updates(self, test_db_session):
+        repo = User_Settings_Repository(test_db_session)
+        settings = repo.get_or_create()
+        repo.set_auto_install_updates(settings, True)
+        test_db_session.commit()
+        assert repo.get_or_create().auto_install_updates is True
+
     def test_set_inference_backend(self, test_db_session):
         repo = User_Settings_Repository(test_db_session)
         settings = repo.get_or_create()
@@ -185,6 +214,8 @@ class TestUserSettingsEndpoints:
             "web_search_enabled": False,
             "language": "en",
             "auto_update_enabled": True,
+            "auto_download_updates": False,
+            "auto_install_updates": False,
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
@@ -197,6 +228,8 @@ class TestUserSettingsEndpoints:
             "web_search_enabled": True,
             "language": "en",
             "auto_update_enabled": True,
+            "auto_download_updates": False,
+            "auto_install_updates": False,
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
@@ -205,6 +238,8 @@ class TestUserSettingsEndpoints:
             "web_search_enabled": True,
             "language": "en",
             "auto_update_enabled": True,
+            "auto_download_updates": False,
+            "auto_install_updates": False,
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
@@ -233,6 +268,8 @@ class TestUserSettingsEndpoints:
             "web_search_enabled": True,
             "language": "es",
             "auto_update_enabled": True,
+            "auto_download_updates": False,
+            "auto_install_updates": False,
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
@@ -245,6 +282,8 @@ class TestUserSettingsEndpoints:
             "web_search_enabled": True,
             "language": "zh",
             "auto_update_enabled": True,
+            "auto_download_updates": False,
+            "auto_install_updates": False,
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
@@ -277,6 +316,8 @@ class TestUserSettingsEndpoints:
             "web_search_enabled": True,
             "language": "fr",
             "auto_update_enabled": False,
+            "auto_download_updates": False,
+            "auto_install_updates": False,
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
@@ -286,6 +327,41 @@ class TestUserSettingsEndpoints:
         client.put("/erudi/user_settings/", json={"auto_update_enabled": False})
         response = client.put("/erudi/user_settings/", json={"auto_update_enabled": True})
         assert response.json()["auto_update_enabled"] is True
+
+    def test_get_reports_the_update_opt_ins_off_by_default(self, client):
+        # Nothing is downloaded or installed until the user opts in (#563).
+        body = client.get("/erudi/user_settings/").json()
+        assert body["auto_download_updates"] is False
+        assert body["auto_install_updates"] is False
+
+    @pytest.mark.parametrize("field", ["auto_download_updates", "auto_install_updates"])
+    def test_put_an_update_opt_in_and_it_survives(self, client, field):
+        response = client.put("/erudi/user_settings/", json={field: True})
+        assert response.status_code == 200, response.text
+        assert response.json()[field] is True
+        assert client.get("/erudi/user_settings/").json()[field] is True
+        response = client.put("/erudi/user_settings/", json={field: False})
+        assert response.json()[field] is False
+
+    def test_put_an_update_opt_in_leaves_the_other_settings_untouched(self, client):
+        client.put("/erudi/user_settings/", json={"auto_update_enabled": False})
+        response = client.put("/erudi/user_settings/", json={"auto_install_updates": True})
+        assert response.json() == {
+            "web_search_enabled": False,
+            "language": "en",
+            "auto_update_enabled": False,
+            "auto_download_updates": False,
+            "auto_install_updates": True,
+            "inference_backend": "auto",
+            "default_reasoning_effort": "medium",
+            "default_compaction_threshold": 80,
+        }
+
+    @pytest.mark.parametrize("field", ["auto_download_updates", "auto_install_updates"])
+    def test_put_rejects_an_update_opt_in_that_is_not_a_boolean(self, client, field):
+        response = client.put("/erudi/user_settings/", json={field: "maybe"})
+        assert response.status_code == 422
+        assert client.get("/erudi/user_settings/").json()[field] is False
 
     def test_put_pins_the_cpu_backend_and_it_survives(self, client):
         # The whole point of the setting: a user whose GPU the bundled CUDA
@@ -310,6 +386,8 @@ class TestUserSettingsEndpoints:
             "web_search_enabled": True,
             "language": "fr",
             "auto_update_enabled": True,
+            "auto_download_updates": False,
+            "auto_install_updates": False,
             "inference_backend": "cpu",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 80,
@@ -341,6 +419,8 @@ class TestUserSettingsEndpoints:
             "web_search_enabled": False,
             "language": "fr",
             "auto_update_enabled": True,
+            "auto_download_updates": False,
+            "auto_install_updates": False,
             "inference_backend": "auto",
             "default_reasoning_effort": "none",
             "default_compaction_threshold": 80,

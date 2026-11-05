@@ -1,47 +1,140 @@
 // @vitest-environment jsdom
+/**
+ * The update banner (#563): one phase per updater state, driven through the
+ * preload bridge only.
+ *
+ * - available: a version was found and nothing downloads on its own -- the
+ *   banner names it and offers Download;
+ * - downloading: a progress bar, no dismiss;
+ * - ready: the update is on disk -- Install now.
+ *
+ * A dismissed banner stays dismissed for that version until the next launch:
+ * the periodic check does not bring it back.
+ */
 import React from "react";
-import { describe, it, expect, vi, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, act } from "@testing-library/react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, cleanup, fireEvent, act, waitFor } from "@testing-library/react";
 
 import UpdateBanner from "./UpdateBanner.jsx";
 
-// The component wires a window-level "__test_updater__" CustomEvent channel in
-// addition to the preload IPC bridge; these tests drive the state machine
-// through that channel and pin every user-visible banner phase.
-const emit = (detail) => {
-  act(() => {
-    window.dispatchEvent(new CustomEvent("__test_updater__", { detail }));
-  });
-};
+let handler;
+let cleanupIPC;
+
+beforeEach(() => {
+  handler = null;
+  cleanupIPC = vi.fn();
+  window.updaterAPI = {
+    onUpdaterEvent: vi.fn((callback) => {
+      handler = callback;
+      return cleanupIPC;
+    }),
+    installNow: vi.fn(),
+    downloadNow: vi.fn().mockResolvedValue({ ok: true }),
+  };
+});
 
 afterEach(() => {
   cleanup();
   delete window.updaterAPI;
 });
 
-describe("UpdateBanner state machine", () => {
+const emit = (payload) => {
+  act(() => {
+    handler(payload);
+  });
+};
+
+const DISMISS = "Dismiss update notification";
+
+describe("UpdateBanner phases", () => {
   it("renders nothing until an updater event arrives", () => {
     const { container } = render(<UpdateBanner />);
     expect(container.firstChild).toBeNull();
   });
 
-  it("ignores unknown updater events", () => {
-    const { container } = render(<UpdateBanner />);
-    emit({ event: "something-else", version: "9.9.9" });
-    expect(container.firstChild).toBeNull();
-  });
-
-  it("stays silent on the events added for the Settings card (#571)", () => {
-    // Main forwards "checking-for-update", "update-not-available" and "error"
-    // on the same channel so the Settings card can answer a manual check. The
-    // banner is for an update that exists, and must not turn any of them into
-    // a notification.
+  it("stays silent on the events it has nothing to say about", () => {
     const { container } = render(<UpdateBanner />);
     emit({ event: "checking-for-update" });
     emit({ event: "update-not-available" });
     emit({ event: "error" });
+    emit({ event: "something-else", version: "9.9.9" });
     expect(container.firstChild).toBeNull();
   });
+
+  it("names the version and offers Download when nothing downloads on its own", () => {
+    render(<UpdateBanner />);
+    emit({ event: "update-available", version: "1.2.0", downloading: false });
+
+    expect(screen.getByText("v1.2.0")).toBeDefined();
+    expect(screen.getByText(/available/)).toBeDefined();
+    expect(document.body.textContent).not.toMatch(/downloading/i);
+    expect(screen.getByRole("button", { name: "Download" })).toBeDefined();
+    expect(screen.getByLabelText(DISMISS)).toBeDefined();
+  });
+
+  it("downloads only when Download is pressed", async () => {
+    render(<UpdateBanner />);
+    emit({ event: "update-available", version: "1.2.0", downloading: false });
+    expect(window.updaterAPI.downloadNow).not.toHaveBeenCalled();
+
+    fireEvent.click(screen.getByRole("button", { name: "Download" }));
+
+    expect(window.updaterAPI.downloadNow).toHaveBeenCalledTimes(1);
+    expect(await screen.findByText(/Downloading/)).toBeDefined();
+  });
+
+  it("goes back to Download when the download could not start", async () => {
+    window.updaterAPI.downloadNow.mockResolvedValue({ ok: false, reason: "error" });
+    render(<UpdateBanner />);
+    emit({ event: "update-available", version: "1.2.0", downloading: false });
+
+    fireEvent.click(screen.getByRole("button", { name: "Download" }));
+
+    await waitFor(() => expect(screen.getByRole("button", { name: "Download" })).toBeDefined());
+  });
+
+  it("says downloading straight away when a download follows the check", () => {
+    render(<UpdateBanner />);
+    emit({ event: "update-available", version: "1.2.0", downloading: true });
+
+    expect(screen.getByText(/Downloading/)).toBeDefined();
+    expect(screen.queryByRole("button", { name: "Download" })).toBeNull();
+  });
+
+  it("shows progress with a bar and no dismiss button", () => {
+    render(<UpdateBanner />);
+    emit({ event: "update-available", version: "1.2.0", downloading: true });
+    emit({ event: "download-progress", percent: 60 });
+
+    expect(screen.getByText(/Downloading/)).toBeDefined();
+    expect(screen.getByText("60%")).toBeDefined();
+    expect(screen.getByText("v1.2.0")).toBeDefined();
+    expect(document.querySelector('[style*="width: 60%"]')).not.toBeNull();
+    expect(screen.queryByLabelText(DISMISS)).toBeNull();
+  });
+
+  it("offers Install now once the update is ready", () => {
+    render(<UpdateBanner />);
+    emit({ event: "update-downloaded", version: "1.2.0" });
+
+    expect(screen.getByText(/ready/)).toBeDefined();
+    fireEvent.click(screen.getByRole("button", { name: "Install now" }));
+    expect(window.updaterAPI.installNow).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["error", "download-cancelled"])(
+    "offers Download again, with a dismiss, when a download ends in %s",
+    (event) => {
+      render(<UpdateBanner />);
+      emit({ event: "update-available", version: "1.2.0", downloading: true });
+      emit({ event: "download-progress", percent: 30 });
+
+      emit({ event });
+
+      expect(screen.getByRole("button", { name: "Download" })).toBeDefined();
+      expect(screen.getByLabelText(DISMISS)).toBeDefined();
+    }
+  );
 
   it("keeps showing a downloaded update when a later background check errors", () => {
     render(<UpdateBanner />);
@@ -50,92 +143,63 @@ describe("UpdateBanner state machine", () => {
     expect(screen.getByText(/ready/)).toBeDefined();
   });
 
-  it("shows the available phase with the version and a dismiss button", () => {
-    render(<UpdateBanner />);
-    emit({ event: "update-available", version: "1.2.0" });
-
-    expect(screen.getByText("v1.2.0")).toBeDefined();
-    expect(screen.getByText(/available/)).toBeDefined();
-    expect(screen.getByLabelText("Dismiss update notification")).toBeDefined();
-  });
-
-  it("shows download progress with a percent bar and no dismiss button", () => {
-    render(<UpdateBanner />);
-    emit({ event: "update-available", version: "1.2.0" });
-    emit({ event: "download-progress", percent: 60 });
-
-    expect(screen.getByText(/Downloading/)).toBeDefined();
-    expect(screen.getByText("60%")).toBeDefined();
-    // The version is carried over from the "available" phase.
-    expect(screen.getByText("v1.2.0")).toBeDefined();
-    const bar = document.querySelector('[style*="width: 60%"]');
-    expect(bar).not.toBeNull();
-    expect(screen.queryByLabelText("Dismiss update notification")).toBeNull();
-  });
-
-  it("falls back to an empty version when progress arrives without a prior event", () => {
-    render(<UpdateBanner />);
-    emit({ event: "download-progress", percent: 15 });
-
-    expect(screen.getByText(/Downloading/)).toBeDefined();
-    expect(screen.getByText("15%")).toBeDefined();
-    expect(screen.getByText("v")).toBeDefined();
-  });
-
-  it("shows the ready phase and installs on click through the preload bridge", () => {
-    const installNow = vi.fn();
-    window.updaterAPI = {
-      onUpdaterEvent: vi.fn(() => null),
-      installNow,
-    };
+  it("stays ready when a later check finds the same version again", () => {
     render(<UpdateBanner />);
     emit({ event: "update-downloaded", version: "1.2.0" });
-
-    expect(screen.getByText(/ready/)).toBeDefined();
-    fireEvent.click(screen.getByRole("button", { name: "restart to install" }));
-    expect(installNow).toHaveBeenCalledTimes(1);
+    emit({ event: "update-available", version: "1.2.0", downloading: false });
+    expect(screen.getByRole("button", { name: "Install now" })).toBeDefined();
   });
+});
 
-  it("does not crash on install when no preload bridge is present", () => {
-    render(<UpdateBanner />);
-    emit({ event: "update-downloaded", version: "1.2.0" });
-    fireEvent.click(screen.getByRole("button", { name: "restart to install" }));
-    expect(screen.getByText(/ready/)).toBeDefined();
-  });
-
-  it("dismiss hides the banner and a new update makes it reappear", () => {
+describe("UpdateBanner dismissal", () => {
+  it("stays dismissed for that version when the periodic check finds it again", () => {
     const { container } = render(<UpdateBanner />);
-    emit({ event: "update-available", version: "1.2.0" });
+    emit({ event: "update-available", version: "1.2.0", downloading: false });
 
-    fireEvent.click(screen.getByLabelText("Dismiss update notification"));
+    fireEvent.click(screen.getByLabelText(DISMISS));
     expect(container.firstChild).toBeNull();
 
-    emit({ event: "update-available", version: "1.3.0" });
+    emit({ event: "update-available", version: "1.2.0", downloading: false });
+    expect(container.firstChild).toBeNull();
+    emit({ event: "update-downloaded", version: "1.2.0" });
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("comes back for a newer version", () => {
+    const { container } = render(<UpdateBanner />);
+    emit({ event: "update-available", version: "1.2.0", downloading: false });
+    fireEvent.click(screen.getByLabelText(DISMISS));
+    expect(container.firstChild).toBeNull();
+
+    emit({ event: "update-available", version: "1.3.0", downloading: false });
     expect(screen.getByText("v1.3.0")).toBeDefined();
   });
 });
 
-describe("UpdateBanner IPC bridge wiring", () => {
-  it("subscribes to updater events via the preload bridge and cleans up on unmount", () => {
-    let bridgeHandler = null;
-    const cleanupIPC = vi.fn();
-    window.updaterAPI = {
-      onUpdaterEvent: vi.fn((handler) => {
-        bridgeHandler = handler;
-        return cleanupIPC;
-      }),
-      installNow: vi.fn(),
-    };
-
+describe("UpdateBanner bridge wiring", () => {
+  it("subscribes through the preload bridge and cleans up on unmount", () => {
     const { unmount } = render(<UpdateBanner />);
     expect(window.updaterAPI.onUpdaterEvent).toHaveBeenCalledTimes(1);
 
-    act(() => {
-      bridgeHandler({ event: "update-available", version: "2.0.0" });
-    });
-    expect(screen.getByText("v2.0.0")).toBeDefined();
-
     unmount();
     expect(cleanupIPC).toHaveBeenCalledTimes(1);
+  });
+
+  it("renders nothing and does not throw outside Electron", () => {
+    delete window.updaterAPI;
+    const { container } = render(<UpdateBanner />);
+    expect(container.firstChild).toBeNull();
+  });
+
+  it("listens to no window-level test channel", () => {
+    const { container } = render(<UpdateBanner />);
+    act(() => {
+      window.dispatchEvent(
+        new CustomEvent("__test_updater__", {
+          detail: { event: "update-available", version: "1.2.0" },
+        })
+      );
+    });
+    expect(container.firstChild).toBeNull();
   });
 });

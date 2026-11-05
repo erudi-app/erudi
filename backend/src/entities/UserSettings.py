@@ -5,10 +5,10 @@ Singleton table (one row) holding app-wide user preferences, mirroring the
 toggle (issue #310) — the DEFAULT for new conversations on a model without a
 saved value (#609). Each conversation takes its value at creation and owns its
 flag afterwards; changing the global setting never retro-affects existing
-conversations. It also carries the interface language, the automatic-update
-preference, the inference backend the app runs models on, and the other
-defaults new conversations start from (reasoning effort, compaction
-threshold).
+conversations. It also carries the interface language, the three update
+switches (check, download, install), the inference backend the app runs models
+on, and the other defaults new conversations start from (reasoning effort,
+compaction threshold).
 
 Example:
     from src.entities.UserSettings import UserSettings
@@ -54,10 +54,18 @@ class UserSettings(Base):
         language: Interface language code (#385), one of SUPPORTED_LANGUAGES.
             "en" by default; the frontend derives the first value from the OS
             locale and persists it here so it survives restarts.
-        auto_update_enabled: Boolean - whether the Electron main process may
-            check for, download and install a new version on its own. True by
-            default, so an install that never touches the setting behaves as it
-            always has; turning it off stops the update traffic entirely.
+        auto_update_enabled: Boolean - "Check for updates": whether the
+            Electron main process asks the update feed for a new version on its
+            own (at launch, then every 4 hours) and shows a banner when there is
+            one. True by default; off stops the update traffic entirely, and
+            makes the two opt-ins below inert.
+        auto_download_updates: Boolean - "Download updates automatically":
+            whether a version the check finds is downloaded without asking
+            (#563). False by default, and false for an install updated from a
+            version that downloaded on its own.
+        auto_install_updates: Boolean - "Install downloaded updates when I
+            quit": whether a downloaded version is installed when the app
+            quits (#563). False by default, like the download opt-in.
         inference_backend: One of INFERENCE_BACKENDS. "auto" by default, so
             hardware detection decides; "cpu" makes the app run models on the
             CPU build even when an NVIDIA GPU is present. Read once per boot,
@@ -77,7 +85,8 @@ class UserSettings(Base):
 
     Constraints:
         - web_search_enabled must be a Boolean (enforced by validator).
-        - auto_update_enabled must be a Boolean (enforced by validator).
+        - auto_update_enabled, auto_download_updates and auto_install_updates
+          must be Booleans (enforced by validator).
         - language must be one of SUPPORTED_LANGUAGES (enforced by validator).
         - inference_backend must be one of INFERENCE_BACKENDS (validator).
         - default_reasoning_effort must be one of REASONING_EFFORT_LEVELS.
@@ -90,6 +99,8 @@ class UserSettings(Base):
     web_search_enabled = Column(Boolean, default=False, nullable=False)
     language = Column(String(8), default=DEFAULT_LANGUAGE, nullable=False)
     auto_update_enabled = Column(Boolean, default=True, nullable=False)
+    auto_download_updates = Column(Boolean, default=False, nullable=False)
+    auto_install_updates = Column(Boolean, default=False, nullable=False)
     inference_backend = Column(String(8), default=DEFAULT_INFERENCE_BACKEND, nullable=False)
     default_reasoning_effort = Column(String(8), default=DEFAULT_REASONING_EFFORT, nullable=False)
     default_compaction_threshold = Column(
@@ -141,7 +152,12 @@ class UserSettings(Base):
             raise ValueError(f"{key} must be one of {COMPACTION_THRESHOLDS}, got {value!r}")
         return value
 
-    @validates("web_search_enabled", "auto_update_enabled")
+    @validates(
+        "web_search_enabled",
+        "auto_update_enabled",
+        "auto_download_updates",
+        "auto_install_updates",
+    )
     def validate_boolean_flags(self, key, value):
         """Ensure boolean flags are actually Boolean type.
 

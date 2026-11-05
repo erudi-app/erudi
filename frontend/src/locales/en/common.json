@@ -73,10 +73,18 @@
     "firstRun": "First launch — this can take a minute while Erudi sets things up."
   },
   "update": {
-    "available": "Update <v>v{{version}}</v> available - downloading…",
+    "available": "Update <v>v{{version}}</v> available",
     "downloading": "Downloading <v>v{{version}}</v>… <pct>{{percent}}</pct>",
-    "ready": "<v>v{{version}}</v> ready — <install>restart to install</install>",
+    "ready": "<v>v{{version}}</v> is ready to install",
+    "download": "Download",
+    "install": "Install now",
     "dismiss": "Dismiss update notification"
+  },
+  "updateNotice": {
+    "title": "Updated to {{version}}",
+    "noNotes": "The notes for this version are on its release page.",
+    "releaseNotes": "Read the release notes",
+    "optIns": "Downloading and installing updates are now two separate choices in Settings › Updates, both off: nothing is downloaded or installed until you turn them on or press the button. Check for updates keeps the value it had."
   },
   "engineSwitch": {
     "downloadTitle": "A download is in progress",

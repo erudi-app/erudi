@@ -73,10 +73,18 @@
     "firstRun": "Premier lancement — cela peut prendre une minute pendant qu'Erudi s'installe."
   },
   "update": {
-    "available": "Mise à jour <v>v{{version}}</v> disponible - téléchargement…",
+    "available": "Mise à jour <v>v{{version}}</v> disponible",
     "downloading": "Téléchargement de <v>v{{version}}</v>… <pct>{{percent}}</pct>",
-    "ready": "<v>v{{version}}</v> prête — <install>redémarrer pour installer</install>",
+    "ready": "<v>v{{version}}</v> est prête à être installée",
+    "download": "Télécharger",
+    "install": "Installer maintenant",
     "dismiss": "Ignorer la notification de mise à jour"
+  },
+  "updateNotice": {
+    "title": "Mis à jour vers la {{version}}",
+    "noNotes": "Les notes de cette version se trouvent sur sa page de release.",
+    "releaseNotes": "Lire les notes de version",
+    "optIns": "Télécharger et installer les mises à jour sont désormais deux choix distincts dans Paramètres › Mises à jour, tous deux désactivés : rien n'est téléchargé ni installé tant que vous ne les activez pas ou n'appuyez pas sur le bouton. « Rechercher des mises à jour » garde sa valeur."
   },
   "engineSwitch": {
     "downloadTitle": "Un téléchargement est en cours",

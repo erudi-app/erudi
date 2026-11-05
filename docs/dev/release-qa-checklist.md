@@ -2,7 +2,7 @@
 
 Erudi ships via a **release-candidate gate**: a tag builds a signed/notarized
 **draft** release; a maintainer QA-tests the **exact** draft artifact, then
-**promotes** it so clients receive it through auto-update.
+**promotes** it so installed clients are offered it by the updater.
 
 ```
 git tag vX.Y.Z && git push --tags
@@ -16,7 +16,7 @@ below on the EXACT signed bits (same appId, same data dir — no modifications)
         │
         ├── KO → delete the draft + tag, fix, re-tag
         ▼
-OK → promote: un-draft + write changelog → latest*.yml goes live → clients auto-update
+OK → promote: un-draft + write changelog → latest*.yml goes live → clients are offered it
 ```
 
 A draft is **never** offered by electron-updater (its feed 404s while drafted), so

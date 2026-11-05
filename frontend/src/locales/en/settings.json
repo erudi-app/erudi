@@ -27,11 +27,23 @@
     "note": "80% by default. Lower: summarizes sooner and more often, keeping the conversation shorter. Higher: keeps more of it word for word and summarizes less often.",
     "selectLabel": "Default compaction threshold"
   },
-  "autoUpdate": {
-    "title": "Automatic updates",
-    "description": "Check for a new version of Erudi in the background, download it and install it the next time you quit. The request goes to this project's GitHub releases and carries nothing but your version and platform.",
-    "note": "On by default. When off, the app makes no update request at all; you can still install a new version yourself from the releases page.",
-    "toggleLabel": "Automatic updates"
+  "updatePreferences": {
+    "title": "Updates",
+    "description": "What Erudi does on its own when a new version is published. The Update Erudi card below checks, downloads and installs on demand, whatever you choose here.",
+    "check": {
+      "label": "Check for updates",
+      "help": "Asks this project's GitHub releases for a new version at launch, then every 4 hours, and shows a banner when there is one. The request carries nothing but your version and platform."
+    },
+    "download": {
+      "label": "Download updates automatically",
+      "help": "As soon as the check finds a new version, Erudi fetches the installer in the background. When off, the banner offers a Download button and nothing is fetched until you press it."
+    },
+    "install": {
+      "label": "Install downloaded updates when I quit",
+      "help": "A downloaded version replaces the app when you quit Erudi, without a dialog. When off, it waits for Install now."
+    },
+    "checkOffNote": "Turn on Check for updates to use the two other switches.",
+    "handedOffNote": "This update may still install when you quit: macOS has already received it."
   },
   "updates": {
     "title": "Update Erudi",
