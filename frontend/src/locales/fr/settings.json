@@ -4,13 +4,13 @@
   "subtitle": "Préférences qui s'appliquent à toute l'application.",
   "webSearch": {
     "title": "Recherche web",
-    "description": "Définit si la recherche web démarre activée ou désactivée pour les nouvelles conversations. Chaque conversation conserve ensuite son propre interrupteur de recherche web dans son en-tête de discussion, donc modifier ce réglage n'affecte jamais une conversation déjà existante.",
+    "description": "Définit si la recherche web démarre activée ou désactivée pour les nouvelles conversations, sur chaque modèle sans valeur enregistrée avec /config global. Chaque conversation conserve ensuite son propre interrupteur de recherche web dans /config, donc modifier ce réglage n'affecte jamais une conversation déjà existante.",
     "note": "Désactivée par défaut. Quand un modèle compatible avec les outils décide de chercher, la requête recherchée est envoyée à des moteurs de recherche externes — rien d'autre ne quitte votre machine.",
     "toggleLabel": "Recherche web"
   },
   "reasoningEffort": {
     "title": "Effort de raisonnement par défaut",
-    "description": "Définit l'effort de raisonnement de départ pour les nouvelles conversations. Chaque conversation conserve ensuite son propre réglage d'effort de raisonnement dans son en-tête de discussion, donc modifier ce réglage n'affecte jamais une conversation déjà existante.",
+    "description": "Définit l'effort de raisonnement de départ pour les nouvelles conversations, sur chaque modèle sans niveau enregistré avec /config global. Chaque conversation conserve ensuite son propre niveau dans /config et /effort, donc modifier ce réglage n'affecte jamais une conversation déjà existante.",
     "note": "Moyen par défaut. Les niveaux plus élevés laissent le modèle réfléchir davantage avant de répondre ; Aucun lui demande de répondre directement.",
     "selectLabel": "Effort de raisonnement par défaut",
     "levels": {
@@ -23,7 +23,7 @@
   },
   "compactionThreshold": {
     "title": "Seuil de compaction par défaut",
-    "description": "Définit le seuil de compaction de départ pour les nouvelles conversations : les messages les plus anciens sont résumés quand une conversation remplit cette part de la fenêtre de contexte du modèle. Chaque conversation conserve ensuite son propre réglage de seuil de compaction dans son en-tête de discussion, donc modifier ce réglage n'affecte jamais une conversation déjà existante.",
+    "description": "Définit le seuil de compaction de départ pour les nouvelles conversations, sur chaque modèle sans seuil enregistré avec /config global : les messages les plus anciens sont résumés quand une conversation remplit cette part de la fenêtre de contexte du modèle. Chaque conversation conserve ensuite son propre seuil dans /config, donc modifier ce réglage n'affecte jamais une conversation déjà existante.",
     "note": "80 % par défaut. Plus bas : résume plus tôt et plus souvent, ce qui garde la conversation plus courte. Plus haut : en garde davantage mot pour mot et résume moins souvent.",
     "selectLabel": "Seuil de compaction par défaut"
   },

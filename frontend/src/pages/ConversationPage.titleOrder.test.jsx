@@ -38,9 +38,8 @@ vi.mock("../components/ChatCollapsibleSection", () => ({
     </ul>
   ),
 }));
-vi.mock("../components/HeaderBar", () => ({ default: () => null }));
+vi.mock("../components/ConversationHeader", () => ({ default: () => null }));
 vi.mock("../components/TypingIndicator", () => ({ default: () => null }));
-vi.mock("../components/modals/CustomizePromptModal", () => ({ default: () => null }));
 vi.mock("../components/MarkdownRenderer", () => ({
   default: ({ content }) => <div data-testid="answer">{content}</div>,
 }));

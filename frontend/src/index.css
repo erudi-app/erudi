@@ -63,6 +63,49 @@ body,
   }
 }
 
+/* Range sliders of the command popups (/config, /effort): a thin track whose
+   filled part the element's inline background paints, and a glossy thumb. */
+.erudi-range {
+  -webkit-appearance: none;
+  appearance: none;
+  height: 6px;
+  border-radius: 999px;
+  outline: none;
+}
+.erudi-range::-webkit-slider-thumb {
+  -webkit-appearance: none;
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 0;
+  cursor: pointer;
+  background: radial-gradient(circle at 30% 30%, #ffffff, #d9e4dd 60%, #b7c6c0 100%);
+  box-shadow:
+    0 2px 6px rgba(0, 0, 0, 0.45),
+    0 0 0 1px rgba(255, 255, 255, 0.4),
+    inset 0 1px 2px rgba(255, 255, 255, 0.7);
+  transition:
+    transform 0.25s ease,
+    box-shadow 0.25s ease;
+}
+.erudi-range:hover::-webkit-slider-thumb {
+  transform: scale(1.07);
+}
+.erudi-range:focus-visible::-webkit-slider-thumb {
+  box-shadow:
+    0 0 0 4px rgba(37, 192, 138, 0.35),
+    0 2px 6px rgba(0, 0, 0, 0.55),
+    inset 0 1px 2px rgba(255, 255, 255, 0.8);
+}
+.erudi-range::-moz-range-thumb {
+  width: 18px;
+  height: 18px;
+  border-radius: 50%;
+  border: 0;
+  cursor: pointer;
+  background: radial-gradient(circle at 30% 30%, #ffffff, #d9e4dd 60%, #b7c6c0 100%);
+}
+
 /* macOS-style overlay scrollbar: thin, no arrows, visible only on hover/scroll */
 .custom-scroll::-webkit-scrollbar {
   width: 6px;

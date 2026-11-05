@@ -336,7 +336,9 @@ class ConversationQuery(BaseModel):
             (``src.agents.output_budget``), so nothing on the client sets it.
             The field stays on the schema so an older client is answered, not
             rejected with a 422.
-        custom_prompt: Optional system prompt override for this query only.
+        custom_prompt: Optional system prompt override for this query only;
+            left out (None), the conversation's stored instructions apply, and
+            an explicit "" runs the turn without any.
 
     Example:
         ::

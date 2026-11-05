@@ -1,4 +1,4 @@
-import React, { useEffect, useState, useRef } from "react";
+import React, { useCallback, useEffect, useState, useRef } from "react";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
 import GradientBox from "../components/GradientBox";
@@ -14,17 +14,29 @@ import apiClient from "../services/api/client";
 import { createLogger } from "../utils/logger";
 import { baseName } from "../utils/messageContent";
 
+const log = createLogger("ArenaPage");
+
 const MAX_PANELS = 4;
 
-// A panel is model-scoped: its sampling seeds from ITS model's resolved
-// defaults (#388, `sampling_defaults` on the /llms/local row; the backend
-// fallback for a model without hints) and follows the model on switch.
+// A panel is model-scoped (#388, #609): its sliders show ITS model's
+// recommended sampling (`sampling_defaults` on the /llms/local row) until the
+// values the model starts from arrive (`GET /llms/{id}/conversation_defaults`:
+// saved with /config global, else recommended), and follow the model on
+// switch. `touched` marks the sliders the user moved: only those are sent,
+// every other value is resolved by the backend for the panel's model.
+const UNTOUCHED = Object.freeze({ temperature: false, topP: false });
+
+// A slider shows the model's value unless the user moved it.
+const seeded = (entry, current, touched) =>
+  touched || typeof entry?.value !== "number" ? current : entry.value;
+
 function makePanel(id, modelName = "", models = []) {
   const selectedModel = modelName || (models[0]?.name ?? "");
   return {
     id,
     selectedModel,
     ...defaultsFor(models.find((m) => m.name === selectedModel)),
+    touched: UNTOUCHED,
     customPrompt: "",
     messages: [],
     showPromptModal: false,
@@ -34,7 +46,6 @@ function makePanel(id, modelName = "", models = []) {
 }
 
 export default function ArenaPage() {
-  const log = createLogger("ArenaPage");
   const { t } = useTranslation();
 
   const [models, setModels] = useState([]);
@@ -49,6 +60,40 @@ export default function ArenaPage() {
   // One controller per ask: all panel streams share it so Stop aborts the
   // whole comparison at once (#136 H).
   const abortRef = useRef(null);
+  // The latest defaults request per panel: an answer for a model the panel
+  // has since left is ignored.
+  const defaultsRequestsRef = useRef({});
+
+  const loadPanelDefaults = useCallback((panelId, model) => {
+    if (!model) return;
+    const request = (defaultsRequestsRef.current[panelId] ?? 0) + 1;
+    defaultsRequestsRef.current[panelId] = request;
+    apiClient
+      .get(`/llms/${model.id}/conversation_defaults`)
+      .then((resolved) => {
+        if (defaultsRequestsRef.current[panelId] !== request) return;
+        setPanels((prev) =>
+          prev.map((p) =>
+            p.id === panelId
+              ? {
+                  ...p,
+                  temperature: seeded(resolved?.temperature, p.temperature, p.touched.temperature),
+                  topP: seeded(resolved?.top_p, p.topP, p.touched.topP),
+                }
+              : p
+          )
+        );
+      })
+      .catch((error) => {
+        // The sliders keep the model's recommended values, and the panel
+        // still leaves its values to the backend.
+        if (defaultsRequestsRef.current[panelId] !== request) return;
+        log.warn(
+          `Could not read the conversation defaults of model ${model.id} for panel ${panelId}`,
+          error
+        );
+      });
+  }, []);
 
   useEffect(() => {
     return () => {
@@ -63,29 +108,53 @@ export default function ArenaPage() {
       .get("/llms/local")
       .then((data) => {
         setModels(data);
-        setPanels([0, 1].map((i) => makePanel(i, data[i % data.length]?.name, data)));
+        const initial = [0, 1].map((i) => makePanel(i, data[i % data.length]?.name, data));
+        setPanels(initial);
+        initial.forEach((panel) =>
+          loadPanelDefaults(
+            panel.id,
+            data.find((m) => m.name === panel.selectedModel)
+          )
+        );
       })
       .catch((err) => log.error("Failed to fetch the local models", err));
-  }, []);
+  }, [loadPanelDefaults]);
 
   // Switching a panel's model re-defaults its sampling to the new model's
   // values, touched or not (#388): the arena compares MODELS, and a model is
   // compared at its own defaults.
-  const handleModelChange = (panelId, newModel) =>
+  const handleModelChange = (panelId, newModel) => {
+    const model = models.find((m) => m.name === newModel);
+    setPanels((prev) =>
+      prev.map((p) =>
+        p.id === panelId
+          ? { ...p, selectedModel: newModel, ...defaultsFor(model), touched: UNTOUCHED }
+          : p
+      )
+    );
+    loadPanelDefaults(panelId, model);
+  };
+
+  const handleSettingsChange = (panelId, newSettings) =>
+    setPanels((prev) => prev.map((p) => (p.id === panelId ? { ...p, ...newSettings } : p)));
+
+  // A slider the user moved is sent from then on (until the model changes).
+  const handleSamplingChange = (panelId, { temperature, topP }) =>
     setPanels((prev) =>
       prev.map((p) =>
         p.id === panelId
           ? {
               ...p,
-              selectedModel: newModel,
-              ...defaultsFor(models.find((m) => m.name === newModel)),
+              temperature,
+              topP,
+              touched: {
+                temperature: p.touched.temperature || temperature !== p.temperature,
+                topP: p.touched.topP || topP !== p.topP,
+              },
             }
           : p
       )
     );
-
-  const handleSettingsChange = (panelId, newSettings) =>
-    setPanels((prev) => prev.map((p) => (p.id === panelId ? { ...p, ...newSettings } : p)));
 
   const handleCustomizePrompt = (panelId, show) =>
     setPanels((prev) => prev.map((p) => (p.id === panelId ? { ...p, showPromptModal: show } : p)));
@@ -180,8 +249,9 @@ export default function ArenaPage() {
         images,
         attachments: attachmentPaths,
         llmId: llm.id,
-        temperature: panel.temperature,
-        topP: panel.topP,
+        // null: the backend applies the model's saved or recommended value.
+        temperature: panel.touched.temperature ? panel.temperature : null,
+        topP: panel.touched.topP ? panel.topP : null,
         customPrompt: panel.customPrompt,
         signal: abortRef.current.signal,
         onStreamChunk: (chunk) => {
@@ -245,6 +315,10 @@ export default function ArenaPage() {
     };
 
     setPanels((prev) => [...prev, newPanel]);
+    loadPanelDefaults(
+      nextId,
+      models.find((m) => m.name === newPanel.selectedModel)
+    );
 
     // Trigger animation
     setTimeout(() => {
@@ -291,11 +365,11 @@ export default function ArenaPage() {
           <HeaderBar
             initialTemperature={panel.temperature}
             initialTopP={panel.topP}
-            // #218: settings take effect at send time. Slider/token edits flow
+            // #218: settings take effect at send time. Slider edits flow
             // straight into the panel state via onLiveChange, so the displayed
             // value is the value the next run sends - no silent Apply divergence.
-            onLiveChange={(s) => handleSettingsChange(panel.id, s)}
-            onApply={(s) => handleSettingsChange(panel.id, s)}
+            onLiveChange={(s) => handleSamplingChange(panel.id, s)}
+            onApply={(s) => handleSamplingChange(panel.id, s)}
             onCustomizePrompt={() => handleCustomizePrompt(panel.id, true)}
             disabled={loading}
             models={models}

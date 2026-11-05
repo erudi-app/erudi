@@ -49,11 +49,10 @@ vi.mock("../components/TraceStrip", async (importOriginal) => {
 });
 vi.mock("../components/Sidebar", () => ({ default: () => null }));
 vi.mock("../components/ChatCollapsibleSection", () => ({ default: () => null }));
-vi.mock("../components/HeaderBar", () => ({ default: () => null }));
+vi.mock("../components/ConversationHeader", () => ({ default: () => null }));
 vi.mock("../components/TypingIndicator", () => ({
   default: () => <span data-testid="typing" />,
 }));
-vi.mock("../components/modals/CustomizePromptModal", () => ({ default: () => null }));
 vi.mock("../components/MarkdownRenderer", () => ({
   default: ({ content }) => <div data-testid="answer">{content}</div>,
 }));

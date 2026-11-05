@@ -5,10 +5,10 @@ import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/re
 import { MemoryRouter } from "react-router-dom";
 
 // PR-D2 — the Settings page's "Default reasoning effort" card: sets the
-// starting value new conversations inherit (`default_reasoning_effort` on
-// `GET/PUT /user_settings/`); each conversation then owns its own control
-// (see ConversationPage / HeaderBar), so changing this never retro-affects
-// an existing conversation.
+// level a new conversation starts at when its model has none saved
+// (`default_reasoning_effort` on `GET/PUT /user_settings/`); each
+// conversation then owns its own value (/effort, /config), so changing this
+// never retro-affects an existing conversation.
 
 const { getMock, putMock } = vi.hoisted(() => ({
   getMock: vi.fn(),
