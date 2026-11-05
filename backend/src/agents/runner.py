@@ -46,7 +46,9 @@ and systematic (zero-tool) turns are untouched and still stream live.
 
 Everything runs inside ``engine.generation_guard()`` so model resolution + the
 whole stream serialize on the single-model engine and the idle-cleanup monitor
-never reaps the model mid-stream.
+never reaps the model mid-stream. The manual compaction (``acompact``,
+``/compact``) takes ``engine.try_generation_guard()`` instead: it is refused,
+never queued, while the engine is busy.
 
 LangChain imports are deferred to the methods that use them (issue #160):
 this module is imported at boot by the conversation/arena services, but the
@@ -65,11 +67,12 @@ import json
 import time
 from dataclasses import dataclass
 from functools import lru_cache
-from typing import TYPE_CHECKING, Any, AsyncIterator, Optional
+from typing import TYPE_CHECKING, Any, AsyncIterator, Awaitable, Callable, Optional
 
 from fastapi.concurrency import run_in_threadpool
 
 from src.agents.chat_model import (
+    CONSERVATIVE_PREFILL_TOKENS_PER_SEC,
     INTER_CHUNK_BUDGET_S,
     PHASE_FIRST_CHUNK,
     first_chunk_ceiling_s,
@@ -97,7 +100,11 @@ from src.agents.token_accounting import (
 from src.database.generation_hints import resolve_sampling_defaults
 from src.agents.think_splitter import ThinkSplitter
 from src.core import config
-from src.core.exceptions import EngineException, GenerationTimeoutException
+from src.core.exceptions import (
+    CompactionFailedException,
+    EngineException,
+    GenerationTimeoutException,
+)
 from src.core.logging import logger
 from src.engines.base_engine import BaseEngine, run_reset_shielded, wait_shielded
 from src.engines.memory_brake import (
@@ -396,6 +403,14 @@ def _engine_overrides(engine: Any, hook_name: str) -> bool:
         return False
     base = getattr(BaseEngine, hook_name)
     return getattr(hook, "__func__", hook) is not getattr(base, "__func__", base)
+
+
+async def reset_prefix_after_rewrite(engine: Any) -> None:
+    """The prefix-cache reset a rewritten history needs (MLX; nothing on
+    llama.cpp), shielded: the old prefix is garbage once the history is
+    rewritten. Every compaction, automatic or manual, goes through here."""
+    if _engine_overrides(engine, "on_history_rewritten"):
+        await run_reset_shielded(engine.on_history_rewritten)
 
 
 def _is_marker(message: Any) -> bool:
@@ -786,6 +801,17 @@ def project_next_request(
     )
 
 
+def manual_summary_timeout_s(allocated_window: Optional[int], max_tokens: int) -> float:
+    """How long a manual compaction's summary may take, server-side: the
+    summary client's first-chunk ceiling for this child's window, plus its
+    whole length decoded at the prefill rate the watchdog already assumes
+    for the slowest machine (``CONSERVATIVE_PREFILL_TOKENS_PER_SEC``). Past
+    it, the compaction fails and nothing changes."""
+    return (
+        first_chunk_ceiling_s(allocated_window) + max_tokens / CONSERVATIVE_PREFILL_TOKENS_PER_SEC
+    )
+
+
 def _token_cutoff(messages: list, budget: int, counter: Any) -> int:
     """LangChain's ``_find_token_based_cutoff``, for a given budget, RAW: the
     earliest index whose suffix fits, the last message kept whole when it
@@ -1034,7 +1060,13 @@ def _summarization_middleware_class():
           INFO: the app did its job;
         * the compaction is announced on the turn's stream (``_announce``,
           #614): ``start`` before the summary call, ``done`` after the
-          rewrite.
+          rewrite;
+        * ``manual=True`` (``/compact``, ``AgentRunner.acompact``): the
+          caller picks the cutoff and writes the rewrite itself
+          (``asummarize_head``), and a summary that cannot be written raises
+          ``CompactionFailedException`` instead of degrading to a
+          placeholder -- the user asked for a summary, nothing changes
+          without one.
         """
 
         # The turn's runtime, stored by ``abefore_model`` (one instance per
@@ -1054,6 +1086,7 @@ def _summarization_middleware_class():
             engine: Any,
             allocated_window: Optional[int] = None,
             overhead: Optional[RequestOverhead] = None,
+            manual: bool = False,
             **kwargs: Any,
         ):
             # The frozen per-call context, initialised before ``super()``
@@ -1067,6 +1100,7 @@ def _summarization_middleware_class():
             self.compaction_threshold = compaction_threshold
             self.allocated_window = allocated_window
             self.engine = engine
+            self.manual = manual
 
         def _real_count(self, messages) -> int:
             return real_token_count(messages, self._weights, self._past_ids)
@@ -1121,10 +1155,28 @@ def _summarization_middleware_class():
             # Non-None exactly when the history was rewritten.
             result = await super().abefore_model(state, runtime)
             if result is not None:
-                if _engine_overrides(self.engine, "on_history_rewritten"):
-                    await run_reset_shielded(self.engine.on_history_rewritten)
+                await reset_prefix_after_rewrite(self.engine)
                 self._announce_done()
             return result
+
+        async def asummarize_head(self, messages, cutoff: int) -> tuple[list, dict]:
+            """The manual compaction of ``messages`` at ``cutoff``
+            (``manual_compaction_cutoff``, > 0): ``(update, facts)`` -- the
+            update that replaces the whole state by the summary and the kept
+            tail, as ``abefore_model`` returns it, and the facts of its
+            ``done`` event. Nothing is written here."""
+            from langchain_core.messages import RemoveMessage
+            from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
+            self._freeze(messages)
+            messages_to_summarize, preserved = self._partition_messages(messages, cutoff)
+            summary = await self._acreate_summary(messages_to_summarize)
+            update = [
+                RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                *self._build_new_messages(summary),
+                *preserved,
+            ]
+            return update, dict(self._last_compaction)
 
         def _announce(self, build) -> None:
             """Write the event ``build()`` returns on the turn's stream. The
@@ -1206,6 +1258,8 @@ def _summarization_middleware_class():
             )
             trimmed = self._trim_for_summary(truncated, retry_budget, start_on=None)
             summary = await self._summarize(previous, trimmed, attempt="retry")
+            if summary is None and self.manual:
+                raise CompactionFailedException(trace="no summary after the retry")
             if summary is None:
                 cap = (
                     summary_cap(self.working_window) if _known_window(self.working_window) else None
@@ -1279,6 +1333,7 @@ def _summarization_middleware_class():
                 f"Conversation compacted: {len(messages_to_summarize)} message(s) "
                 f"summarized into {len(summary or '')} chars, "
                 f"threshold={self.compaction_threshold}%"
+                f"{', manual' if self.manual else ''}"
             )
             self._last_compaction = {
                 "summarized": summarized_message_count(messages_to_summarize),
@@ -1624,6 +1679,22 @@ def _child_crash_suffix(engine) -> str:
     return f"; {text}" if text else ""
 
 
+@dataclass(frozen=True)
+class _CompactionSetup:
+    """What ``AgentRunner._compaction_setup`` built for one compaction."""
+
+    budget: Any
+    allocated_window: Optional[int]
+    working_window: Optional[int]
+    summary_max_tokens: int
+    # ``_build_middleware``'s list; the summarization middleware is last.
+    middleware: list
+
+    @property
+    def summarizer(self) -> Any:
+        return self.middleware[-1]
+
+
 class AgentRunner:
     """Streams an agent turn as structured events. Shared by conversation and arena.
 
@@ -1823,58 +1894,24 @@ class AgentRunner:
                     # (MLX); the summary and title clients push nothing.
                     record_usage=True,
                 )
-                # Memory accounting for the compaction ceiling and the amber
-                # warning. Derived AFTER build_chat_model so the child is up
-                # and the handle carries the loaded artifact and its measured
-                # base; file I/O and hardware probes -> threadpool.
-                # ``from_engine`` never raises; an unaccountable model just
-                # carries None facts.
-                budget = (
-                    await run_in_threadpool(MemoryBudget.from_engine, engine) if summarize else None
-                )
-                allocated_window, working_window = (
-                    self._compaction_windows(budget) if summarize else (None, None)
-                )
-                # The compaction summary ALWAYS runs at effort "none" (1.1.2):
-                # summarizing is machine work, and a reasoning model would spend
-                # the call deliberating about it instead of writing it. Same
-                # child, same everything else -- only the reasoning field and
-                # the length differ, so the second client costs a cached
-                # handle lookup. Its length is BOUNDED to ``summary_cap(W)``,
-                # with no automatic output budget (which would hand it the
-                # whole window) and no preflight retry (a smaller cap would
-                # silently truncate the summary; a rejection takes the
-                # summarizer's size path instead): the keep arithmetic reserves
-                # exactly that much for it. No known window: today's budget.
-                summary_model = (
-                    await run_in_threadpool(
-                        build_chat_model,
+                # The compaction (memory accounting, windows, summary client
+                # and middleware), built AFTER build_chat_model so the child
+                # is up; also what ``acompact`` builds.
+                if summarize:
+                    compaction = await self._compaction_setup(
                         llm,
-                        temperature=params.temperature,
-                        top_p=params.top_p,
-                        max_tokens=(
-                            summary_cap(working_window)
-                            if _known_window(working_window)
-                            else params.max_tokens
-                        ),
+                        params=params,
                         sampling=sampling,
-                        effort_plan=NO_REASONING_PLAN,
-                        auto_output_budget=not _known_window(working_window),
-                        preflight_retry=False,
-                    )
-                    if summarize
-                    else None
-                )
-                middleware = (
-                    self._build_middleware(
-                        summary_model,
-                        budget,
                         overhead=overhead,
                         compaction_threshold=compaction_threshold,
                     )
-                    if summarize
-                    else []
-                )
+                    budget = compaction.budget
+                    allocated_window = compaction.allocated_window
+                    working_window = compaction.working_window
+                    middleware = compaction.middleware
+                else:
+                    budget, allocated_window, working_window = None, None, None
+                    middleware = []
                 if kb_context_block:
                     # After summarization: the merge must see the final
                     # message list that actually reaches the model.
@@ -2522,6 +2559,220 @@ class AgentRunner:
                 if event["t"] == "answer":
                     yield event["text"]
 
+    async def acompact(
+        self,
+        *,
+        llm,
+        thread_id: str,
+        params: GenParams,
+        compaction_threshold: int,
+        persist_marker: Callable[[dict], Awaitable[None]],
+    ) -> dict:
+        """Summarize the conversation's history now (``/compact``, #585).
+
+        Returns the compaction's ``done`` event -- the automatic one's keys
+        (``reason``, ``summarized``, ``summary``, ``summary_lost``) plus
+        ``manual: True`` -- or ``{"summarized": 0}`` when there is nothing
+        to compact.
+
+        The cutoff is ``manual_compaction_cutoff`` on the COMMITTED thread
+        (``_committed_messages``): the answer before the last question
+        onward is kept. Nothing to compact (a single exchange, nothing new
+        since the last manual compaction) is decided before the guard and
+        again under it, before any model is loaded, and nothing is written.
+
+        Under ``try_generation_guard`` (busy: ``EngineBusyException``), in a
+        turn's order: the brake's turn_start sample before the model is
+        resolved, the chat model (which loads the child), the prefix-cache
+        claim for this conversation, the summary client and the middleware
+        through ``_compaction_setup`` (``manual``), then the summary call,
+        bounded by ``manual_summary_timeout_s``. A summary that fails or runs
+        past the bound raises ``CompactionFailedException``: nothing is
+        written. Then, in one task awaited through ``wait_shielded``, the
+        checkpoint is rewritten as the ``model`` node (``RemoveMessage(
+        REMOVE_ALL)``, the summary, the kept tail -- the way
+        ``_repair_alternation`` updates a thread), the prefix cache is reset
+        like after an automatic compaction, and ``persist_marker`` saves the
+        separator: a client that goes away meanwhile cannot leave the stores
+        half-written, and its cancellation is re-raised once they are. The
+        brake's turn_end sample comes last. A client that goes away during
+        the summary call flags the child (``abandon_hook``) and releases the
+        lock with nothing written. ``persist_marker``'s own failure
+        propagates (the history is summarized by then).
+        """
+        from langchain.agents import create_agent
+
+        engine = config.LLM_Engine
+        run_config = {"configurable": {"thread_id": thread_id}}
+        nothing = {"summarized": 0}
+        messages = await self._committed_messages(run_config)
+        if manual_compaction_cutoff(messages, compaction_threshold) <= 0:
+            return nothing
+        async with engine.try_generation_guard():
+            # A turn may have run while the guard was awaited.
+            messages = await self._committed_messages(run_config)
+            cutoff = manual_compaction_cutoff(messages, compaction_threshold)
+            if cutoff <= 0:
+                return nothing
+            if _engine_overrides(engine, "brake_point"):
+                await run_reset_shielded(
+                    functools.partial(
+                        engine.brake_point, POINT_TURN_START, llm_id=getattr(llm, "id", None)
+                    )
+                )
+            sampling = resolve_sampling_defaults(llm)
+            model = await run_in_threadpool(
+                build_chat_model,
+                llm,
+                temperature=params.temperature,
+                top_p=params.top_p,
+                max_tokens=params.max_tokens,
+                sampling=sampling,
+            )
+            abandon_hook = getattr(model, "abandon_hook", None)
+            try:
+                if _engine_overrides(engine, "claim_prefix"):
+                    await run_reset_shielded(
+                        functools.partial(engine.claim_prefix, f"conv:{thread_id}")
+                    )
+                compaction = await self._compaction_setup(
+                    llm,
+                    params=params,
+                    sampling=sampling,
+                    overhead=None,
+                    compaction_threshold=compaction_threshold,
+                    manual=True,
+                )
+                try:
+                    update, facts = await asyncio.wait_for(
+                        compaction.summarizer.asummarize_head(messages, cutoff),
+                        timeout=manual_summary_timeout_s(
+                            compaction.allocated_window, compaction.summary_max_tokens
+                        ),
+                    )
+                except CompactionFailedException:
+                    raise
+                except Exception as exc:
+                    # A transient failure, or the bound expired (the summary
+                    # stream was cancelled: its child is flagged).
+                    if isinstance(exc, asyncio.TimeoutError):
+                        _flag_abandoned(abandon_hook)
+                    raise CompactionFailedException(trace=type(exc).__name__) from exc
+                event = {
+                    "t": COMPACTION_EVENT,
+                    "phase": "done",
+                    "manual": True,
+                    "reason": compaction_reason(
+                        engine, compaction.working_window, compaction.allocated_window
+                    ),
+                    **facts,
+                }
+                agent = create_agent(model, tools=[], checkpointer=self.checkpointer)
+                write = asyncio.get_running_loop().create_task(
+                    self._write_manual_compaction(
+                        agent, run_config, update, engine, persist_marker, event
+                    )
+                )
+                cancelled = await wait_shielded(write)
+            except CompactionFailedException:
+                await self._brake_turn_end(engine)
+                raise
+            except BaseException:
+                # The client went away (or a build failed) before anything
+                # was written.
+                _flag_abandoned(abandon_hook)
+                raise
+            await self._brake_turn_end(engine)
+            if cancelled:
+                if not write.cancelled() and write.exception() is not None:
+                    # Nobody is left to answer: this is the failure's only record.
+                    logger.error(
+                        f"Manual compaction of thread {thread_id} failed while its client "
+                        f"was gone",
+                        exc_info=write.exception(),
+                    )
+                raise asyncio.CancelledError()
+            # The write's own failure (the checkpoint, or the separator).
+            write.result()
+        return event
+
+    @staticmethod
+    async def _write_manual_compaction(
+        agent, run_config, update: list, engine: Any, persist_marker, event: dict
+    ) -> None:
+        """The stores of a manual compaction, in order: the checkpoint (as
+        the ``model`` node), the prefix-cache reset, the separator."""
+        await agent.aupdate_state(run_config, {"messages": update}, as_node="model")
+        await reset_prefix_after_rewrite(engine)
+        await persist_marker(event)
+
+    @staticmethod
+    async def _brake_turn_end(engine: Any) -> None:
+        """The brake's turn_end sample, shielded (as a turn takes it)."""
+        if _engine_overrides(engine, "brake_point"):
+            await run_reset_shielded(functools.partial(engine.brake_point, POINT_TURN_END))
+
+    async def _compaction_setup(
+        self,
+        llm,
+        *,
+        params: GenParams,
+        sampling: Any,
+        overhead: Optional[RequestOverhead],
+        compaction_threshold: int,
+        manual: bool = False,
+    ) -> _CompactionSetup:
+        """What a compacting turn -- or ``/compact`` (``manual``) -- runs its
+        compaction with, built once the child is up (the turn's chat model
+        was built first).
+
+        Memory accounting for the compaction ceiling and the amber warning:
+        the handle carries the loaded artifact and its measured base; file
+        I/O and hardware probes -> threadpool. ``from_engine`` never raises;
+        an unaccountable model just carries None facts.
+
+        The compaction summary ALWAYS runs at effort "none" (1.1.2):
+        summarizing is machine work, and a reasoning model would spend the
+        call deliberating about it instead of writing it. Same child, same
+        everything else -- only the reasoning field and the length differ,
+        so the second client costs a cached handle lookup. Its length is
+        BOUNDED to ``summary_cap(W)``, with no automatic output budget (which
+        would hand it the whole window) and no preflight retry (a smaller
+        cap would silently truncate the summary; a rejection takes the
+        summarizer's size path instead): the keep arithmetic reserves exactly
+        that much for it. No known window: today's budget.
+        """
+        engine = config.LLM_Engine
+        budget = await run_in_threadpool(MemoryBudget.from_engine, engine)
+        allocated_window, working_window = self._compaction_windows(budget)
+        known = _known_window(working_window)
+        summary_max_tokens = summary_cap(working_window) if known else params.max_tokens
+        summary_model = await run_in_threadpool(
+            build_chat_model,
+            llm,
+            temperature=params.temperature,
+            top_p=params.top_p,
+            max_tokens=summary_max_tokens,
+            sampling=sampling,
+            effort_plan=NO_REASONING_PLAN,
+            auto_output_budget=not known,
+            preflight_retry=False,
+        )
+        middleware = self._build_middleware(
+            summary_model,
+            budget,
+            overhead=overhead,
+            compaction_threshold=compaction_threshold,
+            manual=manual,
+        )
+        return _CompactionSetup(
+            budget=budget,
+            allocated_window=allocated_window,
+            working_window=working_window,
+            summary_max_tokens=summary_max_tokens,
+            middleware=middleware,
+        )
+
     def _build_middleware(
         self,
         model,
@@ -2529,6 +2780,7 @@ class AgentRunner:
         *,
         overhead: Optional[RequestOverhead] = None,
         compaction_threshold: int,
+        manual: bool = False,
     ):
         """Auto-summarization using the SAME local model, on token pressure.
 
@@ -2554,7 +2806,9 @@ class AgentRunner:
         Every count -- trigger, cutoff, trim, truncation -- goes through ONE
         counter in real tokens (``real_token_count``), and ``overhead`` (the
         request's system prompt, tool schemas and KB additions) enters the
-        trigger and the keep.
+        trigger and the keep. ``manual`` builds the ``/compact`` variant
+        (``acompact``): the caller picks the cutoff, and a summary that
+        cannot be written fails instead of degrading.
         """
         from src.agents.middleware import (
             _StripStaleImagesMiddleware,
@@ -2583,6 +2837,7 @@ class AgentRunner:
                 allocated_window=allocated_window,
                 overhead=overhead,
                 engine=config.LLM_Engine,
+                manual=manual,
             ),
         ]
 

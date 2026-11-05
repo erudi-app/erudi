@@ -361,3 +361,18 @@ class MessageStarRequest(BaseModel):
     """
 
     message_id: int = Field(..., description="ID of the message to toggle star state")
+
+
+class CompactionResponse(BaseModel):
+    """What a manual compaction did (``POST /conversations/{id}/compact``).
+
+    ``summarized`` counts the questions and answers the summary replaced
+    (0: nothing to compact, and then nothing else is said); ``reason`` is
+    ``length`` or ``memory``, as on the automatic compaction's separator;
+    ``summary`` is the summary's text. The separator itself is saved in the
+    last answer's trace.
+    """
+
+    summarized: int
+    reason: Optional[str] = None
+    summary: Optional[str] = None

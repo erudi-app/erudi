@@ -444,6 +444,49 @@ Starred messages are read back when a turn is planned and appended to the system
 "Important points from the conversation so far" (`build_system_prompt` in
 `backend/src/utils/prompt_utils.py`).
 
+### Compact a conversation now
+
+```bash
+curl -X POST http://127.0.0.1:27182/erudi/conversations/42/compact
+```
+
+Summarizes the earlier messages right away (`/compact` in the composer) with the same summary as
+the automatic compaction, and answers `{"summarized": N, "reason": "length"|"memory", "summary":
+"..."}` — N counts the questions and answers the summary replaced. The cutoff is the automatic
+compaction's (`compaction_cutoff`) with a keep budget of one token, no futility guard and never the
+message-count fallback (`manual_compaction_cutoff`), so the model keeps
+`[summary, previous answer, last question, last answer]`: the summary is inserted as a user
+message, and keeping the last question alone would put two user messages in a row, which strict
+chat templates reject. With two exchanges or more (a previous summary counts as history) everything
+before the previous answer is summarized; a single exchange, or nothing said since the last manual
+compaction, is `{"summarized": 0}` — decided on the committed thread before the model is loaded,
+and nothing is stored.
+
+The request never re-assigns a model and never waits in line:
+
+- A conversation whose model was deleted is a 409 (`STATE_CONFLICT`, `detail.reason: "no_model"`,
+  "pick a model first").
+- A conversation whose last message is a question without an answer (a turn killed before it
+  ended) is a 409 (`detail.reason: "unanswered_question"`). An answer of any kind is accepted,
+  a failed one included — a turn that timed out on a long history is exactly when shrinking it
+  helps (the runner's repair already closed that turn in the thread).
+- While an answer streams, the model reloads, or a memory or idle check holds the model, the
+  request waits at most 2 seconds and then is a 409 (`ENGINE_BUSY`, "The model is busy; try again in
+  a moment."): it takes the engine's non-blocking guard (`try_generation_guard`), never the queue.
+
+Then, in a turn's order: the memory brake's turn-start sample, the model (loaded if needed), the
+prefix-cache claim for this conversation, the summary call, bounded on the server by the summary
+client's first-chunk ceiling plus its length decoded at the watchdog's conservative rate
+(`manual_summary_timeout_s`); the thread state rewritten as the `model` node; the prefix-cache reset
+of a compaction; the separator saved; the brake's turn-end sample. `backend.log` shows one
+`Conversation compacted: ... threshold=<pct>%, manual` line. A summary that fails or runs past its
+bound changes nothing — the model still sees the whole history — and is a 503
+(`COMPACTION_FAILED`, one warning in `backend.log`). A separator that cannot be saved after the
+thread was rewritten is a 500 (`COMPACTION_SEPARATOR_NOT_SAVED`, "The history was summarized, but
+the separator could not be saved.", one error with its traceback). A client that goes away during
+the summary releases the model with nothing written; once the stores are being written, they are
+finished first.
+
 ### Record a failed generation
 
 ```bash
@@ -737,6 +780,10 @@ answer text from the `model` node only.
 - **After a reload.** The `done` events are part of the persisted trace, error turns included, so
   the separators come back with the conversation; a trace holding only compactions shows no
   reasoning strip.
+- **A manual compaction** (`POST /conversations/{id}/compact`) has no turn of its own: its `done`
+  event, with `manual: true` and the same other keys, is appended to the trace of the
+  conversation's last answer (without re-running the trace cap: a full trace may exceed it by that
+  one event), and the separator is drawn **below** that answer.
 
 The announcements never cost a turn: a direct call of the middleware (no runtime) has no channel
 and stays silent, and a channel that fails is one warning in `backend.log` per turn.
