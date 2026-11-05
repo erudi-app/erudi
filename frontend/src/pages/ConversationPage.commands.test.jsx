@@ -186,6 +186,24 @@ describe("the header", () => {
       "Be brief"
     );
   });
+
+  it("offers to unload the loaded model from its settings panel", async () => {
+    getMock.mockImplementation(async (path) =>
+      path === "/llms/loaded" ? { llm_id: 9, name: "Another Model" } : []
+    );
+    await renderPage();
+    expect(getMock).not.toHaveBeenCalledWith("/llms/loaded");
+    fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
+    expect(await screen.findByRole("button", { name: "Unload Another Model" })).toBeTruthy();
+  });
+
+  it("shows no Unload button when no model is loaded", async () => {
+    getMock.mockImplementation(async (path) => (path === "/llms/loaded" ? null : []));
+    await renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith("/llms/loaded"));
+    expect(screen.queryByRole("button", { name: /^Unload/ })).toBeNull();
+  });
 });
 
 describe("slash commands in the composer", () => {

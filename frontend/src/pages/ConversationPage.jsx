@@ -5,6 +5,7 @@ import Sidebar from "../components/Sidebar";
 import ChatCollapsibleSection from "../components/ChatCollapsibleSection";
 import QuestionInput from "../components/QuestionInput";
 import ConversationHeader from "../components/ConversationHeader";
+import UnloadModelButton from "../components/UnloadModelButton";
 import CommandPopups from "../components/CommandPopups";
 import EngineFailureModal from "../components/modals/EngineFailureModal";
 import { AlertTriangle, Copy, Check, FileText, Star } from "lucide-react";
@@ -44,6 +45,12 @@ const MEMORY_WARNING_KEYS = {
   pressure: "chat:memoryWarning.pressure",
   pressure_external: "chat:memoryWarning.pressureExternal",
   gpu_contention: "chat:memoryWarning.gpuContention",
+};
+// The reload state's copy, by the `reason` of the `memory_reload` event.
+const RELOAD_COPY = {
+  memory: "chat:message.memoryReload",
+  idle: "chat:message.idleReload",
+  manual: "chat:message.manualReload",
 };
 // While the `gpu_contention` notice shows, the cached contention state is
 // polled at this pace (the backend samples it every 10 s too).
@@ -421,8 +428,9 @@ export default function ConversationPage() {
           let sawError = false;
           let sawDone = false;
           let sawMemoryWarning = false;
-          // The memory brake or the idle timeout (`reason: "idle"`) unloaded
-          // the model and this turn reloads it (`memory_reload`): shown in
+          // The memory brake, the idle delay or the user's Unload button
+          // (`reason`) unloaded the model and this turn reloads it
+          // (`memory_reload`): shown in
           // the pending bubble until the model speaks (its first answer,
           // thinking or tool event), an error, or the end of the turn. Notices the backend streams as answer text
           // come BEFORE it, so they never end it. Never persisted.
@@ -459,9 +467,10 @@ export default function ConversationPage() {
             }
             switch (evt.t) {
               case "memory_reload":
-                // Why the model reloads picks the copy: "idle" (the idle
-                // timeout unloaded it) or "memory" (the memory brake did).
-                reloading = evt.reason === "idle" ? "idle" : "memory";
+                // Why the model reloads picks the copy (RELOAD_COPY): "idle"
+                // (the idle delay unloaded it), "manual" (the user did) or
+                // "memory" (the memory brake did; also any other reason).
+                reloading = Object.hasOwn(RELOAD_COPY, evt.reason) ? evt.reason : "memory";
                 break;
               case "compaction":
                 // `start` is the transient state; `done` is the marker the
@@ -950,7 +959,9 @@ export default function ConversationPage() {
             disabledCommands={loading ? COMMANDS_DISABLED_WHILE_ANSWERING : []}
             onCommand={setOpenCommand}
             saveFailed={conversationSettings.saveFailed}
-          />
+          >
+            <UnloadModelButton />
+          </ConversationHeader>
         </div>
 
         <div
@@ -1110,11 +1121,7 @@ export default function ConversationPage() {
                             <TypingIndicator size={8} className="-mt-1" />
                           </div>
                           <div className="text-xs text-gray-400 italic mt-1">
-                            {t(
-                              msg.reloading === "idle"
-                                ? "chat:message.idleReload"
-                                : "chat:message.memoryReload"
-                            )}
+                            {t(RELOAD_COPY[msg.reloading])}
                           </div>
                         </div>
                       )}

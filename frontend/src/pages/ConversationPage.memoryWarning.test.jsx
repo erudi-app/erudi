@@ -13,8 +13,9 @@ import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-libra
 //  - the warning is transient state only: it never lands in the answer bubble
 //    (so it cannot be copied with the message) and a LATER turn that carries
 //    no warning clears it;
-//  - a `memory_reload` event (the memory brake unloaded the model; with
-//    `reason: "idle"`, the idle timeout did, and the copy says so) shows a
+//  - a `memory_reload` event (the model reloads; its `reason` picks the copy:
+//    `memory` the memory brake unloaded it, `idle` the idle delay did,
+//    `manual` the user's Unload button did) shows a
 //    reload state in the pending assistant bubble -- even below a notice
 //    already streamed as answer text -- until the model's first thinking,
 //    answer or tool event, an error, or the end of the turn.
@@ -266,8 +267,8 @@ describe("ConversationPage memory warning reasons", () => {
 });
 
 const RELOAD = "Memory was freed on your computer; reloading the model to resume the conversation…";
-const IDLE_RELOAD =
-  "The model was unloaded after a few minutes without use; reloading it to resume the conversation…";
+const IDLE_RELOAD = "The model was unloaded while unused; reloading it to resume the conversation…";
+const MANUAL_RELOAD = "You unloaded the model; reloading it…";
 
 describe("ConversationPage reload state", () => {
   const push = async (stream, line) => {
@@ -282,7 +283,7 @@ describe("ConversationPage reload state", () => {
     await renderAndSettle();
 
     fireEvent.click(screen.getByText("SEND"));
-    await push(turn, '{"t":"memory_reload"}\n');
+    await push(turn, '{"t":"memory_reload","reason":"memory"}\n');
     expect(await screen.findByText(RELOAD)).toBeTruthy();
 
     await push(turn, '{"t":"answer","text":"Back."}\n');
@@ -292,7 +293,25 @@ describe("ConversationPage reload state", () => {
     });
   });
 
-  it("says the model was unloaded after a pause when the reason is idle", async () => {
+  it("says the user unloaded the model when the reason is manual", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await push(turn, '{"t":"memory_reload","reason":"manual"}\n');
+    expect(await screen.findByText(MANUAL_RELOAD)).toBeTruthy();
+    expect(screen.queryByText(IDLE_RELOAD)).toBeNull();
+    expect(screen.queryByText(RELOAD)).toBeNull();
+
+    await push(turn, '{"t":"answer","text":"Back."}\n');
+    await waitFor(() => expect(screen.queryByText(MANUAL_RELOAD)).toBeNull());
+    await act(async () => {
+      turn.end();
+    });
+  });
+
+  it("says the model was unloaded while unused when the reason is idle", async () => {
     const turn = makeControlledStream();
     tracedFetchMock.mockImplementation(makeRoute([turn]));
     await renderAndSettle();
@@ -309,7 +328,7 @@ describe("ConversationPage reload state", () => {
     });
   });
 
-  it("keeps the memory copy for a reload without the idle reason", async () => {
+  it("keeps the memory copy for a reload without a known reason", async () => {
     const turn = makeControlledStream();
     tracedFetchMock.mockImplementation(makeRoute([turn]));
     await renderAndSettle();
