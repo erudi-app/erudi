@@ -184,6 +184,32 @@ describe("the new-conversation page", () => {
     expect(createBody()).toEqual({ llm_id: 42, web_search_enabled: true });
   });
 
+  it("a send right after a model switch waits for the new model's defaults", async () => {
+    let releaseBeta;
+    defaultsByModel[42] = new Promise((resolve) => {
+      releaseBeta = () => resolve(resolved({ llm_id: 42 }));
+    });
+    await renderPage();
+    typeAndEnter("/config");
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("slider", { name: "Creativity" }), {
+      target: { value: "1.5" },
+    });
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    await openModelPopupAndPick("Beta Model");
+    await waitFor(() => expect(header().textContent).toBe("You are chatting with Beta Model"));
+    typeAndEnter("Now");
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(createCalls()).toHaveLength(0);
+
+    releaseBeta();
+    await waitFor(() => expect(createCalls()).toHaveLength(1));
+    // Alpha's creativity is never sent for Beta: Beta's own applies.
+    expect(createBody()).toEqual({ llm_id: 42 });
+  });
+
   it("/config global saves the draft values for the picked model", async () => {
     putMock.mockResolvedValue(resolved());
     await renderPage();

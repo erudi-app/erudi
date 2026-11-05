@@ -118,7 +118,7 @@ export default function ConversationPage() {
   // the command popups and the send path. Hydrated from the conversation row,
   // every change saved as it is made.
   const conversationSettings = useConversationSettings(id);
-  const { adopt, flush, getValues, changeModel } = conversationSettings;
+  const { adopt, loadStamp, flush, getValues, changeModel } = conversationSettings;
   // The command being run (its popup is open), or null.
   const [openCommand, setOpenCommand] = useState(null);
   const [collapsed, setCollapsed] = useState(false);
@@ -500,7 +500,10 @@ export default function ConversationPage() {
                 // build cannot drive, a driver too old, VRAM exhaustion): raise
                 // the dialog that offers the matching remedy. Untyped failures
                 // stay a red bubble and nothing else, as they always have.
+                // A command popup open meanwhile closes first: the dialog
+                // takes the screen and the keyboard.
                 if (evt.code) {
+                  setOpenCommand(null);
                   setEngineFailure({ code: evt.code, raw: evt.raw });
                 }
                 break;
@@ -673,6 +676,8 @@ export default function ConversationPage() {
       }
 
       try {
+        // A row older than a save or a /model made while it loads is dropped.
+        const stamp = loadStamp();
         const [convRes, msgRes, convDetailRes] = await Promise.all([
           tracedFetch(`${API_BASE_URL}/conversations/`),
           tracedFetch(`${API_BASE_URL}/conversations/${id}/fetch_messages`),
@@ -709,7 +714,7 @@ export default function ConversationPage() {
         // model was deleted (conversations survive, no auto-fallback, #225);
         // the orphan check below decides whether to block the composer.
         if (convDetailRes.ok) {
-          adopt(await convDetailRes.json());
+          adopt(await convDetailRes.json(), stamp);
         }
       } catch (err) {
         log.error("Failed to fetch conversations", err);
@@ -756,7 +761,16 @@ export default function ConversationPage() {
     };
 
     loadConversationData();
-  }, [id, location.state, handleAsk, adopt, navigate, location.pathname, initialHandled]);
+  }, [
+    id,
+    location.state,
+    handleAsk,
+    adopt,
+    loadStamp,
+    navigate,
+    location.pathname,
+    initialHandled,
+  ]);
 
   // Detect when user manually scrolls
   useEffect(() => {
@@ -1157,7 +1171,9 @@ export default function ConversationPage() {
             )}
             <QuestionInput
               onSend={handleAsk}
-              disabled={loading || isModelOrphaned}
+              // Locked until the conversation's values are loaded: a turn
+              // carries its instructions and sampling.
+              disabled={loading || isModelOrphaned || !conversationSettings.loaded}
               canAttachImages={canAttachImages(assignedModel)}
               maxImages={maxImagesForModel(assignedModel)}
               commands={COMMANDS}

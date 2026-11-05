@@ -45,7 +45,7 @@ export default function ChatPage() {
   // the header panel. Only what the user set is sent at creation; the
   // backend resolves the rest for the model.
   const draft = useConversationSettings(DRAFT);
-  const { selectModel, createPayload } = draft;
+  const { selectModel, ready, createPayload } = draft;
   // The command being run (its popup is open), or null.
   const [openCommand, setOpenCommand] = useState(null);
 
@@ -159,6 +159,9 @@ export default function ChatPage() {
       try {
         // 1. Create the conversation from the draft: the model and the values
         // the user set; the backend resolves every other one for the model.
+        // A model picked just before sending: its defaults first decide what
+        // the user set that still holds.
+        await ready();
         const res = await tracedFetch(`${API_BASE_URL}/conversations/`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
@@ -186,7 +189,7 @@ export default function ChatPage() {
         );
       }
     },
-    [llm, navigate, createPayload, t]
+    [llm, navigate, ready, createPayload, t]
   );
 
   const handleRename = (id, newName) => {

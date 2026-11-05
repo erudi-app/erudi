@@ -33,6 +33,10 @@ vi.mock("../components/TypingIndicator", () => ({ default: () => null }));
 vi.mock("../components/MarkdownRenderer", () => ({
   default: ({ content }) => <div>{content}</div>,
 }));
+// The engine failure dialog, reduced to a marker.
+vi.mock("../components/modals/EngineFailureModal", () => ({
+  default: ({ notice }) => (notice ? <div data-testid="engine-failure">{notice.code}</div> : null),
+}));
 
 import ConversationPage from "./ConversationPage.jsx";
 
@@ -62,6 +66,50 @@ const answerStream = () => {
   ];
   return { ok: true, body: { getReader: () => ({ read: async () => queue.shift() }) } };
 };
+/** A streaming response fed line by line: the answer stays open until end(). */
+function controlledStream() {
+  const queue = [];
+  let waiting = null;
+  let ended = false;
+  const deliver = (chunk) => {
+    if (waiting) {
+      const resolve = waiting;
+      waiting = null;
+      resolve(chunk);
+    } else {
+      queue.push(chunk);
+    }
+  };
+  return {
+    response: {
+      ok: true,
+      body: {
+        getReader: () => ({
+          read: () =>
+            new Promise((resolve) => {
+              if (queue.length) resolve(queue.shift());
+              else if (ended) resolve({ done: true, value: undefined });
+              else waiting = resolve;
+            }),
+        }),
+      },
+    },
+    push: (line) => deliver({ done: false, value: encoder.encode(line + "\n") }),
+    end: () => {
+      ended = true;
+      deliver({ done: true, value: undefined });
+    },
+  };
+}
+
+const deferred = () => {
+  let resolve;
+  const promise = new Promise((res) => {
+    resolve = res;
+  });
+  return { promise, resolve };
+};
+
 const emptyStream = () => ({
   ok: true,
   body: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
@@ -183,6 +231,32 @@ describe("slash commands in the composer", () => {
 });
 
 describe("sending right after a change", () => {
+  it("sends no turn before the pending save has come back", async () => {
+    await renderPage();
+    const save = deferred();
+    patchMock.mockImplementation((_path, body) => {
+      order.push(["patch", body]);
+      return save.promise.then(() => ({ ...detail, ...body }));
+    });
+    typeAndEnter("/effort");
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("slider", { name: "Reasoning effort" }), {
+      target: { value: "4" },
+    });
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    typeAndEnter("Right away");
+    await waitFor(() => expect(order).toHaveLength(1));
+    // The effort is read server-side: the turn must not start before it is saved.
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(tracedFetchMock.mock.calls.some(([u]) => String(u).includes("/query"))).toBe(false);
+
+    save.resolve();
+    await waitFor(() => expect(queries()).toHaveLength(1));
+    expect(order.map(([kind]) => kind)).toEqual(["patch", "query"]);
+  });
+
   it("waits for the pending slider save, then sends the new value with the turn", async () => {
     await renderPage();
     typeAndEnter("/config");
@@ -198,6 +272,80 @@ describe("sending right after a change", () => {
     expect(order.map(([kind]) => kind)).toEqual(["patch", "query"]);
     expect(order[0][1]).toEqual({ temperature: 1.3 });
     expect(queries()[0][1].temperature).toBe(1.3);
+  });
+});
+
+describe("while an answer streams", () => {
+  const streaming = async () => {
+    const stream = controlledStream();
+    tracedFetchMock.mockImplementation(async (url, opts) =>
+      String(url).includes("/query") ? stream.response : routeFetch(url, opts)
+    );
+    await renderPage();
+    typeAndEnter("A long answer please");
+    await waitFor(() => expect(composer().disabled).toBe(true));
+    return stream;
+  };
+
+  it("disables Model in the header panel, and keeps Config and Effort", async () => {
+    const stream = await streaming();
+    fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
+    expect(screen.getByRole("button", { name: /^Model/ }).disabled).toBe(true);
+    expect(screen.getByRole("button", { name: /^Config/ }).disabled).toBe(false);
+    expect(screen.getByRole("button", { name: /^Effort/ }).disabled).toBe(false);
+    stream.push('{"t":"done"}');
+    stream.end();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^Model/ }).disabled).toBe(false)
+    );
+  });
+
+  it("closes an open command popup before the engine failure dialog opens", async () => {
+    const stream = await streaming();
+    fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Config/ }));
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+
+    stream.push('{"t":"error","text":"[ERROR_MESSAGE_SYSTEM] failed","code":"CUDA_OOM"}');
+    stream.end();
+    await screen.findByTestId("engine-failure");
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+  });
+});
+
+describe("before the conversation's values are loaded", () => {
+  const gatedDetail = () => {
+    const gate = deferred();
+    tracedFetchMock.mockImplementation(async (url, opts) => {
+      if (String(url).endsWith("/conversations/7")) {
+        await gate.promise;
+      }
+      return routeFetch(url, opts);
+    });
+    return gate;
+  };
+
+  it("keeps the composer disabled, so no turn goes out without its instructions", async () => {
+    const gate = gatedDetail();
+    render(<ConversationPage />);
+    await waitFor(() => expect(composer()).toBeTruthy());
+    expect(composer().disabled).toBe(true);
+    gate.resolve();
+    await waitFor(() => expect(composer().disabled).toBe(false));
+  });
+
+  it("drops a load that lands after /model switched the conversation", async () => {
+    const gate = gatedDetail();
+    patchMock.mockImplementation(async (_path, body) => ({ ...detail, ...body }));
+    render(<ConversationPage />);
+    fireEvent.click(await screen.findByRole("button", { name: "Conversation settings" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Model/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Gemma-3-4B/ }));
+    await waitFor(() => expect(header().textContent).toBe("You are chatting with Gemma-3-4B"));
+
+    gate.resolve(); // the older row (llm_id 1) arrives now
+    await new Promise((resolve) => setTimeout(resolve, 50));
+    expect(header().textContent).toBe("You are chatting with Gemma-3-4B");
   });
 });
 

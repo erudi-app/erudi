@@ -23,6 +23,8 @@ export const SETTING_FIELDS = Object.freeze([
 const SAMPLING_FIELDS = new Set(["temperature", "top_p"]);
 // The sliders are saved once they stop moving for this long.
 export const SAMPLING_SAVE_DELAY_MS = 300;
+// How long the "could not be saved" note stays when nothing clears it sooner.
+export const SAVE_FAILED_NOTE_MS = 6000;
 // `source` of a value saved for the model with /config global.
 const SOURCE_SAVED = "saved";
 
@@ -37,8 +39,9 @@ const EMPTY = Object.freeze({
 });
 
 // What the draft shows when the picked model's defaults cannot be read: its
-// recommended sampling and the shipped defaults. Display only: a value the
-// user did not set is still left to the backend at creation.
+// recommended sampling and the shipped defaults. Display only, and marked
+// unread: a value the user did not set is still left to the backend at
+// creation, and /config global refuses to save it.
 const unreadDefaults = (model) => {
   const sampling = defaultsFor(model);
   return {
@@ -61,6 +64,13 @@ const fromConversation = (conversation) => ({
   custom_prompt: conversation.custom_prompt ?? "",
 });
 
+const notLoaded = (fields) => new Error(`Conversation values not loaded yet: ${fields.join(", ")}`);
+
+// Per-conversation bookkeeping: the last value the server holds per field,
+// the latest save per field, the saves on their way per field, and a count
+// of the changes made (saves and model switches) a load is stamped with.
+const newBook = () => ({ saved: {}, latest: {}, inFlight: {}, changes: 0 });
+
 /**
  * The one owner of a conversation's settings (#609): the header panel,
  * /config, /config global, /effort and /model all read and write through it,
@@ -70,25 +80,35 @@ const fromConversation = (conversation) => ({
  * one-field PATCH: effort, web search, threshold and instructions at once,
  * creativity and diversity 300 ms after the slider stops (they also ride in
  * each turn's payload). Saves go out one after another, in the order they
- * were made; a failed one puts its control back to the last saved value
- * (unless a later change of the same control is on its way) and raises
- * `saveFailed`. `flush()` sends what is pending and resolves once every save
- * has settled: the send path and /model wait for it. `adopt(conversation)`
- * takes the values of a conversation row; `changeModel(llmId)` sends only
- * `{llm_id}` and adopts the conversation the backend returns, with the new
- * model's values applied server-side.
+ * were made, each tied to the conversation it was made in: a save of A that
+ * lands after the page moved to B never touches B. A failed save re-reads
+ * the conversation and shows what the server holds (the last saved value
+ * when that read fails too), unless a later change of the same control is on
+ * its way, and raises `saveFailed`, cleared by the next successful save, a
+ * conversation switch or after a few seconds. `flush()` sends what is pending
+ * and resolves once every save has settled: the send path and /model wait
+ * for it. A load takes `loadStamp()` when it starts and passes it to
+ * `adopt(conversation, stamp)`, which drops a row older than a change made
+ * meanwhile. `changeModel(llmId)` sends only `{llm_id}` and adopts the
+ * conversation the backend returns, with the new model's values applied
+ * server-side.
  *
  * On the new-conversation page (`DRAFT`) nothing is saved: `selectModel(model)`
  * reads that model's resolved defaults (`GET /llms/{id}/conversation_defaults`),
  * a late answer for a previous model is ignored, and the values the user set
  * are remembered. On a model switch, the values the user did not set take the
- * new model's; those set follow the /model rule (the new model's saved values
- * and its creativity and diversity replace them, the others stay).
- * `createPayload()` is the creation body: the model and the values the user
- * set, every other one resolved by the backend.
+ * new model's; those set before the switch follow the /model rule (the new
+ * model's creativity and diversity replace them at once, its saved values
+ * when they arrive, the others stay); a value set after the switch started
+ * stays. `ready()` resolves once the current model's defaults are in, and
+ * `createPayload()` is then the creation body: the model and the values the
+ * user set, every other one resolved by the backend.
  *
  * `saveAsDefaults()` (/config global) saves the six current values for the
- * current model; empty instructions clear the instructions saved for it.
+ * current model; empty instructions clear the instructions saved for it. It
+ * refuses while a value is not known: on the draft, while the model's
+ * defaults are on their way, and while values shown from a failed read are
+ * not read again (it retries the read first).
  */
 export default function useConversationSettings(conversationId) {
   const isDraft = conversationId === DRAFT;
@@ -98,62 +118,133 @@ export default function useConversationSettings(conversationId) {
 
   // Synchronous mirrors: the send path reads the values right after adopt().
   const valuesRef = useRef(EMPTY);
+  const loadedRef = useRef(false);
   const idRef = useRef(conversationId);
   idRef.current = conversationId;
 
-  // Conversation: last saved value per field, the latest save per field,
-  // saves in flight per field, the save chain, the pending slider save.
-  const savedRef = useRef({});
-  const latestSaveRef = useRef({});
-  const inFlightRef = useRef({});
+  // Conversation: the bookkeeping per conversation id, the save sequence,
+  // the save chain, the pending slider save and its timer.
+  const booksRef = useRef(new Map());
   const saveSeqRef = useRef(0);
   const chainRef = useRef(Promise.resolve());
   const pendingSamplingRef = useRef({ id: null, patch: {} });
   const timerRef = useRef(null);
+  const failedTimerRef = useRef(null);
 
-  // Draft: the fields the user set, and the current defaults request.
-  const touchedRef = useRef(new Set());
+  // Draft: when each field was set (a touch sequence), the fields shown from
+  // a failed read, the current model and its defaults request.
+  const touchedRef = useRef(new Map());
+  const touchSeqRef = useRef(0);
+  const unreadRef = useRef(new Set());
+  const modelRef = useRef(null);
   const requestRef = useRef(0);
+  const pendingRequestRef = useRef(Promise.resolve());
 
   const write = useCallback((patch) => {
     valuesRef.current = { ...valuesRef.current, ...patch };
     setValues(valuesRef.current);
   }, []);
 
+  const markLoaded = useCallback((value) => {
+    loadedRef.current = value;
+    setLoaded(value);
+  }, []);
+
+  const book = useCallback((id) => {
+    let entry = booksRef.current.get(id);
+    if (!entry) {
+      entry = newBook();
+      booksRef.current.set(id, entry);
+    }
+    return entry;
+  }, []);
+
+  const busy = useCallback(
+    (id, field) =>
+      (book(id).inFlight[field] ?? 0) > 0 ||
+      (pendingSamplingRef.current.id === id &&
+        Object.hasOwn(pendingSamplingRef.current.patch, field)),
+    [book]
+  );
+
+  const clearFailure = useCallback(() => {
+    clearTimeout(failedTimerRef.current);
+    setSaveFailed(false);
+  }, []);
+
+  const reportFailure = useCallback(() => {
+    setSaveFailed(true);
+    clearTimeout(failedTimerRef.current);
+    failedTimerRef.current = setTimeout(() => setSaveFailed(false), SAVE_FAILED_NOTE_MS);
+  }, []);
+
+  // What the server holds now, after a save or a switch that failed (it may
+  // have been applied all the same: a timeout, a retried request).
+  const reread = useCallback(async (id) => {
+    try {
+      const row = await apiClient.get(`/conversations/${id}`);
+      return row ? fromConversation(row) : null;
+    } catch (error) {
+      log.warn(`Could not re-read conversation ${id} after a failed save`, error);
+      return null;
+    }
+  }, []);
+
+  // A conversation row's values into the state and the bookkeeping, except
+  // a value the user is still saving.
+  const takeRow = useCallback(
+    (id, row) => {
+      const entry = book(id);
+      const patch = {};
+      for (const [field, value] of Object.entries(row)) {
+        entry.saved[field] = value;
+        if (!busy(id, field)) patch[field] = value;
+      }
+      write(patch);
+      markLoaded(true);
+    },
+    [book, busy, write, markLoaded]
+  );
+
   const enqueuePatch = useCallback(
     (id, patch) => {
+      const entry = book(id);
+      entry.changes += 1;
       const seq = ++saveSeqRef.current;
       const fields = Object.keys(patch);
       for (const field of fields) {
-        latestSaveRef.current[field] = seq;
-        inFlightRef.current[field] = (inFlightRef.current[field] ?? 0) + 1;
+        entry.latest[field] = seq;
+        entry.inFlight[field] = (entry.inFlight[field] ?? 0) + 1;
       }
       const run = async () => {
         try {
           await apiClient.patch(`/conversations/${id}`, patch);
-          if (id !== idRef.current) return;
-          for (const field of fields) savedRef.current[field] = patch[field];
-          setSaveFailed(false);
+          for (const field of fields) entry.saved[field] = patch[field];
+          if (id === idRef.current) clearFailure();
         } catch (error) {
           log.error(`Failed to save ${fields.join(", ")} of conversation ${id}`, error);
-          if (id !== idRef.current) return;
-          const revert = {};
+          const fresh = await reread(id);
+          const back = {};
           for (const field of fields) {
+            if (fresh) entry.saved[field] = fresh[field];
             const superseded =
-              latestSaveRef.current[field] !== seq ||
-              Object.hasOwn(pendingSamplingRef.current.patch, field);
-            if (!superseded) revert[field] = savedRef.current[field];
+              entry.latest[field] !== seq ||
+              (pendingSamplingRef.current.id === id &&
+                Object.hasOwn(pendingSamplingRef.current.patch, field));
+            if (!superseded) back[field] = entry.saved[field];
           }
-          write(revert);
-          setSaveFailed(true);
+          if (id === idRef.current) {
+            write(back);
+            reportFailure();
+          }
         } finally {
-          for (const field of fields) inFlightRef.current[field] -= 1;
+          for (const field of fields) entry.inFlight[field] -= 1;
         }
       };
       chainRef.current = chainRef.current.then(run);
       return chainRef.current;
     },
-    [write]
+    [book, write, reread, clearFailure, reportFailure]
   );
 
   const sendPendingSampling = useCallback(() => {
@@ -169,13 +260,17 @@ export default function useConversationSettings(conversationId) {
   useEffect(() => {
     valuesRef.current = EMPTY;
     setValues(EMPTY);
-    setLoaded(false);
-    setSaveFailed(false);
-    savedRef.current = {};
-    touchedRef.current = new Set();
+    markLoaded(false);
+    clearFailure();
+    touchedRef.current = new Map();
+    unreadRef.current = new Set();
+    modelRef.current = null;
     requestRef.current += 1;
+    pendingRequestRef.current = Promise.resolve();
     return () => sendPendingSampling();
-  }, [conversationId, sendPendingSampling]);
+  }, [conversationId, sendPendingSampling, markLoaded, clearFailure]);
+
+  useEffect(() => () => clearTimeout(failedTimerRef.current), []);
 
   const flush = useCallback(() => {
     sendPendingSampling();
@@ -186,14 +281,15 @@ export default function useConversationSettings(conversationId) {
     (field, value) => {
       write({ [field]: value });
       if (idRef.current === DRAFT) {
-        touchedRef.current.add(field);
+        touchedRef.current.set(field, ++touchSeqRef.current);
+        unreadRef.current.delete(field);
         return;
       }
       if (SAMPLING_FIELDS.has(field)) {
         const pending = pendingSamplingRef.current;
         pendingSamplingRef.current = {
           id: idRef.current,
-          patch: { ...pending.patch, [field]: value },
+          patch: { ...(pending.id === idRef.current ? pending.patch : {}), [field]: value },
         };
         clearTimeout(timerRef.current);
         timerRef.current = setTimeout(sendPendingSampling, SAMPLING_SAVE_DELAY_MS);
@@ -204,78 +300,86 @@ export default function useConversationSettings(conversationId) {
     [write, enqueuePatch, sendPendingSampling]
   );
 
-  // A conversation row: every value, except one the user is still saving (a
-  // reload of the row must not undo a change on its way).
+  const loadStamp = useCallback(() => book(idRef.current).changes, [book]);
+
+  // A conversation row from a load: dropped when a save or a model switch
+  // was made since the load started (`stamp`, from loadStamp()); its values
+  // are then older than what the page shows.
   const adopt = useCallback(
-    (conversation) => {
-      const next = fromConversation(conversation);
-      const busy = (field) =>
-        (inFlightRef.current[field] ?? 0) > 0 ||
-        Object.hasOwn(pendingSamplingRef.current.patch, field);
-      const patch = {};
-      for (const [field, value] of Object.entries(next)) {
-        savedRef.current[field] = value;
-        if (!busy(field)) patch[field] = value;
-      }
-      write(patch);
-      setLoaded(true);
+    (conversation, stamp) => {
+      const id = idRef.current;
+      if (stamp !== undefined && stamp !== book(id).changes) return false;
+      takeRow(id, fromConversation(conversation));
+      return true;
     },
-    [write]
+    [book, takeRow]
   );
 
   const changeModel = useCallback(
     async (llmId) => {
       sendPendingSampling();
       const id = idRef.current;
+      const entry = book(id);
+      entry.changes += 1;
+      entry.inFlight.llm_id = (entry.inFlight.llm_id ?? 0) + 1;
       let switched = null;
       chainRef.current = chainRef.current.then(async () => {
+        let row = null;
+        let failed = false;
         try {
           switched = await apiClient.patch(`/conversations/${id}`, { llm_id: llmId });
+          row = fromConversation(switched);
         } catch (error) {
           log.error(`Failed to switch conversation ${id} to model ${llmId}`, error);
-          if (id === idRef.current) setSaveFailed(true);
-          return;
+          failed = true;
+          row = await reread(id);
+        } finally {
+          entry.inFlight.llm_id -= 1;
         }
-        if (id === idRef.current) {
-          adopt(switched);
-          setSaveFailed(false);
-        }
+        if (id !== idRef.current) return;
+        if (row) takeRow(id, row);
+        if (failed) reportFailure();
+        else clearFailure();
       });
       await chainRef.current;
       return switched;
     },
-    [adopt, sendPendingSampling]
+    [book, takeRow, reread, sendPendingSampling, reportFailure, clearFailure]
   );
 
-  const selectModel = useCallback(
-    (model) => {
-      const previous = valuesRef.current.llm_id;
-      if (!model || model.id === previous) return Promise.resolve();
-      const isSwitch = previous !== null;
+  // The model's defaults into the draft. `switchSeq` is the touch sequence
+  // when a model switch started (null on a first pick or a re-read): a field
+  // set before it follows the /model rule, one set after it stays.
+  const fetchDefaults = useCallback(
+    (model, switchSeq) => {
       const request = ++requestRef.current;
-      write({ llm_id: model.id });
-      setLoaded(false);
-
-      // `incoming` holds the new model's value and source per field.
-      const apply = (incoming) => {
+      markLoaded(false);
+      const apply = (incoming, unread) => {
         const patch = {};
         for (const field of SETTING_FIELDS) {
           const entry = incoming[field];
           if (!entry) continue;
-          if (!touchedRef.current.has(field)) {
+          const touchedAt = touchedRef.current.get(field);
+          if (touchedAt === undefined) {
             patch[field] = entry.value;
-          } else if (isSwitch && (SAMPLING_FIELDS.has(field) || entry.source === SOURCE_SAVED)) {
+            if (unread) unreadRef.current.add(field);
+            else unreadRef.current.delete(field);
+          } else if (
+            switchSeq !== null &&
+            touchedAt <= switchSeq &&
+            entry.source === SOURCE_SAVED
+          ) {
             patch[field] = entry.value;
             touchedRef.current.delete(field);
+            unreadRef.current.delete(field);
           }
         }
         write(patch);
-        setLoaded(true);
+        markLoaded(true);
       };
-
-      return apiClient.get(`/llms/${model.id}/conversation_defaults`).then(
+      const pending = apiClient.get(`/llms/${model.id}/conversation_defaults`).then(
         (resolved) => {
-          if (request === requestRef.current) apply(resolved ?? {});
+          if (request === requestRef.current) apply(resolved ?? {}, false);
         },
         (error) => {
           if (request !== requestRef.current) return;
@@ -285,33 +389,67 @@ export default function useConversationSettings(conversationId) {
           );
           const shown = unreadDefaults(model);
           apply(
-            Object.fromEntries(
-              SETTING_FIELDS.map((field) => [field, { value: shown[field], source: "model" }])
-            )
+            Object.fromEntries(SETTING_FIELDS.map((field) => [field, { value: shown[field] }])),
+            true
           );
         }
       );
+      pendingRequestRef.current = pending;
+      return pending;
     },
-    [write]
+    [write, markLoaded]
   );
+
+  const selectModel = useCallback(
+    (model) => {
+      const previous = valuesRef.current.llm_id;
+      if (!model || model.id === previous) return Promise.resolve();
+      const isSwitch = previous !== null;
+      modelRef.current = model;
+      write({ llm_id: model.id });
+      if (isSwitch) {
+        // The new model's creativity and diversity replace the ones set for
+        // the previous model, whatever its saved values: never sent for it.
+        for (const field of SAMPLING_FIELDS) touchedRef.current.delete(field);
+      }
+      return fetchDefaults(model, isSwitch ? touchSeqRef.current : null);
+    },
+    [write, fetchDefaults]
+  );
+
+  // Resolves once the defaults of the current model are in (a later pick
+  // started meanwhile is waited for too).
+  const ready = useCallback(async () => {
+    let pending;
+    do {
+      pending = pendingRequestRef.current;
+      await pending;
+    } while (pending !== pendingRequestRef.current);
+  }, []);
 
   const createPayload = useCallback(() => {
     const current = valuesRef.current;
     const payload = { llm_id: current.llm_id };
-    for (const field of touchedRef.current) payload[field] = current[field];
+    for (const field of touchedRef.current.keys()) payload[field] = current[field];
     return payload;
   }, []);
 
   const saveAsDefaults = useCallback(async () => {
     await flush();
+    if (idRef.current === DRAFT) {
+      if (!loadedRef.current) throw notLoaded(["defaults"]);
+      if (unreadRef.current.size > 0 && modelRef.current) {
+        // Shown from a failed read: read them again rather than save them.
+        await fetchDefaults(modelRef.current, null);
+        if (unreadRef.current.size > 0) throw notLoaded([...unreadRef.current]);
+      }
+    }
     const current = valuesRef.current;
     // A value not known yet would be sent as null, which clears it: refuse.
     const unknown = ["llm_id", ...SETTING_FIELDS].filter(
       (field) => field !== "custom_prompt" && current[field] === null
     );
-    if (unknown.length > 0) {
-      throw new Error(`Conversation values not loaded yet: ${unknown.join(", ")}`);
-    }
+    if (unknown.length > 0) throw notLoaded(unknown);
     return apiClient.put(`/llms/${current.llm_id}/conversation_defaults`, {
       reasoning_effort: current.reasoning_effort,
       temperature: current.temperature,
@@ -320,7 +458,7 @@ export default function useConversationSettings(conversationId) {
       web_search_enabled: current.web_search_enabled,
       custom_prompt: current.custom_prompt ?? "",
     });
-  }, [flush]);
+  }, [flush, fetchDefaults]);
 
   const getValues = useCallback(() => valuesRef.current, []);
 
@@ -333,9 +471,11 @@ export default function useConversationSettings(conversationId) {
       getValues,
       setField,
       flush,
+      loadStamp,
       adopt,
       changeModel,
       selectModel,
+      ready,
       createPayload,
       saveAsDefaults,
     }),
@@ -347,9 +487,11 @@ export default function useConversationSettings(conversationId) {
       getValues,
       setField,
       flush,
+      loadStamp,
       adopt,
       changeModel,
       selectModel,
+      ready,
       createPayload,
       saveAsDefaults,
     ]
