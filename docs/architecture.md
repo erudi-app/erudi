@@ -50,6 +50,7 @@ Routers are mounted under the `/erudi` prefix in `register_routers`
   `POST /erudi/conversations/{id}/query`, `PATCH /erudi/conversations/{id}`,
   `GET /erudi/conversations/{id}/fetch_messages`,
   `POST /erudi/conversations/{id}/generate_title`,
+  `POST /erudi/conversations/{id}/compact`, `GET /erudi/conversations/{id}/context`,
   `POST /erudi/conversations/star_message` and `/unstar_message`
 - **Entities**: `Conversation`, `Message`
 - **Conversation state**: held by the LangGraph checkpointer, not rebuilt from the

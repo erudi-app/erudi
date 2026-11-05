@@ -55,6 +55,9 @@ class TurnPlan:
     kb_context_block: Optional[str]
     kb_language_line: str
     context: Optional[Any]  # TurnToolContext on tool-carrying turns, else None
+    # The systematic KB path: its excerpts are merged into the request,
+    # never part of the conversation.
+    systematic_kb: bool = False
 
 
 def _param_size(llm) -> float:
@@ -77,11 +80,18 @@ def plan_turn(
     starred_messages: Optional[List[str]] = None,
     web_search_enabled: bool = False,
     effort_section: Optional[str] = None,
+    context_count: bool = False,
 ) -> TurnPlan:
     """Decide the turn's mode and build the runner bundle.
 
     ``retrieve`` is only called in systematic mode: agentic mode defers
     retrieval to the model's tool call, and plain mode has no KB.
+
+    ``context_count=True`` plans the NEXT turn for the context panel
+    (``/context``, #608), not a turn: nothing is retrieved, a systematic
+    assistant keeps its KB system prompt and zero tools with no excerpt
+    block (instead of the plain fallback an empty retrieval takes), and no
+    ``Turn ...`` line is logged.
 
     ``effort_section`` is the graded reasoning instruction for this turn
     (1.1.2, ``src.agents.reasoning_effort``) or ``None`` when the level needs
@@ -131,7 +141,7 @@ def plan_turn(
     web = web_search_enabled and wire_capable
 
     def _log_web(mode_allows_tools: bool) -> None:
-        if not web_search_enabled:
+        if not web_search_enabled or context_count:
             return
         if web and mode_allows_tools:
             logger.info(
@@ -156,10 +166,11 @@ def plan_turn(
             )
         budget = get_prompting_strategy(_param_size(llm))["kb_token_budget"]
         _log_web(mode_allows_tools=True)
-        logger.info(
-            f"Turn mode: agentic KB (kb_id={getattr(llm, 'kb_id', None)}, "
-            f"decided_by={decided_by}, web_search={'on' if web else 'off'})"
-        )
+        if not context_count:
+            logger.info(
+                f"Turn mode: agentic KB (kb_id={getattr(llm, 'kb_id', None)}, "
+                f"decided_by={decided_by}, web_search={'on' if web else 'off'})"
+            )
         return TurnPlan(
             system_prompt=build_kb_agentic_system_prompt(
                 llm,
@@ -178,8 +189,23 @@ def plan_turn(
             ),
         )
 
+    if context_count and should_use_kb(llm):
+        return TurnPlan(
+            system_prompt=build_kb_system_prompt(
+                llm,
+                custom_prompt=custom_prompt,
+                starred_messages=starred_messages,
+                effort_section=effort_section,
+            ),
+            tools=[],
+            kb_context_block=None,
+            kb_language_line="",
+            context=None,
+            systematic_kb=True,
+        )
+
     # Systematic: retrieve() encapsulates is_attached + tier + failure policy.
-    excerpts = retrieve()
+    excerpts = [] if context_count else retrieve()
     if excerpts:
         # Name the gate that kept this KB turn off the agentic path (#298).
         if flag is False:
@@ -211,6 +237,7 @@ def plan_turn(
             kb_context_block=build_kb_context_block(excerpts=excerpts, question=question),
             kb_language_line=answer_language_line(question),
             context=None,
+            systematic_kb=True,
         )
 
     if not getattr(llm, "is_attached_to_kb", False):
@@ -220,9 +247,10 @@ def plan_turn(
     else:
         plain_reason = "KB retrieval returned no excerpts"
     _log_web(mode_allows_tools=True)
-    logger.info(
-        f"Turn mode: plain (reason={plain_reason}, " f"web_search={'on' if web else 'off'})"
-    )
+    if not context_count:
+        logger.info(
+            f"Turn mode: plain (reason={plain_reason}, " f"web_search={'on' if web else 'off'})"
+        )
     # Zero tools in plain mode (#129): the calculator was a demo tool whose
     # scaffolding cost hurt every model (and wrecked small ones) for no product
     # value outside KB turns. The web toggle is the ONE exception (#310):
