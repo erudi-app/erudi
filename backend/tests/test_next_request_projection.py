@@ -64,16 +64,33 @@ def _states():
     }
 
 
-@pytest.mark.parametrize("name", list(_states()))
-async def test_the_warning_projection_is_the_pure_function(name):
+# ``(projected_tokens, conversation_tokens)`` as the warning's projection
+# computed them BEFORE it was extracted into ``project_next_request``
+# (runner.py at d4c3e61), on these states, with this overhead, at 80 %.
+# Literal on purpose: the extraction must not move a single token.
+_GOLDEN = {
+    ("one-exchange", 10_000): (200, 200),
+    ("one-exchange", 4096): (200, 200),
+    ("long", 10_000): (4509, 11180),
+    ("long", 4096): (1798, 11180),
+    ("summary", 10_000): (1080, 1080),
+    ("summary", 4096): (1080, 1080),
+    ("kb-round", 10_000): (291, 291),
+    ("kb-round", 4096): (291, 291),
+    ("summary-long", 10_000): (4616, 14328),
+    ("summary-long", 4096): (1185, 14328),
+}
+
+
+@pytest.mark.parametrize("name, window", list(_GOLDEN))
+async def test_the_projection_keeps_the_pre_extraction_numbers(name, window):
     state = _states()[name]
     via_method = await AgentRunner()._project_next_request(
-        _agent_with_state(state), {}, 10_000, overhead=_OVERHEAD, compaction_threshold=80
+        _agent_with_state(state), {}, window, overhead=_OVERHEAD, compaction_threshold=80
     )
-    pure = project_next_request(
-        state, 10_000, overhead=_OVERHEAD, compaction_threshold=80, allocated_window=None
-    )
-    assert via_method == (pure.projected_tokens, pure.conversation_tokens)
+    pure = project_next_request(state, window, overhead=_OVERHEAD, compaction_threshold=80)
+    assert via_method == _GOLDEN[(name, window)]
+    assert (pure.projected_tokens, pure.conversation_tokens) == _GOLDEN[(name, window)]
 
 
 async def test_the_method_still_says_nothing_on_an_empty_thread():
