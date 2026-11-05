@@ -446,7 +446,9 @@ red "Please select a model" and the composer is blocked; the panel's Model butto
 picking a model there unblocks sending (Compact and Context then say to pick a model first and ask
 the backend nothing). The composer also stays blocked until the conversation's
 values are loaded, so no turn goes out without them; when the conversation cannot be read, an error
-line with a Retry button shows above the composer and runs the load again. Model is disabled while an answer streams.
+line with a Retry button shows above the composer and runs the load again. Model and Context are
+disabled from the moment a message is sent until its answer starts, and a context panel opened
+while the answer streams goes when the turn ends (it describes a request already sent).
 
 The same commands are typed in the composer. Their names are fixed English identifiers in every
 interface language (`frontend/src/utils/slashCommands.js`); their descriptions and popups are
@@ -518,12 +520,15 @@ closes the help alone. An engine failure that opens its dialog closes any comman
   stays usable while an answer streams, so the backend can answer that the model is busy. What
   follows the answer happens only while the page still shows that conversation:
   - A summary re-reads the conversation, the separator appears below the last answer, and the
-    `/context` panels go.
+    `/context` panels go. The status row waits for that re-read at most a minute, so the
+    conversation is always unlocked (a re-read that lands later still shows).
   - `{"summarized": 0}` shows "Nothing to compact yet." for a few seconds and re-reads nothing.
   - A conversation whose model is gone (`no_model`) is loaded again, so its header asks for a
     model, and the notice says to pick one.
   - A conversation deleted meanwhile (404) is left for the new-conversation page, which shows
-    "This conversation no longer exists." (no re-read: it could only fail).
+    "This conversation no longer exists." (no re-read: it could only fail). The page hands the
+    notice over in the history entry's state and clears it from there once read, so a reload of
+    the window does not show it again.
   - Every other refusal or failure shows its message above the composer until it is closed or the
     next command runs — the model is busy, the last question has no answer yet, the summary could
     not be written (nothing was changed), the separator could not be saved, "The summary failed:
@@ -546,11 +551,11 @@ closes the help alone. An engine failure that opens its dialog closes any comman
   conversation is past its compaction threshold or the next request would not fit the window
   (the next turn summarizes first), or that no window is known (counts without shares). Opening it
   never loads the model. The panels are a list of their own, never part of the messages and never
-  stored: each has a close button, and sending a message, the re-read after `/compact`, opening
-  another conversation or reloading the page removes them; a usage read that lands after any of
-  these is dropped. A new panel brings the end of the thread into view; closing one never moves
-  it. A read that fails says the usage could not be read; for a conversation whose model is gone
-  it loads the conversation again and says to pick a model first.
+  stored: each has a close button, and sending a message, the end of its turn, the re-read after
+  `/compact`, opening another conversation or reloading the page removes them; a usage read that
+  lands after any of these is dropped. A new panel brings the end of the thread into view;
+  closing one never moves it. A read that fails says the usage could not be read; for a
+  conversation whose model is gone it loads the conversation again and says to pick a model first.
 
 The new-conversation page carries the same header and commands, editing the draft the conversation
 is created from. `/compact` and `/context` are neither in its drop-up nor in its header panel;
