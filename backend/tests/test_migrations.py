@@ -341,6 +341,86 @@ def test_compaction_threshold_columns_backfill_existing_rows(fresh_cluster):
 
 
 @pytest.mark.integration
+def test_model_defaults_table_lands_on_a_populated_database(fresh_cluster):
+    # #609: the per-model conversation defaults get their own table, keyed by
+    # the model and deleted with it. A 1.1.3 database (settings, models and a
+    # conversation) migrates without touching a row, starts with nothing
+    # saved, and the chain still equals the models.
+    url = fresh_cluster.sqlalchemy_url
+    cfg = _alembic_config(url)
+    command.upgrade(cfg, "a3e8c6f1d742")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(text("INSERT INTO user_settings (web_search_enabled) VALUES (true)"))
+            for link in ("org/kept", "org/deleted"):
+                conn.execute(
+                    text(
+                        "INSERT INTO llms (name, local, link, type, quantized, is_base, "
+                        "category, is_attached_to_kb) VALUES (:link, 1, :link, 'qwen', true, "
+                        "false, 'general', false)"
+                    ),
+                    {"link": link},
+                )
+            conn.execute(
+                text(
+                    "INSERT INTO conversations (llm_id, name, web_search_enabled) "
+                    "SELECT id, 'Old chat', false FROM llms WHERE link='org/deleted'"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    run_migrations(fresh_cluster)
+
+    assert _alembic_version(url) == _head_revision(cfg)
+    command.check(cfg)
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            columns = {c["name"]: c for c in inspect(conn).get_columns("model_defaults")}
+            (foreign_key,) = inspect(conn).get_foreign_keys("model_defaults")
+            assert conn.execute(text("SELECT count(*) FROM model_defaults")).scalar() == 0
+            assert conn.execute(text("SELECT count(*) FROM llms")).scalar() == 2
+            assert conn.execute(text("SELECT count(*) FROM conversations")).scalar() == 1
+            conn.execute(
+                text(
+                    "INSERT INTO model_defaults (llm_id, reasoning_effort) "
+                    "SELECT id, 'high' FROM llms"
+                )
+            )
+            conn.execute(text("DELETE FROM llms WHERE link='org/deleted'"))
+            remaining = conn.execute(
+                text(
+                    "SELECT l.link FROM model_defaults d JOIN llms l ON l.id = d.llm_id "
+                    "ORDER BY l.link"
+                )
+            ).scalars()
+            assert list(remaining) == ["org/kept"]
+            # The conversation survives its model, as before (SET NULL).
+            assert conn.execute(text("SELECT llm_id FROM conversations")).scalar() is None
+    finally:
+        engine.dispose()
+
+    assert columns["llm_id"]["nullable"] is False
+    for name in (
+        "reasoning_effort",
+        "temperature",
+        "top_p",
+        "compaction_threshold",
+        "web_search_enabled",
+        "custom_prompt",
+    ):
+        assert columns[name]["nullable"] is True, name
+    assert str(columns["reasoning_effort"]["type"]) == "VARCHAR(8)"
+    assert str(columns["compaction_threshold"]["type"]) == "SMALLINT"
+    assert str(columns["web_search_enabled"]["type"]) == "BOOLEAN"
+    assert str(columns["custom_prompt"]["type"]) == "TEXT"
+    assert foreign_key["referred_table"] == "llms"
+    assert foreign_key["options"].get("ondelete") == "CASCADE"
+
+
+@pytest.mark.integration
 def test_backup_database_writes_a_dump(fresh_cluster):
     # pg_dump (custom format) of the LIVE cluster produces a non-empty snapshot.
     engine = create_engine(fresh_cluster.sqlalchemy_url)

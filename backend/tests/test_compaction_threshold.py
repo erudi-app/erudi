@@ -372,17 +372,11 @@ def test_the_entities_default_to_80(test_db_session, mock_llm):
 # ===================== repository =====================
 
 
-def test_the_global_default_reads_80_without_a_row(test_db_session):
-    repo = User_Settings_Repository(test_db_session)
-    assert repo.get_default_compaction_threshold() == 80
-    assert test_db_session.query(UserSettings).count() == 0
-
-
 def test_the_global_default_is_set(test_db_session):
     repo = User_Settings_Repository(test_db_session)
     repo.set_default_compaction_threshold(repo.get_or_create(), 65)
     test_db_session.commit()
-    assert repo.get_default_compaction_threshold() == 65
+    assert repo.get().default_compaction_threshold == 65
 
 
 # ===================== endpoints: the lifecycle =====================

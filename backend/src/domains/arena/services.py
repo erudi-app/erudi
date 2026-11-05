@@ -36,6 +36,7 @@ from src.agents.reasoning_effort import plan_reasoning_effort
 from src.agents.runner import AgentRunner, GenParams, IMAGES_IGNORED_NOTICE
 from src.database.generation_hints import resolve_sampling_defaults
 from src.domains.arena.repository import ArenaRepository
+from src.domains.llms.conversation_defaults import read_conversation_defaults
 from src.domains.llms.repository import detect_supports_vision
 from src.domains.user_settings.repository import User_Settings_Repository
 from src.domains.arena.schemas import ArenaQueryPayload
@@ -147,9 +148,16 @@ class ArenaService:
         # the GLOBAL user setting directly (kept deliberately simple).
         settings_repo = User_Settings_Repository(self.db)
         web_search_enabled = await run_in_threadpool(settings_repo.get_web_search_enabled)
-        # 1.1.2: same reasoning -- an arena panel has no conversation row, so
-        # its reasoning effort is the GLOBAL default, read per turn.
-        effort_level = await run_in_threadpool(settings_repo.get_default_reasoning_effort)
+        # #609: effort, temperature and top_p a panel leaves out (None) follow
+        # the model like a new conversation does: the values saved for it with
+        # ``/config global``, else the Settings effort and the model's
+        # recommendation (#388), else a constant. Explicit values win.
+        resolved = await run_in_threadpool(read_conversation_defaults, self.db, llm)
+        effort_level = (
+            resolved["reasoning_effort"].value
+            if payload.reasoning_effort is None
+            else payload.reasoning_effort
+        )
         effort_plan = await run_in_threadpool(plan_reasoning_effort, llm, effort_level)
         plan = await run_in_threadpool(
             plan_turn,
@@ -161,13 +169,11 @@ class ArenaService:
             effort_section=effort_plan.prompt_section,
         )
 
-        # Omitted values resolve to the MODEL's defaults (#388); explicit wins.
-        defaults = resolve_sampling_defaults(llm)
         params = GenParams(
-            temperature=defaults.temperature
+            temperature=resolved["temperature"].value
             if payload.temperature is None
             else payload.temperature,
-            top_p=defaults.top_p if payload.top_p is None else payload.top_p,
+            top_p=resolved["top_p"].value if payload.top_p is None else payload.top_p,
             # Only the FALLBACK output budget (same contract as a conversation):
             # the per-call budget computed from the running window
             # (``src.agents.output_budget``) overrides it whenever the engine
@@ -175,7 +181,7 @@ class ArenaService:
             # runs with. ``payload.max_new_tokens`` is deliberately not read --
             # the arena panel no longer offers the control, and the field stays
             # accepted only so an older client is not rejected.
-            max_tokens=defaults.max_tokens,
+            max_tokens=resolve_sampling_defaults(llm).max_tokens,
         )
 
         # Safety net (#133/#212): unless the model is positively vision-capable,

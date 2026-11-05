@@ -17,6 +17,9 @@ Example:
 from pydantic import BaseModel, Field, model_validator
 from typing import List, Optional
 
+from src.domains.conversations.schemas import Temperature, TopP
+from src.domains.user_settings.schemas import ReasoningEffort
+
 
 class ArenaQueryPayload(BaseModel):
     """Request schema for stateless arena queries with generation parameters.
@@ -30,8 +33,9 @@ class ArenaQueryPayload(BaseModel):
             only when images or documents are attached).
         images: Optional base64 data-URL images attached to the question (vision models).
         attachments: Local filesystem paths of documents/folders attached to the question.
-        temperature: Sampling temperature (0.0=deterministic, 2.0=creative, default=0.1).
-        top_p: Nucleus sampling threshold (0.0-1.0, default=0.5).
+        reasoning_effort: How much the model may deliberate (None follows the model).
+        temperature: Sampling temperature, 0.0-2.0 (None follows the model).
+        top_p: Nucleus sampling threshold, 0.0-1.0 (None follows the model).
         max_new_tokens: Accepted and ignored -- the output budget comes from the
             model's context window, not from the client.
         custom_prompt: Optional additional instructions appended to system prompt.
@@ -57,20 +61,20 @@ class ArenaQueryPayload(BaseModel):
             "to the question; read on this machine, never uploaded (#492)"
         ),
     )
-    # None = "use the model's own defaults" (#388), resolved by the service from
-    # the Llm row (captured generation_config, else the neutral constants);
-    # explicit wins.
-    temperature: Optional[float] = Field(
+    # None = "follow the model" (#388, #609): the service resolves the value
+    # saved for the model with ``/config global``, else the Settings effort or
+    # the model's recommended sampling, else a constant. Explicit wins.
+    reasoning_effort: Optional[ReasoningEffort] = Field(
         default=None,
-        ge=0.0,
-        le=2.0,
-        description="Sampling temperature (0.0-2.0); None resolves the model's default (#388)",
+        description="Reasoning effort; None resolves the model's saved value, else the Settings default",
     )
-    top_p: Optional[float] = Field(
+    temperature: Optional[Temperature] = Field(
         default=None,
-        ge=0.0,
-        le=1.0,
-        description="Nucleus sampling threshold (0.0-1.0); None resolves the model's default (#388)",
+        description="Sampling temperature (0.0-2.0); None resolves the model's saved or recommended value",
+    )
+    top_p: Optional[TopP] = Field(
+        default=None,
+        description="Nucleus sampling threshold (0.0-1.0); None resolves the model's saved or recommended value",
     )
     # Accepted, never read. The output budget is computed per model call from
     # the context window the model is running in (``src.agents.output_budget``),

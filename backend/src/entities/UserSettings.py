@@ -2,12 +2,13 @@
 
 Singleton table (one row) holding app-wide user preferences, mirroring the
 ``StartupVariables`` singleton pattern. First occupant: the global web-search
-toggle (issue #310) — the DEFAULT for new conversations. Each conversation
-copies this value at creation and owns its flag afterwards; changing the
-global setting never retro-affects existing conversations. It also carries the
-interface language, the automatic-update preference, the inference
-backend the app runs models on, and the other defaults new conversations copy
-(reasoning effort, compaction threshold).
+toggle (issue #310) — the DEFAULT for new conversations on a model without a
+saved value (#609). Each conversation takes its value at creation and owns its
+flag afterwards; changing the global setting never retro-affects existing
+conversations. It also carries the interface language, the automatic-update
+preference, the inference backend the app runs models on, and the other
+defaults new conversations start from (reasoning effort, compaction
+threshold).
 
 Example:
     from src.entities.UserSettings import UserSettings
@@ -62,13 +63,15 @@ class UserSettings(Base):
             CPU build even when an NVIDIA GPU is present. Read once per boot,
             after the migrations, so the choice needs an app restart to apply.
         default_reasoning_effort: One of REASONING_EFFORT_LEVELS, the GLOBAL
-            default new conversations copy at creation. "medium" by default:
-            the level at which a model that reasons naturally behaves exactly
-            as it did before the setting existed. Arena panels, which have no
-            conversation row, read this value on every turn.
+            default new conversations start at on a model without a saved
+            level (#609). "medium" by default: the level at which a model that
+            reasons naturally behaves exactly as it did before the setting
+            existed. Arena panels, which have no conversation row, read it on
+            every turn under the same rule.
         default_compaction_threshold: One of COMPACTION_THRESHOLDS (50-90,
             step 5), the GLOBAL share of the working window, in percent, at
-            which new conversations compact; each copies it at creation. 80
+            which new conversations on a model without a saved threshold
+            compact; each copies it at creation. 80
             by default, the value every row that predates the column holds.
             Arena panels never compact, so nothing else reads it.
 

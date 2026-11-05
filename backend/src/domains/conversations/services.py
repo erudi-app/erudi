@@ -34,8 +34,8 @@ from src.agents.runner import (
 )
 from src.database.generation_hints import FALLBACK_MAX_TOKENS, resolve_sampling_defaults
 from src.domains.conversations.repository import ConversationRepository, MessageRepository
+from src.domains.llms.conversation_defaults import SOURCE_SAVED, read_conversation_defaults
 from src.domains.llms.repository import detect_supports_vision
-from src.domains.user_settings.repository import User_Settings_Repository
 from src.domains.conversations.schemas import ConversationQuery
 from src.entities.Conversation import Conversation
 from src.entities.Llm import Llm
@@ -183,47 +183,47 @@ class ConversationService:
         temperature: Optional[float] = None,
         top_p: Optional[float] = None,
         max_tokens: Optional[int] = None,
-        custom_prompt: str = "",
+        custom_prompt: Optional[str] = None,
         web_search_enabled: Optional[bool] = None,
         reasoning_effort: Optional[str] = None,
         compaction_threshold: Optional[int] = None,
     ) -> Conversation:
         """Create a new conversation with the given LLM and generation params.
 
-        ``temperature`` / ``top_p`` / ``max_tokens`` left ``None`` resolve to the
-        MODEL's defaults (#388: the captured generation_config, else the neutral
-        constants, see ``src.database.generation_hints``); an explicit value
-        wins. Mirrors
-        ``web_search_enabled=None``, which copies the GLOBAL user-settings
-        default at creation (#310), ``reasoning_effort=None``, which copies
-        the global default level the same way (1.1.2), and
-        ``compaction_threshold=None``, which copies the global default
-        threshold (#607). The conversation owns its values afterwards -- later
-        model/global changes never retro-affect it.
+        Every value left ``None`` is resolved for the model by
+        ``resolve_conversation_defaults`` (#609): the value saved for it with
+        ``/config global``, else the global user setting (effort, web search,
+        threshold) or the model's recommendation (temperature, top_p), else a
+        constant; custom instructions default to empty. ``max_tokens`` comes
+        from the model's own defaults (#388). An explicit value always wins.
+        The conversation owns its values afterwards -- later changes to the
+        model's saved values or to the settings never retro-affect it.
+
+        Raises:
+            ModelNotFoundException: If ``llm_id`` does not exist.
         """
         logger.info(f"Creating new conversation with LLM {llm_id}")
-        if temperature is None or top_p is None or max_tokens is None:
-            defaults = resolve_sampling_defaults(self.conversation_repo.get_llm_by_id(llm_id))
-            temperature = defaults.temperature if temperature is None else temperature
-            top_p = defaults.top_p if top_p is None else top_p
-            max_tokens = defaults.max_tokens if max_tokens is None else max_tokens
-        settings_repo = User_Settings_Repository(self.db)
-        if web_search_enabled is None:
-            web_search_enabled = settings_repo.get_web_search_enabled()
-        if reasoning_effort is None:
-            reasoning_effort = settings_repo.get_default_reasoning_effort()
-        if compaction_threshold is None:
-            compaction_threshold = settings_repo.get_default_compaction_threshold()
+        llm = self.conversation_repo.get_llm_by_id(llm_id)
+        resolved = read_conversation_defaults(self.db, llm)
+        sent = {
+            "reasoning_effort": reasoning_effort,
+            "temperature": temperature,
+            "top_p": top_p,
+            "compaction_threshold": compaction_threshold,
+            "web_search_enabled": web_search_enabled,
+            "custom_prompt": custom_prompt,
+        }
+        values = {
+            field: resolved[field].value if value is None else value
+            for field, value in sent.items()
+        }
+        if max_tokens is None:
+            max_tokens = resolve_sampling_defaults(llm).max_tokens
         return self.conversation_repo.create_conversation(
             llm_id=llm_id,
             name="New Conversation",
-            temperature=temperature,
-            top_p=top_p,
             max_tokens=max_tokens,
-            custom_prompt=custom_prompt,
-            web_search_enabled=web_search_enabled,
-            reasoning_effort=reasoning_effort,
-            compaction_threshold=compaction_threshold,
+            **values,
         )
 
     def update_conversation(
@@ -239,20 +239,82 @@ class ConversationService:
         reasoning_effort: Optional[str] = None,
         compaction_threshold: Optional[int] = None,
     ) -> Conversation:
-        """Partial update of conversation metadata (only non-None fields)."""
+        """Partial update of conversation metadata (only non-None fields).
+
+        Switching model (#609, the ``/model`` command): when ``llm_id`` differs
+        from the stored one (an unbound conversation's included), the new
+        model brings its own values in the same transaction:
+
+        - every value saved for it with ``/config global`` replaces the
+          conversation's, whatever this update carries for that field;
+        - ``temperature`` and ``top_p`` it has not saved take its
+          recommendation (``resolve_sampling_defaults``), and the
+          ``temperature`` / ``top_p`` of this update are ignored;
+        - ``reasoning_effort``, ``compaction_threshold``,
+          ``web_search_enabled`` and ``custom_prompt`` it has not saved take
+          this update's value when it carries one, else stay as they are;
+        - ``max_tokens``, when this update does not carry one, takes the new
+          model's fallback budget (``resolve_sampling_defaults``), as at
+          creation.
+
+        An update whose ``llm_id`` equals the stored one is an ordinary
+        partial update: nothing of the model is re-applied.
+
+        Once the repository has written the update, one INFO line names the
+        fields written (``Conversation updated``), and a switch adds one
+        naming what the new model brought.
+
+        Raises:
+            ConversationNotFoundException: If the conversation does not exist.
+            ModelNotFoundException: If the new ``llm_id`` does not exist
+                (nothing is changed).
+        """
         logger.info(f"Updating conversation {conversation_id}")
-        return self.conversation_repo.update_conversation(
-            conversation_id=conversation_id,
-            name=name,
-            llm_id=llm_id,
-            temperature=temperature,
-            top_p=top_p,
-            max_tokens=max_tokens,
-            custom_prompt=custom_prompt,
-            web_search_enabled=web_search_enabled,
-            reasoning_effort=reasoning_effort,
-            compaction_threshold=compaction_threshold,
+        conversation = self.conversation_repo.get_conversation_by_id(conversation_id)
+        resolved = None
+        if llm_id is not None and llm_id != conversation.llm_id:
+            new_llm = self.conversation_repo.get_llm_by_id(llm_id)
+            resolved = read_conversation_defaults(self.db, new_llm)
+            temperature = resolved["temperature"].value
+            top_p = resolved["top_p"].value
+            if max_tokens is None:
+                max_tokens = resolve_sampling_defaults(new_llm).max_tokens
+            if resolved["reasoning_effort"].source == SOURCE_SAVED:
+                reasoning_effort = resolved["reasoning_effort"].value
+            if resolved["compaction_threshold"].source == SOURCE_SAVED:
+                compaction_threshold = resolved["compaction_threshold"].value
+            if resolved["web_search_enabled"].source == SOURCE_SAVED:
+                web_search_enabled = resolved["web_search_enabled"].value
+            if resolved["custom_prompt"].source == SOURCE_SAVED:
+                custom_prompt = resolved["custom_prompt"].value
+        written = {
+            "name": name,
+            "llm_id": llm_id,
+            "temperature": temperature,
+            "top_p": top_p,
+            "max_tokens": max_tokens,
+            "custom_prompt": custom_prompt,
+            "web_search_enabled": web_search_enabled,
+            "reasoning_effort": reasoning_effort,
+            "compaction_threshold": compaction_threshold,
+        }
+        updated = self.conversation_repo.update_conversation(
+            conversation_id=conversation_id, **written
         )
+        logger.info(
+            f"Conversation updated: id={conversation_id}, "
+            f"fields={[field for field, value in written.items() if value is not None]}"
+        )
+        if resolved is not None:
+            saved = [f for f, r in resolved.items() if r.source == SOURCE_SAVED]
+            logger.info(
+                f"Conversation {conversation_id} switched to model {llm_id}: "
+                f"saved=[{', '.join(saved)}], "
+                f"temperature={temperature} ({resolved['temperature'].source}), "
+                f"top_p={top_p} ({resolved['top_p'].source}), "
+                f"max_tokens={max_tokens}"
+            )
+        return updated
 
     # ===================== Deletion (DB + checkpointer thread) =====================
     async def delete_conversation(self, conversation_id: int) -> None:
@@ -451,8 +513,8 @@ class ConversationService:
                 retrieve=lambda: self._retrieve_kb_excerpts(llm, payload.question),
                 custom_prompt=payload.custom_prompt,
                 starred_messages=starred,
-                # #310: the conversation OWNS its web toggle (copied from the
-                # global default at creation).
+                # #310: the conversation OWNS its web toggle (set at creation from
+                # the model's saved defaults or the global default, #609).
                 web_search_enabled=bool(conversation.web_search_enabled),
                 effort_section=effort_plan.prompt_section,
             )
@@ -470,6 +532,13 @@ class ConversationService:
                 # the control it came from is gone (the field is still accepted
                 # so an older client is not rejected).
                 max_tokens=conversation.max_tokens or FALLBACK_MAX_TOKENS,
+            )
+            logger.info(
+                f"Turn settings: conversation={conversation_id}, model={llm.id}, "
+                f"effort={conversation.reasoning_effort}, temperature={params.temperature}, "
+                f"top_p={params.top_p}, threshold={conversation.compaction_threshold}, "
+                f"web_search_toggle={bool(conversation.web_search_enabled)}, "
+                f"custom_prompt_chars={len(payload.custom_prompt or '')}"
             )
 
             # Safety net (#133/#212): unless the model is positively vision-
@@ -512,7 +581,8 @@ class ConversationService:
                     supports_vision=supports_vision,
                     effort_plan=effort_plan,
                     # #607: the conversation OWNS its compaction threshold
-                    # (copied from the global default at creation); a lowered
+                    # (set at creation from the model's saved defaults or the global
+                    # default, #609); a lowered
                     # one compacts on this very turn.
                     compaction_threshold=conversation.compaction_threshold,
                     emit_events=True,

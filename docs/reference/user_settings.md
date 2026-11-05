@@ -5,16 +5,22 @@ web-search default, the interface language, the automatic-update preference, the
 inference backend, the default reasoning effort and the default compaction threshold.
 
 `default_reasoning_effort` (`none`, `low`, `medium`, `high`, `xhigh`, `medium` by default)
-is what a NEW conversation copies at creation and what an arena turn runs at; an existing
-conversation keeps the level it copied. See
+is what a NEW conversation starts at and what an arena panel runs at, on every model that has
+no level saved with `/config global`; an existing conversation keeps the level it started
+at. See
 [Conversations](../guides/conversations.md#how-much-the-model-may-think-reasoning-effort).
 
 `default_compaction_threshold` (a whole percent from 50 to 90 in steps of 5, 80 by
-default) is the share of the working context window at which a NEW conversation compacts;
-the conversation copies it at creation and keeps it, so a later change never touches an
-existing conversation. Arena turns never compact and do not read it. A `PUT` carrying only
+default) is the share of the working context window at which a NEW conversation compacts,
+on every model that has no threshold saved with `/config global`; the conversation copies
+it at creation and keeps it, so a later change never touches an existing conversation. Arena turns never compact and do not read it. A `PUT` carrying only
 this field is a valid update; a value off the scale is a 422. See
 [Conversations](../guides/conversations.md#how-conversation-state-is-kept).
+
+`web_search_enabled` is, the same way, the starting switch of a new conversation on a model
+without a saved one, and the switch every arena panel follows. The values saved per model
+are described in
+[Conversations](../guides/conversations.md#conversation-defaults-per-model).
 
 `inference_backend` (`auto` or `cpu`) is the one setting the backend reads outside a
 request: the FastAPI lifespan reads it once per boot, after the migrations, and swaps
