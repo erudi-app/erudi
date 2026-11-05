@@ -122,6 +122,20 @@ describe("UpdateBanner phases", () => {
     expect(window.updaterAPI.installNow).toHaveBeenCalledTimes(1);
   });
 
+  it.each(["error", "download-cancelled"])(
+    "offers Download again, with a dismiss, when a download ends in %s",
+    (event) => {
+      render(<UpdateBanner />);
+      emit({ event: "update-available", version: "1.2.0", downloading: true });
+      emit({ event: "download-progress", percent: 30 });
+
+      emit({ event });
+
+      expect(screen.getByRole("button", { name: "Download" })).toBeDefined();
+      expect(screen.getByLabelText(DISMISS)).toBeDefined();
+    }
+  );
+
   it("keeps showing a downloaded update when a later background check errors", () => {
     render(<UpdateBanner />);
     emit({ event: "update-downloaded", version: "1.2.0" });

@@ -5,7 +5,7 @@
  * Three switches, persisted in the user settings and handed to main by the
  * renderer: Check for updates (notify only), Download updates automatically,
  * Install downloaded updates when I quit. The two opt-ins only act while the
- * check is on.
+ * check is on. `updaterWiring.js` applies these decisions to the library.
  *
  * electron-updater 6 holds two flags. `autoDownload` makes a check download
  * what it finds. `autoInstallOnAppQuit` is read at the moment a download
@@ -19,25 +19,33 @@
  *   and cannot be told otherwise afterwards. With the flag off, the library
  *   keeps the local server that serves the update to Squirrel listening, so
  *   turning install on later hands it over by asking Squirrel to check again.
+ *   Squirrel says it holds the update with its own `update-downloaded`; until
+ *   then the hand-off is only requested, and it can still fail.
  */
 
-/** Nothing armed yet: no quit handler registered, nothing handed to Squirrel. */
-export const NO_INSTALL_ARMED = Object.freeze({ quitHandler: false, handedOffVersion: null });
+/**
+ * Nothing armed yet. `quitHandler`: the library's quit handler is registered
+ * (Windows, Linux). `handOffRequestedVersion`: Squirrel.Mac was asked to fetch
+ * that version. `handedOffVersion`: Squirrel.Mac holds that version.
+ */
+export const NO_INSTALL_ARMED = Object.freeze({
+  quitHandler: false,
+  handOffRequestedVersion: null,
+  handedOffVersion: null,
+});
 
 /**
  * The effective switches from the snapshot the renderer sent.
  *
  * A switch is `true`, `false`, or unknown (`null`, missing, anything else) when
- * the settings could not be read. Unknown download or install means off:
- * nothing is fetched or installed without a known yes. Unknown check means
- * on: the check only notifies, and an unreadable setting must not strand an
- * install on an old version without a word.
+ * the settings could not be read. Unknown means off for all three: no request
+ * leaves without a known yes, and the next launch reads the settings again.
  *
  * @param {{check?: unknown, download?: unknown, install?: unknown} | null | undefined} snapshot
  * @returns {{check: boolean, download: boolean, install: boolean}}
  */
 export function resolveUpdatePreferences(snapshot) {
-  const check = snapshot?.check !== false;
+  const check = snapshot?.check === true;
   return {
     check,
     download: check && snapshot?.download === true,
@@ -57,21 +65,35 @@ export function resolveUpdatePreferences(snapshot) {
  * @param {{quitHandler: boolean, handedOffVersion: string | null}} input.armed
  *   What is already armed to install at quit.
  * @param {boolean} input.polling Whether the periodic check is running.
+ * @param {boolean} input.automaticDownload Whether a download started by a
+ *   check (Download updates automatically) is running.
  * @returns {{
  *   autoDownload: boolean,
  *   autoInstallOnAppQuit: boolean,
  *   startPolling: boolean,
  *   stopPolling: boolean,
  *   armInstall: "quit-handler" | "squirrel" | null,
+ *   cancelDownload: boolean,
  * }} `armInstall` names how to arm the install of the update already on
  *   disk: register the library's quit handler (Windows, Linux) or hand the
- *   update to Squirrel (macOS).
+ *   update to Squirrel (macOS). `cancelDownload`: the effective Download
+ *   switch went off while an automatic download runs.
  */
-export function planPreferenceChange({ preferences, platform, downloadedVersion, armed, polling }) {
+export function planPreferenceChange({
+  preferences,
+  platform,
+  downloadedVersion,
+  armed,
+  polling,
+  automaticDownload,
+}) {
   let armInstall = null;
   if (preferences.install && downloadedVersion) {
     if (platform === "darwin") {
-      armInstall = armed.handedOffVersion === downloadedVersion ? null : "squirrel";
+      const asked =
+        armed.handedOffVersion === downloadedVersion ||
+        armed.handOffRequestedVersion === downloadedVersion;
+      armInstall = asked ? null : "squirrel";
     } else {
       armInstall = armed.quitHandler ? null : "quit-handler";
     }
@@ -82,33 +104,8 @@ export function planPreferenceChange({ preferences, platform, downloadedVersion,
     startPolling: preferences.check && !polling,
     stopPolling: !preferences.check && polling,
     armInstall,
+    cancelDownload: automaticDownload && !preferences.download,
   };
-}
-
-/**
- * What the library armed by itself when a download finished, from the value
- * `autoInstallOnAppQuit` had at that moment.
- *
- * Windows and Linux: the quit handler, once registered, stays for the life of
- * the process. macOS: Squirrel keeps the update it was handed; a later
- * download made with install off hands nothing over and leaves the earlier
- * one in place.
- *
- * @param {object} input
- * @param {string} input.platform `process.platform`.
- * @param {string} input.version The version that finished downloading.
- * @param {boolean} input.autoInstallOnAppQuit The flag at download time.
- * @param {{quitHandler: boolean, handedOffVersion: string | null}} input.armed
- * @returns {{quitHandler: boolean, handedOffVersion: string | null}}
- */
-export function installArmedAfterDownload({ platform, version, autoInstallOnAppQuit, armed }) {
-  if (!autoInstallOnAppQuit) {
-    return armed;
-  }
-  if (platform === "darwin") {
-    return { ...armed, handedOffVersion: version };
-  }
-  return { ...armed, quitHandler: true };
 }
 
 /**
@@ -164,6 +161,66 @@ export function bannerStateAfter(state, payload) {
       return { phase: "downloading", version: state?.version ?? "", percent: payload.percent };
     case "update-downloaded":
       return { phase: "ready", version: payload.version };
+    case "error":
+    case "download-cancelled":
+      // A download that failed or was cancelled: the update is still there.
+      return state?.phase === "downloading"
+        ? { phase: "available", version: state.version }
+        : state;
+    default:
+      return state;
+  }
+}
+
+/**
+ * The updater state main reports (`updater:get-state`) and the Update Erudi
+ * card keeps, after an updater event.
+ *
+ * `{phase, version, percent, downloadedVersion}`; phases: "idle" |
+ * "checking" | "available" | "up-to-date" | "downloading" | "downloaded" |
+ * "error". Once a version is on disk (`downloadedVersion`), the periodic
+ * check cannot take it back to "available" for that same version, nor to
+ * "checking", "up-to-date" or "error": the update can still be installed.
+ * A download that fails or is cancelled goes back to "available".
+ *
+ * @param {{phase: string, version: string | null, percent: number,
+ *   downloadedVersion: string | null}} state
+ * @param {{event: string, version?: string, percent?: number}} payload
+ * @returns {object} The next state (the same object when unchanged).
+ */
+export function updaterStateAfter(state, payload) {
+  const onDisk = state.downloadedVersion ?? null;
+  switch (payload.event) {
+    case "checking-for-update":
+      return onDisk ? state : { ...state, phase: "checking" };
+    case "update-available":
+      if (onDisk && payload.version === onDisk) {
+        return state.phase === "downloaded"
+          ? state
+          : { ...state, phase: "downloaded", version: onDisk, percent: 100 };
+      }
+      return { ...state, phase: "available", version: payload.version ?? null, percent: 0 };
+    case "update-not-available":
+      return onDisk ? state : { ...state, phase: "up-to-date", version: null, percent: 0 };
+    case "download-progress":
+      return { ...state, phase: "downloading", percent: payload.percent ?? 0 };
+    case "update-downloaded":
+      return {
+        ...state,
+        phase: "downloaded",
+        version: payload.version ?? null,
+        percent: 100,
+        downloadedVersion: payload.version ?? null,
+      };
+    case "error":
+    case "download-cancelled":
+      if (state.phase === "downloading") {
+        return { ...state, phase: "available", percent: 0 };
+      }
+      if (payload.event === "download-cancelled" || onDisk) {
+        return state;
+      }
+      return { ...state, phase: "error", percent: 0 };
     default:
       return state;
   }

@@ -124,7 +124,9 @@ describe("decideUpdateNotice", () => {
     ).toEqual({ action: "show", version: "1.1.6", lines: null, explainOptIns: false });
   });
 
-  it("marks a downgrade as seen without a word", () => {
+  it("says nothing on a downgrade and keeps the higher version recorded", () => {
+    // Recording 1.1.3 would bring back a dialog already dismissed for 1.1.4
+    // once the user upgrades again.
     expect(
       decideUpdateNotice({
         runningVersion: "1.1.3",
@@ -132,7 +134,7 @@ describe("decideUpdateNotice", () => {
         notes: notes("1.1.4"),
         hasUserData: true,
       })
-    ).toEqual({ action: "mark" });
+    ).toEqual({ action: "none" });
   });
 
   it("treats an unreadable last-seen version like a missing one", () => {
@@ -214,6 +216,40 @@ describe("releaseNotesToLines: notes are text only", () => {
     ]) {
       expect(releaseNotesToLines(notes), JSON.stringify(notes)).toBeNull();
     }
+  });
+});
+
+describe("releaseNotesToLines: bounded work on any input (P3-3)", () => {
+  const fast = (input) => {
+    const started = performance.now();
+    releaseNotesToLines(input);
+    return performance.now() - started;
+  };
+
+  it("handles 200k whitespace characters inside HTML quickly", () => {
+    expect(fast(`<p>a${" \n\t".repeat(70000)}b</p>`)).toBeLessThan(300);
+    expect(fast(" ".repeat(200000))).toBeLessThan(300);
+  });
+
+  it("handles unclosed scripts, comments and tags quickly", () => {
+    expect(fast("<script>".repeat(30000))).toBeLessThan(300);
+    expect(fast("<!--".repeat(50000))).toBeLessThan(300);
+    expect(fast("<".repeat(200000))).toBeLessThan(300);
+    expect(fast("<a".repeat(100000) + ">")).toBeLessThan(300);
+    expect(fast("&a".repeat(100000))).toBeLessThan(300);
+  });
+
+  it("reads at most 64 KB of notes", () => {
+    const lines = releaseNotesToLines(`<p>${"x".repeat(200000)}</p>`);
+    expect(lines.join("").length).toBeLessThanOrEqual(64 * 1024);
+  });
+
+  it("drops an unclosed script and everything after it", () => {
+    expect(releaseNotesToLines("<p>Kept</p><script>alert(1)<p>gone</p>")).toEqual(["Kept"]);
+  });
+
+  it("keeps a lone angle bracket as text", () => {
+    expect(releaseNotesToLines("<p>1 < 2 and <3</p>")).toEqual(["1 < 2 and <3"]);
   });
 });
 

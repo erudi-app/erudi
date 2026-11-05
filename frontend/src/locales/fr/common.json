@@ -84,7 +84,7 @@
     "title": "Mis à jour vers la {{version}}",
     "noNotes": "Les notes de cette version se trouvent sur sa page de release.",
     "releaseNotes": "Lire les notes de version",
-    "optIns": "Télécharger et installer les mises à jour sont désormais deux choix distincts dans Paramètres › Mises à jour, tous deux désactivés. « Rechercher des mises à jour » garde sa valeur : quand une nouvelle version sort, un bandeau vous prévient, et rien n'est téléchargé ni installé tant que vous n'activez pas ces choix ou n'appuyez pas sur le bouton."
+    "optIns": "Télécharger et installer les mises à jour sont désormais deux choix distincts dans Paramètres › Mises à jour, tous deux désactivés : rien n'est téléchargé ni installé tant que vous ne les activez pas ou n'appuyez pas sur le bouton. « Rechercher des mises à jour » garde sa valeur."
   },
   "engineSwitch": {
     "downloadTitle": "Un téléchargement est en cours",

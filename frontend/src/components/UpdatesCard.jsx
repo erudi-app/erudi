@@ -3,6 +3,7 @@ import { Download } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import SettingsCard from "./SettingsCard";
 import { formatPercent } from "../i18n/format";
+import { updaterStateAfter } from "../utils/updaterPolicy";
 import { createLogger } from "../utils/logger";
 
 const log = createLogger("UpdatesCard");
@@ -18,7 +19,9 @@ const log = createLogger("UpdatesCard");
  * control anywhere. This card is that control: check, download, install, on
  * demand.
  *
- * It follows the events rather than assuming what they will be. With
+ * It follows the events through the same reducer as main
+ * (`updaterStateAfter`): once a version is on disk, the periodic check that
+ * finds it again leaves Install now on the card. With
  * Download updates automatically on, `autoDownload` turns a check straight
  * into a download, so the Download button is offered only in the one state where it
  * is real -- an update found and not yet downloading. On mount it asks main
@@ -30,6 +33,8 @@ const log = createLogger("UpdatesCard");
  * started -- a background check that fails is main's business, not a
  * notification. No dialog, no popup.
  */
+const IDLE = { phase: "idle", version: null, percent: 0, downloadedVersion: null };
+
 export default function UpdatesCard() {
   const { t } = useTranslation();
   // The version this build is, not the one being offered.
@@ -37,10 +42,12 @@ export default function UpdatesCard() {
   // Whether an updater exists at all: electron-updater is loaded in packaged
   // builds only, so in dev there is nothing to check against.
   const [supported, setSupported] = useState(true);
-  // "idle" | "checking" | "up-to-date" | "available" | "downloading" | "downloaded" | "error"
-  const [phase, setPhase] = useState("idle");
-  const [offeredVersion, setOfferedVersion] = useState(null);
-  const [percent, setPercent] = useState(0);
+  // {phase, version, percent, downloadedVersion}; phases: "idle" | "checking" |
+  // "up-to-date" | "available" | "downloading" | "downloaded" | "error".
+  const [updater, setUpdater] = useState(IDLE);
+  // A download the user started failed: said on the card, which offers it again.
+  const [downloadFailed, setDownloadFailed] = useState(false);
+  const { phase, version: offeredVersion, percent } = updater;
   // A flow this user started. An updater error is only ever shown inside one,
   // and nothing renders from it, so it is a ref: flipping it must not redraw.
   const engaged = useRef(false);
@@ -54,9 +61,12 @@ export default function UpdatesCard() {
       }
       setSupported(state.available !== false);
       if (state.phase && state.phase !== "idle" && state.phase !== "error") {
-        setPhase(state.phase);
-        setOfferedVersion(state.version ?? null);
-        setPercent(state.percent ?? 0);
+        setUpdater({
+          phase: state.phase,
+          version: state.version ?? null,
+          percent: state.percent ?? 0,
+          downloadedVersion: state.downloadedVersion ?? null,
+        });
       }
     };
 
@@ -93,40 +103,22 @@ export default function UpdatesCard() {
 
   useEffect(() => {
     const handlePayload = (payload) => {
-      switch (payload.event) {
-        case "checking-for-update":
-          setPhase("checking");
-          break;
-        case "update-available":
-          setPhase("available");
-          setOfferedVersion(payload.version ?? null);
-          setPercent(0);
-          break;
-        case "update-not-available":
-          setPhase("up-to-date");
-          setOfferedVersion(null);
-          engaged.current = false;
-          break;
-        case "download-progress":
-          setPhase("downloading");
-          setPercent(payload.percent ?? 0);
-          break;
-        case "update-downloaded":
-          setPhase("downloaded");
-          setOfferedVersion(payload.version ?? null);
-          setPercent(100);
-          engaged.current = false;
-          break;
-        case "error":
-          // Only what the user is waiting for. Main logs every one of them.
-          if (engaged.current) {
-            setPhase("error");
-          }
-          engaged.current = false;
-          break;
-        default:
-          break;
+      if (payload.event === "error") {
+        // Only what the user is waiting for is said. Main logs every one.
+        const wasEngaged = engaged.current;
+        engaged.current = false;
+        setUpdater((prev) => {
+          const next = updaterStateAfter(prev, payload);
+          return next.phase === "error" && !wasEngaged ? prev : next;
+        });
+        if (wasEngaged) setDownloadFailed(true);
+        return;
       }
+      if (payload.event === "update-not-available" || payload.event === "update-downloaded") {
+        engaged.current = false;
+      }
+      setDownloadFailed(false);
+      setUpdater((prev) => updaterStateAfter(prev, payload));
     };
 
     return window.updaterAPI?.onUpdaterEvent?.(handlePayload);
@@ -134,28 +126,31 @@ export default function UpdatesCard() {
 
   const handleCheck = useCallback(async () => {
     engaged.current = true;
-    setPhase("checking");
+    setDownloadFailed(false);
+    setUpdater((prev) => ({ ...prev, phase: "checking" }));
     const result = await window.updaterAPI?.checkNow?.();
     if (result?.reason === "unavailable") {
       setSupported(false);
-      setPhase("idle");
+      setUpdater((prev) => ({ ...prev, phase: "idle" }));
       engaged.current = false;
       return;
     }
     if (result && result.ok === false) {
       // The call itself was refused; no updater event will follow it.
-      setPhase("error");
+      setUpdater((prev) => ({ ...prev, phase: "error" }));
       engaged.current = false;
     }
   }, []);
 
   const handleDownload = useCallback(async () => {
     engaged.current = true;
-    setPercent(0);
-    setPhase("downloading");
+    setDownloadFailed(false);
+    setUpdater((prev) => ({ ...prev, phase: "downloading", percent: 0 }));
     const result = await window.updaterAPI?.downloadNow?.();
     if (result && result.ok === false) {
-      setPhase("error");
+      // No updater event follows a refused call: the update is still there.
+      setUpdater((prev) => ({ ...prev, phase: "available", percent: 0 }));
+      setDownloadFailed(true);
       engaged.current = false;
     }
   }, []);
@@ -172,7 +167,9 @@ export default function UpdatesCard() {
       case "up-to-date":
         return { text: t("settings:updates.upToDate") };
       case "available":
-        return { text: t("settings:updates.found", { version: offeredVersion ?? "" }) };
+        return downloadFailed
+          ? { text: t("settings:updates.failed"), failed: true }
+          : { text: t("settings:updates.found", { version: offeredVersion ?? "" }) };
       case "downloading":
         return {
           text: t("settings:updates.downloading", {

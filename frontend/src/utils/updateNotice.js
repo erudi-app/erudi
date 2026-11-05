@@ -17,7 +17,8 @@
  * - an older version recorded: the dialog, with the notes when they are this
  *   version's (an update downloaded but never installed keeps notes for
  *   another version), else the version and the release page link;
- * - a newer version recorded (a downgrade): record it silently.
+ * - a newer version recorded (a downgrade): nothing, and the higher version
+ *   stays recorded, so a dialog dismissed for it does not come back.
  * The version is recorded once the dialog is dismissed, or at once when there
  * is nothing to show. Nothing here makes a network request.
  */
@@ -72,10 +73,15 @@ export function compareVersions(a, b) {
   return 0;
 }
 
+// Notes come from this project's own releases, but they are read at launch on
+// the window's thread: the work stays linear in their size, and their size is
+// capped.
+export const NOTES_MAX_CHARS = 64 * 1024;
+
 const NAMED_ENTITIES = { amp: "&", lt: "<", gt: ">", quot: '"', apos: "'", nbsp: " " };
 
 function decodeEntities(text) {
-  return text.replace(/&(#x[0-9a-f]+|#\d+|[a-z]+);/gi, (match, body) => {
+  return text.replace(/&(#x[0-9a-f]{1,8}|#\d{1,8}|[a-z]{1,32});/gi, (match, body) => {
     if (body[0] === "#") {
       const code =
         body[1] === "x" || body[1] === "X" ? parseInt(body.slice(2), 16) : Number(body.slice(1));
@@ -94,27 +100,98 @@ function cleanLines(text) {
     .filter((line) => line && line !== "•");
 }
 
+// Tags that end a line; `li` also starts one, with a bullet.
+const BLOCK_TAGS = new Set([
+  "p",
+  "div",
+  "h1",
+  "h2",
+  "h3",
+  "h4",
+  "h5",
+  "h6",
+  "ul",
+  "ol",
+  "li",
+  "br",
+  "blockquote",
+  "pre",
+  "table",
+  "tr",
+  "hr",
+]);
+const DROPPED_WITH_CONTENT = new Set(["script", "style"]);
+
+const isLetter = (char) => (char >= "a" && char <= "z") || (char >= "A" && char <= "Z");
+
 /**
  * HTML to text lines, without a DOM: nothing is parsed into elements, so
- * nothing can load. Blocks and line breaks end a line, list items start one
- * with a bullet, scripts and styles are dropped with their content, every
- * other tag is dropped and its text kept.
+ * nothing can load. One pass, each character read a bounded number of times:
+ * blocks and line breaks end a line, list items start one with a bullet,
+ * scripts, styles and comments are dropped with their content (to the end
+ * when unclosed), every other tag is dropped and its text kept, and a "<"
+ * that opens no tag is text.
  */
 function htmlToLines(html) {
-  const text = html
-    .replace(/<(script|style)\b[^>]*>[\s\S]*?<\/\1\s*>/gi, "")
-    .replace(/<!--[\s\S]*?-->/g, "")
-    .replace(/\s*\n\s*/g, " ")
-    .replace(/<li\b[^>]*>/gi, "\n• ")
-    .replace(/<br\s*\/?>/gi, "\n")
-    .replace(/<\/?(p|div|h[1-6]|ul|ol|li|blockquote|pre|table|tr|hr)\b[^>]*>/gi, "\n")
-    .replace(/<[^>]*>/g, "");
-  return cleanLines(decodeEntities(text));
+  const parts = [];
+  const text = (segment) => parts.push(segment.replace(/\s+/g, " "));
+  let i = 0;
+  while (i < html.length) {
+    const lt = html.indexOf("<", i);
+    if (lt === -1) {
+      text(html.slice(i));
+      break;
+    }
+    text(html.slice(i, lt));
+    if (html.startsWith("<!--", lt)) {
+      const end = html.indexOf("-->", lt + 4);
+      if (end === -1) break;
+      i = end + 3;
+      continue;
+    }
+    const nameStart = html[lt + 1] === "/" ? lt + 2 : lt + 1;
+    const markup = html[lt + 1] === "!" || html[lt + 1] === "?";
+    if (!markup && !isLetter(html[nameStart] ?? "")) {
+      parts.push("<");
+      i = lt + 1;
+      continue;
+    }
+    const gt = html.indexOf(">", lt + 1);
+    if (gt === -1) {
+      // An unterminated tag: what follows is not text either.
+      break;
+    }
+    i = gt + 1;
+    if (markup) continue;
+    let nameEnd = nameStart;
+    while (nameEnd < gt && /[a-zA-Z0-9]/.test(html[nameEnd])) nameEnd += 1;
+    const name = html.slice(nameStart, nameEnd).toLowerCase();
+    const closing = nameStart === lt + 2;
+    if (!closing && DROPPED_WITH_CONTENT.has(name)) {
+      const close = new RegExp(`</${name}`, "gi");
+      close.lastIndex = i;
+      const found = close.exec(html);
+      if (!found) break;
+      const end = html.indexOf(">", found.index);
+      if (end === -1) break;
+      i = end + 1;
+      continue;
+    }
+    if (name === "li" && !closing) {
+      parts.push("\n• ");
+    } else if (BLOCK_TAGS.has(name)) {
+      parts.push("\n");
+    }
+  }
+  return cleanLines(decodeEntities(parts.join("")));
 }
 
 function noteToLines(note) {
   if (typeof note !== "string") return [];
-  return /<[a-z!/][^>]*>/i.test(note) ? htmlToLines(note) : cleanLines(note);
+  const capped = note.slice(0, NOTES_MAX_CHARS);
+  return /<[a-z!/]/i.test(capped) && capped.includes(">")
+    ? htmlToLines(capped)
+    : cleanLines(capped);
 }
 
 /**
@@ -130,8 +207,12 @@ export function releaseNotesToLines(notes) {
   if (typeof notes === "string") {
     lines = noteToLines(notes);
   } else if (Array.isArray(notes)) {
+    let budget = NOTES_MAX_CHARS;
     for (const entry of notes) {
-      const entryLines = noteToLines(entry?.note);
+      if (budget <= 0) break;
+      const note = typeof entry?.note === "string" ? entry.note.slice(0, budget) : null;
+      budget -= note?.length ?? 0;
+      const entryLines = noteToLines(note);
       if (entryLines.length > 0) {
         lines.push(String(entry.version ?? ""), ...entryLines);
       }
@@ -159,7 +240,8 @@ export function decideUpdateNotice({ runningVersion, lastSeenVersion, notes, has
   }
   const order = lastSeenVersion ? compareVersions(lastSeenVersion, runningVersion) : null;
   if (order !== null && order > 0) {
-    return { action: "mark" };
+    // A downgrade: keep the higher version recorded.
+    return { action: "none" };
   }
   const known = order !== null;
   if (!known && hasUserData === null) {

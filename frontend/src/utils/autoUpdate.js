@@ -8,9 +8,9 @@
  * every check until it arrives, and decides what to do with it in
  * `updaterPolicy.js`.
  *
- * A switch that cannot be read travels as `null`. Main then downloads and
- * installs nothing, and keeps the notify-only check, so a backend hiccup
- * neither fetches an installer nobody agreed to nor hides a new version.
+ * A switch that cannot be read travels as `null`. Main then checks,
+ * downloads and installs nothing: no request leaves without a known yes, and
+ * the next launch reads the settings again.
  */
 import { createLogger } from "./logger";
 

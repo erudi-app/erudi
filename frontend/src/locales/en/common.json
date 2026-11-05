@@ -84,7 +84,7 @@
     "title": "Updated to {{version}}",
     "noNotes": "The notes for this version are on its release page.",
     "releaseNotes": "Read the release notes",
-    "optIns": "Downloading and installing updates are now two separate choices in Settings › Updates, both off. Check for updates keeps the value it had: when a new version is out, a banner tells you, and nothing is downloaded or installed until you turn those choices on or press the button."
+    "optIns": "Downloading and installing updates are now two separate choices in Settings › Updates, both off: nothing is downloaded or installed until you turn them on or press the button. Check for updates keeps the value it had."
   },
   "engineSwitch": {
     "downloadTitle": "A download is in progress",

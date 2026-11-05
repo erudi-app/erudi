@@ -251,6 +251,35 @@ describe("SettingsPage — Updates (#563)", () => {
     await waitFor(() => expect(checked(toggle)).toBe(String(next)));
   });
 
+  it("holds every switch while a change is saving, so answers cannot cross (P3-10)", async () => {
+    const setPreferences = vi.fn();
+    window.updaterAPI = { setPreferences };
+    mockGetByUrl({ userSettings: SETTINGS, appStartup: { backend_type: "cuda" } });
+    let answer;
+    putMock.mockImplementation(
+      () =>
+        new Promise((resolve) => {
+          answer = resolve;
+        })
+    );
+    renderPage();
+    const download = await switchNamed(DOWNLOAD);
+    await waitFor(() => expect(download.disabled).toBe(false));
+
+    fireEvent.click(download);
+
+    await waitFor(() => expect(download.disabled).toBe(true));
+    expect((await switchNamed(CHECK)).disabled).toBe(true);
+    expect((await switchNamed(INSTALL)).disabled).toBe(true);
+    fireEvent.click(await switchNamed(INSTALL));
+    expect(putMock).toHaveBeenCalledTimes(1);
+
+    await act(async () => answer({ ...SETTINGS, auto_download_updates: true }));
+
+    await waitFor(() => expect(download.disabled).toBe(false));
+    expect(setPreferences).toHaveBeenCalledTimes(1);
+  });
+
   it("keeps the manual Update Erudi card", async () => {
     renderPage();
     expect(await screen.findByText("Update Erudi")).toBeTruthy();

@@ -87,8 +87,8 @@ contextBridge.exposeInMainWorld("languageAPI", {
 contextBridge.exposeInMainWorld("updaterAPI", {
   // Register a callback for updater events from main process.
   // event types: "checking-for-update" | "update-available" | "update-not-available"
-  //            | "download-progress" | "update-downloaded" | "install-handed-off"
-  //            | "error"
+  //            | "download-progress" | "update-downloaded" | "download-cancelled"
+  //            | "install-handed-off" | "error"
   //
   // The cleanup removes THIS listener only: the banner and the Settings card
   // both listen, and removing every listener would leave whichever unmounted

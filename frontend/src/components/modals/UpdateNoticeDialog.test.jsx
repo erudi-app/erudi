@@ -78,6 +78,16 @@ describe("UpdateNoticeDialog", () => {
     const text = document.body.textContent;
     expect(text).toMatch(/Downloading and installing updates are now two separate choices/);
     expect(text).toMatch(/both off/);
+    // True whatever Check for updates was set to (P3-8): no promise of a banner.
+    expect(text).not.toMatch(/banner/i);
+    expect(text).toMatch(/Check for updates keeps the value it had/);
+  });
+
+  it("makes no banner promise in any language", async () => {
+    for (const lang of ["fr", "es", "zh"]) {
+      const common = (await import(`../../locales/${lang}/common.json`)).default;
+      expect(common.updateNotice.optIns, lang).not.toMatch(/bandeau|aviso|横幅/);
+    }
   });
 
   it("does not explain the opt-ins on a later update", () => {

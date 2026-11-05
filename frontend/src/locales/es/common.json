@@ -84,7 +84,7 @@
     "title": "Actualizado a la {{version}}",
     "noNotes": "Las notas de esta versión están en su página de release.",
     "releaseNotes": "Leer las notas de la versión",
-    "optIns": "Descargar e instalar las actualizaciones son ahora dos opciones distintas en Ajustes › Actualizaciones, ambas desactivadas. «Buscar actualizaciones» conserva su valor: cuando sale una versión nueva, un aviso te lo dice, y no se descarga ni se instala nada hasta que actives esas opciones o pulses el botón."
+    "optIns": "Descargar e instalar las actualizaciones son ahora dos opciones distintas en Ajustes › Actualizaciones, ambas desactivadas: no se descarga ni se instala nada hasta que las actives o pulses el botón. «Buscar actualizaciones» conserva su valor."
   },
   "engineSwitch": {
     "downloadTitle": "Hay una descarga en curso",

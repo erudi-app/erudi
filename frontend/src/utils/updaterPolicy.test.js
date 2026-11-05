@@ -16,11 +16,11 @@ import { describe, it, expect } from "vitest";
 import {
   NO_INSTALL_ARMED,
   bannerStateAfter,
-  installArmedAfterDownload,
   installMayStillHappen,
   isHandedOff,
   planPreferenceChange,
   resolveUpdatePreferences,
+  updaterStateAfter,
 } from "./updaterPolicy";
 
 const PLATFORMS = ["win32", "linux", "darwin"];
@@ -35,6 +35,7 @@ function plan(overrides = {}) {
     downloadedVersion: null,
     armed: NO_INSTALL_ARMED,
     polling: false,
+    automaticDownload: false,
     ...overrides,
   });
 }
@@ -57,23 +58,25 @@ describe("resolveUpdatePreferences: the effective switches", () => {
     });
   });
 
-  it("downloads and installs nothing when the preferences could not be read", () => {
+  it("checks, downloads and installs nothing when the preferences could not be read", () => {
     for (const snapshot of [
       null,
       undefined,
       {},
       { check: null, download: null, install: null },
-      { check: true, download: "yes", install: 1 },
+      { check: "yes", download: "yes", install: 1 },
     ]) {
-      const resolved = resolveUpdatePreferences(snapshot);
-      expect(resolved.download, JSON.stringify(snapshot)).toBe(false);
-      expect(resolved.install, JSON.stringify(snapshot)).toBe(false);
+      expect(resolveUpdatePreferences(snapshot), JSON.stringify(snapshot)).toEqual({
+        check: false,
+        download: false,
+        install: false,
+      });
     }
   });
 
-  it("keeps the notify-only check when its value is unknown, and drops it only on an explicit no", () => {
-    expect(resolveUpdatePreferences(null).check).toBe(true);
-    expect(resolveUpdatePreferences({ check: null }).check).toBe(true);
+  it("checks only on an explicit yes: a later launch reads the settings again", () => {
+    expect(resolveUpdatePreferences({ check: true }).check).toBe(true);
+    expect(resolveUpdatePreferences({ check: null }).check).toBe(false);
     expect(resolveUpdatePreferences({ check: false }).check).toBe(false);
   });
 });
@@ -111,10 +114,11 @@ describe("planPreferenceChange: the library flags", () => {
     expect([install.autoDownload, install.autoInstallOnAppQuit]).toEqual([false, true]);
   });
 
-  it("raises nothing from an unknown snapshot", () => {
+  it("raises nothing and starts no check from an unknown snapshot", () => {
     const p = plan({ preferences: resolveUpdatePreferences(null) });
     expect(p.autoDownload).toBe(false);
     expect(p.autoInstallOnAppQuit).toBe(false);
+    expect(p.startPolling).toBe(false);
   });
 });
 
@@ -179,7 +183,7 @@ describe("planPreferenceChange: install turned on after a finished download", ()
         platform,
         preferences: install,
         downloadedVersion: "1.2.0",
-        armed: { quitHandler: true, handedOffVersion: null },
+        armed: { ...NO_INSTALL_ARMED, quitHandler: true },
       }).armInstall
     ).toBe(null);
   });
@@ -190,7 +194,18 @@ describe("planPreferenceChange: install turned on after a finished download", ()
         platform: "darwin",
         preferences: install,
         downloadedVersion: "1.2.0",
-        armed: { quitHandler: false, handedOffVersion: "1.2.0" },
+        armed: { ...NO_INSTALL_ARMED, handedOffVersion: "1.2.0" },
+      }).armInstall
+    ).toBe(null);
+  });
+
+  it("does not ask Squirrel again while it is fetching that version (macOS)", () => {
+    expect(
+      plan({
+        platform: "darwin",
+        preferences: install,
+        downloadedVersion: "1.2.0",
+        armed: { ...NO_INSTALL_ARMED, handOffRequestedVersion: "1.2.0" },
       }).armInstall
     ).toBe(null);
   });
@@ -201,77 +216,32 @@ describe("planPreferenceChange: install turned on after a finished download", ()
         platform: "darwin",
         preferences: install,
         downloadedVersion: "1.3.0",
-        armed: { quitHandler: false, handedOffVersion: "1.2.0" },
+        armed: { ...NO_INSTALL_ARMED, handedOffVersion: "1.2.0" },
       }).armInstall
     ).toBe("squirrel");
   });
 });
 
-describe("installArmedAfterDownload: what the library armed by itself", () => {
-  it.each(["win32", "linux"])(
-    "registers the quit handler at download only when install was on (%s)",
-    (platform) => {
-      expect(
-        installArmedAfterDownload({
-          platform,
-          version: "1.2.0",
-          autoInstallOnAppQuit: true,
-          armed: NO_INSTALL_ARMED,
-        })
-      ).toEqual({ quitHandler: true, handedOffVersion: null });
-      expect(
-        installArmedAfterDownload({
-          platform,
-          version: "1.2.0",
-          autoInstallOnAppQuit: false,
-          armed: NO_INSTALL_ARMED,
-        })
-      ).toEqual(NO_INSTALL_ARMED);
-    }
-  );
-
-  it.each(["win32", "linux"])(
-    "keeps a registered quit handler: the library never removes it (%s)",
-    (platform) => {
-      expect(
-        installArmedAfterDownload({
-          platform,
-          version: "1.3.0",
-          autoInstallOnAppQuit: false,
-          armed: { quitHandler: true, handedOffVersion: null },
-        })
-      ).toEqual({ quitHandler: true, handedOffVersion: null });
-    }
-  );
-
-  it("hands the update to Squirrel at download only when install was on (macOS)", () => {
+describe("planPreferenceChange: an automatic download in progress (P3-9)", () => {
+  it.each([
+    ["Download", { check: true, download: false, install: false }],
+    ["Check", { check: false, download: true, install: false }],
+  ])("cancels it when %s is turned off", (_name, snapshot) => {
     expect(
-      installArmedAfterDownload({
-        platform: "darwin",
-        version: "1.2.0",
-        autoInstallOnAppQuit: true,
-        armed: NO_INSTALL_ARMED,
-      })
-    ).toEqual({ quitHandler: false, handedOffVersion: "1.2.0" });
-    expect(
-      installArmedAfterDownload({
-        platform: "darwin",
-        version: "1.2.0",
-        autoInstallOnAppQuit: false,
-        armed: NO_INSTALL_ARMED,
-      })
-    ).toEqual(NO_INSTALL_ARMED);
+      plan({ preferences: resolveUpdatePreferences(snapshot), automaticDownload: true })
+        .cancelDownload
+    ).toBe(true);
   });
 
-  it("remembers an earlier hand-off on macOS: Squirrel keeps it", () => {
+  it("lets it run while the effective Download switch stays on", () => {
     expect(
-      installArmedAfterDownload({
-        platform: "darwin",
-        version: "1.3.0",
-        autoInstallOnAppQuit: false,
-        armed: { quitHandler: false, handedOffVersion: "1.2.0" },
-      })
-    ).toEqual({ quitHandler: false, handedOffVersion: "1.2.0" });
+      plan({ preferences: resolveUpdatePreferences(ALL_ON), automaticDownload: true })
+        .cancelDownload
+    ).toBe(false);
+  });
+
+  it("has nothing to cancel when no automatic download runs", () => {
+    expect(plan({ automaticDownload: false }).cancelDownload).toBe(false);
   });
 });
 
@@ -312,12 +282,14 @@ describe("installMayStillHappen: the macOS note", () => {
 
 describe("isHandedOff", () => {
   it("is true only once Squirrel holds a version (macOS)", () => {
-    expect(isHandedOff({ quitHandler: false, handedOffVersion: "1.2.0" })).toBe(true);
+    expect(isHandedOff({ ...NO_INSTALL_ARMED, handedOffVersion: "1.2.0" })).toBe(true);
     expect(isHandedOff(NO_INSTALL_ARMED)).toBe(false);
   });
 
   it("is false for the Windows and Linux quit handler, which reads the flag at quit", () => {
-    expect(isHandedOff({ quitHandler: true, handedOffVersion: null })).toBe(false);
+    expect(isHandedOff({ ...NO_INSTALL_ARMED, quitHandler: true })).toBe(false);
+    // Asked, not yet received: Squirrel may still fail.
+    expect(isHandedOff({ ...NO_INSTALL_ARMED, handOffRequestedVersion: "1.2.0" })).toBe(false);
   });
 });
 
@@ -368,6 +340,15 @@ describe("bannerStateAfter: the banner's phase per event", () => {
     ).toEqual({ phase: "available", version: "1.3.0" });
   });
 
+  it.each(["error", "download-cancelled"])(
+    "offers Download again when a download ends in %s",
+    (event) => {
+      expect(
+        bannerStateAfter({ phase: "downloading", version: "1.2.0", percent: 40 }, { event })
+      ).toEqual({ phase: "available", version: "1.2.0" });
+    }
+  );
+
   it("ignores the events the banner has nothing to say about", () => {
     const ready = { phase: "ready", version: "1.2.0" };
     for (const event of [
@@ -380,5 +361,77 @@ describe("bannerStateAfter: the banner's phase per event", () => {
       expect(bannerStateAfter(ready, { event }), event).toBe(ready);
       expect(bannerStateAfter(null, { event }), event).toBe(null);
     }
+  });
+});
+
+describe("updaterStateAfter: the state main and the Update Erudi card keep", () => {
+  const IDLE = { phase: "idle", version: null, percent: 0, downloadedVersion: null };
+  const DOWNLOADED = {
+    phase: "downloaded",
+    version: "1.2.0",
+    percent: 100,
+    downloadedVersion: "1.2.0",
+  };
+
+  it("walks check, available, progress and download", () => {
+    let state = updaterStateAfter(IDLE, { event: "checking-for-update" });
+    expect(state.phase).toBe("checking");
+    state = updaterStateAfter(state, { event: "update-available", version: "1.2.0" });
+    expect(state).toMatchObject({ phase: "available", version: "1.2.0", percent: 0 });
+    state = updaterStateAfter(state, { event: "download-progress", percent: 30 });
+    expect(state).toMatchObject({ phase: "downloading", version: "1.2.0", percent: 30 });
+    state = updaterStateAfter(state, { event: "update-downloaded", version: "1.2.0" });
+    expect(state).toEqual(DOWNLOADED);
+  });
+
+  it("says up to date when nothing is newer", () => {
+    expect(updaterStateAfter(IDLE, { event: "update-not-available" })).toMatchObject({
+      phase: "up-to-date",
+      version: null,
+    });
+  });
+
+  it("keeps a downloaded update when the 4-hourly check finds the same version (P2-2)", () => {
+    for (const event of [
+      { event: "checking-for-update" },
+      { event: "update-available", version: "1.2.0" },
+      { event: "update-not-available" },
+      { event: "error" },
+    ]) {
+      expect(updaterStateAfter(DOWNLOADED, event), event.event).toEqual(DOWNLOADED);
+    }
+  });
+
+  it("moves on to a newer version found after a download", () => {
+    expect(
+      updaterStateAfter(DOWNLOADED, { event: "update-available", version: "1.3.0" })
+    ).toMatchObject({ phase: "available", version: "1.3.0", downloadedVersion: "1.2.0" });
+  });
+
+  it.each(["error", "download-cancelled"])(
+    "offers Download again when a download ends in %s (P3-4)",
+    (event) => {
+      const downloading = {
+        phase: "downloading",
+        version: "1.2.0",
+        percent: 40,
+        downloadedVersion: null,
+      };
+      expect(updaterStateAfter(downloading, { event })).toMatchObject({
+        phase: "available",
+        version: "1.2.0",
+        percent: 0,
+      });
+    }
+  );
+
+  it("reports a failed check as an error", () => {
+    expect(updaterStateAfter({ ...IDLE, phase: "checking" }, { event: "error" }).phase).toBe(
+      "error"
+    );
+  });
+
+  it("ignores events it does not know", () => {
+    expect(updaterStateAfter(DOWNLOADED, { event: "install-handed-off" })).toBe(DOWNLOADED);
   });
 });

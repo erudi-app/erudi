@@ -26,8 +26,9 @@ const SWITCHES = [
  * - Download updates automatically (off by default).
  * - Install downloaded updates when I quit (off by default).
  * The two opt-ins act only while the check is on, so they are disabled
- * while it is off. Each change is persisted, then the full snapshot the
- * backend answered is handed to the main process, which owns
+ * while it is off. Each change is persisted, one at a time (every switch is
+ * held while a save runs), then the full snapshot the backend answered is
+ * handed to the main process, which owns
  * electron-updater (`updaterPolicy.js` decides what it does with it). A
  * change that did not persist is not handed over.
  *
@@ -40,6 +41,9 @@ const SWITCHES = [
 export default function UpdatePreferencesCard({ settings, loading, updateSettings }) {
   const { t } = useTranslation();
   const [handedOff, setHandedOff] = useState(false);
+  // One save at a time: a second toggle could otherwise be answered first and
+  // hand main a snapshot the database no longer holds.
+  const [saving, setSaving] = useState(false);
 
   useEffect(() => {
     let cancelled = false;
@@ -73,6 +77,8 @@ export default function UpdatePreferencesCard({ settings, loading, updateSetting
   };
 
   const handleToggle = async (field, next) => {
+    if (saving) return;
+    setSaving(true);
     let saved;
     try {
       saved = await updateSettings({ [field]: next });
@@ -80,6 +86,8 @@ export default function UpdatePreferencesCard({ settings, loading, updateSetting
       // Already recorded by `useUserSettings`; main must not be told of a
       // preference that did not persist.
       return;
+    } finally {
+      setSaving(false);
     }
     notifyUpdatePreferences(updatePreferencesFrom(saved));
   };
@@ -110,7 +118,7 @@ export default function UpdatePreferencesCard({ settings, loading, updateSetting
                 checked={stored[key]}
                 onChange={(next) => handleToggle(field, next)}
                 label={label}
-                disabled={loading || (key !== "check" && !stored.check)}
+                disabled={loading || saving || (key !== "check" && !stored.check)}
               />
             </div>
           );
