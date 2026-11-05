@@ -1313,7 +1313,11 @@ class TestConversationService:
         )
 
         async def fake_stream(**kwargs):
-            yield {"t": "answer", "text": f"{_SENTINEL} The conversation no longer fits."}
+            yield {
+                "t": "answer",
+                "text": f"{_SENTINEL} The conversation no longer fits.",
+                "curated": True,
+            }
 
         monkeypatch.setattr(service.runner, "astream_text", fake_stream)
 
@@ -1371,6 +1375,35 @@ class TestConversationService:
         assert messages[1].trace == [
             {"t": "error_detail", "text": "kaput at state.db", "request_id": "be-feed0001"}
         ]
+
+    @pytest.mark.parametrize("raise_after", [True, False])
+    async def test_the_red_line_follows_a_notice_after_one_blank_line(
+        self, test_db_session, mock_llm, monkeypatch, raise_after
+    ):
+        """A notice already ends with a blank line: the failure adds none."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+
+        async def fake_stream(**kwargs):
+            yield {"t": "answer", "text": "*A notice.*\n\n"}
+            if raise_after:
+                raise ValueError("kaput")
+            yield {"t": "answer", "text": agent_runner.ERROR_MESSAGE}
+
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        [
+            t
+            async for t in service.query_and_respond_stream(
+                conversation.id, ConversationQuery(question="Go on")
+            )
+        ]
+
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[1].content == f"*A notice.*\n\n{agent_runner.ERROR_MESSAGE}"
 
     async def test_a_failure_before_any_text_ends_red_with_its_detail(
         self, test_db_session, mock_llm, monkeypatch

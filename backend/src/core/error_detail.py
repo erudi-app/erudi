@@ -52,12 +52,8 @@ _SECRET_PAIR = re.compile(
 )
 _HF_TOKEN = re.compile(r"\bhf_[A-Za-z0-9]{30,}")
 _FILE_URL = re.compile(r"file://[^\s'\"<>]*", re.IGNORECASE)
-_WIN_PATH = re.compile(
-    rf"(?<![A-Za-z0-9])[A-Za-z]:{_W_SEP}(?:{_W_SEG}{_W_SEP})*{_W_LEAF}"
-)
-_UNC_PATH = re.compile(
-    rf"(?<![\\\w])\\{{2,4}}[^\s\\'\"]+\\{{1,2}}(?:{_W_SEG}\\{{1,2}})*{_W_LEAF}"
-)
+_WIN_PATH = re.compile(rf"(?<![A-Za-z0-9])[A-Za-z]:{_W_SEP}(?:{_W_SEG}{_W_SEP})*{_W_LEAF}")
+_UNC_PATH = re.compile(rf"(?<![\\\w])\\{{2,4}}[^\s\\'\"]+\\{{1,2}}(?:{_W_SEG}\\{{1,2}})*{_W_LEAF}")
 _POSIX_PATH = re.compile(rf"(?<![\w/.~\-])/(?:{_P_SEG}/)+{_P_LEAF}")
 
 # The first segment of a URL path the app itself serves or calls.

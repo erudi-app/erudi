@@ -1613,6 +1613,14 @@ def _construction_error_message(exc: Exception) -> str:
     return ERROR_MESSAGE
 
 
+def _curated_answer(text: str) -> dict:
+    """The answer event of a curated failed turn: words the app chose (a prompt
+    that does not fit, a model that went silent, the tool-loop limit), not an
+    unexpected failure. ``curated`` rides to the wire ``error`` event, where the
+    renderer logs it at WARNING instead of ERROR."""
+    return {"t": "answer", "text": text, "curated": True}
+
+
 def _generic_failure_detail(exc: BaseException) -> dict:
     """What a generic failure carries next to its headline (#615): the cleaned
     leaf cause and the id of the failing request, so the interface can show
@@ -2436,7 +2444,7 @@ class AgentRunner:
                                 char_count += len(last_tool_result)
                                 yield _record({"t": "answer", "text": last_tool_result})
                             else:
-                                yield _record({"t": "answer", "text": LOOP_LIMIT_MESSAGE})
+                                yield _record(_curated_answer(LOOP_LIMIT_MESSAGE))
                         if stateful:
                             await self._repair_alternation(agent, run_config)
                     except GenerationTimeoutException as exc:
@@ -2458,7 +2466,7 @@ class AgentRunner:
                         for text in hop_text_buffer:
                             yield _record({"t": "answer", "text": text})
                         hop_text_buffer.clear()
-                        yield _record({"t": "answer", "text": _stream_timeout_message(exc)})
+                        yield _record(_curated_answer(_stream_timeout_message(exc)))
                     except Exception as exc:
                         overflow = parse_context_overflow(exc)
                         if overflow is not None:
@@ -2478,12 +2486,9 @@ class AgentRunner:
                                 yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
                             yield _record(
-                                {
-                                    "t": "answer",
-                                    "text": _context_overflow_message(
-                                        overflow, _memory_bound_of(engine)
-                                    ),
-                                }
+                                _curated_answer(
+                                    _context_overflow_message(overflow, _memory_bound_of(engine))
+                                )
                             )
                         elif is_child_prefill_timeout(exc):
                             # Defense in depth (#573 alignment): the MLX child's
@@ -2510,13 +2515,12 @@ class AgentRunner:
                             hop_text_buffer.clear()
                             # Reuse the parent watchdog's curated first-chunk turn.
                             yield _record(
-                                {
-                                    "t": "answer",
-                                    "text": PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
+                                _curated_answer(
+                                    PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
                                         sentinel=ERROR_SENTINEL,
                                         minutes=max(1, round(ceiling / 60)),
-                                    ),
-                                }
+                                    )
+                                )
                             )
                         else:
                             # A stream that breaks because the inference child died shows

@@ -223,9 +223,12 @@ async def test_recursion_limit_loop_no_result_yields_loop_message(monkeypatch, c
                 params=_PARAMS,
                 thread_id="c1",
                 tools=[blank_tool],
+                emit_events=True,
             )
         ]
-    joined = "".join(out)
+    answers = [e for e in out if e["t"] == "answer"]
+    assert [e.get("curated") for e in answers] == [True]
+    joined = "".join(e["text"] for e in answers)
     assert ERROR_SENTINEL in joined
     assert "rephrasing" in joined
     assert any("recursion limit" in r.message for r in caplog.records)
@@ -1412,6 +1415,9 @@ async def test_events_curated_construction_error_carries_no_detail(monkeypatch):
 
     assert len(events) == 1
     assert "detail" not in events[0] and "request_id" not in events[0]
+    # A construction failure is a real failure, not a curated turn: the
+    # renderer counts it as a bug.
+    assert "curated" not in events[0]
     assert events[0]["text"].endswith("The model folder is missing")
 
 
@@ -1485,6 +1491,7 @@ async def test_events_inter_chunk_timeout_says_the_model_went_silent(monkeypatch
     assert ERROR_SENTINEL in text
     assert text != runner_module.ERROR_MESSAGE
     assert "start answering" not in text
+    assert [e.get("curated") for e in events if e["t"] == "answer"] == [True]
 
 
 async def test_events_stream_timeout_logs_one_warning_with_the_budget(monkeypatch, caplog):
@@ -1642,6 +1649,7 @@ async def test_events_llama_overflow_yields_curated_turn_with_numbers(monkeypatc
     assert "8192" in text
     assert "Traceback" not in text
     assert text != runner_module.ERROR_MESSAGE
+    assert [e.get("curated") for e in events if e["t"] == "answer"] == [True]
 
 
 async def test_events_mlx_overflow_yields_curated_turn_with_numbers(monkeypatch):

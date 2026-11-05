@@ -94,10 +94,9 @@ def build_stream_error_event(answer_event: dict) -> dict:
         value = answer_event.get(key)
         if value:
             error_event[key] = value
-    if answer_event["text"] != ERROR_MESSAGE:
-        # Anything but the generic apology is a curated turn: the app chose
-        # these words (a prompt that does not fit, a timeout, the loop limit),
-        # so the renderer does not count it as a bug.
+    if answer_event.get("curated"):
+        # Words the app chose (a prompt that does not fit, a timeout, the loop
+        # limit): the renderer does not count the turn as a bug.
         error_event["curated"] = True
     return error_event
 
@@ -110,6 +109,13 @@ def _is_pinned(event: dict) -> bool:
     """What an error turn keeps of its trace and what a cap never drops: its
     compactions and the cleaned cause of its failure."""
     return _is_compaction(event) or event.get("t") == ERROR_DETAIL_EVENT
+
+
+def _append_failure(partial: str, failure: str) -> str:
+    """The red line of a failed turn goes below what streamed before it, after
+    exactly one blank line (a notice already ends with one)."""
+    head = partial.rstrip("\n")
+    return f"{head}\n\n{failure}" if head else failure
 
 
 def _error_detail_event(detail: str, request_id: Optional[str]) -> dict:
@@ -638,7 +644,7 @@ class ConversationService:
                         if text.startswith(ERROR_SENTINEL):
                             # Whatever streamed before the failure is kept; the
                             # red line starts a paragraph of its own.
-                            assistant_response += ("\n\n" if assistant_response else "") + text
+                            assistant_response = _append_failure(assistant_response, text)
                             if event.get("detail"):
                                 trace.append(
                                     _error_detail_event(event["detail"], event.get("request_id"))
@@ -679,7 +685,7 @@ class ConversationService:
                 # reply stays above the headline, and the cleaned cause rides
                 # the error event and the persisted trace.
                 detail, request_id = error_detail(exc), get_request_id()
-                assistant_response += ("\n\n" if assistant_response else "") + ERROR_MESSAGE
+                assistant_response = _append_failure(assistant_response, ERROR_MESSAGE)
                 trace.append(_error_detail_event(detail, request_id))
                 yield _ndjson(
                     {

@@ -167,14 +167,15 @@ class TestConversationWireEvent:
             "text": f"{runner_module.ERROR_SENTINEL} boom",
             "code": "CUDA_DRIVER_TOO_OLD",
             "raw": "CUDA error: the provided PTX was compiled ...",
-            "curated": True,
         }
 
-    def test_an_untyped_curated_error_carries_only_the_curated_flag(self):
-        """Clients read `{t, text}`; a curated sentence adds the flag and no cause."""
+    def test_an_untyped_error_keeps_the_shape_it_always_had(self):
+        """Existing clients read `{t, text}`; nothing extra appears for them."""
         event = self._error_event({"t": "answer", "text": f"{runner_module.ERROR_SENTINEL} boom"})
-        assert event == {
-            "t": "error",
-            "text": f"{runner_module.ERROR_SENTINEL} boom",
-            "curated": True,
-        }
+        assert event == {"t": "error", "text": f"{runner_module.ERROR_SENTINEL} boom"}
+
+    def test_the_curated_flag_rides_only_when_the_runner_set_it(self):
+        event = self._error_event(
+            {"t": "answer", "text": f"{runner_module.ERROR_SENTINEL} boom", "curated": True}
+        )
+        assert event["curated"] is True

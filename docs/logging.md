@@ -263,17 +263,18 @@ these rules, in both processes.
   was taken (the other `llama-server` flavour, the processor because NVML sees
   no GPU, a default title, an answer without its knowledge-base excerpts), a
   file skipped, an invalid value replaced by a default, a child that printed
-  something alarming but kept running, a probe that timed out once.
+  something alarming but kept running, a probe that timed out once. So is a
+  curated failed turn (a prompt that does not fit the window, a model that
+  did not start in time, the tool-loop limit): the runner flags it
+  `curated: true`, the stream's `error` event carries the flag and the page
+  logs it at `WARNING`, so it does not badge the bug icon. A generic failure
+  (and a model that fails to load) is an `ERROR`.
 - **`INFO`** — the expected outcomes of user actions and the normal
   lifecycle. A 4xx that the client asked for — a model deleted a moment ago
   (404), a guarded delete (409), a rejected input (422) — is one of them: it is
   not a defect, and it must not fill a page meant for bug reports. The backend
   logs it at `INFO` in the request's record, and the API client logs the same
-  status at `info` on its side. So is a curated failed turn (a prompt that does
-  not fit the window, a model that did not start in time, the tool-loop limit):
-  the stream's `error` event carries `curated: true` and the page logs it at
-  `WARNING`, so it does not badge the bug icon; only a generic failure is an
-  `ERROR`.
+  status at `info` on its side.
 - Nothing that indicates a defect is logged at `INFO`/`DEBUG` or not at all.
 
 ### One record per failure
