@@ -244,10 +244,11 @@ saved level starts at the global default whether it reasons or not. Arena panels
 row: a panel that sends no level runs at the level saved for its model, else at the global default,
 read on every turn.
 
-The chat header's settings panel carries a Reasoning effort control next to the Web search toggle,
-seeded from the conversation's level and persisted through the same one-field PATCH the moment it
-changes; the pre-conversation panel shows the same control seeded from the global default. The
-Settings page's "Default reasoning effort" card sets that global default.
+In the app the level is a 5-notch slider in `/effort` and `/config`, saved through a one-field
+PATCH the moment it changes; on the new-conversation page the same slider starts at the level the
+conversation would get (see [Session controls in the
+app](#session-controls-in-the-app-the-header-and-the-slash-commands)). The Settings page's
+"Default reasoning effort" card sets the global default.
 
 What a level costs on the wire depends on the model's own chat template, never on its family name: a
 community fine-tune keeps its parent's name and ships whatever template its author baked in. The
@@ -395,6 +396,74 @@ none. `compaction` with `phase: "start"`, `memory_warning` and `memory_reload` r
 are **never** persisted: the first describes the turn in flight, and the memory events describe the
 machine's memory at that moment — an old conversation reopened on a bigger machine must not replay
 them.
+
+## Session controls in the app: the header and the slash commands
+
+A conversation's header reads a static "You are chatting with <model>". Its settings icon opens a
+panel with one button per command (Config, Effort, Model), each opening that command's popup exactly
+as typing the command does. When the conversation's model was deleted, the line turns into a red
+"Please select a model" and the composer is blocked; the panel's Model button still works, and
+picking a model there unblocks sending.
+
+The same commands are typed in the composer. Their names are fixed English identifiers in every
+interface language (`frontend/src/utils/slashCommands.js`); their descriptions and popups are
+translated. A message runs a command only when it is exactly one of `/config`, `/config global`,
+`/effort` or `/model` (surrounding spaces aside); anything else is an ordinary message sent to the
+model — an unknown name (`/foo`), an argument a command does not take (`/effort high`), or text
+before the command. A command never reaches the model, clears the composer and keeps the files
+attached to it for the next message.
+
+Typing `/` at the start of the composer opens a drop-up listing the commands with a one-line
+description, narrowed as the name is typed. Arrow Up/Down move the highlight, Enter runs it (the
+first entry until the highlight moves), Tab completes the name, Escape closes the list and leaves
+the text alone, and a space after a complete name closes it. When the composer already holds a
+complete command, Enter runs exactly that text, so `/config global` never turns into the
+highlighted `/config`. Enter while an input method is composing (Chinese, Japanese) does nothing.
+
+The popups share one shell: it takes the focus when it opens, keeps Tab inside, closes on Escape
+and gives the focus back to where it was. Each carries a subtitle and a `?` help button next to
+each field, whose help shows on hover and on keyboard focus.
+
+- **`/config`** shows every adjustable value: the reasoning effort as a 5-notch slider (None, Low,
+  Medium, High, Xhigh), web search as a switch, creativity (0–2) and diversity (0–1) as sliders,
+  the compaction threshold (50 % to 90 % in steps of 5) and the custom instructions. Web search is
+  disabled, its help saying why, when the model cannot run tools or its tool calls are not verified
+  yet; a note says when the model's publisher recommends no sampling values. There is no Apply
+  button: the effort, the switch and the threshold are saved by a one-field `PATCH` the moment they
+  change, the instructions when they are saved, and creativity and diversity 300 ms after the
+  slider stops. Saves go out one after another, in the order they were made. Sending a message
+  first waits for every pending save, so a message sent right after a change runs on it; the turn's
+  `Turn settings: ...` line in `backend.log` shows the values. A failed save puts the control back
+  to its last saved value and a short error says the change was not saved. The header panel, the
+  popups and the send path read one state (`frontend/src/shared/hooks/useConversationSettings.js`),
+  so two views never disagree.
+- **`/config global`** saves the six current values as the defaults of the current model with
+  `PUT /erudi/llms/{id}/conversation_defaults` (see
+  [Conversation defaults per model](#conversation-defaults-per-model)); the popup names the model,
+  confirms the save and lists what was saved. Empty instructions clear the instructions saved for
+  the model.
+- **`/effort`** is the effort slider alone, saved the same way.
+- **`/model`** lists the installed models, leaving out a knowledge-base assistant whose weights are
+  missing. Picking one sends `PATCH {"llm_id": <id>}` alone, after the pending saves; the backend
+  applies the new model's saved values and recommended sampling (see
+  [Update a conversation](#update-a-conversation)) and the page adopts the conversation it
+  returns.
+
+The new-conversation page carries the same header and commands, editing the draft the conversation
+is created from. Picking a model reads its resolved values with `GET
+/erudi/llms/{id}/conversation_defaults` (when that read fails, the sliders show the model's
+recommended sampling and the shipped defaults); an answer for a model the user has since left is
+ignored. On a model switch, the values the user did not set take the new model's; those set follow
+the `/model` rule. The creation `POST` carries the model and only the values the user set, every
+other field being resolved by the backend for that model; the first message is then sent on the
+values of the conversation as created, read back by the conversation page. `/config global` there
+saves the draft's values for the picked model.
+
+The Arena keeps its own panel header (model picker, creativity and diversity sliders, custom
+instructions). Each panel shows the values its model starts from (`GET
+/erudi/llms/{id}/conversation_defaults`, re-read when the panel's model changes; the model's
+recommended sampling when that read fails). It sends no reasoning effort, and `null` for a slider
+the user did not move, so the backend applies the model's saved or recommended value.
 
 ## Other endpoints
 
@@ -544,9 +613,10 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    two messages, so an agentic conversation holds many of them long before it fills the window.
 
    The threshold is a whole percent from **50 to 90 in steps of 5, 80 by default**. Each
-   conversation owns its own (`compaction_threshold`, set from the chat header's settings panel or
-   the new-conversation panel); the Settings page's "Default compaction threshold" card sets the
-   default a new conversation copies (`default_compaction_threshold`). One helper turns it into the trigger every part of
+   conversation owns its own (`compaction_threshold`, set in `/config`, in a conversation or on the
+   new-conversation page); the Settings page's "Default compaction threshold" card sets the
+   default a new conversation copies when its model has none saved
+   (`default_compaction_threshold`). One helper turns it into the trigger every part of
    compaction reads (`trigger_tokens` in `backend/src/engines/working_window.py`):
    `T = max(1, min(⌊pct × W / 100⌋, W − 768))` — the second term always leaves the answer the output
    budget's 512-token floor and its 256-token margin, and at 80 % it only binds below 3836 tokens.
