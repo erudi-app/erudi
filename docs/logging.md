@@ -269,7 +269,11 @@ these rules, in both processes.
   (404), a guarded delete (409), a rejected input (422) — is one of them: it is
   not a defect, and it must not fill a page meant for bug reports. The backend
   logs it at `INFO` in the request's record, and the API client logs the same
-  status at `info` on its side.
+  status at `info` on its side. So is a curated failed turn (a prompt that does
+  not fit the window, a model that did not start in time, the tool-loop limit):
+  the stream's `error` event carries `curated: true` and the page logs it at
+  `WARNING`, so it does not badge the bug icon; only a generic failure is an
+  `ERROR`.
 - Nothing that indicates a defect is logged at `INFO`/`DEBUG` or not at all.
 
 ### One record per failure

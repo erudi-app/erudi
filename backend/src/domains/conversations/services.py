@@ -20,6 +20,7 @@ from typing import AsyncGenerator, Optional
 
 from fastapi.concurrency import run_in_threadpool
 
+from src.core.error_detail import error_detail
 from src.core.logging import logger
 from src.core.logutils import truncate_for_log
 from src.agents.kb_mode import plan_turn
@@ -27,6 +28,7 @@ from src.agents.reasoning_effort import plan_reasoning_effort
 from src.agents.runner import (
     AgentRunner,
     COMPACTION_EVENT,
+    ERROR_DETAIL_EVENT,
     GenParams,
     ERROR_MESSAGE,
     ERROR_SENTINEL,
@@ -46,6 +48,7 @@ from src.core.exceptions import (
     ModelNotFoundException,
     StateConflictException,
 )
+from src.core.request_context import get_request_id
 from src.utils.attachment_utils import (
     build_attachment_notice,
     prepend_attachment_block,
@@ -87,15 +90,30 @@ def build_stream_error_event(answer_event: dict) -> dict:
     keeps exactly the shape it had.
     """
     error_event: dict = {"t": "error", "text": answer_event["text"]}
-    for key in ("code", "raw"):
+    for key in ("code", "raw", "detail", "request_id"):
         value = answer_event.get(key)
         if value:
             error_event[key] = value
+    if answer_event["text"] != ERROR_MESSAGE:
+        # Anything but the generic apology is a curated turn: the app chose
+        # these words (a prompt that does not fit, a timeout, the loop limit),
+        # so the renderer does not count it as a bug.
+        error_event["curated"] = True
     return error_event
 
 
 def _is_compaction(event: dict) -> bool:
     return event.get("t") == COMPACTION_EVENT
+
+
+def _is_pinned(event: dict) -> bool:
+    """What an error turn keeps of its trace and what a cap never drops: its
+    compactions and the cleaned cause of its failure."""
+    return _is_compaction(event) or event.get("t") == ERROR_DETAIL_EVENT
+
+
+def _error_detail_event(detail: str, request_id: Optional[str]) -> dict:
+    return {"t": ERROR_DETAIL_EVENT, "text": detail, "request_id": request_id}
 
 
 def _cap_trace(events: list) -> Optional[list]:
@@ -106,9 +124,10 @@ def _cap_trace(events: list) -> Optional[list]:
     ``{"t":"truncated"}`` marker counted in the budget -- until the marker plus the
     remaining events fit, always keeping at least the newest event.
 
-    Compaction events (#614) are pinned: a reasoning turn emits one event per
-    token, so a compaction announced at the first model call would be the first
-    dropped. They lead the capped trace, in their order, and are never dropped;
+    Compaction events (#614) and the failure's ``error_detail`` (#615) are
+    pinned: a reasoning turn emits one event per token, so a compaction
+    announced at the first model call would be the first dropped. They lead the
+    capped trace, in their order, and are never dropped;
     the other events are capped against what they leave -- all of them may go,
     and the marker follows the compactions only when one of them did. With a
     known window a summary is capped at ``summary_cap`` tokens and a turn's
@@ -121,8 +140,8 @@ def _cap_trace(events: list) -> Optional[list]:
     if len(json.dumps(events)) <= TRACE_MAX_BYTES:
         return list(events)
     marker = {"t": "truncated"}
-    pinned = [e for e in events if _is_compaction(e)]
-    others = [e for e in events if not _is_compaction(e)]
+    pinned = [e for e in events if _is_pinned(e)]
+    others = [e for e in events if not _is_pinned(e)]
     capped = list(others)
     floor = 0 if pinned else 1
     while len(capped) > floor and len(json.dumps([*pinned, marker, *capped])) > TRACE_MAX_BYTES:
@@ -417,7 +436,7 @@ class ConversationService:
         appended to ``assistant_response`` so the persisted content is byte-for-byte
         the pre-#90 error turn, and (b) re-framed on the wire as an ``error`` event
         (the frontend renders the red bubble from ``error`` as it did from the
-        sentinel substring). Error turns persist only their compaction events
+        sentinel substring). Error turns persist only their compaction and error_detail events
         (the compaction is checkpointed even when the model call then fails).
         """
         start_s = time.perf_counter()
@@ -438,12 +457,19 @@ class ConversationService:
             conversation, llm = await run_in_threadpool(
                 self._load_conversation_and_llm, conversation_id
             )
-        except Exception:
+        except Exception as exc:
             # The response has started (an NDJSON stream), so no exception
             # handler will see this: the record is written here.
             logger.exception(f"Failed to load conversation {conversation_id} or its LLM for query")
             # No conversation loaded -> nothing to persist; just surface the error.
-            yield _ndjson({"t": "error", "text": ERROR_MESSAGE})
+            yield _ndjson(
+                {
+                    "t": "error",
+                    "text": ERROR_MESSAGE,
+                    "detail": error_detail(exc),
+                    "request_id": get_request_id(),
+                }
+            )
             yield _ndjson({"t": "done"})
             return
 
@@ -461,11 +487,11 @@ class ConversationService:
             if persisted:
                 return
             persisted = True
-            # An error turn persists only its compactions: the compaction was
-            # checkpointed before the model call failed, and its marker must
-            # survive a reload.
+            # An error turn persists only its compactions (checkpointed before
+            # the model call failed, so their marker must survive a reload) and
+            # the cleaned cause of an unexpected failure.
             if ERROR_SENTINEL in assistant_response:
-                persist_trace = _cap_trace([e for e in trace if _is_compaction(e)])
+                persist_trace = _cap_trace([e for e in trace if _is_pinned(e)])
             else:
                 persist_trace = _cap_trace(trace)
             await run_in_threadpool(
@@ -609,10 +635,17 @@ class ConversationService:
                         # Persistence is unchanged: the full answer text
                         # (including a sentinel error string, if any) is
                         # accumulated for the DB.
-                        assistant_response += text
                         if text.startswith(ERROR_SENTINEL):
+                            # Whatever streamed before the failure is kept; the
+                            # red line starts a paragraph of its own.
+                            assistant_response += ("\n\n" if assistant_response else "") + text
+                            if event.get("detail"):
+                                trace.append(
+                                    _error_detail_event(event["detail"], event.get("request_id"))
+                                )
                             yield _ndjson(build_stream_error_event(event))
                         else:
+                            assistant_response += text
                             yield _ndjson(event)
                     elif event["t"] == "memory_warning":
                         # Wire only, NEVER the persisted trace (1.1.2): the
@@ -639,11 +672,23 @@ class ConversationService:
                         yield _ndjson(event)
             await _persist_assistant_once()
             yield _ndjson({"t": "done"})
-        except Exception:
+        except Exception as exc:
             logger.exception(f"Query streaming failed for conversation {conversation_id}")
-            if not assistant_response:
-                assistant_response = ERROR_MESSAGE
-                yield _ndjson({"t": "error", "text": ERROR_MESSAGE})
+            if ERROR_SENTINEL not in assistant_response:
+                # The turn ends red whether or not text had streamed: a partial
+                # reply stays above the headline, and the cleaned cause rides
+                # the error event and the persisted trace.
+                detail, request_id = error_detail(exc), get_request_id()
+                assistant_response += ("\n\n" if assistant_response else "") + ERROR_MESSAGE
+                trace.append(_error_detail_event(detail, request_id))
+                yield _ndjson(
+                    {
+                        "t": "error",
+                        "text": ERROR_MESSAGE,
+                        "detail": detail,
+                        "request_id": request_id,
+                    }
+                )
             await _persist_assistant_once()
             yield _ndjson({"t": "done"})
         finally:

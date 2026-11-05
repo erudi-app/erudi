@@ -210,7 +210,7 @@ their contents through history forever.
 | `compaction` | `phase`; with `phase: "done"`: `summarized`, `reason`, `summary`, `summary_lost` | Earlier messages are summarized (see [compaction](#what-the-thread-shows-of-a-compaction)). `phase: "start"`: the summary call is about to run; never persisted. `phase: "done"`: the history was rewritten — `summarized` = the user messages and answers summarized (tool calls, tool results and the previous summary not counted), `reason` = `"memory"` (the computer's memory bounds the window) or `"length"`, `summary` = the summary text, `summary_lost: true` when no summary could be written (`summary` is then the previous summary the model keeps, possibly empty). Persisted in the turn's trace. Several per turn are possible: one before each model call that needs it |
 | `memory_reload` | `reason` (`"idle"` only) | Without `reason`, Apple Silicon and the CPU engine: the memory brake unloaded the model (or, on the CPU engine, restarted it with a smaller window) while the computer's memory was under pressure, and this turn reloads it or re-reads the conversation (see below). `reason: "idle"` (any engine): the model was unloaded after about five minutes without use, and this turn reloads it; the renderer says so instead of blaming memory. Only a conversation that already has messages gets it (a new one shows its first-reply hint), a model switch never sends it, and a turn announces at most one reload. Sent before anything else the model produces; never persisted |
 | `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one, by precedence: a brake notice, then `gpu_contention`, then `bound`. `reason: "pressure"`: the computer's memory is under pressure and the memory brake shrank the window, so the conversation will be summarized sooner. `reason: "pressure_external"`: the computer's memory is under pressure from other apps and this conversation uses little of it. `reason: "gpu_contention"` (the CUDA engine on Windows): another app is taking the graphics card's memory from the model, so answers are slower; sent at every turn end while it lasts, and the renderer polls `GET /hardware/gpu_contention/status` to drop the notice once it ends (see below). `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
-| `error` | `text` | The turn failed; the text is the curated error message |
+| `error` | `text`; optional `code`, `raw`, `detail`, `request_id`, `curated` | The turn failed. `text` is the red message: the generic apology, or a curated sentence (a prompt that does not fit, a model that did not start in time, the tool-loop limit, an engine diagnostic). A generic failure carries `detail` (the cleaned cause, see [Errors](#when-a-turn-fails)) and `request_id`; a curated one carries `curated: true` and no detail. `code`/`raw` are the engine's typed cause (CUDA remedies). Text streamed before the failure stays in the answer; the error event follows it |
 | `done` | — | Terminal event, always sent, including after an `error` |
 
 `done` is also the refetch signal: the assistant message is committed to the database *before* it is
@@ -390,12 +390,41 @@ order as that message's `trace`, so the reasoning and tool panel and the compact
 replayed on reload. The serialized trace is capped at 32 KB, drop-oldest, with a
 `{"t": "truncated"}` marker prepended when events were dropped; compaction events are never dropped
 (they lead the capped trace, ahead of the marker, which follows them only when a reasoning or tool
-step was dropped). Error turns persist their compaction events only —
-a compaction is checkpointed even when the model call after it fails — and no trace when they have
-none. `compaction` with `phase: "start"`, `memory_warning` and `memory_reload` reach the wire but
+step was dropped). Error turns persist their compaction events (a compaction is checkpointed even
+when the model call after it fails) and, for an unexpected failure, an `error_detail` event — and no
+other trace. `error_detail` is pinned like a compaction. `compaction` with `phase: "start"`, `memory_warning` and `memory_reload` reach the wire but
 are **never** persisted: the first describes the turn in flight, and the memory events describe the
 machine's memory at that moment — an old conversation reopened on a bigger machine must not replay
 them.
+
+## When a turn fails
+
+A turn that ends in error shows a red bubble. Two kinds exist:
+
+- **Generic failure** (an unexpected exception): the backend writes the English apology
+  (`ERROR_MESSAGE`, behind the `[ERROR_MESSAGE_SYSTEM]` sentinel) as the message content, and the
+  renderer shows the headline translated (`chat:errors.generationFailed`) at display time, so it
+  follows the interface language live, after a reload and after a language switch. Under it a
+  discreet **Details** control shows the cleaned cause and the request id.
+- **Curated turn** (the prompt does not fit the window or the machine's memory, the model did not
+  start answering in time, the tool-loop limit, an engine diagnostic): the app's own sentence,
+  rendered as written, without Details. The error event carries `curated: true`, and the renderer
+  logs it at WARNING, so it does not count as a bug in the sidebar or in Diagnostics.
+
+The cleaned cause (`src/core/error_detail.py`) is the message of the innermost exception of the
+chain (`__cause__`, then `__context__`; an `EngineException` ends the walk, its message being
+written for the reader), on one line, at most 300 characters, sanitised *before* truncation:
+absolute POSIX, Windows and UNC paths and `file://` URLs become their file name; user names and
+passwords in URLs, bearer tokens, `--api-key` values, `api_key=` pairs and database URLs are
+masked. It is never a traceback and never translated: it is quoted as the backend produced it.
+
+It is built where the exception is caught (agent construction, agent streaming, the conversation
+service's last-resort handler), sent on the `error` event with the request id (`X-Request-ID`, the
+id of the matching Diagnostics entry), and persisted as `{"t": "error_detail", "text",
+"request_id"}` in the failed message's trace. A turn counts as a generic failure when its trace
+holds `error_detail` or, for turns stored before this existed, when its content ends with the exact
+generic apology; such an older turn shows the translated headline and no Details. A failure after
+part of the answer was written keeps that text above the red headline, with Details.
 
 ## Session controls in the app: the header and the slash commands
 

@@ -101,6 +101,7 @@ from src.agents.token_accounting import (
 from src.database.generation_hints import resolve_sampling_defaults, trained_context_window
 from src.agents.think_splitter import ThinkSplitter
 from src.core import config
+from src.core.error_detail import error_detail
 from src.core.exceptions import (
     AppBaseException,
     CompactionFailedException,
@@ -110,6 +111,7 @@ from src.core.exceptions import (
     log_level_for_status,
 )
 from src.core.logging import logger
+from src.core.request_context import get_request_id
 from src.engines.base_engine import BaseEngine, run_reset_shielded, wait_shielded
 from src.engines.memory_brake import (
     NOTICE_ACTED,
@@ -906,6 +908,9 @@ def _summary_placeholder(previous: Any, max_tokens: Optional[int] = None) -> str
 # history is rewritten -- the conversation service keeps that one in the
 # turn's trace, so the thread marks where the summary took over.
 COMPACTION_EVENT = "compaction"
+# Trace event of a turn that failed unexpectedly (#615): the cleaned cause and the
+# request id of the failing request, persisted with the failed message.
+ERROR_DETAIL_EVENT = "error_detail"
 _COMPACTION_PHASES = frozenset({"start", "done"})
 # Why a compaction happened, as ``done`` says it: the computer's memory bounds
 # the working window, or the conversation outgrew the model's own window.
@@ -1608,6 +1613,14 @@ def _construction_error_message(exc: Exception) -> str:
     return ERROR_MESSAGE
 
 
+def _generic_failure_detail(exc: BaseException) -> dict:
+    """What a generic failure carries next to its headline (#615): the cleaned
+    leaf cause and the id of the failing request, so the interface can show
+    both under the red message and the matching Diagnostics entry is findable.
+    Built where the exception is caught."""
+    return {"detail": error_detail(exc), "request_id": get_request_id()}
+
+
 def _construction_error_event(exc: Exception) -> dict:
     """The answer event a failed agent construction becomes.
 
@@ -1625,6 +1638,8 @@ def _construction_error_event(exc: Exception) -> dict:
     the stream it has always seen.
     """
     event: dict = {"t": "answer", "text": _construction_error_message(exc)}
+    if not isinstance(exc, EngineException):
+        event.update(_generic_failure_detail(exc))
     code = getattr(exc, "engine_code", None)
     if code:
         event["code"] = code
@@ -2520,7 +2535,13 @@ class AgentRunner:
                             for text in hop_text_buffer:
                                 yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
-                            yield _record({"t": "answer", "text": ERROR_MESSAGE})
+                            yield _record(
+                                {
+                                    "t": "answer",
+                                    "text": ERROR_MESSAGE,
+                                    **_generic_failure_detail(exc),
+                                }
+                            )
             except BaseException as exit_in_flight:
                 _flag_abandoned(abandon_hook)
                 # Synchronous on purpose: the exit in flight (a closed
