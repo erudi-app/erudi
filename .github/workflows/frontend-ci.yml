@@ -43,3 +43,9 @@ jobs:
       - name: Unit tests (Vitest)
         working-directory: frontend
         run: npm run test:run
+
+      # Vitest does not run Babel, and the full-app smoke only boots the
+      # backend, so this is the one gate that compiles the renderer JSX.
+      - name: Build bundles (webpack)
+        working-directory: frontend
+        run: npm run build
