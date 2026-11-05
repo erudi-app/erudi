@@ -487,10 +487,11 @@ def engine_delay(monkeypatch):
 
     monkeypatch.setattr(config, "LLM_Engine", _RunningEngine)
     detected = BaseEngine.get_engine()
-    monkeypatch.setattr(detected, "_max_idle_time", detected._max_idle_time)
+    before = detected._max_idle_time
+    monkeypatch.setattr(detected, "_max_idle_time", before)
     yield _RunningEngine
     # The detected engine was never the one to change.
-    assert detected._max_idle_time == BaseEngine._max_idle_time
+    assert detected._max_idle_time == before
 
 
 class TestIdleUnloadDelay:
