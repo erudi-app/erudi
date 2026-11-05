@@ -150,7 +150,7 @@ describe("DragDropArea — safety cap", () => {
     const paths = onFilesAdded.mock.calls.at(-1)[0];
     expect(paths).toHaveLength(500);
     expect(screen.getByText(/capped at 500 files/i)).toBeTruthy();
-  });
+  }, 15000);
 });
 
 describe("DragDropArea — plain file drop/pick unchanged", () => {

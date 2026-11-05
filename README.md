@@ -80,7 +80,7 @@ Most local-AI tools are either a runtime you drive from a terminal, or a web int
 
 ### Prerequisites
 
-- **Node.js** >= 20.9 — the floor `webpack-cli` declares
+- **Node.js** 22.18 or later in the 22 line, 24.11 or later in the 24 line, or 26+ — what Babel 8 and Vitest 5 both accept
 - **Python 3.12** exactly — `pgserver`, which ships the embedded PostgreSQL cluster, publishes wheels up to cp312 only
 - **Git**
 - Platform-specific requirements:

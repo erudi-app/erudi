@@ -317,13 +317,14 @@ cd backend
 pytest tests/ -q --ignore=tests/e2e -m "not mlx_only"
 ```
 
-**Frontend** (`.github/workflows/frontend-ci.yml`, Node 20 — `webpack-cli` needs >= 20.9, which the CI runner's Node 20 satisfies):
+**Frontend** (`.github/workflows/frontend-ci.yml`, Node 22 — Babel 8 and Vitest 5 together need `^22.18.0 || ^24.11.0 || >=26.0.0`):
 
 ```bash
 cd frontend
 npm run lint:check
 npm run format:check
 npm run test:run
+npm run build
 ```
 
 **Full-app smoke** (`.github/workflows/app-build-smoke.yml`) also blocks the merge.
