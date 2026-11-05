@@ -51,24 +51,25 @@ non-functional behavior.
 ## Chat — `/erudi/chat`
 
 **Happy path**
-- [ ] When I open Chat with at least one local model, then the first model is auto-selected in the "Chat with" picker.
+- [ ] When I open Chat with at least one local model, then the first model is auto-selected and the header reads "You are chatting with <model>"; the header's **Model** button changes it.
 - [ ] When I type a prompt and press Enter, then it sends; Shift+Enter inserts a newline.
 - [ ] When I send a prompt, then a new conversation is created and I am taken to it, where the reply **streams token by token**.
-- [ ] When I adjust Creativity / Diversity or customize the prompt, then those settings carry into the conversation.
-- [ ] When I turn on the **ephemeral** toggle before starting a conversation, then it opens with a visible **ephemeral badge** marking that it will not be kept.
+- [ ] When I adjust values through the header's **Config** or **Effort** before the first message, then the conversation is created with them and `/config` shows them once it opens.
+- [ ] When I run `/config global` on the new-conversation page, then the values are saved as the defaults for the selected model, as in a conversation.
+- [ ] *(not built yet: ephemeral chats, #428 — record as not applicable)* When I turn on the **ephemeral** toggle before starting a conversation, then it opens with a visible **ephemeral badge** marking that it will not be kept.
 
 **Per-model sampling defaults**
 - [ ] When I select a model whose publisher ships sampling values, then Creativity / Diversity start at **that model's** values rather than a global 0.2 / 0.95 (Qwen3 starts at 0.6 / 0.95, Qwen2.5 at 0.7 / 0.8).
 - [ ] When the publisher ships a **greedy** temperature (Qwen2.5-VL ships `0.000001`), then the slider shows **0** and the model answers normally — no stream of `!` *(greedy is sent as an exact 0)*.
 - [ ] When I send the **same prompt in several fresh conversations** on an Apple Silicon model at a non-zero temperature, then the answers differ *(a fresh seed per request; a short factual answer may still converge)*.
-- [ ] When I switch model mid-setup, then the sliders **re-default** to the new model's values.
+- [ ] When I switch model mid-setup, then the new model brings its own values, as `/model` does: the defaults saved for it with `/config global`, otherwise its recommended creativity and diversity; the other values I set stay.
 **Output budget (no Max Tokens control)**
-- [ ] When I open the conversation settings panel, the pre-conversation panel, or an Arena panel, then there is **no Max Tokens field anywhere** — the answer budget is assigned automatically from the model's context window and the space the conversation already uses.
+- [ ] When I open `/config` (in a conversation or on the new-conversation page) or an Arena panel, then there is **no Max Tokens field anywhere** — the answer budget is assigned automatically from the model's context window and the space the conversation already uses.
 - [ ] When I ask for a genuinely long answer (a long structured document, a big code file), then it **completes** — nothing is cut at the old 1024-token default.
 - [ ] When a conversation created **before this version** (with a stored Max Tokens value) sends a turn, then it works normally — the stored value is ignored, nothing errors.
 - [ ] When I search any of the four languages for a "Max Tokens" label, then none survives anywhere in the UI.
 - [ ] When the Creativity slider is dragged to the top, then it reaches **2**, not 1.
-- [ ] When the selected model's publisher recommends **nothing**, then a muted one-liner under the sliders says so ("No sampling recommendation from this model's publisher; neutral defaults applied") — in the conversation header panel, the pre-conversation panel and the model info modal, and **never** on a card face or in the Arena.
+- [ ] When the selected model's publisher recommends **nothing**, then a muted one-liner under the sliders says so ("No sampling recommendation from this model's publisher; neutral defaults applied") — in `/config` (in a conversation and on the new-conversation page) and the model info modal, and **never** on a card face or in the Arena.
 - [ ] When the publisher **does** recommend values, then that one-liner is absent.
 
 **Edge cases & errors**
@@ -135,7 +136,7 @@ non-functional behavior.
 - [ ] When a conversation grows, then it goes **far past the old 4096-token limit** before anything is compacted (the window is the model's, not a fixed constant).
 - [ ] When a single turn is **larger than the window itself** (a huge attached document), then the turn fails with an honest message naming the prompt size and the window and suggesting what to do — nothing is silently truncated, no answer is invented.
 - [ ] *(Apple Silicon)* When the same oversized turn is sent on MLX, then it is **refused cleanly before generation** with the same honest treatment — never accepted into minutes of silent gibberish.
-- [ ] When `ERUDI_CTX` is set in the environment, then the window is pinned to exactly that value (dev/QA escape hatch) and the engine log says the user's value was respected.
+- [ ] *(Windows, Linux)* When `ERUDI_CTX` is set in the environment, then the llama.cpp window is pinned to exactly that value (dev/QA escape hatch) and the engine log says the user's value was respected. *(Apple Silicon: the MLX engine does not read it; the window is sized as usual.)*
 - [ ] When the app boots **offline** on a fresh install (catalog seeded from the bundled snapshot), then model info cards already show context windows — the values shipped with the snapshot.
 - [ ] *(Apple Silicon)* When the machine's memory tightens during a long conversation, then the **working window** the app plans against for the next turn shrinks to the smaller of the model's allocated window and what memory can safely hold — visible in `/context` and in `backend.log`; it never silently plans past what the GPU can hold.
 - [ ] *(llama.cpp)* When a llama.cpp model's window must shrink to free memory, then it does so by **respawning the child while I am idle** — the pause reloads the model transparently (a short reload; the prompt cache is rebuilt), the next turn uses the smaller window, and no in-flight turn is ever interrupted.
@@ -160,7 +161,7 @@ non-functional behavior.
 - [ ] When an answer runs to its length limit (tens of thousands of tokens) and I send another message, then the next answer still gets a real budget (not cut after a few hundred tokens): the long answer is counted at its exact token count.
 - [ ] When I hold a conversation in **Chinese or Japanese** past a few turns, then compaction fires at about the threshold (80 % by default) of the window in **real** tokens (not three times too late), the answers are never cut short for lack of budget, and the next turn after a knowledge-base or web search is budgeted like the turns before it.
 - [ ] *(Windows CPU/CUDA, Linux)* When I send the first turn of a conversation on a llama.cpp engine, then it answers normally (the server is now asked for its token usage) — and a long conversation compacts at about its threshold (80 % by default) of the window counted in real tokens, a little earlier than before on text that `chars / 4` under-counts (code, numbers, other scripts).
-- [ ] When a compaction would gain almost nothing (the history before the last exchange is already tiny), then it is skipped — no summary call, no `Prefix cache reset: reason=compaction` — unless the turn would otherwise overflow the window.
+- [ ] When an **automatic** compaction would gain almost nothing (the history before the last exchange is already tiny), then it is skipped — no summary call, no `Prefix cache reset: reason=compaction` — unless the turn would otherwise overflow the window.
 - [ ] When the amber memory notice about the memory bound is shown, then it says your computer's memory limits this conversation, quotes the approximate size of the model and the conversation together, and suggests starting a new conversation, sending less at once or switching to a smaller model; it is **translated** (fr/es/zh — not English-only), it never lands in the answer bubble or in what the copy button copies, and it does **not** stick to the conversation after a reload once the pressure is gone.
 - [ ] When a conversation crosses the **compaction threshold** (a percentage of the working window, 50 % to 90 % in steps of 5, set through the conversation's `/config`), then compaction fires — the trigger is counted **in tokens** against the working window, not in a fixed number of messages.
 - [ ] When the engine cannot report a window at all (the rare defective-artifact case), then and only then does a **message-count fallback** guard compaction — never in the normal path, where the trigger is purely token-based.
@@ -186,7 +187,7 @@ non-functional behavior.
 - [ ] *(Apple Silicon)* When critical pressure lasts while I am away, then after two idle samples (about two minutes) the model is unloaded — one `Memory brake: ... action=unload` WARNING in `backend.log` — and my next message shows "Memory was freed on your computer; reloading the model to resume the conversation…" in the pending answer until the model starts answering; the answer comes with the reduced window (`brake_cap=` in the `Window bounded by memory` line of the reload), translated in fr/es/zh, and the reload state never stays in the answer or comes back after a reload of the page.
 - [ ] *(Apple Silicon)* When the memory brake has unloaded the model and I send the **first message of a NEW conversation**, then the usual first-reply hint ("First response may take a bit longer while loading the model into memory…") shows while the title request reloads the model, and the answer follows; the memory-freed reload notice is what an existing conversation shows when its next message reloads the model.
 - [ ] *(Apple Silicon)* When other apps keep the Mac under memory pressure for a long time (a permanent warning or critical), then the app never loops: at most one unload per pressure episode (none again right after a reload of the model), at most two `action=shrink` lines per episode, and after that nothing but the paced idle samples — the conversation keeps working.
-- [ ] *(Apple Silicon)* When the pressure is gone for a few minutes, then the window grows back step by step (`action=grow` lines: three calm samples each, one a minute while idle and one per turn while chatting), first never back to the size that hurt, then fully once the episode is long forgotten (ten calm samples). A fully idle user sees at most one idle `action=grow` before the idle unload at about five minutes, so keep chatting through the calm period to see the full recovery.
+- [ ] *(Apple Silicon)* When the pressure is gone for a few minutes, then the window grows back step by step (`action=grow` lines: three calm samples each, one a minute while idle and one per turn while chatting), first never back to the size that hurt, then fully once the episode is long forgotten (ten calm samples). A fully idle user sees at most one idle `action=grow` before the idle unload (five minutes at the default idle delay), so keep chatting through the calm period to see the full recovery.
 - [ ] *(Apple Silicon)* When a tiny conversation runs while other apps put the Mac under memory pressure, then the amber notice says the pressure comes from other apps and this conversation uses little of it, and no `action=shrink` line appears.
 - [ ] *(Apple Silicon)* When the memory pressure sensor cannot be read, then the brake is off: one `Memory pressure level unreadable ... the memory brake is off` WARNING per launch, and conversations work as usual.
 - [ ] *(Apple Silicon)* When memory pressure rises while an answer is streaming, then the answer is never cut or slowed by the brake: every `Memory brake` line is at `point=turn_start`, `point=turn_end` or `point=idle`.
@@ -195,7 +196,7 @@ non-functional behavior.
 - [ ] *(Windows CPU, Linux CPU — FIRST, before the scenarios below)* When the shipped build's `llama-server` loads a small GGUF with `-lv 5 -np 1 --cache-ram 0 -c 8192`, then again with `-c 32768` (on the packaged binary), then its `KV buffer size` is exactly `n_ctx` × the model's KV bytes per token, its `compute buffer size` grows by 1 KiB per token between the two (24 MiB over the 24,576 extra tokens), `flash_attn` resolves to enabled, and the `CPU_REPACK` line says whether this build repacks Erudi's quants (Q4_K_M, Q8_0) — record all four lines; the Windows build is the OpenBLAS one. On a vision model (a GGUF with its `mmproj`), record the same lines once, to size the projector's compute buffer.
 - [ ] *(CPU engine)* When a model loads, then `backend.log` shows `Window sized at spawn: window=W, trained=T, memory_bound=...` with `W = min(T, what 0.75 x RAM affords)` and the `allocated context window: W tokens` line agrees; loading the same model again with very different free RAM (a heavy app open, then closed) gives the same `W` — the window no longer depends on the free memory of the moment (on a pre-3.5b build, the Windows window did).
 - [ ] *(CPU engine)* When a model loads, then no `llama-server allocated more than the window budget predicted` WARNING appears; if one does, collect it with the `-lv 5` lines above.
-- [ ] *(CPU engine)* When I open a memory-heavy app in the middle of a long conversation (Windows: commit charge above 85 % in Task Manager, Performance → Memory → Committed; Linux: `cat /proc/pressure/memory` shows `some avg10` above 10), then `backend.log` shows `Memory brake: ... action=shrink, ... cap=...` at the end of the next answer (no notice yet: nothing is summarized earlier until the cap applies); once I have been away two to three minutes the model restarts with the smaller window (`action=respawn, window=A->B`, B a multiple of 256, and the `allocated context window` line of the restart says B), and my next message shows the reload state ("Memory was freed on your computer; reloading the model…") in the pending answer, then answers, and the amber notice says my computer's memory is under pressure and the conversation will be summarized sooner. Away longer than three minutes before the first idle sample past two, no restart happens: the idle unload at five minutes comes first, and the next load carries the smaller window (`brake_cap=`). Every later turn runs without any further restart while the pressure stays as it is.
+- [ ] *(CPU engine)* When I open a memory-heavy app in the middle of a long conversation (Windows: commit charge above 85 % in Task Manager, Performance → Memory → Committed; Linux: `cat /proc/pressure/memory` shows `some avg10` above 10), then `backend.log` shows `Memory brake: ... action=shrink, ... cap=...` at the end of the next answer (no notice yet: nothing is summarized earlier until the cap applies); once I have been away two to three minutes the model restarts with the smaller window (`action=respawn, window=A->B`, B a multiple of 256, and the `allocated context window` line of the restart says B), and my next message shows the reload state ("Memory was freed on your computer; reloading the model…") in the pending answer, then answers, and the amber notice says my computer's memory is under pressure and the conversation will be summarized sooner. Away longer than three minutes before the first idle sample past two, no restart happens: the idle unload (five minutes at the default idle delay) comes first, and the next load carries the smaller window (`brake_cap=`). Every later turn runs without any further restart while the pressure stays as it is.
 - [ ] *(CPU engine)* When memory goes **critical** in the middle of a session (Windows: committed above 93 %), then at the next turn boundary the model restarts with a smaller window (`point=turn_start` or `point=turn_end, ..., action=shrink+respawn`); a restart at the start of my turn shows the reload state in that same turn, before the answer.
 - [ ] *(CPU engine, 14B model)* When the brake restarts a 14B model under real critical pressure, then time the restart (`action=shrink+respawn` follows within 30 s); past 30 s it degrades into an unload — one `action=respawn-failed (...)` WARNING, the model reloads at my next message with the reloading state and the reduced window.
 - [ ] *(CPU engine)* When critical pressure lasts while I am away, then after the restart and two idle samples the model is unloaded (`action=unload` WARNING) and my next message reloads it with the reduced window (`brake_cap=` in the `Window sized at spawn` line).
@@ -220,13 +221,13 @@ non-functional behavior.
 - [ ] When I inspect any agentic answer, then **no raw tool markup** (`<tool_call>`, JSON arguments, function-call syntax) appears in the answer bubble or in the persisted history; the search call and its excerpts appear only inside the reasoning strip.
 
 **Web search**
-- [ ] When I create a new conversation, then its **Web search** toggle (settings panel, under the sliders) starts at the value of the global Settings-page default at creation time.
+- [ ] When I create a new conversation, then its **Web search** switch (in `/config`) starts at the value saved for its model with `/config global`, else at the global Settings-page default at creation time.
 - [ ] When I flip the Web search toggle in an open conversation, then it persists immediately (survives a reload) and **takes effect on the next turn** — no Apply needed.
 - [ ] When web search is ON with a tool-capable model and I ask a question needing a **current external fact**, then the reasoning strip shows a `web_search` call with its results, and the answer **cites source URLs** from those results.
 - [ ] When web search is ON and I ask something the model already knows ("capital of France"), then it answers **directly with zero web calls**.
 - [ ] When web search is ON but the machine is **offline**, then the turn completes with the model relaying the honest tool text ("Error during Web Search: no internet connection") — no hang, no invented answer.
-- [ ] When the conversation's model is **not verified tool-capable**, then the Web search toggle in the chat header is **disabled** (greyed, cannot be flipped) and hovering it explains why — one wording for a model that **can't** use tools, another for one whose tool support **hasn't been verified** yet. The model never receives the web tool either way.
-- [ ] When the Settings page describes the **Web Search** control, then it reads as the starting value for **new** conversations (each conversation keeps its own toggle in its chat header) — not as a global switch.
+- [ ] When the conversation's model is **not verified tool-capable**, then the Web search switch in `/config` is **disabled** (greyed, cannot be flipped) and its help explains why — one wording for a model that **can't** use tools, another for one whose tool support **hasn't been verified** yet. The model never receives the web tool either way.
+- [ ] When the Settings page describes the **Web Search** control, then it reads as the starting value for **new** conversations (each conversation keeps its own switch in `/config`) — not as a global switch.
 - [ ] When I change the **global** web-search default in Settings, then existing conversations keep their own toggle unchanged; only conversations created afterwards inherit the new default.
 
 **Multimodal / multi-turn**
@@ -257,6 +258,8 @@ non-functional behavior.
 - [ ] When I paste a **very long message** (several tens of thousands of characters), then it is accepted and handled by the honest overflow path — no ugly low-level `422` error; if it exceeds the window, the same honest "prompt size vs window" message applies.
 - [ ] When a turn fails with an unexpected error, then the red bubble's headline is in my interface language and a discreet **Details** control reveals the exact cause in one line, as the backend wrote it (not translated), with a request id — never a stack trace, and a file path shows as its file name only.
 - [ ] When I reload the conversation or switch the interface language, then the failed turn keeps its translated headline and its **Details**.
+- [ ] When I open a conversation whose failed turn dates from before this version, then its generic headline shows in my interface language, without **Details**.
+- [ ] When a failure's cause contains a web address with a user name and password, a `--api-key` value or a bearer token, then **Details** shows it masked.
 - [ ] When I copy the request id from **Details** and open Diagnostics, then the matching entry carries the same request id with the full technical record.
 - [ ] When a turn ends with a curated message (the prompt does not fit the window or this computer's memory, the model did not start answering in time, the tool-loop limit), then it reads as today, without **Details**, and it is **not** counted as a bug (no bug badge, no Diagnostics error for it).
 - [ ] *(Apple Silicon)* When a model that is too tight for the machine hits a **GPU out-of-memory** during a tool-call turn, then the turn ends with an **honest message** that the model is too large for this machine's memory — never a silent crash, a red generic error, or minutes of gibberish.
@@ -280,10 +283,14 @@ non-functional behavior.
 - [ ] When the conversation's model was deleted, then the header shows the red "Please select a model" attention state and the **Model** button in its panel still works although the composer is blocked; picking a model there unblocks sending.
 - [ ] When I open the **new-conversation page**, then it carries the same header and settings icon: the Model, Config and Effort buttons set the values the conversation will be created with, and Compact and Context are not offered (there is no conversation yet). The old inline settings block of that page is gone.
 - [ ] When I use the **Arena**, then its header is unchanged by this version (its own model pickers and sliders).
+- [ ] When I pick a model in an Arena panel, then that panel's creativity and diversity sliders start at the values saved for that model with `/config global`, else at its recommended values.
 
 **Typing a command**
 - [ ] When I type **`/`** at the start of the composer, then a styled **drop-up** lists the available commands (`/config`, `/context`, `/compact`, `/effort`, `/model`) with a one-line description each.
 - [ ] When the drop-up is showing, then **Arrow Up/Down** move the highlight, **Enter** confirms the highlighted command (the first one when I have not moved), **Tab** completes the name in the composer, and **Escape** closes the drop-up and leaves my text alone.
+- [ ] When I have typed a complete command (`/config global`) and press **Enter**, then exactly that command runs — never the highlighted suggestion; typing a space after a complete name closes the drop-up.
+- [ ] When I type with an input method (Japanese, Chinese) and press Enter to confirm a character, then no command runs and nothing is sent.
+- [ ] When I run a command while files are attached to the composer, then the attachments stay for my next message.
 - [ ] When I type `/con`, then the drop-up narrows to the matching commands (`/config`, `/context`).
 - [ ] When the message is **exactly** `/config`, `/config global`, `/context`, `/compact`, `/effort` or `/model` and I send it, then the command runs and **nothing is sent to the model**; the composer is cleared.
 - [ ] When the message is anything else — a command inside a sentence ("please /compact this for me"), an unknown name (`/foo`), or an argument a command does not take (`/compact now`, `/config everything`) — then it is a **normal message** sent to the model.
@@ -294,10 +301,11 @@ non-functional behavior.
 **/config**
 - [ ] When I run **/config**, then one popup shows every adjustable value of the current conversation: reasoning effort as a **5-notch graduated slider** (None → Low → Medium → High → Xhigh), web search as a switch, creativity and diversity as sliders with their real bounds, the compaction threshold as a select (50 % to 90 % in steps of 5), and the custom instructions (the existing instructions editor). There is **no** "defaults for new conversations" section and **no Apply button**.
 - [ ] When the model has no publisher recommendation for creativity and diversity, then the popup says the neutral values are in use (the note the old header panel showed); when web search cannot be enabled for this model, then the switch is disabled and its help says why.
-- [ ] When I change the effort, the web search switch or the threshold, then the change is saved at once; when I move the creativity or diversity slider, it is saved as soon as I stop moving it. Sending a message right after any change (even within a second) uses the new value on that turn.
+- [ ] When I change the effort, the web search switch or the threshold, then the change is saved at once; when I move the creativity or diversity slider, it is saved as soon as I stop moving it. Sending a message right after any change (even within a second) uses the new value on that turn: the turn's `Turn settings: ...` line in `backend.log` shows it.
 - [ ] When a change cannot be saved (the backend is unreachable), then the control returns to its previous value and a short error says the change was not saved.
 - [ ] When I close **/config** and open the header settings panel's Config button or type `/config` again, then both show the same values (one source, never two copies that disagree).
-- [ ] When I run **/config global**, then the current values — effort, web search, creativity, diversity, threshold and custom instructions — are saved as the defaults **for the current model** (the popup says so and names the model), and a confirmation says they were saved. A **different** model's defaults are left untouched.
+- [ ] When I run **/config global**, then the current values — effort, web search, creativity, diversity, threshold and custom instructions — are saved as the defaults **for the current model** (the popup says so and names the model), and a confirmation says they were saved. A **different** model's defaults are left untouched. Empty custom instructions are not saved as a default (they never erase another conversation's instructions).
+- [ ] When I save defaults for a knowledge-base assistant, then they belong to that assistant, not to its base model, and they survive a **Re-bind** of the assistant to another model.
 - [ ] When I create a new conversation on a model whose defaults I saved, then it opens with exactly those values; on a model without saved defaults, it opens with the Settings defaults (effort, web search, threshold), the model's recommended creativity and diversity, and empty custom instructions.
 - [ ] When I delete a model and download it again, then it starts without saved defaults (a fresh download is a new model for the app).
 
@@ -309,10 +317,14 @@ non-functional behavior.
 - [ ] When I switch model, then the new model brings its own values: the defaults saved for it with `/config global`, and otherwise its recommended creativity and diversity; every other value of the conversation (effort, web search, threshold, custom instructions — unless the new model has saved ones) stays as it was.
 
 **/compact**
-- [ ] When I run **/compact** on a conversation with several exchanges, then a **confirmation popup** explains what compaction does; confirming summarizes the earlier messages now (the same summary as the automatic one): the pending state reads "Summarizing earlier messages to make room…", then a thin separator appears **below the last answer** saying that N earlier messages were summarized, with **Show summary**. The on-screen history is untouched, the next answers still know the earlier facts, and `backend.log` shows one `Conversation compacted` line.
+- [ ] When I run **/compact** on a conversation with several exchanges, then a **confirmation popup** explains what compaction does; confirming summarizes the earlier messages now (the same summary as the automatic one): the pending state reads "Summarizing earlier messages to make room…", then a thin separator appears **below the last answer** saying "You summarized N earlier messages.", with **Show summary**; while it runs, a status line at the end of the thread says it is summarizing, and sending, the header buttons and commands are disabled. The on-screen history is untouched, the next answers still know the earlier facts, and `backend.log` shows one `Conversation compacted` line.
 - [ ] When I send the next message after a manual compaction, then the model answers normally — on a strict-template model (Gemma, Mistral) too: no "roles must alternate" error.
 - [ ] When I dismiss the confirmation, then nothing is compacted.
-- [ ] When the conversation has only one exchange (or was just compacted), then **/compact** says there is nothing to compact yet, and nothing is stored.
+- [ ] When the conversation has only one or two exchanges, or nothing but a summary and the last two exchanges, then **/compact** says there is nothing to compact yet, without loading the model, and nothing is stored.
+- [ ] When the summary cannot be written (the model fails or is stopped), then **/compact** says so and nothing changes: no separator, and the model still sees the whole history.
+- [ ] When the last turn failed (red bubble), then **/compact** says there is nothing to compact yet; after the next successful answer it works.
+- [ ] When an answer is being generated, or the model is busy reloading, then **/compact** says the model is busy and to try again in a moment; nothing is compacted.
+- [ ] When I am on the new-conversation page, then **/compact** and **/context** are not offered.
 - [ ] When the model is not loaded, then **/compact** loads it first (the pending state shows) and then compacts.
 - [ ] When I reopen the conversation or restart the app, then the manual separator is still below the same answer, and its summary still opens.
 
@@ -322,13 +334,15 @@ non-functional behavior.
 - [ ] When the model is loaded and the machine reduced its window, then the panel shows the **allocated** window with a short note that the model supports more but this computer's memory bounds it — never a smaller-than-the-card number left unexplained.
 - [ ] When the model is not loaded, then the panel shows the model's trained window and says the window this computer allows is known once the model is loaded; opening **/context** never loads the model.
 - [ ] When the conversation uses a knowledge base, then the panel says the counts leave out the excerpts a question retrieves.
-- [ ] When I read the counts, then they are presented as **estimates**; for a conversation near its threshold, the auto-compaction reserve shrinks as it fills, and compaction fires on the turn where messages plus summary reach the reserve.
+- [ ] When I read the counts, then they are presented as **estimates** and the percentages are of the window the conversation works with (the allocated window, or less when memory bounds it); the auto-compaction reserve is the share above the compaction threshold plus the room kept for the answer.
+- [ ] When a conversation is past its threshold, then free space shows as zero and the panel says the next turn will be summarized first.
 - [ ] When I reload the page, then the **/context** panel is gone (it is a snapshot, never stored in the conversation).
 
 **Unloading the model**
-- [ ] When a model is loaded, then the header settings panel shows a small red **Unload model** button; with no model loaded it is not shown.
-- [ ] When I press **Unload model**, then the model leaves memory (its inference process ends, `backend.log` shows the cleanup) and the button disappears; my next message shows that the model is reloading because it was unloaded, then answers.
-- [ ] When an answer is being generated, then **Unload model** is refused with a short message saying to wait for the answer to finish; nothing is interrupted.
+- [ ] When a model is loaded, then the header settings panel (in a conversation and on the new-conversation page) shows a small red **Unload <model name>** button naming the loaded model, even when another conversation loaded it; with no model loaded it is not shown.
+- [ ] When I press **Unload model**, then the model leaves memory (its inference process ends, `backend.log` shows the cleanup) and the button disappears; my next message shows "You unloaded the model; reloading it…" (translated in fr/es/zh, distinct from the idle-unload notice), then answers.
+- [ ] When an answer is being generated, or the model is busy reloading, then **Unload** is refused with "The model is busy; try again in a moment."; nothing is interrupted.
+- [ ] When I unload the model while the computer was under memory pressure, then the next load sizes the window from the memory available then (the reduced size remembered before the unload is not kept).
 
 ## Arena — `/erudi/arena`
 
@@ -371,7 +385,7 @@ non-functional behavior.
 **Embeddings run without the torch stack (footprint)**
 - [ ] When I create an assistant and ask a document question, then ingestion and retrieval work exactly as before — embeddings now come from a **dedicated child** (`llama-server --embeddings` on Windows/Linux, `mlx_vlm.server` on Apple Silicon), not from the in-process sentence-transformers stack.
 - [ ] When retrieval is compared to the previous version on the **same KB** (golden questions), then answers ground on the same passages — no regression from the engine swap.
-- [ ] When the embedding child has been **idle**, then it is unloaded to free memory, and the next KB operation transparently reloads it.
+- [ ] When the embedding child has been **idle**, then it is unloaded to free memory, and the next KB operation transparently reloads it. *(The Settings idle delay governs the chat model only, not this one.)*
 - [ ] When I inspect the installed app, then on Windows/Linux the **torch/transformers tree is gone**, and on Apple Silicon torch/sklearn/sentence-transformers are gone (transformers stays as an mlx-vlm dependency) — with no loss of KB function.
 - [ ] *(Apple Silicon)* When the KB embeds, then the app serves `intfloat/multilingual-e5-small` **as-is** through mlx_vlm — vectors match the previous output, so **no reindex** is needed.
 - [ ] *(Windows/Linux)* When the KB embeds, then the app serves the **published GGUF (F16)** through `llama-server --embeddings` — 384-dim, mean-pooled, L2-normalized, with the `query:`/`passage:` prefixes applied.
@@ -382,7 +396,7 @@ non-functional behavior.
 - [ ] When I click the **gear icon** at the bottom of the left rail, then the Settings page opens and the gear shows the active highlight.
 - [ ] When I open Settings on a fresh install, then the **Web Search** toggle is **off** and the copy explains that enabling it sends the searched query to external search engines when the model decides to search.
 - [ ] When I flip the Web Search toggle, then the change **persists across an app relaunch**.
-- [ ] When the global toggle is on and I start a **new** conversation, then that conversation's own Web search toggle starts **on** (inheritance at creation; the conversation owns it afterwards).
+- [ ] When the global toggle is on and I start a **new** conversation, then that conversation's own Web search switch starts **on** unless its model has saved defaults (inheritance at creation; the conversation owns it afterwards).
 
 **Default reasoning effort**
 - [ ] When I open Settings on a fresh install, then a **Default reasoning effort** card shows **Medium** selected among None / Low / Medium / High / Xhigh, and the copy says it sets the starting value for new conversations (each conversation keeps its own control afterwards).
@@ -390,12 +404,12 @@ non-functional behavior.
 - [ ] When I have saved a model's defaults with `/config global`, then new conversations on that model open at the saved effort, and every model without saved defaults keeps opening at this card's value.
 
 **Default compaction threshold**
-- [ ] When I open Settings on a fresh install, then a **Default compaction threshold** card shows **80 %** selected among 50 % to 90 %, and the copy says it sets the starting value for new conversations (each conversation keeps its own control afterwards).
+- [ ] When I open Settings on a fresh install, then a **Default compaction threshold** card shows **80 %** selected among 50 % to 90 %, and the copy says it sets the starting value for new conversations on models without saved defaults (each conversation keeps its own value afterwards).
 - [ ] When I change the default, then it persists across an app relaunch and only affects conversations created afterwards — an existing conversation keeps its threshold.
 
 **Idle unload delay**
 - [ ] When I open Settings on a fresh install, then an **Unload the model when idle** card shows **5 minutes** selected among 5, 15, 30 and 60 minutes and **Never**, and the copy says an unused model leaves memory after that delay and reloads at the next message.
-- [ ] When I pick **15 minutes**, then it persists across an app relaunch, and a model left unused is unloaded about 15 minutes after its last answer (within half a minute; `backend.log` shows the cleanup), not after 5.
+- [ ] When I pick **15 minutes**, then it applies at once (no relaunch needed), persists across an app relaunch, and a model left unused is unloaded about 15 minutes after its last answer (within half a minute; `backend.log` shows the cleanup), not after 5.
 - [ ] When I pick **Never**, then a model left unused stays loaded (an hour later it still answers without reloading); the memory brake still acts when the computer runs short of memory, and **Unload model** still works.
 
 **Updates**
@@ -415,10 +429,10 @@ updater, and the card says so.*
 
 - [ ] When I open Settings, then an **Update Erudi** card names the version I am running and offers **Check for updates**.
 - [ ] When I press **Check for updates** while already on the newest release, then the button shows it is checking, and the card then says I am on the latest version — no dialog, no popup.
-- [ ] When a newer release exists and **Download updates automatically** is off, then pressing Check names that version and offers **Download**; nothing is downloaded until I press Download, and quitting still installs nothing — only **Install now** installs it.
+- [ ] When a newer release exists and **Download updates automatically** is off, then pressing Check names that version and offers **Download**; nothing is downloaded until I press Download. Once downloaded, **Install now** installs it; quitting installs it only when **Install downloaded updates when I quit** is on.
 - [ ] When the download is running, then the card shows the percentage and offers no second Download button.
 - [ ] When the update is downloaded, then **Install now** closes Erudi and opens it again on the new version.
-- [ ] When an update was downloaded earlier and its installation never applied (the app was reopened before the installer finished), then it comes back without downloading anything again — this is the case the card exists for. With **Check for updates** on, the check at launch re-detects it within moments and the card offers **Install now** on its own. With it **off**, pressing **Check for updates** then **Download** brings it back instantly, served from the copy already on disk.
+- [ ] When an update was downloaded earlier and its installation never applied (the app was reopened before the installer finished), then it comes back without downloading anything again — this is the case the card exists for. With **Check for updates** on, the check at launch re-detects it within moments and the card offers **Install now** on its own when the installer is still on disk (otherwise **Download**, served from the cache when possible). With it **off**, pressing **Check for updates** then **Download** brings it back instantly, served from the copy already on disk.
 - [ ] When the machine is offline and I press Check for updates, then one quiet line on the card says the check did not go through, and the button is usable again.
 - [ ] When I run the app from source (`npm start`), then the card says updates are handled by the installed application and the button is disabled.
 
@@ -639,13 +653,15 @@ tool path explicitly — a working chat proves nothing about it.*
 **Updates & first run**
 - [ ] When I run a **packaged** build with **Download updates automatically** on and a newer release is published, then a banner shows "downloading…", then "ready — restart to install"; it installs on **Install now**, or at quit when **Install downloaded updates when I quit** is on.
 - [ ] When the app starts on a newly installed version after an update it downloaded, then a dismissible popup says **Updated to X.Y.Z** with that release's notes, kept from the update download (no request is made at launch); once dismissed it does not reappear on later launches of that version.
+- [ ] When the notes contain formatting or links, then they show as plain text (lists as lines, no images loaded); the only link is **Read the release notes**, which opens in the browser.
+- [ ] When an update was downloaded but never installed and I then install a later version by hand, then the popup does not show the older notes (version and link only).
 - [ ] When the notes are not available (a manual install, or a release without notes), then the popup shows the version and a **Read the release notes** link that opens the release page in the browser only when clicked.
 - [ ] When I first launch this version over an earlier one, then the popup says **Updated to** this version, with the link, and explains that downloading and installing updates are now separate choices in Settings, both off.
 - [ ] When I launch a fresh install, the app after **Clear all data**, or an older version than the last one I ran, then no update popup appears.
 - [ ] *(QA setup)* The update scenarios run against the local fake update feed described in `docs/dev/release-qa-checklist.md`, so they need no second published release.
 - [ ] When a release is still a **draft**, then my installed build is **not** offered that update.
 - [ ] When **Check for updates** is off in Settings and a newer release is published, then no banner appears, nothing is downloaded and quitting installs nothing; turning it back on starts a check at once — the banner appears without a relaunch (and downloads only when **Download updates automatically** is on).
-- [ ] When I dismiss the update banner, then the **Update Erudi** card in Settings still knows the update is there and offers to install it.
+- [ ] When I dismiss the update banner, then it does not come back for that version until the next launch (the periodic check does not re-raise it), and the **Update Erudi** card in Settings still knows the update is there and offers **Download** or **Install now**, whichever applies.
 - [ ] When I do a **fresh install**, then the Welcome dialog shows once, the catalog seeds instantly from the bundled snapshot (then refreshes in the background), and the machine readout renders (even if hardware profiling falls back).
 - [ ] When the app quits, then the backend and its inference child processes are stopped (none left orphaned).
 
