@@ -2,78 +2,56 @@ import React, { useState, useEffect } from "react";
 import { Download, RefreshCw, X } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
 import { formatPercent } from "../i18n/format";
+import { bannerStateAfter } from "../utils/updaterPolicy";
 
 /**
- * Non-intrusive update notification banner.
+ * Non-intrusive update notification banner (#563).
  *
- * Lifecycle:
- *   1. Hidden until main process emits "update-available"
- *   2. Shows "Downloading vX.Y.Z…" with progress during download
- *   3. Shows "Restart to install" button once download is complete
- *   4. User can dismiss — they'll get the update on next natural quit anyway
- *      (autoInstallOnAppQuit is enabled in main.js)
+ * Phases, from the updater events main forwards (`bannerStateAfter`):
+ *   1. available   -- a version was found and nothing downloads on its own
+ *                     (Download updates automatically is off): it names the
+ *                     version and offers Download;
+ *   2. downloading -- progress, from a Download press or an automatic download;
+ *   3. ready       -- the update is on disk: Install now.
+ * Whether a downloaded update also installs at quit is the "Install
+ * downloaded updates when I quit" switch, not the banner's business.
+ *
+ * Dismissing hides the banner for that version until the next launch: the
+ * periodic check finds it again and must not bring it back. The Update Erudi
+ * card in Settings still offers it.
  */
 export default function UpdateBanner() {
   const { t } = useTranslation();
   const [state, setState] = useState(null);
-  // state shape:
-  //   { phase: "available", version }
-  //   { phase: "downloading", version, percent }
-  //   { phase: "ready", version }
-
-  const [dismissed, setDismissed] = useState(false);
+  const [dismissedVersion, setDismissedVersion] = useState(null);
 
   useEffect(() => {
-    const handlePayload = (payload) => {
-      switch (payload.event) {
-        case "update-available":
-          setState({ phase: "available", version: payload.version });
-          setDismissed(false);
-          break;
-        case "download-progress":
-          setState((prev) => ({
-            phase: "downloading",
-            version: prev?.version ?? "",
-            percent: payload.percent,
-          }));
-          break;
-        case "update-downloaded":
-          setState({ phase: "ready", version: payload.version });
-          break;
-        default:
-          break;
-      }
-    };
-
-    // Production: receive events from main process via preload bridge
-    let cleanupIPC = null;
-    if (window.updaterAPI) {
-      cleanupIPC = window.updaterAPI.onUpdaterEvent(handlePayload);
-    }
-
-    // DEV TESTING ONLY — remove before shipping.
-    // In the browser console, trigger any phase with:
-    //   window.dispatchEvent(new CustomEvent("__test_updater__", { detail: { event: "update-available", version: "1.2.0" } }))
-    //   window.dispatchEvent(new CustomEvent("__test_updater__", { detail: { event: "download-progress", version: "1.2.0", percent: 60 } }))
-    //   window.dispatchEvent(new CustomEvent("__test_updater__", { detail: { event: "update-downloaded", version: "1.2.0" } }))
-    const testHandler = (e) => handlePayload(e.detail);
-    window.addEventListener("__test_updater__", testHandler);
-
-    return () => {
-      if (cleanupIPC) {
-        cleanupIPC();
-      }
-      window.removeEventListener("__test_updater__", testHandler);
-    };
+    return window.updaterAPI?.onUpdaterEvent?.((payload) => {
+      setState((prev) => bannerStateAfter(prev, payload));
+    });
   }, []);
 
-  if (!state || dismissed) {
+  if (!state || state.version === dismissedVersion) {
     return null;
   }
 
-  const handleInstall = () => {
-    window.updaterAPI?.installNow();
+  const handleDownload = async () => {
+    setState((prev) => ({ phase: "downloading", version: prev?.version ?? "", percent: 0 }));
+    const result = await window.updaterAPI?.downloadNow?.();
+    if (result && result.ok === false) {
+      // No updater event follows a refused call: offer the button again.
+      setState((prev) =>
+        prev?.phase === "downloading" ? { phase: "available", version: prev.version } : prev
+      );
+    }
   };
+
+  const handleInstall = () => {
+    window.updaterAPI?.installNow?.();
+  };
+
+  const actionClass =
+    "shrink-0 rounded-lg border border-[#00B574]/40 px-2.5 py-1 text-[12px] text-[#00B574] hover:text-white hover:border-white/40 transition-colors";
 
   return (
     <div
@@ -86,7 +64,6 @@ export default function UpdateBanner() {
         "animate-in slide-in-from-bottom-2 duration-300",
       ].join(" ")}
     >
-      {/* Icon */}
       <div className="shrink-0">
         {state.phase === "ready" ? (
           <RefreshCw className="w-4 h-4 text-[#00B574]" />
@@ -95,7 +72,6 @@ export default function UpdateBanner() {
         )}
       </div>
 
-      {/* Text + progress */}
       <div className="flex-1 min-w-0">
         {state.phase === "available" && (
           <p className="text-gray-200">
@@ -133,24 +109,29 @@ export default function UpdateBanner() {
             <Trans
               i18nKey="common:update.ready"
               values={{ version: state.version }}
-              components={{
-                v: <span className="text-[#00B574] font-semibold" />,
-                install: (
-                  <button
-                    onClick={handleInstall}
-                    className="underline text-[#00B574] hover:text-white transition-colors"
-                  />
-                ),
-              }}
+              components={{ v: <span className="text-[#00B574] font-semibold" /> }}
             />
           </p>
         )}
       </div>
 
-      {/* Dismiss — only on "available" and "ready" phases; not during download */}
+      {state.phase === "available" && (
+        <button type="button" onClick={handleDownload} className={actionClass}>
+          {t("common:update.download")}
+        </button>
+      )}
+
+      {state.phase === "ready" && (
+        <button type="button" onClick={handleInstall} className={actionClass}>
+          {t("common:update.install")}
+        </button>
+      )}
+
+      {/* Dismiss -- on "available" and "ready"; a download in progress stays. */}
       {state.phase !== "downloading" && (
         <button
-          onClick={() => setDismissed(true)}
+          type="button"
+          onClick={() => setDismissedVersion(state.version)}
           className="shrink-0 text-gray-500 hover:text-gray-300 transition-colors"
           aria-label={t("common:update.dismiss")}
         >

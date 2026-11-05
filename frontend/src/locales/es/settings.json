@@ -4,13 +4,13 @@
   "subtitle": "Preferencias que se aplican a toda la aplicación.",
   "webSearch": {
     "title": "Búsqueda web",
-    "description": "Define si la búsqueda web empieza activada o desactivada en las conversaciones nuevas. Cada conversación conserva después su propio interruptor de búsqueda web en la cabecera del chat, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
+    "description": "Define si la búsqueda web empieza activada o desactivada en las conversaciones nuevas, en cada modelo sin un valor guardado con /config global. Cada conversación conserva después su propio interruptor de búsqueda web en /config, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
     "note": "Desactivada por defecto. Cuando un modelo compatible con herramientas decide buscar, la consulta buscada se envía a motores de búsqueda externos; nada más sale de tu equipo.",
     "toggleLabel": "Búsqueda web"
   },
   "reasoningEffort": {
     "title": "Esfuerzo de razonamiento predeterminado",
-    "description": "Define el esfuerzo de razonamiento inicial para las conversaciones nuevas. Cada conversación conserva después su propio control de esfuerzo de razonamiento en la cabecera del chat, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
+    "description": "Define el esfuerzo de razonamiento inicial para las conversaciones nuevas, en cada modelo sin un nivel guardado con /config global. Cada conversación conserva después su propio nivel en /config y /effort, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
     "note": "Medio por defecto. Los niveles más altos permiten que el modelo delibere más antes de responder; Ninguno le pide responder directamente.",
     "selectLabel": "Esfuerzo de razonamiento predeterminado",
     "levels": {
@@ -23,15 +23,27 @@
   },
   "compactionThreshold": {
     "title": "Umbral de compactación predeterminado",
-    "description": "Define el umbral de compactación inicial para las conversaciones nuevas: los mensajes más antiguos se resumen cuando una conversación llena esta parte de la ventana de contexto del modelo. Cada conversación conserva después su propio control de umbral de compactación en la cabecera del chat, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
+    "description": "Define el umbral de compactación inicial para las conversaciones nuevas, en cada modelo sin un umbral guardado con /config global: los mensajes más antiguos se resumen cuando una conversación llena esta parte de la ventana de contexto del modelo. Cada conversación conserva después su propio umbral en /config, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
     "note": "80 % por defecto. Más bajo: resume antes y con más frecuencia, lo que mantiene la conversación más corta. Más alto: conserva más de ella palabra por palabra y resume con menos frecuencia.",
     "selectLabel": "Umbral de compactación predeterminado"
   },
-  "autoUpdate": {
-    "title": "Actualizaciones automáticas",
-    "description": "Busca una nueva versión de Erudi en segundo plano, la descarga y la instala la próxima vez que cierres la aplicación. La solicitud va a las releases de GitHub de este proyecto y solo lleva tu versión y tu plataforma.",
-    "note": "Activadas por defecto. Cuando están desactivadas, la aplicación no hace ninguna solicitud de actualización; siempre puedes instalar una versión nueva tú mismo desde la página de releases.",
-    "toggleLabel": "Actualizaciones automáticas"
+  "updatePreferences": {
+    "title": "Actualizaciones",
+    "description": "Lo que Erudi hace por su cuenta cuando se publica una versión nueva. La tarjeta «Actualizar Erudi» de abajo busca, descarga e instala cuando lo pides, elijas lo que elijas aquí.",
+    "check": {
+      "label": "Buscar actualizaciones",
+      "help": "Consulta las releases de GitHub de este proyecto al iniciar y luego cada 4 horas, y muestra un aviso cuando hay una versión nueva. La solicitud solo lleva tu versión y tu plataforma."
+    },
+    "download": {
+      "label": "Descargar actualizaciones automáticamente",
+      "help": "En cuanto la búsqueda encuentra una versión nueva, Erudi descarga el instalador en segundo plano. Desactivado, el aviso ofrece un botón Descargar y no se descarga nada hasta que lo pulses."
+    },
+    "install": {
+      "label": "Instalar las actualizaciones descargadas al salir",
+      "help": "Una versión descargada sustituye a la aplicación cuando sales de Erudi, sin ningún diálogo. Desactivado, espera a «Instalar ahora»."
+    },
+    "checkOffNote": "Activa «Buscar actualizaciones» para usar los otros dos interruptores.",
+    "handedOffNote": "Esta actualización aún puede instalarse al salir: macOS ya la ha recibido."
   },
   "updates": {
     "title": "Actualizar Erudi",

@@ -766,8 +766,11 @@ def test_no_warning_respawn_when_the_idle_reap_is_near(world):
     CPU_Engine.brake_point("turn_end")
     assert CPU_Engine._model["brake"].cap == int(W * mb.SHRINK_FACTOR)
     CPU_Engine._model["brake"].last_sample_at -= mb.BRAKE_IDLE_INTERVAL_S
+    # One second past the margin: the brake reads time.time() and the test sets
+    # a datetime.now(); on Windows the two clocks differ by a few milliseconds,
+    # so an exact boundary can land on either side.
     CPU_Engine._last_used = datetime.now() - timedelta(
-        seconds=CPU_Engine._max_idle_time - mb.LLAMA_REAP_MARGIN_S
+        seconds=CPU_Engine._max_idle_time - mb.LLAMA_REAP_MARGIN_S + 1
     )
     assert CPU_Engine.brake_point("idle") == BrakeOutcome()
     assert len(world.spawns) == 1

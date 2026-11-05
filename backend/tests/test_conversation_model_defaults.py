@@ -485,7 +485,7 @@ async def test_the_turn_logs_the_conversations_values(
         top_p=0.6,
         compaction_threshold=75,
         web_search_enabled=True,
-        custom_prompt="Stored but not sent.",
+        custom_prompt="Stored instructions.",
     )
     test_db_session.commit()
 
@@ -496,8 +496,52 @@ async def test_the_turn_logs_the_conversations_values(
     assert line.isascii()
     assert line == (
         f"Turn settings: conversation={conversation.id}, model={model_a.id}, effort=high, "
-        "temperature=0.4, top_p=0.6, threshold=75, web_search_toggle=True, custom_prompt_chars=0"
+        "temperature=0.4, top_p=0.6, threshold=75, web_search_toggle=True, custom_prompt_chars=20"
     )
+
+
+async def test_a_turn_without_instructions_uses_the_stored_ones(
+    test_db_session, model_a, monkeypatch
+):
+    service = ConversationService(test_db_session)
+    conversation = service.create_conversation(llm_id=model_a.id, custom_prompt="Be brief.")
+    test_db_session.commit()
+    plan_kwargs: dict = {}
+    monkeypatch.setattr("src.domains.conversations.services.plan_turn", _plan_spy(plan_kwargs))
+    monkeypatch.setattr(
+        "src.domains.conversations.services.detect_supports_vision", lambda link: False
+    )
+    monkeypatch.setattr(service.runner, "astream_text", _stream_spy({}))
+
+    async for _ in service.query_and_respond_stream(
+        conversation.id, ConversationQuery(question="hi")
+    ):
+        pass
+
+    assert plan_kwargs["custom_prompt"] == "Be brief."
+
+
+async def test_a_turn_with_empty_instructions_runs_without_any(
+    test_db_session, model_a, monkeypatch, caplog
+):
+    service = ConversationService(test_db_session)
+    conversation = service.create_conversation(llm_id=model_a.id, custom_prompt="Be brief.")
+    test_db_session.commit()
+    plan_kwargs: dict = {}
+    monkeypatch.setattr("src.domains.conversations.services.plan_turn", _plan_spy(plan_kwargs))
+    monkeypatch.setattr(
+        "src.domains.conversations.services.detect_supports_vision", lambda link: False
+    )
+    monkeypatch.setattr(service.runner, "astream_text", _stream_spy({}))
+
+    with caplog.at_level(logging.INFO):
+        async for _ in service.query_and_respond_stream(
+            conversation.id, ConversationQuery(question="hi", custom_prompt="")
+        ):
+            pass
+
+    assert plan_kwargs["custom_prompt"] == ""
+    assert _turn_line(caplog).endswith("custom_prompt_chars=0")
 
 
 async def test_the_turn_logs_the_payload_overrides(test_db_session, model_a, monkeypatch, caplog):

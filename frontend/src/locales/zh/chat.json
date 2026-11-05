@@ -19,32 +19,98 @@
     "toggleSettings": "显示或隐藏设置",
     "creativity": "创造力",
     "diversity": "多样性",
-    "webSearch": "网页搜索",
-    "webSearchToggle": "网页搜索",
-    "reasoningEffort": "推理强度",
-    "reasoningEffortLevels": {
-      "none": "无",
-      "low": "低",
-      "medium": "中",
-      "high": "高",
-      "xhigh": "极高"
-    },
-    "compactionThreshold": "压缩阈值",
     "customizePrompt": "自定义提示词",
     "apply": "应用",
-    "pickerAttention": "请选择一个模型",
     "tooltips": {
       "temperature": "控制创造力。越低越专注，越高越有创意。",
       "topP": "控制用词的多样性。越低越可预测，越高越丰富。",
-      "prompt": "自定义引导 AI 行为的系统提示词。",
-      "webSearch": "允许模型搜索网页以获取最新信息。搜索查询会发送给外部搜索引擎。",
-      "webSearchUnavailable": "该模型无法使用工具，因此网页搜索对它不可用。",
-      "webSearchUnverified": "该模型尚未验证能够运行工具，因此网页搜索对它保持关闭。",
-      "reasoningEffort": "决定模型在回答前可以深思熟虑的程度：级别越高，推理越多但耗时越长；“无”会要求模型直接作答。",
-      "compactionThreshold": "当对话占满模型上下文窗口的这一比例时，较早的消息会被摘要。较低：更早、更频繁地摘要，使对话保持更短。较高：逐字保留更多内容，摘要频率更低。"
+      "prompt": "自定义引导 AI 行为的系统提示词。"
+    }
+  },
+  "conversationHeader": {
+    "chattingWith": "正在与 <model>{{model}}</model> 对话",
+    "settings": "对话设置",
+    "pickerAttention": "请选择一个模型"
+  },
+  "commands": {
+    "listLabel": "命令",
+    "config": {
+      "label": "设置",
+      "description": "调整此对话的设置"
+    },
+    "effort": {
+      "label": "推理强度",
+      "description": "设置模型回答前的推理程度"
+    },
+    "model": {
+      "label": "模型",
+      "description": "切换到另一个已安装的模型"
+    }
+  },
+  "config": {
+    "title": "对话设置",
+    "subtitle": "更改会立即保存，并从下一条消息起生效。",
+    "subtitleDraft": "新对话将以这些值开始。",
+    "help": "帮助：{{field}}",
+    "saveFailed": "无法保存您的更改。",
+    "effort": {
+      "label": "推理强度",
+      "help": "决定模型在回答前可以深思熟虑的程度：级别越高，推理越多但耗时越长；“无”会要求模型直接作答。",
+      "levels": {
+        "none": "无",
+        "low": "低",
+        "medium": "中",
+        "high": "高",
+        "xhigh": "极高"
+      }
+    },
+    "webSearch": {
+      "label": "网页搜索",
+      "help": "允许模型搜索网页以获取最新信息。搜索查询会发送给外部搜索引擎。",
+      "unavailable": "该模型无法使用工具，因此网页搜索对它不可用。",
+      "unverified": "该模型尚未验证能够运行工具，因此网页搜索对它保持关闭。"
+    },
+    "creativity": {
+      "label": "创造力",
+      "help": "控制创造力。越低越专注，越高越有创意。"
+    },
+    "diversity": {
+      "label": "多样性",
+      "help": "控制用词的多样性。越低越可预测，越高越丰富。"
     },
     "noPublisherRecommendation": "此模型的发布者未提供采样建议；已应用中性默认值。",
-    "weightsMissingHint": "缺少模型权重——请在“模型”页面重新绑定此助手"
+    "threshold": {
+      "label": "压缩阈值",
+      "help": "当对话占满模型上下文窗口的这一比例时，较早的消息会被摘要。较低：更早、更频繁地摘要，使对话保持更短。较高：逐字保留更多内容，摘要频率更低。"
+    },
+    "instructions": {
+      "label": "自定义指令",
+      "help": "定义引导 AI 回答方式的自定义指令。这将应用于此对话中的所有消息。",
+      "placeholder": "在此输入您的自定义系统提示词...",
+      "save": "保存指令"
+    },
+    "global": {
+      "title": "此模型的默认值",
+      "subtitle": "使用 {{model}} 的新对话将以这些值开始。",
+      "saving": "正在保存 {{model}} 的默认值…",
+      "saved": "已保存为 {{model}} 的默认值。",
+      "failed": "无法保存 {{model}} 的默认值。",
+      "noInstructions": "无",
+      "on": "开启",
+      "off": "关闭"
+    }
+  },
+  "effortPopup": {
+    "subtitle": "立即保存，从下一条消息起生效。",
+    "subtitleDraft": "新对话将从此级别开始。"
+  },
+  "modelPopup": {
+    "title": "模型",
+    "subtitle": "新模型会带来为其保存的值，否则使用其推荐的创造力和多样性。",
+    "listLabel": "已安装的模型",
+    "help": "仅列出权重位于此电脑上的已安装模型。",
+    "current": "当前",
+    "empty": "目前没有可用的已安装模型。"
   },
   "composer": {
     "placeholder": "提出一个问题…",
@@ -82,7 +148,8 @@
     "star": "收藏消息"
   },
   "conversation": {
-    "untitled": "新对话"
+    "untitled": "新对话",
+    "loadFailed": "无法加载此对话。"
   },
   "compaction": {
     "length_one": "已将 {{count}} 条之前的消息总结为摘要，使对话保持在模型的上下文范围内",

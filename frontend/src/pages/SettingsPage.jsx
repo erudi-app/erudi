@@ -1,16 +1,16 @@
 import React, { useCallback } from "react";
-import { Brain, Cpu, Globe, Languages, RefreshCw, ScrollText, ShieldCheck } from "lucide-react";
+import { Brain, Cpu, Globe, Languages, ScrollText, ShieldCheck } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
 import SettingsCard from "../components/SettingsCard";
 import ToggleSwitch from "../components/ToggleSwitch";
+import UpdatePreferencesCard from "../components/UpdatePreferencesCard";
 import UpdatesCard from "../components/UpdatesCard";
 import EngineSwitchConfirmation from "../components/modals/EngineSwitchConfirmation";
 import { useUserSettings, useAppStartupInfo } from "../shared/hooks/api";
 import { useEngineSwitch } from "../shared/hooks/useEngineSwitch";
 import { setAppLanguage } from "../i18n";
 import { LANGUAGE_NAMES, SUPPORTED_LANGUAGES } from "../i18n/languages";
-import { notifyAutoUpdatePreference } from "../utils/autoUpdate";
 import { REASONING_EFFORT_LEVELS, DEFAULT_REASONING_EFFORT } from "../utils/reasoningEffort";
 import {
   COMPACTION_THRESHOLDS,
@@ -46,16 +46,17 @@ export function showsInferenceEngineSetting(backendType, inferenceBackend) {
  * App-wide settings page (gear icon in the sidebar rail).
  *
  * Sections: the global Web Search default (#310), the defaults new
- * conversations copy (reasoning effort, compaction threshold #607), automatic
- * updates, the manual update controls (#571), the inference engine and the
- * application language (#385). Enabling web search lets tool-capable models
- * search the web; the searched query is sent to external search engines, so it
- * ships OFF by default and new conversations inherit whatever the user picks
- * here (each conversation then owns its own toggle). Automatic updates ship ON
- * -- refusing them stops the update traffic entirely, and the choice is handed
- * to the Electron main process, which owns electron-updater. `UpdatesCard`
- * sits under it and is the only place a check, a download or an installation
- * can be started by hand, whatever that preference says (#571). The inference
+ * conversations copy (reasoning effort, compaction threshold #607), the three
+ * update switches (#563), the manual update controls (#571), the inference
+ * engine and the application language (#385). Enabling web search lets
+ * tool-capable models search the web; the searched query is sent to external
+ * search engines, so it ships OFF by default and new conversations inherit
+ * whatever the user picks here (each conversation then owns its own toggle).
+ * `UpdatePreferencesCard` holds the update switches -- Check for updates ships
+ * ON (notify only), downloading and installing on their own are opt-ins -- and
+ * hands them to the Electron main process, which owns electron-updater.
+ * `UpdatesCard` sits under it and is the only place a check, a download or an
+ * installation can be started by hand, whatever those switches say. The inference
  * engine defaults to Automatic (the hardware decides) and can be pinned to the
  * processor for a machine whose graphics card Erudi cannot drive; the backend
  * reads it once per boot, so changing it restarts the engine. This card only
@@ -83,7 +84,6 @@ export default function SettingsPage() {
     settled: refetchesAfterReady,
   });
   const webSearchEnabled = settings?.web_search_enabled ?? false;
-  const autoUpdateEnabled = settings?.auto_update_enabled ?? true;
   const reasoningEffort = settings?.default_reasoning_effort ?? DEFAULT_REASONING_EFFORT;
   const compactionThreshold =
     settings?.default_compaction_threshold ?? DEFAULT_COMPACTION_THRESHOLD;
@@ -121,19 +121,6 @@ export default function SettingsPage() {
     } catch {
       // Already recorded by the hook.
     }
-  };
-
-  const handleAutoUpdateToggle = async (next) => {
-    try {
-      await updateSettings({ auto_update_enabled: next });
-    } catch {
-      // Already recorded by the hook; main must not be told of a preference
-      // that did not persist.
-      return;
-    }
-    // Main holds electron-updater and has no database: without this it would
-    // keep checking after the user said no.
-    notifyAutoUpdatePreference(next);
   };
 
   const handleInferenceBackendChange = (event) => {
@@ -227,19 +214,10 @@ export default function SettingsPage() {
             }
           />
 
-          <SettingsCard
-            icon={<RefreshCw className="w-5 h-5 text-[var(--fit-good)]" />}
-            title={t("settings:autoUpdate.title")}
-            description={t("settings:autoUpdate.description")}
-            note={t("settings:autoUpdate.note")}
-            control={
-              <ToggleSwitch
-                checked={autoUpdateEnabled}
-                onChange={handleAutoUpdateToggle}
-                label={t("settings:autoUpdate.toggleLabel")}
-                disabled={loading}
-              />
-            }
+          <UpdatePreferencesCard
+            settings={settings}
+            loading={loading}
+            updateSettings={updateSettings}
           />
 
           <UpdatesCard />

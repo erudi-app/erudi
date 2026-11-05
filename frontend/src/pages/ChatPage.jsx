@@ -1,16 +1,15 @@
-import React, { useEffect, useState, useCallback, useRef } from "react";
+import React, { useEffect, useState, useCallback } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
 import ChatCollapsibleSection from "../components/ChatCollapsibleSection";
 import GradientBox from "../components/GradientBox";
 import QuestionInput from "../components/QuestionInput";
-import CustomizePromptModal from "../components/modals/CustomizePromptModal";
-import Tooltip from "../components/Tooltip";
-import ToggleSwitch from "../components/ToggleSwitch";
+import ConversationHeader from "../components/ConversationHeader";
+import CommandPopups from "../components/CommandPopups";
 import ErrorModal from "../components/modals/ErrorModal";
 import { motion, AnimatePresence } from "framer-motion";
-import { SlidersHorizontal, ChevronDown, HelpCircle } from "lucide-react";
+import { ChevronDown } from "lucide-react";
 import logoErudi from "../assets/images/logos/logoerudifinal.png";
 import { API_BASE_URL } from "../config/api.js";
 import apiClient, { tracedFetch } from "../services/api/client";
@@ -19,19 +18,14 @@ import { createLogger } from "../utils/logger";
 import { conversationPath } from "../utils/routes";
 import { canAttachImages } from "../utils/modelCapabilities";
 import { hasMissingWeights } from "../utils/modelWeights";
-import { defaultsFor, hasNoPublisherRecommendation } from "../utils/samplingDefaults";
-import { formatNumber } from "../i18n/format";
-import { REASONING_EFFORT_LEVELS } from "../utils/reasoningEffort";
-import {
-  COMPACTION_THRESHOLDS,
-  DEFAULT_COMPACTION_THRESHOLD,
-  formatCompactionThreshold,
-} from "../utils/compactionThreshold";
+import { COMMAND_SCOPES, commandsFor } from "../utils/slashCommands";
+import useConversationSettings, { DRAFT } from "../shared/hooks/useConversationSettings";
 
 const log = createLogger("ChatPage");
 
-// Temperature / top-p read-outs: two decimals in the active locale.
-const TWO_DECIMALS = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
+// The slash commands the new-conversation page offers: they edit the draft
+// the conversation is created from.
+const COMMANDS = commandsFor(COMMAND_SCOPES.DRAFT);
 
 export default function ChatPage() {
   const { t } = useTranslation();
@@ -46,84 +40,18 @@ export default function ChatPage() {
   const [collapsed, setCollapsed] = useState(false);
   const [isLanguageWarningExpanded, setIsLanguageWarningExpanded] = useState(false);
 
-  // Parameters state (#388): seeded from the selected model's resolved
-  // defaults (`sampling_defaults` on the /llms/local row; the backend
-  // fallback 0.2 / 0.95 / 1024 before a model is known or for a model
-  // without hints). Every model switch re-defaults them to the new model's
-  // values, touched or not (maintainer decision 1); a touched value persists
-  // while the model stays the same and is what the creation POST sends.
-  const [settings, setSettings] = useState(() => defaultsFor(null));
-  const patchSettings = (patch) => setSettings((prev) => ({ ...prev, ...patch }));
-  const [customPrompt, setCustomPrompt] = useState("");
-  const [showPromptModal, setShowPromptModal] = useState(false);
-  const [isSettingsOpen, setIsSettingsOpen] = useState(false);
-  // Web-search toggle (#310): null until the GLOBAL default is fetched, so an
-  // untouched panel inherits it server-side (the creation payload omits the
-  // field while null). Once fetched or flipped, the explicit value is sent
-  // and the FIRST turn already honors it.
-  const [webSearch, setWebSearch] = useState(null);
-  // Reasoning effort (PR-D2): same null-until-fetched pattern as webSearch
-  // above, seeded from the global default and sent explicitly once known so
-  // the FIRST turn already honors it.
-  const [reasoningEffort, setReasoningEffort] = useState(null);
-  // Compaction threshold (#607): same null-until-fetched pattern, seeded
-  // from the global default and sent explicitly once known. When the fetch
-  // fails, the select shows the shipped default and stays usable, but the
-  // value is sent only once the user picks one: until then the backend
-  // copies the real global default.
-  const [compactionThreshold, setCompactionThreshold] = useState(null);
-  const [globalDefaultsFailed, setGlobalDefaultsFailed] = useState(false);
-
-  useEffect(() => {
-    let cancelled = false;
-    (async () => {
-      try {
-        const data = await apiClient.get("/user_settings/");
-        if (!cancelled) {
-          setWebSearch(Boolean(data?.web_search_enabled));
-          // Functional guard: a user who already picked a level before this
-          // fetch resolved keeps their choice -- the global default only fills
-          // the blank.
-          setReasoningEffort((cur) => cur ?? (data?.default_reasoning_effort || "medium"));
-          setCompactionThreshold(
-            (cur) => cur ?? data?.default_compaction_threshold ?? DEFAULT_COMPACTION_THRESHOLD
-          );
-        }
-      } catch (error) {
-        // The backend applies its own default: degraded, not failed.
-        if (!cancelled) {
-          setGlobalDefaultsFailed(true);
-        }
-        log.warn(
-          "Failed to fetch the global chat defaults (web search, reasoning effort, compaction threshold)",
-          error
-        );
-      }
-    })();
-    return () => {
-      cancelled = true;
-    };
-  }, []);
-
-  // Refs for dropdown
-  const dropdownRef = useRef(null);
-  const [isDropdownOpen, setIsDropdownOpen] = useState(false);
+  // The draft the conversation is created from (#609): the picked model's
+  // resolved defaults, and what the user set through /config, /effort and
+  // the header panel. Only what the user set is sent at creation; the
+  // backend resolves the rest for the model.
+  const draft = useConversationSettings(DRAFT);
+  const { selectModel, ready, createPayload } = draft;
+  // The command being run (its popup is open), or null.
+  const [openCommand, setOpenCommand] = useState(null);
 
   const toggleSidebar = () => {
     setCollapsed((prev) => !prev);
   };
-
-  // Close dropdown when clicking outside
-  useEffect(() => {
-    const handleClickOutside = (event) => {
-      if (dropdownRef.current && !dropdownRef.current.contains(event.target)) {
-        setIsDropdownOpen(false);
-      }
-    };
-
-    document.addEventListener("mousedown", handleClickOutside);
-    return () => document.removeEventListener("mousedown", handleClickOutside);
-  }, []);
 
   const fetchModels = useCallback(() => {
     apiClient
@@ -210,13 +138,13 @@ export default function ChatPage() {
     }
   }, [searchParams, models]); // Re-run when the models list arrives (#211 lesson)
 
-  // Re-seed the panel from the selected model on every switch (#388): the
-  // previous values were the previous model's.
+  const llm = models.find((m) => m.name === selectedModel);
+
+  // The draft follows the picked model: its defaults are read, and a switch
+  // brings the new model's values (the /model rule).
   useEffect(() => {
-    const model = models.find((m) => m.name === selectedModel);
-    if (!model) return;
-    setSettings(defaultsFor(model));
-  }, [selectedModel, models]);
+    if (llm) selectModel(llm);
+  }, [llm, selectModel]);
 
   const handleConversationClick = (id) => {
     navigate(conversationPath(id));
@@ -224,42 +152,34 @@ export default function ChatPage() {
 
   const handleAsk = useCallback(
     async (question, images = [], imagePaths = [], attachmentPaths = []) => {
-      const llm = models.find((m) => m.name === selectedModel);
       if (!llm || hasMissingWeights(llm)) {
         log.error("Selected model not found or has no weights on disk");
         return;
       }
       try {
-        // 1. Create a new conversation with the specified parameters
+        // 1. Create the conversation from the draft: the model and the values
+        // the user set; the backend resolves every other one for the model.
+        // A model picked just before sending: its defaults first decide what
+        // the user set that still holds.
+        await ready();
         const res = await tracedFetch(`${API_BASE_URL}/conversations/`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify({
-            llm_id: llm.id,
-            temperature: settings.temperature,
-            top_p: settings.topP,
-            custom_prompt: customPrompt,
-            // null (global default not fetched yet) -> omit: the backend
-            // copies the global setting at creation (#310).
-            ...(webSearch === null ? {} : { web_search_enabled: webSearch }),
-            ...(reasoningEffort === null ? {} : { reasoning_effort: reasoningEffort }),
-            ...(compactionThreshold === null ? {} : { compaction_threshold: compactionThreshold }),
-          }),
+          body: JSON.stringify(createPayload()),
         });
         if (!res.ok) {
           throw new Error(t("chat:errors.createConversation"));
         }
         const conversation = await res.json();
 
-        // 2. Redirect to ConversationPage and pass the question AND parameters
+        // 2. Hand the question over: the conversation page reads the created
+        // conversation and sends the first turn on its values.
         navigate(conversationPath(conversation.id), {
           state: {
             initialQuestion: question,
             initialImages: images,
             initialImagePaths: imagePaths,
             initialAttachments: attachmentPaths,
-            initialSettings: settings,
-            initialCustomPrompt: customPrompt,
           },
         });
       } catch (err) {
@@ -269,17 +189,7 @@ export default function ChatPage() {
         );
       }
     },
-    [
-      models,
-      selectedModel,
-      navigate,
-      settings,
-      customPrompt,
-      webSearch,
-      reasoningEffort,
-      compactionThreshold,
-      t,
-    ]
+    [llm, navigate, ready, createPayload, t]
   );
 
   const handleRename = (id, newName) => {
@@ -303,36 +213,6 @@ export default function ChatPage() {
         t("chat:errors.refreshConversations", { error: err.message || t("chat:errors.network") })
       );
     }
-  };
-
-  // Utility functions for HeaderBar-like styling
-  const TooltipIcon = ({ id, side = "right" }) => {
-    const text =
-      id === "temperature"
-        ? t("chat:header.tooltips.temperature")
-        : id === "top-p"
-          ? t("chat:header.tooltips.topP")
-          : id === "prompt"
-            ? t("chat:header.tooltips.prompt")
-            : id === "web-search"
-              ? t("chat:header.tooltips.webSearch")
-              : id === "reasoning-effort"
-                ? t("chat:header.tooltips.reasoningEffort")
-                : id === "compaction-threshold"
-                  ? t("chat:header.tooltips.compactionThreshold")
-                  : "";
-    return (
-      <Tooltip content={text} side={side} width="w-64">
-        <HelpCircle className="w-4 h-4 text-gray-400 hover:text-emerald-400 transition-colors cursor-help" />
-      </Tooltip>
-    );
-  };
-
-  const sliderBg = (value, max = 1) => {
-    const pct = Math.round((value / max) * 100);
-    return {
-      background: `linear-gradient(to right, #25C08A 0%, #1EAB78 ${pct}%, rgba(255,255,255,0.06) ${pct}%, rgba(255,255,255,0.06) 100%)`,
-    };
   };
 
   return (
@@ -405,382 +285,84 @@ export default function ChatPage() {
             </div>
           </GradientBox>
         ) : (
-          /* Interface de création de chat avec design HeaderBar */
           <div className="w-[700px] max-w-full">
             {/* Logo Erudi */}
             <div className="flex justify-center mb-8">
               <img src={logoErudi} alt="Erudi" className="h-20 w-auto" />
             </div>
 
-            {/* HeaderBar-like container */}
-            <div
-              className={[
-                "hb-scope relative w-full rounded-[26px] mb-6",
-                "border border-white/10",
-                "bg-[rgba(22,40,36,0.45)] backdrop-blur-[18px] saturate-[1.4]",
-                "shadow-[0_8px_30px_-4px_rgba(0,0,0,0.45),0_2px_6px_-1px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,255,255,0.06)]",
-              ].join(" ")}
-            >
-              {/* Glossy overlays */}
-              <div
-                aria-hidden
-                className="absolute inset-0 pointer-events-none rounded-[26px] mix-blend-overlay"
-                style={{
-                  background:
-                    "linear-gradient(to bottom, rgba(255,255,255,0.18), rgba(255,255,255,0) 40%)",
-                }}
+            {/* The same header as a conversation; its commands edit the draft. */}
+            <ConversationHeader
+              modelName={selectedModel}
+              attention={!selectedModel}
+              commands={COMMANDS}
+              onCommand={setOpenCommand}
+            />
+
+            {/* Question Input - Always visible */}
+            <div className="mt-6">
+              <QuestionInput
+                onSend={handleAsk}
+                disabled={!selectedModel}
+                placeholder={t("chat:composer.placeholderNew")}
+                canAttachImages={canAttachImages(llm)}
+                commands={COMMANDS}
+                onCommand={setOpenCommand}
               />
-
-              <div className="relative z-10 p-5">
-                <style>{`
-                  .hb-scope input.hb-range { -webkit-appearance: none; appearance: none; height: 6px; border-radius: 999px; outline: none; }
-                  .hb-scope input.hb-range::-webkit-slider-thumb {
-                    -webkit-appearance: none; width: 18px; height: 18px; border-radius: 50%; border: 0; cursor: pointer;
-                    background: radial-gradient(circle at 30% 30%, #ffffff, #d9e4dd 60%, #b7c6c0 100%);
-                    box-shadow: 0 2px 6px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.4), inset 0 1px 2px rgba(255,255,255,0.7);
-                    transition: transform .25s ease, box-shadow .25s ease;
-                  }
-                  .hb-scope input.hb-range:hover::-webkit-slider-thumb { transform: scale(1.07); }
-                  .hb-scope input.hb-range:active::-webkit-slider-thumb { transform: scale(.9); }
-                  .hb-scope input.hb-range:focus-visible::-webkit-slider-thumb {
-                    box-shadow: 0 0 0 4px rgba(37,192,138,0.35), 0 2px 6px rgba(0,0,0,0.55), inset 0 1px 2px rgba(255,255,255,0.8);
-                  }
-                  .hb-scope input.hb-range::-moz-range-track { height: 6px; background: rgba(255,255,255,0.06); border-radius: 999px; }
-                  .hb-scope input.hb-range::-moz-range-thumb {
-                    width: 18px; height: 18px; border-radius: 50%; border: 0; cursor: pointer;
-                    background: radial-gradient(circle at 30% 30%, #ffffff, #d9e4dd 60%, #b7c6c0 100%);
-                    box-shadow: 0 2px 6px rgba(0,0,0,0.45), 0 0 0 1px rgba(255,255,255,0.4), inset 0 1px 2px rgba(255,255,255,0.7);
-                  }
-                  .hb-scope input.hb-range:focus-visible::-moz-range-thumb {
-                    box-shadow: 0 0 0 4px rgba(37,192,138,0.35), 0 2px 6px rgba(0,0,0,0.55), inset 0 1px 2px rgba(255,255,255,0.8);
-                  }
-                `}</style>
-
-                <div className="flex items-center justify-between gap-3">
-                  <div className="flex items-center gap-3 flex-wrap min-w-0">
-                    <h3 className="text-[1.15rem] font-semibold tracking-tight text-[#F2F7F4] truncate">
-                      {t("chat:header.chatWith")}
-                    </h3>
-
-                    <div
-                      ref={dropdownRef}
-                      className={[
-                        "inline-flex items-center rounded-lg relative z-50",
-                        "px-3.5 py-1.5 text-sm",
-                        "border transition",
-                        "bg-white/5 hover:bg-white/10 border-white/10 hover:border-white/20",
-                        "backdrop-blur-sm text-gray-100",
-                        "max-w-[100%] cursor-pointer",
-                      ].join(" ")}
-                      onClick={() => setIsDropdownOpen(!isDropdownOpen)}
-                    >
-                      <div
-                        className="font-medium truncate pr-5 max-w-[150px]"
-                        title={selectedModel}
-                      >
-                        {selectedModel || t("chat:header.selectModelPlaceholder")}
-                      </div>
-                      <ChevronDown
-                        size={16}
-                        className={`opacity-70 shrink-0 transition-transform absolute right-3 ${
-                          isDropdownOpen ? "rotate-180" : ""
-                        }`}
-                      />
-
-                      {/* Custom Dropdown */}
-                      {isDropdownOpen && (
-                        <div className="absolute top-full left-0 right-0 mt-1 bg-[#2a2a2a] border border-white/20 rounded-lg shadow-lg z-[9999] max-h-60 overflow-y-auto">
-                          {models.map((m) => {
-                            // Orphaned assistant (#376): listed but not
-                            // selectable, with the remedy spelled out.
-                            const weightsMissing = hasMissingWeights(m);
-                            return (
-                              <div
-                                key={m.id ?? m.name}
-                                data-testid={`model-option-${m.id ?? m.name}`}
-                                aria-disabled={weightsMissing}
-                                className={[
-                                  "px-3 py-2 border-b border-white/10 last:border-b-0",
-                                  weightsMissing
-                                    ? "text-gray-500 cursor-not-allowed"
-                                    : "hover:bg-white/10 cursor-pointer text-gray-100",
-                                ].join(" ")}
-                                onClick={(e) => {
-                                  e.stopPropagation();
-                                  if (weightsMissing) return;
-                                  setSelectedModel(m.name);
-                                  setIsDropdownOpen(false);
-                                }}
-                              >
-                                {m.name}
-                                {weightsMissing && (
-                                  <div className="text-[11px] leading-snug text-gray-500">
-                                    {t("chat:header.weightsMissingHint")}
-                                  </div>
-                                )}
-                              </div>
-                            );
-                          })}
-                        </div>
-                      )}
-                    </div>
-                  </div>
-
-                  <button
-                    type="button"
-                    aria-label={t("chat:header.toggleSettings")}
-                    onClick={() => setIsSettingsOpen((v) => !v)}
-                    className={[
-                      "inline-flex items-center justify-center",
-                      "w-9 h-9 rounded-xl",
-                      "bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20",
-                      "text-gray-300 hover:text-emerald-400 transition",
-                      "shrink-0",
-                    ].join(" ")}
-                  >
-                    <SlidersHorizontal size={18} />
-                  </button>
-                </div>
-
-                <AnimatePresence initial={false}>
-                  {isSettingsOpen && (
-                    <motion.div
-                      key="controls"
-                      initial={{ opacity: 0, height: 0 }}
-                      animate={{ opacity: 1, height: "auto" }}
-                      exit={{ opacity: 0, height: 0 }}
-                      transition={{ type: "tween", duration: 0.3 }}
-                      className="overflow-hidden"
-                    >
-                      <div className="mt-6 grid gap-6 md:grid-cols-2">
-                        <div className="flex flex-col gap-6">
-                          <div className="relative">
-                            <div className="flex items-center gap-1.5 mb-1">
-                              <span className="text-[0.72rem] uppercase tracking-wide font-semibold text-gray-300/80">
-                                {t("chat:header.creativity")}
-                              </span>
-                              <TooltipIcon id="temperature" side="right" />
-                              <span className="ml-auto text-[11px] font-semibold text-emerald-200/90 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-400/25">
-                                {formatNumber(settings.temperature, TWO_DECIMALS)}
-                              </span>
-                            </div>
-
-                            <div className="relative pt-1">
-                              <input
-                                type="range"
-                                min="0"
-                                max="2"
-                                step="0.01"
-                                value={settings.temperature}
-                                onChange={(e) =>
-                                  patchSettings({ temperature: parseFloat(e.target.value) })
-                                }
-                                className="hb-range w-full rounded-full bg-white/5 cursor-pointer"
-                                style={sliderBg(settings.temperature, 2)}
-                              />
-                            </div>
-                          </div>
-
-                          <div className="relative">
-                            <div className="flex items-center gap-1.5 mb-1">
-                              <span className="text-[0.72rem] uppercase tracking-wide font-semibold text-gray-300/80">
-                                {t("chat:header.diversity")}
-                              </span>
-                              <TooltipIcon id="top-p" side="right" />
-                              <span className="ml-auto text-[11px] font-semibold text-emerald-200/90 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-400/25">
-                                {formatNumber(settings.topP, TWO_DECIMALS)}
-                              </span>
-                            </div>
-
-                            <div className="relative pt-1">
-                              <input
-                                type="range"
-                                min="0"
-                                max="1"
-                                step="0.01"
-                                value={settings.topP}
-                                onChange={(e) =>
-                                  patchSettings({ topP: parseFloat(e.target.value) })
-                                }
-                                className="hb-range w-full rounded-full bg-white/5 cursor-pointer"
-                                style={sliderBg(settings.topP)}
-                              />
-                            </div>
-                          </div>
-                          {hasNoPublisherRecommendation(
-                            models.find((m) => m.name === selectedModel)
-                          ) && (
-                            <p
-                              data-testid="no-publisher-recommendation"
-                              className="-mt-3 text-[11px] leading-snug text-gray-400/80"
-                            >
-                              {t("chat:header.noPublisherRecommendation")}
-                            </p>
-                          )}
-                        </div>
-
-                        <div className="flex flex-col justify-center gap-6">
-                          {/* The output budget used to live here as a Max
-                              Tokens field. It is now derived by the backend
-                              from the context window the model runs in. */}
-                          <div>
-                            <div className="flex items-center gap-3">
-                              <span className="text-[0.72rem] uppercase tracking-wide font-semibold text-gray-300/80">
-                                {t("chat:header.webSearch")}
-                              </span>
-                              <TooltipIcon id="web-search" side="right" />
-                              <div className="ml-auto">
-                                <ToggleSwitch
-                                  checked={webSearch === true}
-                                  onChange={(next) => setWebSearch(next)}
-                                  label={t("chat:header.webSearchToggle")}
-                                />
-                              </div>
-                            </div>
-                          </div>
-
-                          <div className="flex items-center gap-3">
-                            <span className="text-[0.72rem] uppercase tracking-wide font-semibold text-gray-300/80">
-                              {t("chat:header.reasoningEffort")}
-                            </span>
-                            <TooltipIcon id="reasoning-effort" side="right" />
-                            <select
-                              aria-label={t("chat:header.reasoningEffort")}
-                              // Until the global default is known the select is
-                              // disabled and shows nothing: displaying "Medium"
-                              // while the backend would copy another default
-                              // into the new conversation would be a lie (and a
-                              // failed settings fetch would make it permanent).
-                              disabled={reasoningEffort === null}
-                              value={reasoningEffort ?? ""}
-                              onChange={(e) => setReasoningEffort(e.target.value)}
-                              className="ml-auto text-[11px] font-semibold rounded-md border border-emerald-400/25 bg-emerald-500/10 text-emerald-200/90 px-2 py-1 focus:outline-none focus:border-emerald-400/50 transition-colors cursor-pointer"
-                            >
-                              {REASONING_EFFORT_LEVELS.map((level) => (
-                                <option key={level} value={level}>
-                                  {t(`chat:header.reasoningEffortLevels.${level}`)}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-
-                          <div className="flex items-center gap-3">
-                            <span className="text-[0.72rem] uppercase tracking-wide font-semibold text-gray-300/80">
-                              {t("chat:header.compactionThreshold")}
-                            </span>
-                            <TooltipIcon id="compaction-threshold" side="right" />
-                            <select
-                              aria-label={t("chat:header.compactionThreshold")}
-                              // Disabled and blank until the global default is
-                              // known, like the reasoning effort above; if it
-                              // cannot be fetched, the shipped default shows
-                              // (not sent until the user picks a value).
-                              disabled={compactionThreshold === null && !globalDefaultsFailed}
-                              value={
-                                compactionThreshold ??
-                                (globalDefaultsFailed ? DEFAULT_COMPACTION_THRESHOLD : "")
-                              }
-                              onChange={(e) => setCompactionThreshold(Number(e.target.value))}
-                              className="ml-auto text-[11px] font-semibold rounded-md border border-emerald-400/25 bg-emerald-500/10 text-emerald-200/90 px-2 py-1 focus:outline-none focus:border-emerald-400/50 transition-colors cursor-pointer"
-                            >
-                              {COMPACTION_THRESHOLDS.map((value) => (
-                                <option key={value} value={value}>
-                                  {formatCompactionThreshold(value)}
-                                </option>
-                              ))}
-                            </select>
-                          </div>
-
-                          <div className="flex flex-row items-center gap-3 w-full">
-                            <div className="flex items-center gap-2 w-full">
-                              <button
-                                type="button"
-                                onClick={() => setShowPromptModal(true)}
-                                className={[
-                                  "rounded-md font-semibold",
-                                  "px-5 py-2 text-[0.9rem]",
-                                  "bg-emerald-800 hover:bg-emerald-900 text-white",
-                                  "border border-white/20 shadow",
-                                  "transition active:scale-95",
-                                ].join(" ")}
-                              >
-                                {t("chat:header.customizePrompt")}
-                              </button>
-                              <div>
-                                <TooltipIcon id="prompt" side="top-left" />
-                              </div>
-                            </div>
-                          </div>
-                        </div>
-                      </div>
-                    </motion.div>
-                  )}
-                </AnimatePresence>
-
-                {/* Question Input - Always visible */}
-                <div className="mt-6">
-                  <QuestionInput
-                    onSend={handleAsk}
-                    disabled={!selectedModel}
-                    placeholder={t("chat:composer.placeholderNew")}
-                    canAttachImages={canAttachImages(models.find((m) => m.name === selectedModel))}
+            </div>
+            {/* Language Warning */}
+            <div className="flex justify-center mt-6 px-2 pb-1">
+              <div className="w-[700px] max-w-full">
+                <div
+                  className={[
+                    "relative w-full rounded-[26px] overflow-hidden cursor-pointer transition-all duration-300",
+                    "bg-[rgba(64,35,22,0.45)] backdrop-blur-[18px] saturate-[1.4]",
+                    "shadow-[0_8px_30px_-4px_rgba(0,0,0,0.45),0_2px_6px_-1px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,200,150,0.06)]",
+                    "hover:border-orange-600/40",
+                  ].join(" ")}
+                  onClick={() => setIsLanguageWarningExpanded(!isLanguageWarningExpanded)}
+                >
+                  <div
+                    aria-hidden
+                    className="absolute inset-0 pointer-events-none rounded-[26px] mix-blend-overlay"
+                    style={{
+                      background:
+                        "linear-gradient(to bottom, rgba(255,180,100,0.18), rgba(255,180,100,0) 40%)",
+                    }}
                   />
-                </div>
-                {/* Language Warning */}
-                <div className="flex justify-center mt-6 px-2 pb-1">
-                  <div className="w-[700px] max-w-full">
-                    <div
-                      className={[
-                        "relative w-full rounded-[26px] overflow-hidden cursor-pointer transition-all duration-300",
-                        "bg-[rgba(64,35,22,0.45)] backdrop-blur-[18px] saturate-[1.4]",
-                        "shadow-[0_8px_30px_-4px_rgba(0,0,0,0.45),0_2px_6px_-1px_rgba(0,0,0,0.4),inset_0_1px_0_rgba(255,200,150,0.06)]",
-                        "hover:border-orange-600/40",
-                      ].join(" ")}
-                      onClick={() => setIsLanguageWarningExpanded(!isLanguageWarningExpanded)}
-                    >
-                      <div
-                        aria-hidden
-                        className="absolute inset-0 pointer-events-none rounded-[26px] mix-blend-overlay"
-                        style={{
-                          background:
-                            "linear-gradient(to bottom, rgba(255,180,100,0.18), rgba(255,180,100,0) 40%)",
-                        }}
-                      />
 
-                      {/* Content */}
-                      <div className="relative z-10 p-4 px-6">
-                        <div className="flex items-center justify-between">
-                          <h2 className="text-base font-semibold tracking-tight text-orange-100">
-                            {t("chat:languageNote.title")}
-                          </h2>
-                          <motion.div
-                            animate={{ rotate: isLanguageWarningExpanded ? 180 : 0 }}
-                            transition={{ duration: 0.3 }}
-                          >
-                            <ChevronDown className="w-5 h-5 text-orange-100" />
-                          </motion.div>
-                        </div>
-
-                        <AnimatePresence>
-                          {isLanguageWarningExpanded && (
-                            <motion.div
-                              initial={{ height: 0, opacity: 0 }}
-                              animate={{ height: "auto", opacity: 1 }}
-                              exit={{ height: 0, opacity: 0 }}
-                              transition={{ duration: 0.3 }}
-                              className="overflow-hidden"
-                            >
-                              <p className="text-sm text-orange-200/80 mb-3 mt-3">
-                                {t("chat:languageNote.body")}
-                              </p>
-                              <p className="text-sm text-orange-200/70 italic">
-                                {t("chat:languageNote.frenchAside")}
-                              </p>
-                            </motion.div>
-                          )}
-                        </AnimatePresence>
-                      </div>
+                  {/* Content */}
+                  <div className="relative z-10 p-4 px-6">
+                    <div className="flex items-center justify-between">
+                      <h2 className="text-base font-semibold tracking-tight text-orange-100">
+                        {t("chat:languageNote.title")}
+                      </h2>
+                      <motion.div
+                        animate={{ rotate: isLanguageWarningExpanded ? 180 : 0 }}
+                        transition={{ duration: 0.3 }}
+                      >
+                        <ChevronDown className="w-5 h-5 text-orange-100" />
+                      </motion.div>
                     </div>
+
+                    <AnimatePresence>
+                      {isLanguageWarningExpanded && (
+                        <motion.div
+                          initial={{ height: 0, opacity: 0 }}
+                          animate={{ height: "auto", opacity: 1 }}
+                          exit={{ height: 0, opacity: 0 }}
+                          transition={{ duration: 0.3 }}
+                          className="overflow-hidden"
+                        >
+                          <p className="text-sm text-orange-200/80 mb-3 mt-3">
+                            {t("chat:languageNote.body")}
+                          </p>
+                          <p className="text-sm text-orange-200/70 italic">
+                            {t("chat:languageNote.frenchAside")}
+                          </p>
+                        </motion.div>
+                      )}
+                    </AnimatePresence>
                   </div>
                 </div>
               </div>
@@ -792,13 +374,14 @@ export default function ChatPage() {
       {/* Error Popup */}
       <ErrorModal errorMessage={errorMessage} onClose={() => setErrorMessage("")} />
 
-      {/* Customize Prompt Modal */}
-      <CustomizePromptModal
-        isOpen={showPromptModal}
-        onClose={() => setShowPromptModal(false)}
-        customPrompt={customPrompt}
-        onSave={(newPrompt) => setCustomPrompt(newPrompt)}
-        title={t("chat:prompt.title")}
+      {/* The popup of the command being run (/config, /effort, /model). */}
+      <CommandPopups
+        command={openCommand}
+        onClose={() => setOpenCommand(null)}
+        settings={draft}
+        model={llm}
+        models={models}
+        onPickModel={(model) => setSelectedModel(model.name)}
       />
     </div>
   );

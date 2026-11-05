@@ -73,10 +73,18 @@
     "firstRun": "首次启动 — Erudi 正在进行初始化，可能需要一分钟。"
   },
   "update": {
-    "available": "更新 <v>v{{version}}</v> 可用 - 正在下载…",
+    "available": "更新 <v>v{{version}}</v> 可用",
     "downloading": "正在下载 <v>v{{version}}</v>… <pct>{{percent}}</pct>",
-    "ready": "<v>v{{version}}</v> 已就绪 — <install>重启以安装</install>",
+    "ready": "<v>v{{version}}</v> 已准备好安装",
+    "download": "下载",
+    "install": "立即安装",
     "dismiss": "关闭更新通知"
+  },
+  "updateNotice": {
+    "title": "已更新到 {{version}}",
+    "noNotes": "此版本的说明位于其发布页面。",
+    "releaseNotes": "阅读版本说明",
+    "optIns": "下载更新和安装更新现在是“设置 › 更新”中两个独立的选项，默认均为关闭：在您开启它们或按下按钮之前，不会下载或安装任何内容。“检查更新”保持原来的设置。"
   },
   "engineSwitch": {
     "downloadTitle": "正在下载",

@@ -11,6 +11,7 @@ Architecture:
 
 Endpoints:
     GET /startup/welcome-popup - Check and update welcome popup display status.
+    GET /startup/install_state - Whether the database holds the user's data (read-only).
 
 Example:
     curl http://127.0.0.1:27182/erudi/startup/welcome-popup
@@ -22,7 +23,7 @@ from sqlalchemy.orm import Session
 
 from src.database.core import get_db
 from src.domains.startup.repository import Startup_Variables_Repository
-from src.domains.startup.schemas import WelcomePopupResponse
+from src.domains.startup.schemas import InstallStateResponse, WelcomePopupResponse
 from src.core.logging import logger
 from src.core.exceptions import DatabaseException
 
@@ -92,3 +93,27 @@ async def get_welcome_popup_status(
     except Exception as e:
         db.rollback()
         raise DatabaseException("Failed to get welcome popup status", trace=str(e))
+
+
+@router.get("/install_state", response_model=InstallStateResponse)
+async def get_install_state(
+    startup_repo: Startup_Variables_Repository = Depends(get_startup_repository),
+):
+    """Whether this install holds the user's data (read-only, #572).
+
+    The renderer asks it once, at the first launch of a version with no
+    recorded "last seen version", to tell an install updated from an earlier
+    version (a conversation, a knowledge base or a downloaded model exists:
+    it is told what changed) from a fresh one (nothing to say). Unlike ``/welcome-popup`` it
+    writes nothing.
+
+    Raises:
+        DatabaseException: If the database cannot be read.
+
+    Example:
+        GET /startup/install_state -> {"has_user_data": true}
+    """
+    try:
+        return InstallStateResponse(has_user_data=startup_repo.has_user_data())
+    except Exception as e:
+        raise DatabaseException("Failed to read the install state", trace=str(e))

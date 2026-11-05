@@ -28,10 +28,9 @@ vi.mock("react-router-dom", () => ({
 vi.mock("../components/Sidebar", () => ({ default: () => null }));
 vi.mock("../components/ChatCollapsibleSection", () => ({ default: () => null }));
 vi.mock("../components/QuestionInput", () => ({ default: () => null }));
-vi.mock("../components/HeaderBar", () => ({ default: () => null }));
+vi.mock("../components/ConversationHeader", () => ({ default: () => null }));
 vi.mock("../components/TypingIndicator", () => ({ default: () => null }));
 vi.mock("../components/MarkdownRenderer", () => ({ default: () => null }));
-vi.mock("../components/modals/CustomizePromptModal", () => ({ default: () => null }));
 
 import ConversationPage from "./ConversationPage.jsx";
 import apiClient from "../services/api/client";

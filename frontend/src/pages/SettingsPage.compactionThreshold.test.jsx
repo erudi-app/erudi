@@ -5,10 +5,10 @@ import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/re
 import { MemoryRouter } from "react-router-dom";
 
 // #607 — the Settings page's "Default compaction threshold" card: sets the
-// threshold new conversations inherit (`default_compaction_threshold` on
-// `GET/PUT /user_settings/`); each conversation then owns its own control
-// (see ConversationPage / HeaderBar), so changing this never retro-affects an
-// existing conversation.
+// threshold a new conversation starts at when its model has none saved
+// (`default_compaction_threshold` on `GET/PUT /user_settings/`); each
+// conversation then owns its own value (its /config popup), so changing this
+// never retro-affects an existing conversation.
 
 const { getMock, putMock } = vi.hoisted(() => ({
   getMock: vi.fn(),
@@ -109,8 +109,8 @@ describe("compaction threshold copy (#607)", () => {
   it("exists in every language", () => {
     for (const lang of SUPPORTED_LANGUAGES) {
       const { chat, settings } = resources[lang];
-      expect(chat.header.compactionThreshold, lang).toBeTruthy();
-      expect(chat.header.tooltips.compactionThreshold, lang).toBeTruthy();
+      expect(chat.config.threshold.label, lang).toBeTruthy();
+      expect(chat.config.threshold.help, lang).toBeTruthy();
       expect(settings.compactionThreshold.title, lang).toBeTruthy();
       expect(settings.compactionThreshold.description, lang).toBeTruthy();
       expect(settings.compactionThreshold.note, lang).toBeTruthy();

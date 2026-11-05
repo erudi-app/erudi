@@ -1,10 +1,10 @@
 """Pydantic validation schemas for the user-settings domain (issue #310).
 
 One singleton resource: the app-wide user settings. It carries the global
-web-search default (#310), the interface language (#385), the
-automatic-update preference, the inference backend, the default reasoning
-effort and the default compaction threshold (#607); new settings slot in as
-additional fields.
+web-search default (#310), the interface language (#385), the three update
+switches (check, download, install, #563), the inference backend, the default
+reasoning effort and the default compaction threshold (#607); new settings
+slot in as additional fields.
 """
 
 from typing import Annotated, Literal, Optional
@@ -47,8 +47,13 @@ class UserSettingsResponse(BaseModel):
             creation; the per-conversation toggle owns it afterwards. Arena
             panels follow it.
         language: Interface language code the frontend renders in.
-        auto_update_enabled: Whether the Electron main process may check for,
-            download and install a new version on its own.
+        auto_update_enabled: "Check for updates": whether the Electron main
+            process asks the update feed for a new version on its own and shows
+            a banner when there is one. Off makes the two opt-ins inert.
+        auto_download_updates: "Download updates automatically": whether a
+            version the check finds is downloaded without asking.
+        auto_install_updates: "Install downloaded updates when I quit": whether
+            a downloaded version is installed when the app quits.
         inference_backend: "auto" to let hardware detection pick the engine,
             "cpu" to run models on the CPU build regardless of the GPU.
         default_reasoning_effort: Global default for how much a model may
@@ -69,7 +74,15 @@ class UserSettingsResponse(BaseModel):
     )
     auto_update_enabled: bool = Field(
         ...,
-        description="Whether the app may check for and install updates on its own",
+        description="Whether the app checks for a new version on its own (notify only)",
+    )
+    auto_download_updates: bool = Field(
+        ...,
+        description="Whether a version the check finds is downloaded without asking",
+    )
+    auto_install_updates: bool = Field(
+        ...,
+        description="Whether a downloaded version is installed when the app quits",
     )
     inference_backend: InferenceBackend = Field(
         ...,
@@ -105,7 +118,15 @@ class UserSettingsUpdate(BaseModel):
     )
     auto_update_enabled: Optional[bool] = Field(
         None,
-        description="Allow or refuse automatic update checks, downloads and installs",
+        description="Allow or refuse the automatic update check",
+    )
+    auto_download_updates: Optional[bool] = Field(
+        None,
+        description="Allow or refuse downloading a version the check finds without asking",
+    )
+    auto_install_updates: Optional[bool] = Field(
+        None,
+        description="Allow or refuse installing a downloaded version when the app quits",
     )
     inference_backend: Optional[InferenceBackend] = Field(
         None,
@@ -126,6 +147,8 @@ class UserSettingsUpdate(BaseModel):
             self.web_search_enabled is None
             and self.language is None
             and self.auto_update_enabled is None
+            and self.auto_download_updates is None
+            and self.auto_install_updates is None
             and self.inference_backend is None
             and self.default_reasoning_effort is None
             and self.default_compaction_threshold is None
