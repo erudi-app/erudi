@@ -71,7 +71,9 @@ Routers are mounted under the `/erudi` prefix in `register_routers`
   `DELETE /erudi/llms/{id}`, `GET /erudi/llms/{llm_id}/dependents`,
   `POST /erudi/llms/{assistant_id}/rebind`,
   `GET|PUT /erudi/llms/{llm_id}/conversation_defaults` (the conversation values saved for a
-  model with `/config global`, read by conversation creation, the model switch and the Arena)
+  model with `/config global`, read by conversation creation, the model switch and the Arena),
+  `GET /erudi/llms/loaded` and `POST /erudi/llms/loaded/unload` (the model in memory and the
+  header's Unload button)
 - **Entities**: `Llm`, `DownloadJob`, `ModelDefaults`
 - **Features**: Hugging Face integration, download of pre-built quants only, KB attachment
 - [Reference](reference/llms.md)
@@ -113,8 +115,8 @@ Routers are mounted under the `/erudi` prefix in `register_routers`
   version.
 - `GET|PUT /erudi/user_settings/` reads and writes the UI language, the global
   web-search default, the three update switches (check, download, install),
-  the default reasoning effort and the default compaction threshold
-  (`UserSettings`).
+  the default reasoning effort, the default compaction threshold and the idle
+  unload delay (`UserSettings`).
   See [Internationalization](i18n.md).
 - Connectivity for the status pill is read in the renderer from `navigator.onLine`
   and the `online` / `offline` events, corrected by requests that fail on the wire
@@ -305,9 +307,11 @@ cause: the model never started on a prompt this size, or it started and went sil
 5. **Seed and catalog** — `startup_populate_database()` sets startup variables, the
    hardware profile, and reconciles the model catalog from the bundled snapshots. Phase
    event: `loading_catalog`.
-6. **Engine preference and CUDA pre-flight** — `apply_inference_backend_preference()`
-   swaps `CUDA_Engine` for `CPU_Engine` when the user pinned the processor, then
-   `emit_engine_notice(app)` runs the pre-flight on the engine that won and emits an
+6. **Engine preference, idle delay and CUDA pre-flight** —
+   `apply_inference_backend_preference()` swaps `CUDA_Engine` for `CPU_Engine` when the
+   user pinned the processor, `apply_idle_unload_preference()` gives the engine that won
+   the Settings idle unload delay (`user_settings.idle_unload_minutes`), then
+   `emit_engine_notice(app)` runs the pre-flight on that engine and emits an
    `engine_notice` event if the GPU cannot drive the bundled CUDA build.
 7. **KB vector store** — `init_kb_store(...)`, after the migration because its
    cross-schema foreign keys reference the business tables.
@@ -315,7 +319,8 @@ cause: the model never started on a prompt this size, or it started and went sil
    app lifetime and published on `app.state.checkpointer`.
 9. **Idle cleanup task** — `config.LLM_Engine.start_cleanup_task()`; the monitor ticks
    every 30 s and unloads the model once it has been idle longer than
-   `_max_idle_time` (300 s), so about 300-330 s after its last use.
+   `_max_idle_time`, the Settings idle delay (5 minutes by default, so about 300-330 s
+   after its last use; never when the user picked Never).
 10. **Database watchdog** — `start_watchdog(app)` detects a dead embedded cluster,
     resurrects it, and exposes the state on `/erudi/health/` as `db`.
 11. **Post-ready backfill** — a background task verifies the tool-call wire capability of
@@ -534,11 +539,20 @@ the budget to consume.
 
 `BaseEngine` keeps a single model in memory as class state. The cleanup monitor started
 in the lifespan ticks every 30 seconds and unloads the model once it has been idle
-longer than `_max_idle_time` (300 seconds), so about 300 to 330 seconds after its last use.
+longer than `_max_idle_time`: the Settings card "Unload the model when idle" (5, 15, 30 or
+60 minutes, or Never; stored as `user_settings.idle_unload_minutes`, 0 for Never). At the
+default 5 minutes the model goes about 300 to 330 seconds after its last use. The lifespan
+applies the delay to the engine that runs, after the CUDA-to-CPU swap, and the settings PUT
+applies a change at once; the knowledge-base embedding model keeps its own idle release.
 A tick with nothing to reap returns without touching the lock; one that finds an idle model
 takes the same lock as `generation_guard`, so it waits for a generation in flight to release
 it — and the guard refreshes `_last_used` on release — which is what keeps a model from being
 reaped mid-stream.
+
+The conversation header's Unload button (`POST /erudi/llms/loaded/unload`) unloads the model
+on demand through `BaseEngine.unload`, under `try_generation_guard`: refused with 409 while an
+answer, a reload or a memory check holds the engine, otherwise the same `cleanup()` as the
+idle reap, so the next turn of that model reloads it exactly as after an idle unload.
 
 ### The memory brake (Apple Silicon and CPU)
 
@@ -547,8 +561,9 @@ of every turn and every minute while it is idle (a second lifespan monitor, unde
 same lock), never during an answer. On Apple Silicon the MLX child shrinks the working
 window so the next turn compacts earlier, releases the prefix cache and MLX's buffer
 cache, and, under critical pressure while the user is away, unloads the model, which the
-next message reloads with the reduced window (`memory_reload` on the wire; the idle
-timeout's own unload sends the same event with `reason: "idle"`). On the CPU
+next message reloads with the reduced window (`memory_reload` with `reason: "memory"` on
+the wire; the idle delay's own unload sends the same event with `reason: "idle"`, the
+Unload button's with `reason: "manual"`). On the CPU
 engine (`llama-server`, whose KV cache is allocated in full at load) the brake restarts
 the same model with a smaller window — at once under critical pressure, after two
 minutes of user idle under warning — or unloads it; the turn that re-reads the

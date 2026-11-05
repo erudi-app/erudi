@@ -297,21 +297,29 @@ none: the user loses nothing visible. A stateful turn end consumes the notice
 unload itself) and the time. The next spawn of the same alias within 30 minutes
 (`BRAKE_RELOAD_TTL_S`) is seeded with it before anything else in
 `_read_server_properties`, so it loads with the reduced window, takes no second unload
-in the same episode and no extra shrink. Any successful spawn, an idle-timeout reap and
-the shutdown forget the record; `brake_reload_pending(llm_id)` lets the runner announce
-the reload (`memory_reload`) before it resolves the model.
+in the same episode and no extra shrink. Any successful spawn, an idle reap, a manual
+unload and the shutdown forget the record; `brake_reload_pending(llm_id)` lets the runner
+announce the reload (`memory_reload` with `reason: "memory"`) before it resolves the model.
 
-**The idle reload.** The idle reap (`BaseEngine._cleanup_tick`) leaves
-`_idle_unload = {"model_id": ...}` after `cleanup()` returns; `cleanup()` itself clears it,
-so a delete, the shutdown and the brake's unload never leave one. A model switch does not
-call `cleanup()`: what keeps it from reading as an idle reap is that `take_idle_reload`
-drops a record found while a model is loaded. The runner calls `take_idle_reload(llm.id)`
-when no brake reload is pending, always consuming the record before it resolves the model
-(a turn cancelled before the load loses the notice); it is true once for the reaped model
-while nothing is loaded. The turn yields `{"t": "memory_reload", "reason": "idle"}` only
-when the caller passes `announce_idle_reload=True`, which the conversation service does for
-a conversation that already has messages (a new one shows its first-reply hint). A turn
-announces at most one reload.
+**The idle and manual reloads.** The idle reap (`BaseEngine._cleanup_tick`) and the
+header's Unload button (`BaseEngine.unload`, behind `POST /erudi/llms/loaded/unload`) both
+go through `_unload_and_record`, which leaves
+`_idle_unload = {"model_id": ..., "reason": "idle" | "manual"}` after `cleanup()` returns;
+`cleanup()` itself clears it, so a delete, the shutdown and the brake's unload never leave
+one. `unload` runs under `try_generation_guard`: busy (an answer, a reload, a brake sample or
+the idle check holds the lock, or a turn waits for it, for more than 2 s) it raises
+`EngineBusyException` (409) and changes nothing; with nothing loaded it is a no-op. Being the
+same `cleanup()` as the idle reap, a manual unload on llama.cpp keeps the per-alias window
+memory, so the next load keeps a recent brake reduction exactly as after an idle unload. A
+model switch does not call `cleanup()`: what keeps it from reading as an unload is that
+`take_idle_reload` drops a record found while a model is loaded. The runner calls
+`take_idle_reload(llm.id)` when no brake reload is pending, always consuming the record
+before it resolves the model (a turn cancelled before the load loses the notice); it returns
+the record's reason once for the unloaded model while nothing is loaded, else None. The turn
+yields `{"t": "memory_reload", "reason": <that reason>}` only when the caller passes
+`announce_idle_reload=True`, which the conversation service does for a conversation that
+already has messages (a new one shows its first-reply hint). A turn announces at most one
+reload.
 
 **Logs.** A shrink, a grow and a release are one INFO line each,
 `[MLX_Engine] Memory brake: point=..., level=..., action=..., window=A->B, excess_mib=...`
@@ -423,7 +431,7 @@ RAM sensor, so these values do nothing there; its seam values are
 | Action | When | What it does |
 |---|---|---|
 | Shrink | One per episode under warning — with at least 8 MiB of paging since the previous sample, when the machine counts paging — one more once critical; never two without a turn between them; only when the window's KV is 10 % of RAM or more | The cap becomes `0.75 × min(window, cap)`, rounded down to a multiple of 256, never under 4096; state only until a respawn applies it |
-| Respawn | The cap is below the allocated window, and: critical, at any safe point; or warning, at an idle sample once the user has been away 120 s (two ticks: a reader between messages pays no re-prefill) and less than 180 s — the idle reap (300 s) minus `LLAMA_REAP_MARGIN_S` (120 s): a child about to be reaped is not worth a reload, the window memory applies the cap at its next spawn. At most one per turn: a `turn_start` respawn is not repeated at the same turn's end; the next turn or an idle sample re-arms it | The same model restarts in place with `-c = min(budget window, cap)` |
+| Respawn | The cap is below the allocated window, and: critical, at any safe point; or warning, at an idle sample once the user has been away 120 s (two ticks: a reader between messages pays no re-prefill) and less than the idle reap minus `LLAMA_REAP_MARGIN_S` (120 s; 180 s at the default five-minute delay, unbounded when the delay is Never): a child about to be reaped is not worth a reload, the window memory applies the cap at its next spawn. At most one per turn: a `turn_start` respawn is not repeated at the same turn's end; the next turn or an idle sample re-arms it | The same model restarts in place with `-c = min(budget window, cap)` |
 | Unload | Idle only: critical at two consecutive idle samples with no turn between them, at most once per episode, never within 600 s of a brake reload (a respawn sets no such grace), only for a child holding 5 % or more of RAM | The idle reap's path; the episode goes to `_brake_reload` |
 | Grow | Outside an episode, every 3 calm samples (the MLX rule) | State only: never a respawn. The larger window applies at the next spawn of the model |
 
@@ -453,7 +461,7 @@ no `acted` notice is drawn; the unload still applies.
 sample), the engine stops the child, picks a port and starts the same GGUF with the
 brake's cap handed to the spawn context (`_start_server(..., brake_cap=)`, never left to
 the window memory), so the new `-c` is the reduced window.
-`_model_id`, the tokenizer and the idle clock are kept (the 300 s reap still sees an
+`_model_id`, the tokenizer and the idle clock are kept (the idle reap still sees an
 abandoned child); the brake state is carried whole — episode, cap, notice, the
 critical-unload clock — with no reload grace. One INFO line,
 `[CPU_Engine] Memory brake: point=..., level=..., action=shrink+respawn, window=A->B, footprint_mib=...`.
@@ -852,8 +860,12 @@ callback and never reaches the next holder.
 `BaseEngine` keeps `_model`, `_tokenizer`, `_model_id` and `_last_used` as class
 attributes shared across requests. A cleanup monitor started in the FastAPI lifespan
 (`core/api.py`, `start_cleanup_task()`) ticks every 30 seconds and unloads the model once
-it has been idle for longer than `_max_idle_time` (300 seconds, `base_engine.py`), so about 300 to
-330 seconds after its last use. A tick that finds nothing to reap returns before the lock, so it
+it has been idle for longer than `_max_idle_time` (`base_engine.py`): the Settings idle delay in
+seconds, or None for Never, which `_should_cleanup` reads as "never reap". The lifespan applies
+`user_settings.idle_unload_minutes` through `set_idle_unload_minutes` to the engine left after
+the CUDA-to-CPU swap, before the monitor starts, and the settings PUT applies a change to the
+same class at once. At the default five minutes the model goes about 300 to 330 seconds after
+its last use; the brake's `reap_idle_s` is that same value (None with Never). A tick that finds nothing to reap returns before the lock, so it
 never queues behind a generation; the idle check is repeated under the lock before any reap.
 A generation in flight cannot be reaped because the idle tick (`_cleanup_tick`) takes the
 same lock as `generation_guard`, through the same `_acquire_generation_lock`: it waits until

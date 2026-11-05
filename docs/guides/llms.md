@@ -282,6 +282,8 @@ Regenerated from `backend/src/domains/llms/endpoints.py`.
 | `GET` | `/erudi/llms/remote` | Catalog entries (`local = 0`) |
 | `GET` | `/erudi/llms/search?name=` | Search the catalog by name |
 | `GET` | `/erudi/llms/search/huggingface?q=&limit=` | Live Hugging Face search in the engine's format |
+| `GET` | `/erudi/llms/loaded` | The model in memory (`{"llm_id", "name"}`), or `null` |
+| `POST` | `/erudi/llms/loaded/unload` | Unload it now: `204` (also when nothing is loaded), `409` while busy |
 | `GET` | `/erudi/llms/{llm_id}` | One model |
 | `GET` | `/erudi/llms/{llm_id}/dependents` | KB assistants and conversation counts a delete would affect |
 | `GET` | `/erudi/llms/{llm_id}/conversation_defaults` | The values a new conversation on the model starts from, with their source |
@@ -295,20 +297,40 @@ Regenerated from `backend/src/domains/llms/endpoints.py`.
 | `GET` | `/erudi/llms/downloads/{job_id}/status` | Poll one download job |
 | `GET` | `/erudi/llms/downloads/status` | Most recent job active in the last 60 s |
 
-There is no unload route, and no training route.
+The two `loaded` routes are declared before every `/{llm_id}` route, which would otherwise read
+`loaded` as an id. There is no training route.
 
 ## Memory and the idle unload
 
 Only **one model is resident at a time**. `BaseEngine` keeps `_model`, `_tokenizer`, `_model_id` and
 `_last_used` as class attributes shared across requests, guarded by a lock, and a background monitor
 started in the FastAPI lifespan (`start_cleanup_task`) ticks every 30 seconds and calls `cleanup()`
-when the model has been idle longer than `_max_idle_time`, 300 seconds, so an idle model is released
-about 300 to 330 seconds after its last use (`backend/src/engines/base_engine.py`).
+when the model has been idle longer than `_max_idle_time` (`backend/src/engines/base_engine.py`).
 
-In practice: after about five minutes without a request, the model is unloaded and its memory freed.
-The next request reloads it, which costs the usual load time; the next turn of an existing
-conversation says why it reloads (a new conversation shows its usual first-reply hint). Switching
-to another model swaps the resident one.
+`_max_idle_time` is the Settings card **Unload the model when idle**: 5, 15, 30 or 60 minutes, or
+**Never** (`user_settings.idle_unload_minutes`, `0` for Never, 5 by default). At the default an idle
+model is released about 300 to 330 seconds after its last use; with Never it stays loaded however
+long it is unused. The lifespan applies the stored delay to the engine that runs, after the
+CUDA-to-CPU swap, and `PUT /erudi/user_settings/` applies a change at once, without a relaunch
+(`BaseEngine.set_idle_unload_minutes`). It governs the chat model only: the knowledge-base embedding
+model keeps its own idle release. Nothing shorter than five minutes is offered, because the memory
+brake's idle timings are calibrated against a reap at five minutes or later; with Never the brake
+still acts when the computer runs short of memory.
+
+The conversation header's settings panel (in a conversation and on the new-conversation page) shows
+a small red **Unload <model>** button while a model is loaded, naming it whichever conversation
+loaded it (`GET /erudi/llms/loaded`, which checks that the inference child is alive, read when the
+panel opens and after an unload). Pressing it calls `POST /erudi/llms/loaded/unload`, which runs
+`BaseEngine.unload` under `try_generation_guard`: while an answer, a reload, a memory-brake sample or
+the idle check holds the engine (waited out for at most 2 seconds) it answers 409 "The model is busy;
+try again in a moment." and nothing is interrupted; otherwise the model goes through the same
+`cleanup()` as an idle unload, so on llama.cpp a window the memory brake reduced recently stays
+reduced at the next load.
+
+The next request reloads an unloaded model, which costs the usual load time; the next turn of an
+existing conversation says why it reloads (`memory_reload` with `reason: "idle"` after the idle
+delay, `"manual"` after the Unload button; a new conversation shows its usual first-reply hint).
+Switching to another model swaps the resident one.
 
 Do not instantiate engines. Call class methods on the result of `BaseEngine.get_engine()`; the
 selected engine is also available as `src.core.config.LLM_Engine`.

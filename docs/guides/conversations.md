@@ -208,7 +208,7 @@ their contents through history forever.
 | `tool_call` | `name`, `args` | The agent called a tool (`search_knowledge_base`, `web_search`, `calculator`) |
 | `tool_result` | `name`, `text` | What that tool returned |
 | `compaction` | `phase`; with `phase: "done"`: `summarized`, `reason`, `summary`, `summary_lost` | Earlier messages are summarized (see [compaction](#what-the-thread-shows-of-a-compaction)). `phase: "start"`: the summary call is about to run; never persisted. `phase: "done"`: the history was rewritten — `summarized` = the user messages and answers summarized (tool calls, tool results and the previous summary not counted), `reason` = `"memory"` (the computer's memory bounds the window) or `"length"`, `summary` = the summary text, `summary_lost: true` when no summary could be written (`summary` is then the previous summary the model keeps, possibly empty). Persisted in the turn's trace. Several per turn are possible: one before each model call that needs it |
-| `memory_reload` | `reason` (`"idle"` only) | Without `reason`, Apple Silicon and the CPU engine: the memory brake unloaded the model (or, on the CPU engine, restarted it with a smaller window) while the computer's memory was under pressure, and this turn reloads it or re-reads the conversation (see below). `reason: "idle"` (any engine): the model was unloaded after about five minutes without use, and this turn reloads it; the renderer says so instead of blaming memory. Only a conversation that already has messages gets it (a new one shows its first-reply hint), a model switch never sends it, and a turn announces at most one reload. Sent before anything else the model produces; never persisted |
+| `memory_reload` | `reason` (`"memory"`, `"idle"` or `"manual"`) | Why this turn reloads the model, which picks the renderer's copy. `reason: "memory"`: the memory brake unloaded the model (or, on the llama.cpp engines, restarted it with a smaller window) while the computer's memory was under pressure, and this turn reloads it or re-reads the conversation (see below). `reason: "idle"` (any engine): the model was unloaded after the Settings idle delay without use, and this turn reloads it; the copy names no duration. `reason: "manual"` (any engine): the user unloaded it with the header's Unload button ("You unloaded the model; reloading it…"). The idle and manual reasons only reach a conversation that already has messages (a new one shows its first-reply hint); a model switch never sends the event, and a turn announces at most one reload. Sent before anything else the model produces; never persisted |
 | `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one, by precedence: a brake notice, then `gpu_contention`, then `bound`. `reason: "pressure"`: the computer's memory is under pressure and the memory brake shrank the window, so the conversation will be summarized sooner. `reason: "pressure_external"`: the computer's memory is under pressure from other apps and this conversation uses little of it. `reason: "gpu_contention"` (the CUDA engine on Windows): another app is taking the graphics card's memory from the model, so answers are slower; sent at every turn end while it lasts, and the renderer polls `GET /hardware/gpu_contention/status` to drop the notice once it ends (see below). `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
 | `error` | `text` | The turn failed; the text is the curated error message |
 | `done` | — | Terminal event, always sent, including after an `error` |
@@ -406,6 +406,14 @@ as typing the command does. When the conversation's model was deleted, the line 
 picking a model there unblocks sending. The composer also stays blocked until the conversation's
 values are loaded, so no turn goes out without them; when the conversation cannot be read, an error
 line with a Retry button shows above the composer and runs the load again. Model is disabled while an answer streams.
+
+While a model is loaded, the panel (here and on the new-conversation page) also shows a small red
+**Unload <model>** button naming the model in memory, whichever conversation loaded it; it asks
+`GET /erudi/llms/loaded` when the panel opens and after an unload, and is absent when nothing is
+loaded. Pressing it unloads the model (`POST /erudi/llms/loaded/unload`) and the button goes; while
+an answer is being generated the backend refuses with "The model is busy; try again in a moment."
+and nothing is interrupted. The next message of a conversation then says "You unloaded the model;
+reloading it…" until the model answers (see [Model residency](#model-residency)).
 
 The same commands are typed in the composer. Their names are fixed English identifiers in every
 interface language (`frontend/src/utils/slashCommands.js`); their descriptions and popups are
@@ -934,8 +942,9 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    drops the notice once `active` is false; a failed poll, or `active: null` (no reading),
    keeps it.
    When the brake unloaded the model while the user was away, the next turn first sends
-   `memory_reload` (without `reason`; after the idle timeout's own unload it carries
-   `reason: "idle"` and the copy names the pause instead of memory) and the renderer shows a reload state in the pending answer until the model
+   `memory_reload` with `reason: "memory"` (after the idle delay's own unload it carries
+   `reason: "idle"` and the copy names the pause instead of memory; after the Unload button,
+   `reason: "manual"`) and the renderer shows a reload state in the pending answer until the model
    speaks, an error arrives or the turn ends; the model reloads with the reduced window. On the CPU
    engine a smaller window means restarting the model with it (about 1-2 s, then the
    conversation is read again): under critical pressure at the next turn boundary — a restart at
@@ -1054,12 +1063,15 @@ the tool's explicit failure text instead of a silently missing tool.
 
 ## Model residency
 
-Only one model is resident at a time, and it is unloaded after about five minutes without a request:
-`BaseEngine._max_idle_time` is 300 seconds and the cleanup monitor started by the FastAPI lifespan
-ticks every 30 seconds, so the unload lands about 300 to 330 seconds after the last request.
-The next question reloads it, which costs the usual load time; the next turn of an existing
-conversation says why it reloads (`memory_reload` with `reason: "idle"`), while a new conversation
-shows its usual first-reply hint. See
+Only one model is resident at a time, and it is unloaded once it has gone unused for the Settings
+idle delay ("Unload the model when idle": 5, 15, 30 or 60 minutes, or Never; 5 by default):
+`BaseEngine._max_idle_time` holds that delay and the cleanup monitor started by the FastAPI
+lifespan ticks every 30 seconds, so at the default the unload lands about 300 to 330 seconds after
+the last request. The header's settings panel also offers **Unload <model>**, which unloads the
+loaded model at once (refused with "The model is busy; try again in a moment." while an answer is
+being generated). The next question reloads it, which costs the usual load time; the next turn of
+an existing conversation says why it reloads (`memory_reload` with `reason: "idle"` or
+`"manual"`), while a new conversation shows its usual first-reply hint. See
 [LLMs](llms.md#memory-and-the-idle-unload).
 
 ## Related pages

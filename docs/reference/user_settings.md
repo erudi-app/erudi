@@ -2,7 +2,8 @@
 
 Persisted user preferences exposed over the `/erudi/user_settings` routes: the global
 web-search default, the interface language, the three update switches, the
-inference backend, the default reasoning effort and the default compaction threshold.
+inference backend, the default reasoning effort, the default compaction threshold and the
+idle unload delay.
 
 The three update switches are read by the Electron main process, which owns
 electron-updater; the renderer reads them here and hands them over at launch and on every
@@ -42,6 +43,17 @@ after a backend restart, which the frontend triggers when the user saves. The va
 inert everywhere but the CUDA leg, so the Settings page only shows the control on a
 machine running the CUDA engine, or one already pinned back to the processor from it. See
 [Hardware Detection](../guides/hardware.md).
+
+`idle_unload_minutes` (`0`, `5`, `15`, `30` or `60`, `5` by default and `5` after the
+migration that added it) is how long the chat model stays loaded once unused; `0` is the
+Settings card's **Never**, which keeps the model loaded however long it stays unused. The
+lifespan reads it at boot and gives it to the engine that runs (after the CUDA-to-CPU swap),
+and a `PUT` carrying it applies it to that engine at once, so no relaunch is needed. Any
+other value, a boolean, a float or a numeric string is a 422. Nothing below five minutes is
+offered: the memory brake's idle timings are calibrated against a reap at five minutes or
+later. With Never the memory brake still frees memory when the computer runs short, and the
+header's Unload button still unloads the model. The knowledge-base embedding model keeps its
+own idle release. See [LLMs](../guides/llms.md#memory-and-the-idle-unload).
 
 ::: src.domains.user_settings.endpoints
 
