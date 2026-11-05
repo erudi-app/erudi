@@ -122,6 +122,9 @@ describe("SettingsPage — Unload the model when idle (#619)", () => {
     const page = document.body.textContent;
     expect(page).toMatch(/leaves memory/i);
     expect(page).toMatch(/reloads at your next message/i);
+    // The Unload button is refused while an answer is being written.
+    expect(page).toMatch(/whenever no answer is being written/i);
+    expect(page).not.toMatch(/at any time/i);
   });
 });
 
