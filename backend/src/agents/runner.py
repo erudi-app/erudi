@@ -692,6 +692,100 @@ def manual_compaction_cutoff(messages: list, pct: int) -> int:
     )
 
 
+@dataclass(frozen=True)
+class NextRequestProjection:
+    """The next request of a conversation, in real tokens (``project_next_request``).
+
+    ``conversation_tokens`` is the whole request before any compaction,
+    ``overhead_tokens + summary_tokens + message_tokens`` exactly (the
+    counter is additive); ``projected_tokens`` is the request after the
+    compaction the next request would run, or the whole one when none
+    would. ``ratio`` is the measured ratio the weights were frozen with
+    (``None``: nothing measured).
+    """
+
+    projected_tokens: int
+    conversation_tokens: int
+    overhead_tokens: int
+    summary_tokens: int
+    message_tokens: int
+    ratio: Optional[float]
+
+
+def project_next_request(
+    messages: list,
+    working_window: Optional[int],
+    *,
+    overhead: Optional[RequestOverhead] = None,
+    allocated_window: Optional[int] = None,
+    compaction_threshold: int,
+) -> NextRequestProjection:
+    """THE projection of a conversation's NEXT request, pure, in real tokens.
+
+    Shared by the amber warning (``AgentRunner._project_next_request``) and
+    the context panel (``AgentRunner.acontext_usage``). ``messages`` is the
+    thread state after the turn just answered: that turn is past (its KB/web
+    results count as their markers, ``strip_stale_tool_results(all_past=
+    True)``), an empty next question is appended (so the cutoff is the one
+    the next request's compaction computes), and the weights are frozen ONCE
+    on that whole set before anything is split. ``overhead`` is what the
+    request carries beyond the state: the system prompt and the tool schemas
+    only (the KB block of the turn just answered is not in the next
+    request).
+
+    The previous summary is counted apart from the messages. When a
+    compaction would happen (``compaction_cutoff`` > 0, futility guard
+    included, a known window), ``projected_tokens`` is ``O + count(kept) +
+    summary_cap(W)``; otherwise the whole request -- no summary is added when
+    nothing would be compacted. The projection does not check whether the
+    trigger fires: between the keep budget (about ``0.4 W``) and the trigger
+    ``T`` it projects a compaction the next request will not run yet (see
+    ``_project_next_request`` for what that means to the warning).
+    """
+    from langchain_core.messages import HumanMessage
+
+    from src.agents.middleware import strip_stale_tool_results
+
+    projected = strip_stale_tool_results(messages, all_past=True) + [
+        HumanMessage(content="", id="erudi-next-request")
+    ]
+    weights, ratio = frozen_weights(projected)
+
+    def counter(part):
+        return real_token_count(part, weights)
+
+    fixed = overhead_tokens(
+        overhead,
+        ratio,
+        dense=COUNTER_DENSE_TOKENS,
+        weight_floor=COUNTER_WEIGHT_FLOOR,
+    )
+    has_summary = _is_previous_summary(projected[0])
+    summary_tokens = counter(projected[:1]) if has_summary else 0
+    message_tokens = counter(projected[1:] if has_summary else projected)
+    conversation_tokens = fixed + summary_tokens + message_tokens
+    cutoff = compaction_cutoff(
+        projected,
+        working_window,
+        counter,
+        pct=compaction_threshold,
+        overhead=fixed,
+        allocated_window=allocated_window,
+    )
+    if cutoff > 0 and _known_window(working_window):
+        projected_tokens = fixed + counter(projected[cutoff:]) + summary_cap(working_window)
+    else:
+        projected_tokens = conversation_tokens
+    return NextRequestProjection(
+        projected_tokens=projected_tokens,
+        conversation_tokens=conversation_tokens,
+        overhead_tokens=fixed,
+        summary_tokens=summary_tokens,
+        message_tokens=message_tokens,
+        ratio=ratio,
+    )
+
+
 def _token_cutoff(messages: list, budget: int, counter: Any) -> int:
     """LangChain's ``_find_token_based_cutoff``, for a given budget, RAW: the
     earliest index whose suffix fits, the last message kept whole when it
@@ -2531,26 +2625,17 @@ class AgentRunner:
         allocated_window: Optional[int] = None,
         compaction_threshold: int,
     ) -> Optional[tuple[int, int]]:
-        """``(projected_tokens, conversation_tokens)`` of the NEXT request,
-        or ``None`` on an empty thread.
+        """``(projected_tokens, conversation_tokens)`` of the NEXT request
+        (``project_next_request`` over the post-turn thread state), or
+        ``None`` on an empty thread.
 
         The summarization middleware runs in ``before_model``, so the growth
         of THIS turn is compacted on the NEXT turn -- judging the warning on
         the current size would flag every conversation for exactly one turn
         and then flicker off once compaction ran. Instead the post-turn thread
-        state is projected the way the NEXT request will see it, in real
-        tokens: the turn just answered is past (its KB/web results count as
-        markers, ``strip_stale_tool_results(all_past=True)``), an empty next
-        question is appended (so the cutoff is the one the next request's
-        compaction computes), every message is weighed as the counter weighs
-        it, and the request overhead O is on top -- the system prompt and the
-        tool schemas only (``overhead``; the KB block of the turn just
-        answered is not in the next request). When a compaction would happen
-        (``compaction_cutoff`` > 0, futility guard included) the projection is
-        ``O + count(kept) + summary_cap(W)``; otherwise ``O + count(all)`` --
-        no summary is added when nothing would be compacted. The projection
-        does not check whether the trigger fires: between the keep budget
-        (about ``0.4 W``) and the trigger ``T`` (``trigger_tokens(W,
+        state is projected the way the NEXT request will see it. The
+        projection does not check whether the trigger fires: between the keep
+        budget (about ``0.4 W``) and the trigger ``T`` (``trigger_tokens(W,
         compaction_threshold)``) it projects a compaction the next request
         will not run yet. Up to an 85 % threshold that request is then under
         ``T``, below the warning's 85 %, so the projection can warn up to one
@@ -2561,42 +2646,18 @@ class AgentRunner:
         ``conversation_tokens`` is ``O + count(all)``, the request before any
         compaction.
         """
-        from langchain_core.messages import HumanMessage
-
-        from src.agents.middleware import strip_stale_tool_results
-
         state = await agent.aget_state(run_config)
         messages = (state.values or {}).get("messages", []) if state else []
         if not messages:
             return None
-        projected = strip_stale_tool_results(messages, all_past=True) + [
-            HumanMessage(content="", id="erudi-next-request")
-        ]
-        weights, ratio = frozen_weights(projected)
-
-        def counter(part):
-            return real_token_count(part, weights)
-
-        fixed = overhead_tokens(
-            overhead,
-            ratio,
-            dense=COUNTER_DENSE_TOKENS,
-            weight_floor=COUNTER_WEIGHT_FLOOR,
-        )
-        cutoff = compaction_cutoff(
-            projected,
+        projection = project_next_request(
+            messages,
             working_window,
-            counter,
-            pct=compaction_threshold,
-            overhead=fixed,
+            overhead=overhead,
             allocated_window=allocated_window,
+            compaction_threshold=compaction_threshold,
         )
-        conversation_tokens = fixed + counter(projected)
-        if cutoff > 0:
-            projected_tokens = fixed + counter(projected[cutoff:]) + summary_cap(working_window)
-        else:
-            projected_tokens = conversation_tokens
-        return projected_tokens, conversation_tokens
+        return projection.projected_tokens, projection.conversation_tokens
 
     async def _memory_warning_event(
         self,
