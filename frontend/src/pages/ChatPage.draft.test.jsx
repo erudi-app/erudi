@@ -271,6 +271,15 @@ describe("arriving from a conversation that no longer exists", () => {
     );
     const notice = await screen.findByText("This conversation no longer exists.");
     expect(notice.closest('[role="alert"]')).toBeTruthy();
+    // The history entry forgets it, so a reload never shows it again.
+    await waitFor(() =>
+      expect(navigateMock).toHaveBeenCalledWith("/erudi/chat", { replace: true, state: null })
+    );
+  });
+
+  it("leaves the history entry alone when nothing was handed over", async () => {
+    await renderPage();
+    expect(navigateMock).not.toHaveBeenCalled();
   });
 });
 

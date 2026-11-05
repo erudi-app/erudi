@@ -76,13 +76,26 @@ const GPU_CONTENTION_STATUS_PATH = "/hardware/gpu_contention/status";
 const GPU_CONTENTION_POLL_MS = 10_000;
 // The slash commands a conversation offers, in the composer and the header.
 const COMMANDS = commandsFor(COMMAND_SCOPES.CONVERSATION);
-// Switching model while an answer streams waits for the answer to end.
-const COMMANDS_DISABLED_WHILE_ANSWERING = ["model"];
+// While an answer streams, switching model waits for it to end, and so does
+// /context (a snapshot taken mid-turn would outlive the turn as if current).
+const COMMANDS_DISABLED_WHILE_ANSWERING = ["model", "context"];
 // Every command waits while /compact runs.
 const ALL_COMMAND_NAMES = COMMANDS.map((command) => command.name);
 // A /compact the backend has not answered after this long is given up (the
 // summary is bounded server-side; a model load that hangs is not).
 const COMPACT_CEILING_MS = 10 * 60 * 1000;
+// The re-read that follows it is waited for at most this long, so the
+// conversation is always unlocked (a re-read that lands later still shows).
+const COMPACT_REREAD_CEILING_MS = 60 * 1000;
+
+/** `promise`, waited for at most `ms`: settles with it, or resolves after `ms`. */
+function withinCeiling(promise, ms) {
+  let timer;
+  const ceiling = new Promise((resolve) => {
+    timer = setTimeout(resolve, ms);
+  });
+  return Promise.race([promise, ceiling]).finally(() => clearTimeout(timer));
+}
 // What follows a /compact answer (#585): nothing more, the conversation's
 // messages read again (its separator, or where it stands after a failure),
 // the whole conversation loaded again (its model is gone: the header turns
@@ -389,8 +402,12 @@ export default function ConversationPage() {
       ]);
       const msgs = await msgRes.json();
       const convs = await convRes.json();
-      // A read of a conversation the page has left (or a page that is gone)
-      // lands nowhere: its rows would replace the other conversation's.
+      // The sidebar's list is the same whatever conversation is shown: it is
+      // always refreshed (a first turn's new title and the new order).
+      convs.sort((a, b) => new Date(b.last_message_time) - new Date(a.last_message_time));
+      setConversations(convs);
+      // The rows of a conversation the page has left (or a page that is
+      // gone) land nowhere: they would replace the other conversation's.
       if (idRef.current !== id) return;
       // initialize starred state from backend
       const starredMap = {};
@@ -400,7 +417,6 @@ export default function ConversationPage() {
         }
       });
       setStarredIds(starredMap);
-      convs.sort((a, b) => new Date(b.last_message_time) - new Date(a.last_message_time));
       setMessages((prev) => {
         const sameConv = loadedConvIdRef.current === id;
         const fetched = msgs.map((m, i) => ({
@@ -410,7 +426,6 @@ export default function ConversationPage() {
         return sameConv ? mergeFetchedMessages(prev, fetched) : fetched;
       });
       loadedConvIdRef.current = id;
-      setConversations(convs);
     } catch (err) {
       log.error("Failed to fetch messages and conversations", err);
     }
@@ -806,6 +821,12 @@ export default function ConversationPage() {
 
       isStreamingRef.current = false;
       await fetchMessagesAndConversations();
+      // The page moved to another conversation while this turn ran: its load
+      // waited for the turn (it never overwrites a streaming answer), so it
+      // runs now and the page shows what it names.
+      if (idRef.current !== null && idRef.current !== id) {
+        setLoadAttempt((n) => n + 1);
+      }
 
       if (isFirstMessage) {
         setTimeout(() => setCurrentTitle(""), 3000);
@@ -901,7 +922,13 @@ export default function ConversationPage() {
           location.state.initialImagePaths || [],
           location.state.initialAttachments || []
         );
-        navigate(location.pathname, { replace: true, state: {} });
+        // The question is consumed from the history entry, but only while
+        // the page still shows this conversation: after a switch during the
+        // first turn, the current entry is the other conversation's, and
+        // replacing it with this path would bring the user back here.
+        if (idRef.current === id) {
+          navigate(location.pathname, { replace: true, state: {} });
+        }
       } else if (!location.state || !location.state.initialQuestion) {
         try {
           const msgs = await apiClient.get(`/conversations/${id}/fetch_messages`);
@@ -1183,7 +1210,7 @@ export default function ConversationPage() {
       if (outcome.after === AFTER_COMPACT.RELOAD) {
         setLoadAttempt((n) => n + 1);
       } else if (outcome.after === AFTER_COMPACT.REREAD) {
-        await fetchMessagesAndConversations();
+        await withinCeiling(fetchMessagesAndConversations(), COMPACT_REREAD_CEILING_MS);
         if (!here()) return;
         clearContextPanels();
       }
@@ -1215,10 +1242,14 @@ export default function ConversationPage() {
 
   // A sent message makes the /context snapshots stale, and drops any still
   // on its way.
-  const sendMessage = (...args) => {
+  const sendMessage = async (...args) => {
+    const conversationId = id;
     clearContextPanels();
     setCommandNotice(null);
-    return handleAsk(...args);
+    await handleAsk(...args);
+    // Context is usable again once the answer starts (like Model): a
+    // snapshot taken while it streamed describes a request already sent.
+    if (idRef.current === conversationId) clearContextPanels();
   };
 
   return (

@@ -34,12 +34,20 @@ vi.mock("react-router-dom", () => ({
 }));
 
 vi.mock("../components/Sidebar", () => ({ default: () => null }));
-// The history list, reduced to a trigger for deleting another conversation.
+// The history list, reduced to its names and a trigger for deleting another
+// conversation.
 vi.mock("../components/ChatCollapsibleSection", () => ({
-  default: ({ onDelete }) => (
-    <button type="button" onClick={() => onDelete(99)}>
-      delete-other-conversation
-    </button>
+  default: ({ items, onDelete }) => (
+    <div>
+      <ul aria-label="history">
+        {items.map((c) => (
+          <li key={c.id}>{c.name}</li>
+        ))}
+      </ul>
+      <button type="button" onClick={() => onDelete(99)}>
+        delete-other-conversation
+      </button>
+    </div>
   ),
 }));
 vi.mock("../components/TypingIndicator", () => ({ default: () => null }));
@@ -49,6 +57,7 @@ vi.mock("../components/MarkdownRenderer", () => ({
 vi.mock("../components/modals/EngineFailureModal", () => ({ default: () => null }));
 
 import ConversationPage from "./ConversationPage.jsx";
+import { resetCompacting } from "../shared/compactingConversations";
 import { GENERIC_ERROR_LINE } from "../utils/messageContent";
 
 const MODELS = [
@@ -146,6 +155,8 @@ let detail;
 let messages;
 // What POST /compact answers (a function of nothing, so a test can gate it).
 let compactAnswer;
+// What GET /conversations/ answers (the sidebar's list).
+let conversationList;
 
 const routeFetch = async (url, opts = {}) => {
   const u = String(url);
@@ -155,6 +166,7 @@ const routeFetch = async (url, opts = {}) => {
   if (u.endsWith("/llms/local")) return { ok: true, json: async () => MODELS };
   if (u.endsWith("/fetch_messages")) return { ok: true, json: async () => messages };
   if (/\/conversations\/\d+$/.test(u)) return { ok: true, json: async () => detail };
+  if (u.endsWith("/conversations/")) return { ok: true, json: async () => conversationList };
   return { ok: true, json: async () => [] };
 };
 
@@ -194,6 +206,8 @@ beforeEach(() => {
   detail = { ...DETAIL };
   messages = HISTORY;
   compactAnswer = async () => jsonResponse(200, { summarized: 0 });
+  conversationList = [];
+  navigateMock.mockReset();
   locationMock.state = null;
   paramsMock.id = "7";
   getMock.mockReset();
@@ -210,6 +224,8 @@ beforeEach(() => {
 
 afterEach(() => {
   cleanup();
+  // A test that leaves a run unfinished never locks a conversation for the next.
+  resetCompacting();
 });
 
 describe("/compact asks first", () => {
@@ -525,13 +541,14 @@ describe("an orphaned conversation", () => {
 
 // Review round (#687): races, stale answers and edge payloads.
 
-/** A streaming answer that stays open until end(). */
-function openStream() {
+/** A streaming answer that stays open until end(); with `started: false`
+ * it sends nothing at all before then (the model has not begun answering). */
+function openStream({ started = true } = {}) {
   let finish;
   const done = new Promise((resolve) => {
     finish = resolve;
   });
-  let sent = false;
+  let sent = !started;
   return {
     response: {
       ok: true,
@@ -840,6 +857,125 @@ describe("a /compact that never answers", () => {
       ).toBeTruthy();
       await waitFor(() => expect(messageReads()).toBeGreaterThan(reads));
       expect(screen.queryByRole("status")).toBeNull();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+});
+
+describe("an answer that ends after a switch to another conversation", () => {
+  const streamingOnA = async () => {
+    const stream = openStream();
+    tracedFetchMock.mockImplementation(async (url, opts) =>
+      String(url).includes("/query") ? stream.response : routeFetch(url, opts)
+    );
+    const view = render(<ConversationPage />);
+    await screen.findByText("Lyon is lovely.");
+    await waitFor(() => expect(composer().disabled).toBe(false));
+    return { stream, ...view };
+  };
+
+  it("refreshes the history list and loads the conversation now shown", async () => {
+    const { stream, rerender } = await streamingOnA();
+    typeAndEnter("A long answer please");
+    await waitFor(() => expect(composer().disabled).toBe(true));
+
+    switchTo(rerender, "8");
+    conversationList = [
+      { id: 8, name: "B conversation", last_message_time: "2026-11-05T10:00:00Z" },
+      { id: 7, name: "Trip Title", last_message_time: "2026-11-05T11:00:00Z" },
+    ];
+    messages = [{ id: 20, sender: "user", content: "B's own question" }];
+    stream.end();
+
+    await screen.findByText("B's own question");
+    expect(screen.queryByText("Lyon is lovely.")).toBeNull();
+    const history = screen.getByRole("list", { name: "history" });
+    expect(within(history).getByText("Trip Title")).toBeTruthy();
+    await waitFor(() => expect(composer().disabled).toBe(false));
+  });
+
+  it("never sends the user back to the first question's conversation", async () => {
+    locationMock.state = { initialQuestion: "First question" };
+    const stream = openStream();
+    tracedFetchMock.mockImplementation(async (url, opts) =>
+      String(url).includes("/query") ? stream.response : routeFetch(url, opts)
+    );
+    const { rerender } = render(<ConversationPage />);
+    await waitFor(() =>
+      expect(tracedFetchMock.mock.calls.some(([u]) => String(u).includes("/query"))).toBe(true)
+    );
+    switchTo(rerender, "8");
+    stream.end();
+    await new Promise((resolve) => setTimeout(resolve, 100));
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
+
+  it("consumes the first question from its own entry when the page stayed", async () => {
+    locationMock.state = { initialQuestion: "First question" };
+    render(<ConversationPage />);
+    await waitFor(() =>
+      expect(navigateMock).toHaveBeenCalledWith("/conversation/7", { replace: true, state: {} })
+    );
+  });
+});
+
+describe("/context while an answer streams", () => {
+  it("waits, like Model, until the answer starts", async () => {
+    const stream = openStream({ started: false });
+    tracedFetchMock.mockImplementation(async (url, opts) =>
+      String(url).includes("/query") ? stream.response : routeFetch(url, opts)
+    );
+    await renderPage();
+    typeAndEnter("A long answer please");
+    await waitFor(() => expect(composer().disabled).toBe(true));
+    openSettings();
+    expect(screen.getByRole("button", { name: /^Context/ }).disabled).toBe(true);
+    stream.end();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /^Context/ }).disabled).toBe(false)
+    );
+  });
+
+  it("drops a snapshot taken mid-answer once the turn ends", async () => {
+    const stream = openStream();
+    tracedFetchMock.mockImplementation(async (url, opts) =>
+      String(url).includes("/query") ? stream.response : routeFetch(url, opts)
+    );
+    await renderPage();
+    typeAndEnter("A long answer please");
+    await screen.findByText("Long");
+    openSettings();
+    fireEvent.click(screen.getByRole("button", { name: /^Context/ }));
+    await screen.findByRole("region", { name: "Context usage" });
+    stream.end();
+    await waitFor(() => expect(contextPanel()).toBeNull());
+  });
+});
+
+describe("the re-read after /compact", () => {
+  it("is waited for at most a minute: the conversation is unlocked either way", async () => {
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"], shouldAdvanceTime: true });
+    try {
+      compactAnswer = async () => {
+        // The re-read that follows never answers.
+        tracedFetchMock.mockImplementation(async (url, opts) =>
+          String(url).endsWith("/fetch_messages") ? new Promise(() => {}) : routeFetch(url, opts)
+        );
+        return appError(503, "COMPACTION_FAILED", "The summary could not be written.");
+      };
+      await renderPage();
+      await confirmCompact();
+      await screen.findByRole("status");
+      vi.advanceTimersByTime(59 * 1000);
+      await new Promise((resolve) => setTimeout(resolve, 20));
+      expect(screen.getByRole("status")).toBeTruthy();
+      vi.advanceTimersByTime(1000);
+      await waitFor(() => expect(screen.queryByRole("status")).toBeNull());
+      expect(
+        screen.getByText("The summary could not be written; nothing was changed.")
+      ).toBeTruthy();
+      expect(composer().disabled).toBe(false);
     } finally {
       vi.useRealTimers();
     }

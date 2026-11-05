@@ -56,6 +56,14 @@ export default function ChatPage() {
   // conversation page handed over when it sent the user here (a /compact
   // that found its conversation deleted).
   const [commandNotice, setCommandNotice] = useState(() => location.state?.notice ?? null);
+  // Read once: the history entry forgets it, so a reload of the window
+  // (which keeps the entry's state) never shows it again.
+  const handedOverNotice = Boolean(location.state?.notice);
+  useEffect(() => {
+    if (handedOverNotice) {
+      navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
+    }
+  }, [handedOverNotice, location.pathname, location.search, navigate]);
   const runCommand = (command) => {
     setCommandNotice(null);
     setOpenCommand(command);

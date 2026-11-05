@@ -3,6 +3,7 @@ import {
   compactingVersion,
   finishCompacting,
   isCompacting,
+  resetCompacting,
   startCompacting,
   subscribeCompacting,
 } from "./compactingConversations";
@@ -35,5 +36,19 @@ describe("compactingConversations", () => {
     startCompacting("9");
     finishCompacting("9");
     expect(listener).toHaveBeenCalledTimes(2);
+  });
+
+  it("forgets every run on reset, telling its listeners", () => {
+    const listener = vi.fn();
+    const unsubscribe = subscribeCompacting(listener);
+    startCompacting("1");
+    startCompacting("2");
+    resetCompacting();
+    expect(isCompacting("1")).toBe(false);
+    expect(isCompacting("2")).toBe(false);
+    expect(listener.mock.calls).toEqual([["1"], ["2"], ["1"], ["2"]]);
+    expect(startCompacting("1")).toBe(true);
+    resetCompacting();
+    unsubscribe();
   });
 });

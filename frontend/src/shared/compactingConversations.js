@@ -44,6 +44,14 @@ export function subscribeCompacting(listener) {
   return () => listeners.delete(listener);
 }
 
+/**
+ * Forgets every run, telling the listeners (for tests: a test that leaves a
+ * run unfinished must not lock its conversation for the next one).
+ */
+export function resetCompacting() {
+  [...running].forEach(finishCompacting);
+}
+
 /** Changes whenever a run starts or ends (useSyncExternalStore's snapshot). */
 export function compactingVersion() {
   return version;
