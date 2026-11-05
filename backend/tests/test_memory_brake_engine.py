@@ -992,6 +992,10 @@ async def test_shutdown_stops_the_monitor_and_drains_before_cleanup(monkeypatch)
             order.append("start_pressure")
 
         @staticmethod
+        def set_idle_unload_minutes(minutes):
+            pass
+
+        @staticmethod
         def stop_cleanup_task():
             order.append("stop_cleanup")
 

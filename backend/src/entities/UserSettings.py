@@ -7,8 +7,8 @@ saved value (#609). Each conversation takes its value at creation and owns its
 flag afterwards; changing the global setting never retro-affects existing
 conversations. It also carries the interface language, the three update
 switches (check, download, install), the inference backend the app runs models
-on, and the other defaults new conversations start from (reasoning effort,
-compaction threshold).
+on, the other defaults new conversations start from (reasoning effort,
+compaction threshold), and how long an unused model stays loaded.
 
 Example:
     from src.entities.UserSettings import UserSettings
@@ -41,6 +41,13 @@ DEFAULT_LANGUAGE = "en"
 # app's own initiative -- the user opts in here, or reinstalls the CPU build.
 INFERENCE_BACKENDS = ("auto", "cpu")
 DEFAULT_INFERENCE_BACKEND = "auto"
+
+# How long an unused chat model stays loaded, in minutes (#619); 0 is "Never".
+# Nothing below five minutes: the memory brake's timings (the MLX release at
+# 3 minutes, the llama.cpp unload after the brake's own idle samples) are
+# calibrated against a reap at five minutes or later.
+IDLE_UNLOAD_MINUTES = (0, 5, 15, 30, 60)
+DEFAULT_IDLE_UNLOAD_MINUTES = 5
 
 
 class UserSettings(Base):
@@ -82,6 +89,12 @@ class UserSettings(Base):
             compact; each copies it at creation. 80
             by default, the value every row that predates the column holds.
             Arena panels never compact, so nothing else reads it.
+        idle_unload_minutes: One of IDLE_UNLOAD_MINUTES: how long the chat
+            model stays loaded once unused before it is unloaded, 0 for never
+            (#619). 5 by default, the delay every row that predates the column
+            holds. Applied to the running engine at boot and on every change,
+            without a relaunch; the knowledge-base embedding model has its own
+            idle release and ignores it.
 
     Constraints:
         - web_search_enabled must be a Boolean (enforced by validator).
@@ -91,6 +104,7 @@ class UserSettings(Base):
         - inference_backend must be one of INFERENCE_BACKENDS (validator).
         - default_reasoning_effort must be one of REASONING_EFFORT_LEVELS.
         - default_compaction_threshold must be one of COMPACTION_THRESHOLDS.
+        - idle_unload_minutes must be one of IDLE_UNLOAD_MINUTES.
     """
 
     __tablename__ = "user_settings"
@@ -106,6 +120,7 @@ class UserSettings(Base):
     default_compaction_threshold = Column(
         SmallInteger, default=DEFAULT_COMPACTION_THRESHOLD, nullable=False
     )
+    idle_unload_minutes = Column(SmallInteger, default=DEFAULT_IDLE_UNLOAD_MINUTES, nullable=False)
 
     @validates("language")
     def validate_language(self, key, value):
@@ -150,6 +165,18 @@ class UserSettings(Base):
         """
         if not is_compaction_threshold(value):
             raise ValueError(f"{key} must be one of {COMPACTION_THRESHOLDS}, got {value!r}")
+        return value
+
+    @validates("idle_unload_minutes")
+    def validate_idle_unload_minutes(self, key, value):
+        """Ensure the idle delay is one of the offered choices.
+
+        Raises:
+            ValueError: If value is not an int in IDLE_UNLOAD_MINUTES (a
+                bool, a float, a string or None is rejected).
+        """
+        if type(value) is not int or value not in IDLE_UNLOAD_MINUTES:
+            raise ValueError(f"{key} must be one of {IDLE_UNLOAD_MINUTES}, got {value!r}")
         return value
 
     @validates(

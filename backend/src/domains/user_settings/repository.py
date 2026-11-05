@@ -9,6 +9,7 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from src.entities.UserSettings import (
+    DEFAULT_IDLE_UNLOAD_MINUTES,
     DEFAULT_INFERENCE_BACKEND,
     DEFAULT_LANGUAGE,
     UserSettings,
@@ -35,7 +36,8 @@ class User_Settings_Repository:
             UserSettings: The singleton settings entity (defaults applied on
             first creation: web_search_enabled=False, language="en",
             auto_update_enabled=True, auto_download_updates=False,
-            auto_install_updates=False, inference_backend="auto").
+            auto_install_updates=False, inference_backend="auto",
+            idle_unload_minutes=5).
         """
         settings = self.db.query(UserSettings).first()
         if not settings:
@@ -189,6 +191,27 @@ class User_Settings_Repository:
         self.db.refresh(settings)
         return settings
 
+    def set_idle_unload_minutes(self, settings: UserSettings, value: int) -> UserSettings:
+        """Update the idle unload delay (flushed, not committed).
+
+        Args:
+            settings: The singleton entity to update.
+            value: One of IDLE_UNLOAD_MINUTES, 0 for never (validated by the
+                entity).
+
+        Returns:
+            UserSettings: Updated entity.
+
+        Note:
+            Only the stored value: the endpoint applies it to the running
+            engine once the transaction is committed.
+        """
+        logger.info(f"Updating UserSettings.idle_unload_minutes = {value}")
+        settings.idle_unload_minutes = value
+        self.db.flush()
+        self.db.refresh(settings)
+        return settings
+
     def set_language(self, settings: UserSettings, value: str) -> UserSettings:
         """Update the interface language (flushed, not committed).
 
@@ -227,3 +250,25 @@ def read_inference_backend() -> str:
         return DEFAULT_INFERENCE_BACKEND
     finally:
         db.close()
+
+
+def read_idle_unload_minutes() -> int:
+    """The persisted idle unload delay in minutes (0: never), on a session of
+    its own.
+
+    Used by the FastAPI lifespan, which has no request-scoped session. A
+    missing row or a database that cannot be read means the default (five
+    minutes), the delay the app had before the setting existed.
+    """
+    from src.database.core import SessionLocal
+
+    try:
+        db = SessionLocal()
+        try:
+            settings = db.query(UserSettings).first()
+        finally:
+            db.close()
+    except Exception as e:
+        logger.warning(f"Could not read the idle unload delay, using the default: {e}")
+        return DEFAULT_IDLE_UNLOAD_MINUTES
+    return settings.idle_unload_minutes if settings else DEFAULT_IDLE_UNLOAD_MINUTES

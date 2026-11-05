@@ -479,6 +479,63 @@ def test_update_opt_ins_land_off_on_a_populated_database(fresh_cluster, check_fo
 
 
 @pytest.mark.integration
+def test_idle_unload_delay_lands_at_five_minutes_on_a_populated_database(fresh_cluster):
+    # #619: an install updated from a version without the setting keeps the
+    # five-minute delay it always had; the column is NOT NULL (never is 0).
+    url = fresh_cluster.sqlalchemy_url
+    cfg = _alembic_config(url)
+    command.upgrade(cfg, "717291e2cad1")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO user_settings (web_search_enabled, auto_update_enabled, "
+                    "auto_download_updates) VALUES (true, false, true)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO llms (name, local, link, type, quantized, is_base, category, "
+                    "is_attached_to_kb) VALUES ('Old', 1, 'org/old', 'qwen', true, false, "
+                    "'general', false)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO conversations (llm_id, name, web_search_enabled) "
+                    "SELECT id, 'Old chat', false FROM llms WHERE link='org/old'"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    run_migrations(fresh_cluster)
+
+    assert _alembic_version(url) == _head_revision(cfg)
+    command.check(cfg)
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT web_search_enabled, auto_update_enabled, auto_download_updates, "
+                    "idle_unload_minutes FROM user_settings"
+                )
+            ).one()
+            column = {c["name"]: c for c in inspect(conn).get_columns("user_settings")}[
+                "idle_unload_minutes"
+            ]
+            assert conn.execute(text("SELECT count(*) FROM conversations")).scalar() == 1
+            assert conn.execute(text("SELECT count(*) FROM llms")).scalar() == 1
+    finally:
+        engine.dispose()
+    assert row == (True, False, True, 5)
+    assert column["nullable"] is False
+    assert str(column["type"]) == "SMALLINT"
+
+
+@pytest.mark.integration
 def test_backup_database_writes_a_dump(fresh_cluster):
     # pg_dump (custom format) of the LIVE cluster produces a non-empty snapshot.
     engine = create_engine(fresh_cluster.sqlalchemy_url)

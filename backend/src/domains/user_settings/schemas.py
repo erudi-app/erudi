@@ -3,14 +3,15 @@
 One singleton resource: the app-wide user settings. It carries the global
 web-search default (#310), the interface language (#385), the three update
 switches (check, download, install, #563), the inference backend, the default
-reasoning effort and the default compaction threshold (#607); new settings
-slot in as additional fields.
+reasoning effort, the default compaction threshold (#607) and the idle unload
+delay (#619); new settings slot in as additional fields.
 """
 
 from typing import Annotated, Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import AfterValidator, BaseModel, Field, model_validator
 
+from src.entities.UserSettings import IDLE_UNLOAD_MINUTES
 from src.engines.working_window import (
     COMPACTION_THRESHOLD_MAX,
     COMPACTION_THRESHOLD_MIN,
@@ -23,6 +24,22 @@ InferenceBackend = Literal["auto", "cpu"]
 # be built from a runtime tuple without losing the OpenAPI enum); the entity
 # validator enforces the same list on the way to the database.
 ReasoningEffort = Literal["none", "low", "medium", "high", "xhigh"]
+
+
+def _offered_idle_delay(value: int) -> int:
+    if value not in IDLE_UNLOAD_MINUTES:
+        raise ValueError(f"must be one of {IDLE_UNLOAD_MINUTES}")
+    return value
+
+
+# How long an unused model stays loaded, in minutes, 0 for never (#619): one
+# of the entity's IDLE_UNLOAD_MINUTES. Strict, like the threshold: a bool, a
+# float or a numeric string is refused (a Literal would take False as 0).
+IdleUnloadMinutes = Annotated[
+    int,
+    Field(strict=True, json_schema_extra={"enum": list(IDLE_UNLOAD_MINUTES)}),
+    AfterValidator(_offered_idle_delay),
+]
 # The share of the working window, in whole percent, at which a conversation
 # compacts (#607): 50 to 90 in steps of 5. Strict: a bool, a float or a
 # numeric string is refused, not coerced. The entity validators enforce the
@@ -62,6 +79,9 @@ class UserSettingsResponse(BaseModel):
         default_compaction_threshold: Global default for the share of the
             working window, in percent, at which a conversation compacts. New
             conversations on a model without a saved threshold copy it.
+        idle_unload_minutes: How long the chat model stays loaded once
+            unused, in minutes (5, 15, 30 or 60), or 0 to never unload it for
+            being idle. Applies to the running engine at once.
     """
 
     web_search_enabled: bool = Field(
@@ -95,6 +115,10 @@ class UserSettingsResponse(BaseModel):
     default_compaction_threshold: CompactionThreshold = Field(
         ...,
         description="Default compaction threshold new conversations inherit, in percent (50-90, step 5)",
+    )
+    idle_unload_minutes: IdleUnloadMinutes = Field(
+        ...,
+        description="Minutes an unused model stays loaded (5, 15, 30, 60), 0 for never",
     )
 
     class Config:
@@ -140,6 +164,10 @@ class UserSettingsUpdate(BaseModel):
         None,
         description="Default compaction threshold for new conversations, in percent (50-90, step 5)",
     )
+    idle_unload_minutes: Optional[IdleUnloadMinutes] = Field(
+        None,
+        description="Minutes an unused model stays loaded (5, 15, 30, 60), 0 for never; applies at once",
+    )
 
     @model_validator(mode="after")
     def require_at_least_one_field(self):
@@ -152,6 +180,7 @@ class UserSettingsUpdate(BaseModel):
             and self.inference_backend is None
             and self.default_reasoning_effort is None
             and self.default_compaction_threshold is None
+            and self.idle_unload_minutes is None
         ):
             raise ValueError("At least one setting must be provided")
         return self
