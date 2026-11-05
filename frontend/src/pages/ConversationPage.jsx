@@ -144,6 +144,10 @@ export default function ConversationPage() {
   // it did (the effect depended on it), so toggling it near the bottom snapped
   // the view back down and the user could not scroll freely.
   const userScrolledUpRef = useRef(false);
+  // The pending 100 ms re-check of the scroll position. Held in a ref so that
+  // sending a message can cancel it: a re-check that fires after the send
+  // would mark the view as scrolled up again.
+  const scrollCheckTimerRef = useRef(null);
 
   // Refs to avoid putting messages.length in useCallback deps, which
   // would cascade into the loadConversationData useEffect and overwrite
@@ -288,6 +292,11 @@ export default function ConversationPage() {
     async (question, images = [], imagePaths = [], attachmentPaths = []) => {
       setLoading(true);
       isStreamingRef.current = true;
+
+      // Sending is the user's return to the bottom: the view follows the
+      // answer again, and a pending scroll re-check must not undo that.
+      clearTimeout(scrollCheckTimerRef.current);
+      userScrolledUpRef.current = false;
 
       const isFirstMessage = messagesLengthRef.current === 0;
 
@@ -806,7 +815,6 @@ export default function ConversationPage() {
       return;
     }
 
-    let scrollTimeout;
     let lastScrollTop = scrollContainer.scrollTop;
 
     const handleScroll = () => {
@@ -820,10 +828,10 @@ export default function ConversationPage() {
       lastScrollTop = currentScrollTop;
 
       // Clear any pending timeout
-      clearTimeout(scrollTimeout);
+      clearTimeout(scrollCheckTimerRef.current);
 
       // Wait a bit before checking position to avoid false positives during auto-scroll
-      scrollTimeout = setTimeout(() => {
+      scrollCheckTimerRef.current = setTimeout(() => {
         const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
         const isAtBottom = scrollHeight - scrollTop - clientHeight < 100; // Increased threshold to 100px
 
@@ -834,7 +842,7 @@ export default function ConversationPage() {
 
     scrollContainer.addEventListener("scroll", handleScroll);
     return () => {
-      clearTimeout(scrollTimeout);
+      clearTimeout(scrollCheckTimerRef.current);
       scrollContainer.removeEventListener("scroll", handleScroll);
     };
   }, []);
