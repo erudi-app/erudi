@@ -475,13 +475,22 @@ class TestUserSettingsEndpoints:
 
 @pytest.fixture
 def engine_delay(monkeypatch):
-    """The running engine's idle delay, put back after the test (the PUT
-    writes it on the process-wide engine class)."""
+    """The running engine, a class of its own: the PUT must write the delay
+    on ``config.LLM_Engine`` (the engine left after the CUDA-to-CPU swap),
+    never on whatever ``BaseEngine.get_engine()`` detects, which the
+    assertions on this class would miss."""
     from src.core import config
+    from src.engines.base_engine import BaseEngine
 
-    engine = config.LLM_Engine
-    monkeypatch.setattr(engine, "_max_idle_time", engine._max_idle_time)
-    return engine
+    class _RunningEngine(BaseEngine):
+        pass
+
+    monkeypatch.setattr(config, "LLM_Engine", _RunningEngine)
+    detected = BaseEngine.get_engine()
+    monkeypatch.setattr(detected, "_max_idle_time", detected._max_idle_time)
+    yield _RunningEngine
+    # The detected engine was never the one to change.
+    assert detected._max_idle_time == BaseEngine._max_idle_time
 
 
 class TestIdleUnloadDelay:
