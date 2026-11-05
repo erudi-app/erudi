@@ -14,7 +14,6 @@ const { tracedFetchMock } = vi.hoisted(() => ({ tracedFetchMock: vi.fn() }));
 
 vi.mock("../services/api/client", () => ({
   default: { get: vi.fn() },
-  apiClient: { get: vi.fn() },
   tracedFetch: tracedFetchMock,
 }));
 
@@ -24,12 +23,11 @@ vi.mock("../contexts/DownloadModalContext", () => ({
   useDownloadModal: () => ({ open: vi.fn(), completionCount: 0 }),
 }));
 
-// Stub the heavy children; the model selector itself stays real.
+// Stub the heavy children; the header naming the model stays real.
 vi.mock("../components/Sidebar", () => ({ default: () => null }));
 vi.mock("../components/ChatCollapsibleSection", () => ({ default: () => null }));
 vi.mock("../components/GradientBox", () => ({ default: ({ children }) => <div>{children}</div> }));
 vi.mock("../components/QuestionInput", () => ({ default: () => null }));
-vi.mock("../components/modals/CustomizePromptModal", () => ({ default: () => null }));
 vi.mock("../components/modals/ErrorModal", () => ({ default: () => null }));
 
 import apiClient from "../services/api/client";
@@ -47,7 +45,7 @@ const renderAt = (search) =>
     </MemoryRouter>
   );
 
-/** The selected model is displayed in the dropdown trigger, titled with its name. */
+/** The header names the selected model, titled with its name. */
 const selectedModelNode = (name) => screen.findByTitle(name);
 
 beforeEach(() => {

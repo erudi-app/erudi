@@ -5,8 +5,8 @@ import { render, screen, cleanup, fireEvent, act, waitFor } from "@testing-libra
 
 // Interactive surface of HeaderBar beyond the bounds already pinned in
 // HeaderBar.test.jsx: the model dropdown (open/select/outside-close/disabled),
-// the Apply commit, the diversity slider live edit, the picker-attention
-// alert, and the width-tier responsive classes driven by ResizeObserver.
+// the Apply commit, the diversity slider live edit, and the width-tier
+// responsive classes driven by ResizeObserver.
 
 // Capture the ResizeObserver callback so tests can feed synthetic widths.
 let resizeCallback = null;
@@ -28,7 +28,9 @@ const MODELS = [
 ];
 
 const renderBar = (props = {}) =>
-  render(<HeaderBar onApply={() => {}} onCustomizePrompt={() => {}} {...props} />);
+  render(
+    <HeaderBar onApply={() => {}} onLiveChange={() => {}} onCustomizePrompt={() => {}} {...props} />
+  );
 
 const openSettings = () => fireEvent.click(screen.getByLabelText("Toggle settings"));
 
@@ -68,16 +70,10 @@ describe("HeaderBar model dropdown", () => {
     expect(screen.queryByText("Beta")).toBeNull();
   });
 
-  it("shows the placeholder when no model is selected and the attention alert when asked", () => {
-    renderBar({
-      models: MODELS,
-      currentModel: "",
-      pickerAttention: true,
-      pickerAttentionMessage: "Pick a model to continue",
-    });
+  it("shows the placeholder when no model is selected", () => {
+    renderBar({ models: MODELS, currentModel: "" });
 
     expect(screen.getByText("Select model...")).toBeTruthy();
-    expect(screen.getByRole("alert").textContent).toBe("Pick a model to continue");
   });
 });
 

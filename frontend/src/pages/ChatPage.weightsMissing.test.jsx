@@ -1,21 +1,20 @@
 // @vitest-environment jsdom
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
 import { MemoryRouter } from "react-router-dom";
 
 // A KB assistant whose base model was deleted survives with
 // `weights_available === false` (#376). Its Installed card already disables
-// Chat and offers Re-bind; the Chat page's own picker must agree: the entry is
-// listed but disabled with a hint, it is never auto-selected (neither as the
-// default nor through `?model=`), and with nothing selectable the composer
+// Chat and offers Re-bind; the Chat page must agree: /model does not offer it,
+// it is never auto-selected (neither as the default nor through `?model=`),
+// and with nothing selectable the header asks for a model and the composer
 // stays disabled instead of creating a conversation that can only fail.
 
 const { tracedFetchMock } = vi.hoisted(() => ({ tracedFetchMock: vi.fn() }));
 
 vi.mock("../services/api/client", () => ({
   default: { get: vi.fn() },
-  apiClient: { get: vi.fn() },
   tracedFetch: tracedFetchMock,
 }));
 
@@ -30,7 +29,6 @@ vi.mock("../components/GradientBox", () => ({ default: ({ children }) => <div>{c
 vi.mock("../components/QuestionInput", () => ({
   default: ({ disabled }) => <div data-testid="composer" data-disabled={String(disabled)} />,
 }));
-vi.mock("../components/modals/CustomizePromptModal", () => ({ default: () => null }));
 vi.mock("../components/modals/ErrorModal", () => ({ default: () => null }));
 
 import apiClient from "../services/api/client";
@@ -56,9 +54,10 @@ const useModels = (models) => {
   apiClient.get.mockImplementation(async (path) => (path === "/llms/local" ? models : []));
 };
 
-const openPicker = async () => {
-  const trigger = await screen.findByText("Chat with");
-  fireEvent.click(trigger.nextSibling);
+const openModelCommand = async () => {
+  fireEvent.click(await screen.findByRole("button", { name: "Conversation settings" }));
+  fireEvent.click(screen.getByRole("button", { name: /^Model/ }));
+  return screen.findByRole("dialog");
 };
 
 beforeEach(() => {
@@ -69,20 +68,14 @@ afterEach(() => {
 });
 
 describe("ChatPage picker and a weights-missing assistant (#376)", () => {
-  it("lists the assistant disabled with a hint and does not select it on click", async () => {
+  it("is not offered by /model", async () => {
     useModels([ORPHAN, HEALTHY]);
     renderAt();
     await screen.findByTitle("Beta Model");
 
-    await openPicker();
-    const entry = screen.getByTestId("model-option-9");
-    expect(entry.getAttribute("aria-disabled")).toBe("true");
-    expect(entry.textContent).toMatch(/Weights missing/);
-    expect(entry.textContent).toMatch(/Models page/);
-
-    fireEvent.click(entry);
-    // Still the healthy model, and the picker did not treat it as a pick.
-    expect(screen.getByTitle("Beta Model").textContent).toBe("Beta Model");
+    const dialog = await openModelCommand();
+    expect(within(dialog).queryByText("Nimbus Assistant")).toBeNull();
+    expect(within(dialog).getByRole("button", { name: /Beta Model/ })).toBeTruthy();
   });
 
   it("skips the orphan and preselects the next selectable model", async () => {
@@ -98,11 +91,13 @@ describe("ChatPage picker and a weights-missing assistant (#376)", () => {
     useModels([ORPHAN]);
     renderAt();
 
-    await openPicker();
-    expect(screen.getByTestId("model-option-9").getAttribute("aria-disabled")).toBe("true");
-    expect(screen.getByText("Select model...")).toBeTruthy();
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toBe("Please select a model")
+    );
     expect(screen.queryByTitle("Nimbus Assistant")).toBeNull();
     expect(screen.getByTestId("composer").getAttribute("data-disabled")).toBe("true");
+    const dialog = await openModelCommand();
+    expect(within(dialog).getByText("No installed model can be used right now.")).toBeTruthy();
   });
 
   it("ignores a ?model= deep link that points at the orphan", async () => {

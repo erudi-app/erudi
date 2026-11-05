@@ -19,32 +19,98 @@
     "toggleSettings": "Toggle settings",
     "creativity": "Creativity",
     "diversity": "Diversity",
-    "webSearch": "Web Search",
-    "webSearchToggle": "Web search",
-    "reasoningEffort": "Reasoning effort",
-    "reasoningEffortLevels": {
-      "none": "None",
-      "low": "Low",
-      "medium": "Medium",
-      "high": "High",
-      "xhigh": "Extra high"
-    },
-    "compactionThreshold": "Compaction threshold",
     "customizePrompt": "Customize Prompt",
     "apply": "Apply",
-    "pickerAttention": "Please select a model",
     "tooltips": {
       "temperature": "Controls creativity. Lower = focused, higher = creative.",
       "topP": "Controls word variety. Lower = predictable, higher = diverse.",
-      "prompt": "Customize system instructions that guide AI behavior.",
-      "webSearch": "Lets the model search the web for current facts. Searched queries are sent to external search engines.",
-      "webSearchUnavailable": "This model can't use tools, so web search isn't available for it.",
-      "webSearchUnverified": "This model hasn't been verified to run tools yet, so web search stays off for it.",
-      "reasoningEffort": "How much the model may deliberate before answering. Higher levels reason more but take longer; None asks it to answer directly.",
-      "compactionThreshold": "Older messages are summarized when the conversation fills this share of the model's context window. Lower: summarizes sooner and more often, keeping the conversation shorter. Higher: keeps more of it word for word and summarizes less often."
+      "prompt": "Customize system instructions that guide AI behavior."
+    }
+  },
+  "conversationHeader": {
+    "chattingWith": "You are chatting with <model>{{model}}</model>",
+    "settings": "Conversation settings",
+    "pickerAttention": "Please select a model"
+  },
+  "commands": {
+    "listLabel": "Commands",
+    "config": {
+      "label": "Config",
+      "description": "Adjust this conversation's settings"
+    },
+    "effort": {
+      "label": "Effort",
+      "description": "Set how much the model reasons before answering"
+    },
+    "model": {
+      "label": "Model",
+      "description": "Switch to another installed model"
+    }
+  },
+  "config": {
+    "title": "Conversation settings",
+    "subtitle": "Changes are saved as you make them and apply from the next message.",
+    "subtitleDraft": "The new conversation starts with these values.",
+    "help": "Help: {{field}}",
+    "saveFailed": "Your change could not be saved.",
+    "effort": {
+      "label": "Reasoning effort",
+      "help": "How much the model may deliberate before answering. Higher levels reason more but take longer; None asks it to answer directly.",
+      "levels": {
+        "none": "None",
+        "low": "Low",
+        "medium": "Medium",
+        "high": "High",
+        "xhigh": "Extra high"
+      }
+    },
+    "webSearch": {
+      "label": "Web search",
+      "help": "Lets the model search the web for current facts. Searched queries are sent to external search engines.",
+      "unavailable": "This model can't use tools, so web search isn't available for it.",
+      "unverified": "This model hasn't been verified to run tools yet, so web search stays off for it."
+    },
+    "creativity": {
+      "label": "Creativity",
+      "help": "Controls creativity. Lower = focused, higher = creative."
+    },
+    "diversity": {
+      "label": "Diversity",
+      "help": "Controls word variety. Lower = predictable, higher = diverse."
     },
     "noPublisherRecommendation": "No sampling recommendation from this model's publisher; neutral defaults applied.",
-    "weightsMissingHint": "Weights missing — re-bind this assistant on the Models page"
+    "threshold": {
+      "label": "Compaction threshold",
+      "help": "Older messages are summarized when the conversation fills this share of the model's context window. Lower: summarizes sooner and more often, keeping the conversation shorter. Higher: keeps more of it word for word and summarizes less often."
+    },
+    "instructions": {
+      "label": "Custom instructions",
+      "help": "Define custom instructions that guide how the AI responds. This will be applied to all messages in this conversation.",
+      "placeholder": "Enter your custom system prompt here...",
+      "save": "Save instructions"
+    },
+    "global": {
+      "title": "Defaults for this model",
+      "subtitle": "New conversations on {{model}} start with these values.",
+      "saving": "Saving the defaults for {{model}}…",
+      "saved": "Saved as defaults for {{model}}.",
+      "failed": "The defaults for {{model}} could not be saved.",
+      "noInstructions": "None",
+      "on": "On",
+      "off": "Off"
+    }
+  },
+  "effortPopup": {
+    "subtitle": "Saved at once; applies from the next message.",
+    "subtitleDraft": "The new conversation starts at this level."
+  },
+  "modelPopup": {
+    "title": "Model",
+    "subtitle": "The new model brings its own saved values, otherwise its recommended creativity and diversity.",
+    "listLabel": "Installed models",
+    "help": "Only installed models whose weights are on this computer are listed.",
+    "current": "Current",
+    "empty": "No installed model can be used right now."
   },
   "composer": {
     "placeholder": "Ask a question…",

@@ -1,0 +1,311 @@
+// @vitest-environment jsdom
+import React from "react";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
+import { render, screen, cleanup, fireEvent, waitFor, within } from "@testing-library/react";
+
+// The command surface on a conversation (#585, #609): the static header, its
+// settings panel, the slash commands typed in the composer, and the popups
+// they open, wired to the conversation through one settings owner. The real
+// header, composer and popups render here; only the network is faked.
+
+const { tracedFetchMock, navigateMock, locationMock, patchMock, putMock } = vi.hoisted(() => ({
+  tracedFetchMock: vi.fn(),
+  navigateMock: vi.fn(),
+  locationMock: { pathname: "/conversation/7", state: null },
+  patchMock: vi.fn(),
+  putMock: vi.fn(),
+}));
+
+vi.mock("../services/api/client", () => ({
+  default: { get: vi.fn(async () => []), patch: patchMock, put: putMock },
+  tracedFetch: tracedFetchMock,
+}));
+
+vi.mock("react-router-dom", () => ({
+  useParams: () => ({ id: "7" }),
+  useNavigate: () => navigateMock,
+  useLocation: () => locationMock,
+}));
+
+vi.mock("../components/Sidebar", () => ({ default: () => null }));
+vi.mock("../components/ChatCollapsibleSection", () => ({ default: () => null }));
+vi.mock("../components/TypingIndicator", () => ({ default: () => null }));
+vi.mock("../components/MarkdownRenderer", () => ({
+  default: ({ content }) => <div>{content}</div>,
+}));
+
+import ConversationPage from "./ConversationPage.jsx";
+
+const MODELS = [
+  { id: 1, name: "Qwen3-4B", supports_tools: true, supports_tools_wire: true },
+  { id: 2, name: "Gemma-3-4B", supports_tools: true, supports_tools_wire: true },
+  { id: 3, name: "Orphan assistant", weights_available: false },
+];
+
+const DETAIL = {
+  id: 7,
+  llm_id: 1,
+  reasoning_effort: "medium",
+  temperature: 0.7,
+  top_p: 0.8,
+  max_tokens: 512,
+  compaction_threshold: 80,
+  web_search_enabled: false,
+  custom_prompt: "Be brief",
+};
+
+const encoder = new TextEncoder();
+const answerStream = () => {
+  const queue = [
+    { done: false, value: encoder.encode('{"t":"answer","text":"ok"}\n{"t":"done"}\n') },
+    { done: true, value: undefined },
+  ];
+  return { ok: true, body: { getReader: () => ({ read: async () => queue.shift() }) } };
+};
+const emptyStream = () => ({
+  ok: true,
+  body: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },
+});
+
+let detail;
+let order;
+
+const routeFetch = async (url, opts = {}) => {
+  const u = String(url);
+  if (u.includes("generate_title")) return emptyStream();
+  if (u.includes("/query")) {
+    order.push(["query", JSON.parse(opts.body)]);
+    return answerStream();
+  }
+  if (u.endsWith("/llms/local")) return { ok: true, json: async () => MODELS };
+  if (u.endsWith("/conversations/7")) return { ok: true, json: async () => detail };
+  return { ok: true, json: async () => [] };
+};
+
+const composer = () => document.querySelector("textarea");
+const typeAndEnter = (value) => {
+  fireEvent.change(composer(), { target: { value } });
+  fireEvent.keyDown(composer(), { key: "Enter" });
+};
+const header = () => screen.getByRole("heading", { level: 3 });
+const queries = () => order.filter(([kind]) => kind === "query");
+
+const renderPage = async () => {
+  render(<ConversationPage />);
+  await waitFor(() => expect(header().textContent).toContain("Qwen3-4B"));
+};
+
+beforeEach(() => {
+  Element.prototype.scrollTo = () => {};
+  detail = { ...DETAIL };
+  order = [];
+  locationMock.state = null;
+  tracedFetchMock.mockReset();
+  tracedFetchMock.mockImplementation(routeFetch);
+  patchMock.mockReset();
+  patchMock.mockImplementation(async (_path, body) => {
+    order.push(["patch", body]);
+    return { ...detail, ...body };
+  });
+  putMock.mockReset();
+});
+
+afterEach(() => {
+  cleanup();
+  vi.useRealTimers();
+});
+
+describe("the header", () => {
+  it("reads a static line naming the conversation's model", async () => {
+    await renderPage();
+    expect(header().textContent).toBe("You are chatting with Qwen3-4B");
+  });
+
+  it("opens /config from its settings panel, showing the conversation's values", async () => {
+    await renderPage();
+    fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Config/ }));
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).getByRole("slider", { name: "Creativity" }).value).toBe("0.7");
+    expect(within(dialog).getByRole("textbox", { name: "Custom instructions" }).value).toBe(
+      "Be brief"
+    );
+  });
+});
+
+describe("slash commands in the composer", () => {
+  it("/config opens the popup and sends nothing to the model", async () => {
+    await renderPage();
+    typeAndEnter("/config");
+    expect(await screen.findByRole("dialog")).toBeTruthy();
+    expect(queries()).toHaveLength(0);
+    expect(composer().value).toBe("");
+  });
+
+  it("/model switches with a PATCH of llm_id alone and adopts the answer", async () => {
+    await renderPage();
+    patchMock.mockImplementation(async (_path, body) => {
+      order.push(["patch", body]);
+      return { ...detail, llm_id: 2, temperature: 0.3, top_p: 0.9, custom_prompt: "Gemma rules" };
+    });
+    typeAndEnter("/model");
+    const dialog = await screen.findByRole("dialog");
+    expect(within(dialog).queryByText("Orphan assistant")).toBeNull();
+    fireEvent.click(within(dialog).getByRole("button", { name: /Gemma-3-4B/ }));
+
+    await waitFor(() => expect(header().textContent).toBe("You are chatting with Gemma-3-4B"));
+    expect(patchMock).toHaveBeenCalledTimes(1);
+    expect(patchMock).toHaveBeenCalledWith("/conversations/7", { llm_id: 2 });
+
+    typeAndEnter("Hello");
+    await waitFor(() => expect(queries()).toHaveLength(1));
+    expect(queries()[0][1]).toMatchObject({
+      temperature: 0.3,
+      top_p: 0.9,
+      custom_prompt: "Gemma rules",
+    });
+  });
+
+  it("/config global saves the conversation's values for its model", async () => {
+    putMock.mockResolvedValue({});
+    await renderPage();
+    typeAndEnter("/config global");
+    await screen.findByText("Saved as defaults for Qwen3-4B.");
+    expect(putMock).toHaveBeenCalledWith("/llms/1/conversation_defaults", {
+      reasoning_effort: "medium",
+      temperature: 0.7,
+      top_p: 0.8,
+      compaction_threshold: 80,
+      web_search_enabled: false,
+      custom_prompt: "Be brief",
+    });
+  });
+});
+
+describe("sending right after a change", () => {
+  it("waits for the pending slider save, then sends the new value with the turn", async () => {
+    await renderPage();
+    typeAndEnter("/config");
+    const dialog = await screen.findByRole("dialog");
+    fireEvent.change(within(dialog).getByRole("slider", { name: "Creativity" }), {
+      target: { value: "1.3" },
+    });
+    fireEvent.keyDown(dialog, { key: "Escape" });
+    await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+    typeAndEnter("Right away");
+    await waitFor(() => expect(queries()).toHaveLength(1));
+    expect(order.map(([kind]) => kind)).toEqual(["patch", "query"]);
+    expect(order[0][1]).toEqual({ temperature: 1.3 });
+    expect(queries()[0][1].temperature).toBe(1.3);
+  });
+});
+
+describe("an orphaned conversation", () => {
+  it("keeps the Model button working while the composer is blocked", async () => {
+    detail = { ...DETAIL, llm_id: null };
+    render(<ConversationPage />);
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toBe("Please select a model")
+    );
+    expect(composer().disabled).toBe(true);
+
+    patchMock.mockImplementation(async (_path, body) => ({ ...detail, ...body }));
+    fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Model/ }));
+    fireEvent.click(await screen.findByRole("button", { name: /Qwen3-4B/ }));
+
+    await waitFor(() => expect(composer().disabled).toBe(false));
+    expect(patchMock).toHaveBeenCalledWith("/conversations/7", { llm_id: 1 });
+    expect(header().textContent).toBe("You are chatting with Qwen3-4B");
+  });
+
+  it.each([
+    ["missing from the installed list", 99],
+    ["an assistant whose weights are missing", 3],
+  ])("is blocked when its model is %s", async (_label, llmId) => {
+    detail = { ...DETAIL, llm_id: llmId };
+    render(<ConversationPage />);
+    await waitFor(() =>
+      expect(screen.getByRole("alert").textContent).toBe("Please select a model")
+    );
+    expect(composer().disabled).toBe(true);
+  });
+});
+
+describe("loading the header (#217)", () => {
+  it("names the model when the models list resolves after the conversation", async () => {
+    let releaseModels;
+    tracedFetchMock.mockImplementation(async (url, opts) => {
+      if (String(url).endsWith("/llms/local")) {
+        await new Promise((resolve) => {
+          releaseModels = resolve;
+        });
+        return { ok: true, json: async () => MODELS };
+      }
+      return routeFetch(url, opts);
+    });
+    render(<ConversationPage />);
+    await waitFor(() => expect(releaseModels).toBeTypeOf("function"));
+    expect(screen.queryByRole("alert")).toBeNull();
+    releaseModels();
+    await waitFor(() => expect(header().textContent).toBe("You are chatting with Qwen3-4B"));
+  });
+
+  it("names the model when the conversation resolves after the models list", async () => {
+    let releaseDetail;
+    tracedFetchMock.mockImplementation(async (url, opts) => {
+      if (String(url).endsWith("/conversations/7")) {
+        await new Promise((resolve) => {
+          releaseDetail = resolve;
+        });
+      }
+      return routeFetch(url, opts);
+    });
+    render(<ConversationPage />);
+    await waitFor(() => expect(releaseDetail).toBeTypeOf("function"));
+    expect(screen.queryByRole("alert")).toBeNull();
+    releaseDetail();
+    await waitFor(() => expect(header().textContent).toBe("You are chatting with Qwen3-4B"));
+  });
+});
+
+describe("/config follows the conversation's model", () => {
+  it("shows the no-recommendation note once switched to a model without one", async () => {
+    MODELS[1].sampling_defaults = { temperature: 0.2, top_p: 0.95, source: "none" };
+    try {
+      await renderPage();
+      typeAndEnter("/config");
+      let dialog = await screen.findByRole("dialog");
+      expect(within(dialog).queryByText(/No sampling recommendation/)).toBeNull();
+      fireEvent.keyDown(dialog, { key: "Escape" });
+      await waitFor(() => expect(screen.queryByRole("dialog")).toBeNull());
+
+      typeAndEnter("/model");
+      dialog = await screen.findByRole("dialog");
+      fireEvent.click(within(dialog).getByRole("button", { name: /Gemma-3-4B/ }));
+      await waitFor(() => expect(header().textContent).toBe("You are chatting with Gemma-3-4B"));
+
+      typeAndEnter("/config");
+      dialog = await screen.findByRole("dialog");
+      expect(within(dialog).getByText(/No sampling recommendation/)).toBeTruthy();
+    } finally {
+      delete MODELS[1].sampling_defaults;
+    }
+  });
+});
+
+describe("the first message from the new-conversation page", () => {
+  it("is sent with the values of the conversation as created", async () => {
+    locationMock.state = { initialQuestion: "First question" };
+    detail = { ...DETAIL, temperature: 0.4, top_p: 0.6, custom_prompt: "Saved for the model" };
+    render(<ConversationPage />);
+    await waitFor(() => expect(queries()).toHaveLength(1));
+    expect(queries()[0][1]).toMatchObject({
+      question: "First question",
+      temperature: 0.4,
+      top_p: 0.6,
+      custom_prompt: "Saved for the model",
+    });
+  });
+});

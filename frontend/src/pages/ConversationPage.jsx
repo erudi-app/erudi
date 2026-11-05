@@ -4,8 +4,8 @@ import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
 import ChatCollapsibleSection from "../components/ChatCollapsibleSection";
 import QuestionInput from "../components/QuestionInput";
-import HeaderBar from "../components/HeaderBar";
-import CustomizePromptModal from "../components/modals/CustomizePromptModal";
+import ConversationHeader from "../components/ConversationHeader";
+import CommandPopups from "../components/CommandPopups";
 import EngineFailureModal from "../components/modals/EngineFailureModal";
 import { AlertTriangle, Copy, Check, FileText, Star } from "lucide-react";
 import TypingIndicator from "../components/TypingIndicator";
@@ -16,12 +16,9 @@ import { API_BASE_URL } from "../config/api.js";
 import apiClient, { tracedFetch } from "../services/api/client";
 import { createLogger } from "../utils/logger";
 import { conversationPath } from "../utils/routes";
-import {
-  canAttachImages,
-  maxImagesForModel,
-  webSearchUnavailabilityReason,
-} from "../utils/modelCapabilities";
-import { defaultsFor, hasNoPublisherRecommendation } from "../utils/samplingDefaults";
+import { canAttachImages, maxImagesForModel } from "../utils/modelCapabilities";
+import { COMMAND_SCOPES, commandsFor } from "../utils/slashCommands";
+import useConversationSettings from "../shared/hooks/useConversationSettings";
 import {
   baseName,
   getAttachmentNames,
@@ -30,7 +27,6 @@ import {
 } from "../utils/messageContent";
 import { formatBytes } from "../utils/formatBytes";
 import { compactionMarkers, compactionsOnly, hasStripEvents } from "../utils/traceEvents";
-import { DEFAULT_COMPACTION_THRESHOLD } from "../utils/compactionThreshold";
 
 const log = createLogger("ConversationPage");
 
@@ -53,6 +49,10 @@ const MEMORY_WARNING_KEYS = {
 // polled at this pace (the backend samples it every 10 s too).
 const GPU_CONTENTION_STATUS_PATH = "/hardware/gpu_contention/status";
 const GPU_CONTENTION_POLL_MS = 10_000;
+// The slash commands a conversation offers, in the composer and the header.
+const COMMANDS = commandsFor(COMMAND_SCOPES.CONVERSATION);
+// Switching model while an answer streams waits for the answer to end.
+const COMMANDS_DISABLED_WHILE_ANSWERING = ["model"];
 const alignmentClassFor = (isUser) => (isUser ? "items-end" : "items-start");
 const bubbleClassFor = (isUser, isError) => {
   if (isUser) {
@@ -102,37 +102,25 @@ export default function ConversationPage() {
   const loadedConvIdRef = useRef(null);
   const [, setCurrentTitle] = useState("");
 
-  const [showPromptModal, setShowPromptModal] = useState(false);
   // A turn that died because the graphics card could not run the model carries
   // an engine code on its error event. The red bubble stays as it is; the code
   // additionally opens the decision dialog, which is the only place the user
   // can act on it.
   const [engineFailure, setEngineFailure] = useState(null);
-  const [customPrompt, setCustomPrompt] = useState("");
   const [initialHandled, setInitialHandled] = useState(false);
   const [loading, setLoading] = useState(false);
   const [models, setModels] = useState([]);
-  const [currentModel, setCurrentModel] = useState("");
-  // The conversation's assigned model id, recorded when the conversation loads.
-  // The header picker's selected value is derived from this + `models` below.
-  const [conversationLlmId, setConversationLlmId] = useState(null);
-  // Both load independently; the orphan check below only fires once each has
-  // resolved, so we never flash the "missing model" state during initial load.
-  const [conversationLoaded, setConversationLoaded] = useState(false);
+  // The models list and the conversation load independently; the orphan
+  // check below only fires once each has resolved, so the "missing model"
+  // state never flashes during the initial load.
   const [modelsLoaded, setModelsLoaded] = useState(false);
-  // Hydrated from the conversation row (which carries the model-derived
-  // values from creation, #388); the fallback only covers the load window.
-  const [settings, setSettings] = useState(() => defaultsFor(null));
-  // Per-conversation web-search toggle (#310): hydrated from the conversation
-  // GET, persisted through a one-field PATCH the moment it is flipped (like
-  // the model picker) so the NEXT turn already honors it.
-  const [webSearch, setWebSearch] = useState(false);
-  // Per-conversation Reasoning effort control (PR-D2): same hydrate-then-PATCH
-  // pattern as the web-search toggle above.
-  const [reasoningEffort, setReasoningEffort] = useState("medium");
-  // Per-conversation Compaction threshold (#607): same hydrate-then-PATCH
-  // pattern; the backend compacts the NEXT turn at the new share.
-  const [compactionThreshold, setCompactionThreshold] = useState(DEFAULT_COMPACTION_THRESHOLD);
+  // The conversation's model and settings (#609): one owner for the header,
+  // the command popups and the send path. Hydrated from the conversation row,
+  // every change saved as it is made.
+  const conversationSettings = useConversationSettings(id);
+  const { adopt, flush, getValues, changeModel } = conversationSettings;
+  // The command being run (its popup is open), or null.
+  const [openCommand, setOpenCommand] = useState(null);
   const [collapsed, setCollapsed] = useState(false);
   const [firstReplyPending, setFirstReplyPending] = useState(false);
   // The amber memory warning (1.1.2): the LATEST turn's `memory_warning`
@@ -144,6 +132,7 @@ export default function ConversationPage() {
   // switching conversations must never show conversation A's warning over B.
   useEffect(() => {
     setMemoryWarning(null);
+    setOpenCommand(null);
   }, [id]);
   // A ref, not state: the scroll handler updates it on every scroll event, and
   // reading it from the auto-scroll effect must NOT re-run that effect. As state
@@ -241,10 +230,9 @@ export default function ConversationPage() {
     };
   }, [messages]);
 
-  // Load the available models list. The header picker's selected value is
-  // hydrated by the dedicated effect below, not here: the models list and the
-  // conversation's assigned model arrive from two independent fetches and
-  // either can win the race.
+  // Load the available models list. The header names the conversation's
+  // model by looking its id up in this list, whichever of the two loads lands
+  // first (#217).
   useEffect(() => {
     tracedFetch(`${API_BASE_URL}/llms/local`)
       .then((res) => res.json())
@@ -258,110 +246,6 @@ export default function ConversationPage() {
         setModelsLoaded(true);
       });
   }, []);
-
-  // Hydrate the header model picker's selected value once BOTH the models list
-  // and the conversation's assigned llm_id are known. They come from two
-  // independent effects with no guaranteed order, so deriving here (instead of
-  // inside either loader) makes hydration order-independent and keeps the
-  // picker populated on reopen and during generation (#217).
-  useEffect(() => {
-    if (conversationLlmId === null || models.length === 0) {
-      return;
-    }
-    const model = models.find((m) => m.id === conversationLlmId);
-    if (model) {
-      setCurrentModel(model.name);
-    }
-  }, [conversationLlmId, models]);
-
-  const handleModelChange = async (modelName) => {
-    setCurrentModel(modelName);
-    const model = models.find((m) => m.name === modelName);
-    if (!model) {
-      return;
-    }
-    // Keep the derived-picker source of truth aligned with the new selection.
-    setConversationLlmId(model.id);
-    // A model switch re-defaults the sampling to the NEW model's values,
-    // touched or not (#388, maintainer decision): the previous values were
-    // the previous model's. Persisted in the same PATCH as llm_id so the
-    // next turn already runs on them.
-    const next = defaultsFor(model);
-    setSettings(next);
-    await tracedFetch(`${API_BASE_URL}/conversations/${id}`, {
-      method: "PATCH",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({
-        llm_id: model.id,
-        temperature: next.temperature,
-        top_p: next.topP,
-      }),
-    });
-  };
-
-  // #310: persist a web-search flip immediately (one-field PATCH, mirroring
-  // the model picker) with an optimistic local update.
-  const handleWebSearchChange = async (next) => {
-    setWebSearch(next);
-    try {
-      await tracedFetch(`${API_BASE_URL}/conversations/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ web_search_enabled: next }),
-      });
-    } catch (error) {
-      log.error("Failed to save the web search toggle", error);
-    }
-  };
-
-  // PR-D2: persist a reasoning-effort change immediately (one-field PATCH,
-  // same pattern as the web-search toggle) with an optimistic local update.
-  const handleReasoningEffortChange = async (next) => {
-    setReasoningEffort(next);
-    try {
-      await tracedFetch(`${API_BASE_URL}/conversations/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ reasoning_effort: next }),
-      });
-    } catch (error) {
-      log.error("Failed to save the reasoning effort", error);
-    }
-  };
-
-  // #607: persist a compaction-threshold change immediately (one-field PATCH,
-  // same pattern as the reasoning effort) with an optimistic local update.
-  const handleCompactionThresholdChange = async (next) => {
-    setCompactionThreshold(next);
-    try {
-      await tracedFetch(`${API_BASE_URL}/conversations/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ compaction_threshold: next }),
-      });
-    } catch (error) {
-      log.error("Failed to save the compaction threshold", error);
-    }
-  };
-
-  // Function to save conversation parameters
-  const saveConversationParameters = async (newSettings, newCustomPrompt) => {
-    try {
-      await tracedFetch(`${API_BASE_URL}/conversations/${id}`, {
-        method: "PATCH",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          temperature: newSettings.temperature,
-          top_p: newSettings.topP,
-          // ?? (not ||): an explicit empty string means "clear the prompt"
-          // and must be persisted as-is, not swallowed by the state fallback.
-          custom_prompt: newCustomPrompt ?? customPrompt,
-        }),
-      });
-    } catch (error) {
-      log.error("Failed to save conversation parameters", error);
-    }
-  };
 
   const fetchMessagesAndConversations = useCallback(async () => {
     try {
@@ -395,18 +279,8 @@ export default function ConversationPage() {
     }
   }, [id]);
 
-  const handleAskWithParams = useCallback(
-    async (
-      question,
-      images = [],
-      explicitSettings = null,
-      explicitCustomPrompt = null,
-      imagePaths = [],
-      attachmentPaths = []
-    ) => {
-      const settingsToUse = explicitSettings || settings;
-      const customPromptToUse = explicitCustomPrompt !== null ? explicitCustomPrompt : customPrompt;
-
+  const handleAsk = useCallback(
+    async (question, images = [], imagePaths = [], attachmentPaths = []) => {
       setLoading(true);
       isStreamingRef.current = true;
 
@@ -446,6 +320,10 @@ export default function ConversationPage() {
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
 
       try {
+        // A change made just before sending (a slider still within its save
+        // delay, a save on its way) is saved first, so this turn runs on it.
+        await flush();
+        const current = getValues();
         // The title runs BEFORE the chat, and the chat starts once the title
         // stream has ended (success, HTTP error or network failure alike).
         // llama.cpp runs one slot with no prompt cache, so a title that ran
@@ -510,9 +388,12 @@ export default function ConversationPage() {
             images,
             image_paths: imagePaths,
             attachments: attachmentPaths,
-            temperature: settingsToUse.temperature,
-            top_p: settingsToUse.topP,
-            custom_prompt: customPromptToUse,
+            // The conversation's values, once loaded (the backend uses the
+            // stored ones otherwise); the instructions only reach the model
+            // through the turn.
+            ...(current.temperature === null ? {} : { temperature: current.temperature }),
+            ...(current.top_p === null ? {} : { top_p: current.top_p }),
+            ...(current.custom_prompt === null ? {} : { custom_prompt: current.custom_prompt }),
           }),
         });
 
@@ -771,21 +652,7 @@ export default function ConversationPage() {
 
       setLoading(false);
     },
-    [id, fetchMessagesAndConversations, t]
-  );
-
-  const handleAsk = useCallback(
-    async (question, images = [], imagePaths = [], attachmentPaths = []) => {
-      return handleAskWithParams(
-        question,
-        images,
-        settings,
-        customPrompt,
-        imagePaths,
-        attachmentPaths
-      );
-    },
-    [handleAskWithParams, settings, customPrompt]
+    [id, fetchMessagesAndConversations, t, flush, getValues]
   );
 
   // Load conversation data when ID changes
@@ -836,54 +703,25 @@ export default function ConversationPage() {
         });
         loadedConvIdRef.current = id;
 
-        // Load conversation parameters
+        // Load the conversation's model and settings. `max_tokens` is
+        // deliberately not read: the output budget is computed backend-side
+        // from the running context window. llm_id can be null after the
+        // model was deleted (conversations survive, no auto-fallback, #225);
+        // the orphan check below decides whether to block the composer.
         if (convDetailRes.ok) {
-          const conversation = await convDetailRes.json();
-          // `max_tokens` is deliberately not read: the output budget is
-          // computed backend-side from the running context window, and the
-          // column is only that computation's fallback.
-          setSettings({
-            temperature: conversation.temperature,
-            topP: conversation.top_p,
-          });
-          setWebSearch(Boolean(conversation.web_search_enabled));
-          setReasoningEffort(conversation.reasoning_effort || "medium");
-          setCompactionThreshold(conversation.compaction_threshold ?? DEFAULT_COMPACTION_THRESHOLD);
-          setCustomPrompt(conversation.custom_prompt || "");
-
-          // Record the conversation's assigned model; the header picker's
-          // selected value is derived from this + the models list in the
-          // dedicated effect above, so hydration no longer depends on which
-          // of the two fetches lands first (#217).
-          setConversationLlmId(conversation.llm_id);
-          // llm_id can be null after the model was deleted (conversations
-          // survive, no auto-fallback, #225). Marking the detail loaded lets
-          // the orphan check below decide whether to block the composer.
-          setConversationLoaded(true);
+          adopt(await convDetailRes.json());
         }
       } catch (err) {
         log.error("Failed to fetch conversations", err);
       }
 
+      // The first message from the new-conversation page: it runs on the
+      // values of the conversation as created, adopted just above.
       if (location.state && location.state.initialQuestion && !initialHandled) {
         setInitialHandled(true);
-
-        const settingsToUse = location.state.initialSettings || settings;
-        const customPromptToUse = location.state.initialCustomPrompt || customPrompt;
-
-        if (location.state.initialSettings) {
-          setSettings(location.state.initialSettings);
-        }
-
-        if (location.state.initialCustomPrompt) {
-          setCustomPrompt(location.state.initialCustomPrompt);
-        }
-
-        await handleAskWithParams(
+        await handleAsk(
           location.state.initialQuestion,
           location.state.initialImages || [],
-          settingsToUse,
-          customPromptToUse,
           location.state.initialImagePaths || [],
           location.state.initialAttachments || []
         );
@@ -918,7 +756,7 @@ export default function ConversationPage() {
     };
 
     loadConversationData();
-  }, [id, location.state, handleAskWithParams, navigate, location.pathname, initialHandled]);
+  }, [id, location.state, handleAsk, adopt, navigate, location.pathname, initialHandled]);
 
   // Detect when user manually scrolls
   useEffect(() => {
@@ -1015,29 +853,18 @@ export default function ConversationPage() {
   };
 
   // Orphaned conversation (#225): its assigned model was deleted (llm_id null)
-  // or no longer exists in the installed list. Sending is blocked and the header
-  // picker turns red until the user explicitly switches to an installed model.
-  // An assigned model whose weights are gone (an orphaned KB assistant,
-  // weights_available === false) can only fail, so it blocks the same way;
-  // undefined/null weights_available (remote or older backend) never blocks.
-  const assignedModel = models.find((m) => m.id === conversationLlmId);
+  // or no longer exists in the installed list. Sending is blocked and the
+  // header turns red until the user switches to an installed model with
+  // /model (the header panel's Model button stays usable). An assigned model
+  // whose weights are gone (an orphaned KB assistant, weights_available ===
+  // false) can only fail, so it blocks the same way; undefined/null
+  // weights_available (remote or older backend) never blocks.
+  const llmId = conversationSettings.values.llm_id;
+  const assignedModel = models.find((m) => m.id === llmId);
   const isModelOrphaned =
-    conversationLoaded &&
+    conversationSettings.loaded &&
     modelsLoaded &&
-    (conversationLlmId === null || !assignedModel || assignedModel.weights_available === false);
-
-  // #570: the web_search tool is a silent no-op unless the assigned model is
-  // BOTH `supports_tools` and `supports_tools_wire is True` (the exact
-  // backend gate, kb_mode.py) -- so an unverified wire (null) is disabled
-  // just like a positively-false one, with a distinct explanation for each.
-  const webSearchReason = webSearchUnavailabilityReason(assignedModel);
-  const webSearchDisabled = webSearchReason !== null;
-  const webSearchDisabledTooltip =
-    webSearchReason === "incapable"
-      ? t("chat:header.tooltips.webSearchUnavailable")
-      : webSearchReason === "unverified"
-        ? t("chat:header.tooltips.webSearchUnverified")
-        : "";
+    (llmId === null || !assignedModel || assignedModel.weights_available === false);
 
   return (
     <div className="flex h-screen overflow-hidden">
@@ -1075,34 +902,13 @@ export default function ConversationPage() {
       </aside>
       <main className="flex-1 flex flex-col bg-gradient-to-br from-[#041915] to-[#0f2d27] overflow-hidden">
         <div className="relative flex justify-center w-full px-8 pt-6">
-          <HeaderBar
-            initialTemperature={settings.temperature}
-            initialTopP={settings.topP}
-            noPublisherRecommendation={hasNoPublisherRecommendation(
-              models.find((m) => m.id === conversationLlmId)
-            )}
-            onApply={(newSettings) => {
-              setSettings((prev) => ({ ...prev, ...newSettings }));
-              saveConversationParameters(newSettings, customPrompt);
-            }}
-            onCustomizePrompt={() => setShowPromptModal(true)}
-            disabled={loading}
-            models={models}
-            currentModel={currentModel}
-            onModelChange={handleModelChange}
-            pickerAttention={isModelOrphaned}
-            pickerAttentionMessage={t("chat:header.pickerAttention")}
-            showWebSearch
-            initialWebSearch={webSearch}
-            onWebSearchChange={handleWebSearchChange}
-            webSearchDisabled={webSearchDisabled}
-            webSearchDisabledTooltip={webSearchDisabledTooltip}
-            showReasoningEffort
-            initialReasoningEffort={reasoningEffort}
-            onReasoningEffortChange={handleReasoningEffortChange}
-            showCompactionThreshold
-            initialCompactionThreshold={compactionThreshold}
-            onCompactionThresholdChange={handleCompactionThresholdChange}
+          <ConversationHeader
+            modelName={assignedModel?.name ?? ""}
+            attention={isModelOrphaned}
+            commands={COMMANDS}
+            disabledCommands={loading ? COMMANDS_DISABLED_WHILE_ANSWERING : []}
+            onCommand={setOpenCommand}
+            saveFailed={conversationSettings.saveFailed}
           />
         </div>
 
@@ -1352,25 +1158,23 @@ export default function ConversationPage() {
             <QuestionInput
               onSend={handleAsk}
               disabled={loading || isModelOrphaned}
-              canAttachImages={canAttachImages(models.find((m) => m.name === currentModel))}
-              maxImages={maxImagesForModel(models.find((m) => m.name === currentModel))}
+              canAttachImages={canAttachImages(assignedModel)}
+              maxImages={maxImagesForModel(assignedModel)}
+              commands={COMMANDS}
+              onCommand={setOpenCommand}
             />
           </div>
         </div>
       </main>
 
-      {/* Customize Prompt Modal */}
-      <CustomizePromptModal
-        isOpen={showPromptModal}
-        onClose={() => setShowPromptModal(false)}
-        customPrompt={customPrompt}
-        onSave={(newPrompt) => {
-          // Saving in the modal persists immediately — closing without
-          // clicking Apply in the header must not lose the prompt (#136).
-          setCustomPrompt(newPrompt);
-          saveConversationParameters(settings, newPrompt);
-        }}
-        title={t("chat:prompt.title")}
+      {/* The popup of the command being run (/config, /effort, /model). */}
+      <CommandPopups
+        command={openCommand}
+        onClose={() => setOpenCommand(null)}
+        settings={conversationSettings}
+        model={assignedModel}
+        models={models}
+        onPickModel={(model) => changeModel(model.id)}
       />
 
       {/* The turn failed for a reason the app can act on. */}

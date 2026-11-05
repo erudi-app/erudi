@@ -19,32 +19,98 @@
     "toggleSettings": "Afficher ou masquer les réglages",
     "creativity": "Créativité",
     "diversity": "Diversité",
-    "webSearch": "Recherche web",
-    "webSearchToggle": "Recherche web",
-    "reasoningEffort": "Effort de raisonnement",
-    "reasoningEffortLevels": {
-      "none": "Aucun",
-      "low": "Faible",
-      "medium": "Moyen",
-      "high": "Élevé",
-      "xhigh": "Très élevé"
-    },
-    "compactionThreshold": "Seuil de compaction",
     "customizePrompt": "Personnaliser les instructions",
     "apply": "Appliquer",
-    "pickerAttention": "Veuillez sélectionner un modèle",
     "tooltips": {
       "temperature": "Contrôle la créativité. Plus bas = ciblé, plus haut = créatif.",
       "topP": "Contrôle la variété des mots. Plus bas = prévisible, plus haut = varié.",
-      "prompt": "Personnalisez les instructions système qui guident le comportement de l'IA.",
-      "webSearch": "Permet au modèle de chercher sur le web des informations récentes. Les requêtes de recherche sont envoyées à des moteurs de recherche externes.",
-      "webSearchUnavailable": "Ce modèle ne peut pas utiliser d'outils, la recherche web n'est donc pas disponible pour lui.",
-      "webSearchUnverified": "Ce modèle n'a pas encore été vérifié pour l'exécution d'outils, la recherche web reste donc désactivée pour lui.",
-      "reasoningEffort": "Détermine à quel point le modèle peut réfléchir avant de répondre. Les niveaux plus élevés raisonnent davantage mais prennent plus de temps ; Aucun lui demande de répondre directement.",
-      "compactionThreshold": "Les messages les plus anciens sont résumés quand la conversation remplit cette part de la fenêtre de contexte du modèle. Plus bas : résume plus tôt et plus souvent, ce qui garde la conversation plus courte. Plus haut : en garde davantage mot pour mot et résume moins souvent."
+      "prompt": "Personnalisez les instructions système qui guident le comportement de l'IA."
+    }
+  },
+  "conversationHeader": {
+    "chattingWith": "Vous discutez avec <model>{{model}}</model>",
+    "settings": "Réglages de la conversation",
+    "pickerAttention": "Veuillez sélectionner un modèle"
+  },
+  "commands": {
+    "listLabel": "Commandes",
+    "config": {
+      "label": "Réglages",
+      "description": "Ajuster les réglages de cette conversation"
+    },
+    "effort": {
+      "label": "Effort",
+      "description": "Régler combien le modèle réfléchit avant de répondre"
+    },
+    "model": {
+      "label": "Modèle",
+      "description": "Passer à un autre modèle installé"
+    }
+  },
+  "config": {
+    "title": "Réglages de la conversation",
+    "subtitle": "Chaque modification est enregistrée aussitôt et s'applique dès le prochain message.",
+    "subtitleDraft": "La nouvelle conversation démarre avec ces valeurs.",
+    "help": "Aide : {{field}}",
+    "saveFailed": "Votre modification n'a pas pu être enregistrée.",
+    "effort": {
+      "label": "Effort de raisonnement",
+      "help": "Détermine à quel point le modèle peut réfléchir avant de répondre. Les niveaux plus élevés raisonnent davantage mais prennent plus de temps ; Aucun lui demande de répondre directement.",
+      "levels": {
+        "none": "Aucun",
+        "low": "Faible",
+        "medium": "Moyen",
+        "high": "Élevé",
+        "xhigh": "Très élevé"
+      }
+    },
+    "webSearch": {
+      "label": "Recherche web",
+      "help": "Permet au modèle de chercher sur le web des informations récentes. Les requêtes de recherche sont envoyées à des moteurs de recherche externes.",
+      "unavailable": "Ce modèle ne peut pas utiliser d'outils, la recherche web n'est donc pas disponible pour lui.",
+      "unverified": "Ce modèle n'a pas encore été vérifié pour l'exécution d'outils, la recherche web reste donc désactivée pour lui."
+    },
+    "creativity": {
+      "label": "Créativité",
+      "help": "Contrôle la créativité. Plus bas = ciblé, plus haut = créatif."
+    },
+    "diversity": {
+      "label": "Diversité",
+      "help": "Contrôle la variété des mots. Plus bas = prévisible, plus haut = varié."
     },
     "noPublisherRecommendation": "Aucune recommandation de réglages de la part de l'éditeur de ce modèle ; réglages neutres appliqués.",
-    "weightsMissingHint": "Poids manquants — réassociez cet assistant depuis la page Modèles"
+    "threshold": {
+      "label": "Seuil de compaction",
+      "help": "Les messages les plus anciens sont résumés quand la conversation remplit cette part de la fenêtre de contexte du modèle. Plus bas : résume plus tôt et plus souvent, ce qui garde la conversation plus courte. Plus haut : en garde davantage mot pour mot et résume moins souvent."
+    },
+    "instructions": {
+      "label": "Instructions personnalisées",
+      "help": "Définissez des instructions personnalisées qui guident les réponses de l'IA. Elles s'appliqueront à tous les messages de cette conversation.",
+      "placeholder": "Saisissez vos instructions système personnalisées ici...",
+      "save": "Enregistrer les instructions"
+    },
+    "global": {
+      "title": "Valeurs par défaut de ce modèle",
+      "subtitle": "Les nouvelles conversations avec {{model}} démarrent avec ces valeurs.",
+      "saving": "Enregistrement des valeurs par défaut de {{model}}…",
+      "saved": "Enregistré comme valeurs par défaut de {{model}}.",
+      "failed": "Les valeurs par défaut de {{model}} n'ont pas pu être enregistrées.",
+      "noInstructions": "Aucune",
+      "on": "Activée",
+      "off": "Désactivée"
+    }
+  },
+  "effortPopup": {
+    "subtitle": "Enregistré aussitôt ; s'applique dès le prochain message.",
+    "subtitleDraft": "La nouvelle conversation démarre à ce niveau."
+  },
+  "modelPopup": {
+    "title": "Modèle",
+    "subtitle": "Le nouveau modèle apporte ses propres valeurs enregistrées, sinon sa créativité et sa diversité recommandées.",
+    "listLabel": "Modèles installés",
+    "help": "Seuls les modèles installés dont les poids sont sur cet ordinateur sont proposés.",
+    "current": "Actuel",
+    "empty": "Aucun modèle installé n'est utilisable pour le moment."
   },
   "composer": {
     "placeholder": "Posez une question…",

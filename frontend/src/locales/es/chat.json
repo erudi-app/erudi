@@ -19,32 +19,98 @@
     "toggleSettings": "Mostrar u ocultar ajustes",
     "creativity": "Creatividad",
     "diversity": "Diversidad",
-    "webSearch": "Búsqueda web",
-    "webSearchToggle": "Búsqueda web",
-    "reasoningEffort": "Esfuerzo de razonamiento",
-    "reasoningEffortLevels": {
-      "none": "Ninguno",
-      "low": "Bajo",
-      "medium": "Medio",
-      "high": "Alto",
-      "xhigh": "Muy alto"
-    },
-    "compactionThreshold": "Umbral de compactación",
     "customizePrompt": "Personalizar instrucciones",
     "apply": "Aplicar",
-    "pickerAttention": "Selecciona un modelo",
     "tooltips": {
       "temperature": "Controla la creatividad. Más bajo = preciso, más alto = creativo.",
       "topP": "Controla la variedad de palabras. Más bajo = predecible, más alto = variado.",
-      "prompt": "Personaliza las instrucciones del sistema que guían el comportamiento de la IA.",
-      "webSearch": "Permite que el modelo busque en la web información actual. Las consultas de búsqueda se envían a motores de búsqueda externos.",
-      "webSearchUnavailable": "Este modelo no puede usar herramientas, por lo que la búsqueda web no está disponible para él.",
-      "webSearchUnverified": "Este modelo aún no se ha verificado para ejecutar herramientas, por lo que la búsqueda web permanece desactivada para él.",
-      "reasoningEffort": "Indica cuánto puede deliberar el modelo antes de responder. Los niveles más altos razonan más pero tardan más; Ninguno le pide responder directamente.",
-      "compactionThreshold": "Los mensajes más antiguos se resumen cuando la conversación llena esta parte de la ventana de contexto del modelo. Más bajo: resume antes y con más frecuencia, lo que mantiene la conversación más corta. Más alto: conserva más de ella palabra por palabra y resume con menos frecuencia."
+      "prompt": "Personaliza las instrucciones del sistema que guían el comportamiento de la IA."
+    }
+  },
+  "conversationHeader": {
+    "chattingWith": "Estás chateando con <model>{{model}}</model>",
+    "settings": "Ajustes de la conversación",
+    "pickerAttention": "Selecciona un modelo"
+  },
+  "commands": {
+    "listLabel": "Comandos",
+    "config": {
+      "label": "Ajustes",
+      "description": "Ajustar la configuración de esta conversación"
+    },
+    "effort": {
+      "label": "Esfuerzo",
+      "description": "Ajustar cuánto razona el modelo antes de responder"
+    },
+    "model": {
+      "label": "Modelo",
+      "description": "Cambiar a otro modelo instalado"
+    }
+  },
+  "config": {
+    "title": "Ajustes de la conversación",
+    "subtitle": "Cada cambio se guarda al momento y se aplica desde el próximo mensaje.",
+    "subtitleDraft": "La nueva conversación empieza con estos valores.",
+    "help": "Ayuda: {{field}}",
+    "saveFailed": "No se pudo guardar el cambio.",
+    "effort": {
+      "label": "Esfuerzo de razonamiento",
+      "help": "Indica cuánto puede deliberar el modelo antes de responder. Los niveles más altos razonan más pero tardan más; Ninguno le pide responder directamente.",
+      "levels": {
+        "none": "Ninguno",
+        "low": "Bajo",
+        "medium": "Medio",
+        "high": "Alto",
+        "xhigh": "Muy alto"
+      }
+    },
+    "webSearch": {
+      "label": "Búsqueda web",
+      "help": "Permite que el modelo busque en la web información actual. Las consultas de búsqueda se envían a motores de búsqueda externos.",
+      "unavailable": "Este modelo no puede usar herramientas, por lo que la búsqueda web no está disponible para él.",
+      "unverified": "Este modelo aún no se ha verificado para ejecutar herramientas, por lo que la búsqueda web permanece desactivada para él."
+    },
+    "creativity": {
+      "label": "Creatividad",
+      "help": "Controla la creatividad. Más bajo = preciso, más alto = creativo."
+    },
+    "diversity": {
+      "label": "Diversidad",
+      "help": "Controla la variedad de palabras. Más bajo = predecible, más alto = variado."
     },
     "noPublisherRecommendation": "El editor de este modelo no recomienda ajustes de muestreo; se aplican valores neutros.",
-    "weightsMissingHint": "Faltan los pesos — vuelve a vincular este asistente en la página Modelos"
+    "threshold": {
+      "label": "Umbral de compactación",
+      "help": "Los mensajes más antiguos se resumen cuando la conversación llena esta parte de la ventana de contexto del modelo. Más bajo: resume antes y con más frecuencia, lo que mantiene la conversación más corta. Más alto: conserva más de ella palabra por palabra y resume con menos frecuencia."
+    },
+    "instructions": {
+      "label": "Instrucciones personalizadas",
+      "help": "Define instrucciones personalizadas que guíen cómo responde la IA. Se aplicarán a todos los mensajes de esta conversación.",
+      "placeholder": "Escribe aquí tus instrucciones del sistema personalizadas...",
+      "save": "Guardar instrucciones"
+    },
+    "global": {
+      "title": "Valores predeterminados de este modelo",
+      "subtitle": "Las nuevas conversaciones con {{model}} empiezan con estos valores.",
+      "saving": "Guardando los valores predeterminados de {{model}}…",
+      "saved": "Guardado como valores predeterminados de {{model}}.",
+      "failed": "No se pudieron guardar los valores predeterminados de {{model}}.",
+      "noInstructions": "Ninguna",
+      "on": "Activada",
+      "off": "Desactivada"
+    }
+  },
+  "effortPopup": {
+    "subtitle": "Se guarda al momento; se aplica desde el próximo mensaje.",
+    "subtitleDraft": "La nueva conversación empieza en este nivel."
+  },
+  "modelPopup": {
+    "title": "Modelo",
+    "subtitle": "El nuevo modelo trae sus propios valores guardados; si no, su creatividad y diversidad recomendadas.",
+    "listLabel": "Modelos instalados",
+    "help": "Solo se muestran los modelos instalados cuyos pesos están en este ordenador.",
+    "current": "Actual",
+    "empty": "Ningún modelo instalado se puede usar ahora mismo."
   },
   "composer": {
     "placeholder": "Haz una pregunta…",

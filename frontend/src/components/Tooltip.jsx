@@ -1,8 +1,10 @@
 import React from "react";
 import PropTypes from "prop-types";
 
-// Reusable Tooltip component
-export default function Tooltip({ children, content, side = "right", width = "w-64" }) {
+// Reusable Tooltip component. The bubble shows while the pointer is over the
+// wrapper or while something inside it holds the keyboard focus; `id` lets the
+// trigger name it with aria-describedby.
+export default function Tooltip({ children, content, side = "right", width = "w-64", id }) {
   const positionClasses =
     {
       top: "bottom-full left-1/2 -translate-x-1/2 mb-2",
@@ -31,9 +33,13 @@ export default function Tooltip({ children, content, side = "right", width = "w-
     <span className="relative group inline-block align-middle overflow-visible">
       {children}
       <span
-        className={`pointer-events-none absolute ${positionClasses} ${width} opacity-0 group-hover:opacity-100 scale-95 group-hover:scale-100 transition-all duration-300 ease-out z-[999999] overflow-visible`}
+        className={`pointer-events-none absolute ${positionClasses} ${width} opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 scale-95 group-hover:scale-100 group-focus-within:scale-100 transition-all duration-300 ease-out z-[999999] overflow-visible`}
       >
-        <span className="relative block px-4 py-3 text-sm text-gray-200 bg-gradient-to-br from-[#1a1a1a] via-[#2a2a2a] to-[#1a1a1a] rounded-xl shadow-2xl border border-emerald-500/20 backdrop-blur-sm font-normal">
+        <span
+          id={id}
+          role="tooltip"
+          className="relative block px-4 py-3 text-sm text-gray-200 bg-gradient-to-br from-[#1a1a1a] via-[#2a2a2a] to-[#1a1a1a] rounded-xl shadow-2xl border border-emerald-500/20 backdrop-blur-sm font-normal"
+        >
           {content}
           <span className={`absolute w-3 h-3 ${arrowPosition} z-[-1]`}>
             <span className="block w-full h-full rotate-45 bg-[#1a1a1a] border border-emerald-500/20" />
@@ -44,6 +50,9 @@ export default function Tooltip({ children, content, side = "right", width = "w-
   );
 }
 Tooltip.propTypes = {
-  text: PropTypes.string.isRequired,
+  content: PropTypes.node.isRequired,
   children: PropTypes.node.isRequired,
+  side: PropTypes.string,
+  width: PropTypes.string,
+  id: PropTypes.string,
 };

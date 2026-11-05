@@ -4,99 +4,36 @@ import { motion, AnimatePresence } from "framer-motion";
 import { ChevronDown, HelpCircle, SlidersHorizontal } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import Tooltip from "./Tooltip";
-import ToggleSwitch from "./ToggleSwitch";
 import { formatNumber } from "../i18n/format";
-import { REASONING_EFFORT_LEVELS } from "../utils/reasoningEffort";
-import {
-  COMPACTION_THRESHOLDS,
-  DEFAULT_COMPACTION_THRESHOLD,
-  formatCompactionThreshold,
-} from "../utils/compactionThreshold";
 
 // Temperature / top-p read-outs: two decimals in the active locale.
 const TWO_DECIMALS = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
 
+// The Arena panel header: a model picker, the creativity and diversity
+// sliders, and the panel's custom instructions. A conversation uses
+// ConversationHeader and the command popups instead.
 export default function HeaderBar({
   initialTemperature = 0.2,
   initialTopP = 0.2,
   onApply,
-  // Optional live callback (#218): when provided, every slider edit is pushed
-  // to the parent immediately, so the displayed value is the value used at
-  // send time. onApply stays intact for consumers (ConversationPage) that
-  // deliberately commit-and-persist on an explicit Apply instead.
+  // Live callback (#218): every slider edit is pushed to the panel at once,
+  // so the displayed value is the value used at send time.
   onLiveChange,
   onCustomizePrompt,
   disabled = false,
   models = [],
   currentModel = "",
   onModelChange,
-  // Attention state for the model picker (#225): when the open conversation's
-  // model was deleted, the picker turns red and a short prompt sits beside it,
-  // steering the user to pick a model before the composer will unblock.
-  pickerAttention = false,
-  pickerAttentionMessage = "",
-  // Per-conversation web-search toggle (#310). Hidden by default so the
-  // Arena (which shares this bar but has no conversation row — its turns
-  // follow the GLOBAL setting backend-side) keeps an unchanged panel;
-  // ConversationPage opts in and persists flips through onWebSearchChange.
-  showWebSearch = false,
-  initialWebSearch = false,
-  onWebSearchChange,
-  // True when the conversation's current model is known to make the
-  // `web_search` tool a no-op (#570): it never joins the turn no matter this
-  // toggle's state (backend/src/agents/kb_mode.py gate). The toggle stays
-  // visible (its stored value is not hidden) but is disabled instead of
-  // silently doing nothing when flipped on. The caller (ConversationPage)
-  // computes this AND the reason from the models list it already loads; this
-  // component stays decoupled from that taxonomy and just renders the state
-  // and the already-translated explanation it is handed.
-  webSearchDisabled = false,
-  webSearchDisabledTooltip = "",
-  // Per-conversation Reasoning effort control (PR-D2). Same opt-in pattern as
-  // showWebSearch: hidden by default so the Arena (which follows the GLOBAL
-  // default backend-side, no conversation row) keeps an unchanged panel;
-  // ConversationPage opts in and persists changes through
-  // onReasoningEffortChange.
-  showReasoningEffort = false,
-  initialReasoningEffort = "medium",
-  onReasoningEffortChange,
-  // Per-conversation Compaction threshold control (#607): the share of the
-  // context window at which older messages are summarized. Same opt-in
-  // pattern as showReasoningEffort: hidden by default so the Arena (which
-  // never compacts) keeps an unchanged panel; ConversationPage opts in and
-  // persists changes through onCompactionThresholdChange.
-  showCompactionThreshold = false,
-  initialCompactionThreshold = DEFAULT_COMPACTION_THRESHOLD,
-  onCompactionThresholdChange,
-  // The model's publisher gives no sampling recommendation (#388,
-  // `sampling_defaults.source === "none"`): a discreet line under the sliders
-  // says the neutral defaults apply. Nothing is shown when one exists.
-  noPublisherRecommendation = false,
 }) {
   const { t } = useTranslation();
   const [isOpen, setIsOpen] = useState(false);
   const [temperature, setTemperature] = useState(initialTemperature);
   const [topP, setTopP] = useState(initialTopP);
-  const [webSearch, setWebSearch] = useState(initialWebSearch);
-  const [reasoningEffort, setReasoningEffort] = useState(initialReasoningEffort);
-  const [compactionThreshold, setCompactionThreshold] = useState(initialCompactionThreshold);
 
   // Sync internal state with props when they change
   useEffect(() => {
     setTemperature(initialTemperature);
   }, [initialTemperature]);
-
-  useEffect(() => {
-    setWebSearch(initialWebSearch);
-  }, [initialWebSearch]);
-
-  useEffect(() => {
-    setReasoningEffort(initialReasoningEffort);
-  }, [initialReasoningEffort]);
-
-  useEffect(() => {
-    setCompactionThreshold(initialCompactionThreshold);
-  }, [initialCompactionThreshold]);
 
   useEffect(() => {
     setTopP(initialTopP);
@@ -169,13 +106,7 @@ export default function HeaderBar({
           ? t("chat:header.tooltips.topP")
           : id === "prompt"
             ? t("chat:header.tooltips.prompt")
-            : id === "web-search"
-              ? t("chat:header.tooltips.webSearch")
-              : id === "reasoning-effort"
-                ? t("chat:header.tooltips.reasoningEffort")
-                : id === "compaction-threshold"
-                  ? t("chat:header.tooltips.compactionThreshold")
-                  : "";
+            : "";
     const widthClass = isXs ? "w-40" : isSm ? "w-52" : "w-64";
     const iconSize = isXs ? "w-3 h-3" : isSm ? "w-3.5 h-3.5" : "w-4 h-4";
     return (
@@ -295,9 +226,7 @@ export default function HeaderBar({
                 pillPy,
                 pillText,
                 "border transition",
-                pickerAttention
-                  ? "bg-red-500/10 hover:bg-red-500/15 border-red-500/70 hover:border-red-500"
-                  : "bg-white/5 hover:bg-white/10 border-white/10 hover:border-white/20",
+                "bg-white/5 hover:bg-white/10 border-white/10 hover:border-white/20",
                 "backdrop-blur-sm text-gray-100",
                 "max-w-[100%] cursor-pointer",
               ].join(" ")}
@@ -339,12 +268,6 @@ export default function HeaderBar({
                 </div>
               )}
             </div>
-
-            {pickerAttention && pickerAttentionMessage && (
-              <span role="alert" className="text-xs font-medium text-red-400 whitespace-nowrap">
-                {pickerAttentionMessage}
-              </span>
-            )}
           </div>
 
           <button
@@ -446,120 +369,9 @@ export default function HeaderBar({
                       />
                     </div>
                   </div>
-                  {noPublisherRecommendation && (
-                    <p
-                      data-testid="no-publisher-recommendation"
-                      className="-mt-3 text-[11px] leading-snug text-gray-400/80"
-                    >
-                      {t("chat:header.noPublisherRecommendation")}
-                    </p>
-                  )}
                 </div>
 
                 <div className="flex flex-col justify-center gap-6">
-                  {/* The output budget used to live here as a Max Tokens field.
-                      It is now derived by the backend from the context window
-                      the model runs in, so this column starts at the web-search
-                      toggle (and is empty in the Arena, which has none). */}
-                  {showWebSearch && (
-                    <div className="flex items-center gap-3">
-                      <span
-                        className={`${labelText} uppercase tracking-wide font-semibold text-gray-300/80`}
-                      >
-                        {t("chat:header.webSearch")}
-                      </span>
-                      <TooltipIcon id="web-search" side={isNarrow ? "bottom-right" : "right"} />
-                      <div className="ml-auto">
-                        {webSearchDisabled ? (
-                          <Tooltip
-                            content={webSearchDisabledTooltip}
-                            side={isNarrow ? "bottom-right" : "right"}
-                            width={isXs ? "w-40" : isSm ? "w-52" : "w-64"}
-                          >
-                            <ToggleSwitch
-                              checked={webSearch}
-                              onChange={(next) => {
-                                setWebSearch(next);
-                                onWebSearchChange?.(next);
-                              }}
-                              label={t("chat:header.webSearchToggle")}
-                              disabled
-                            />
-                          </Tooltip>
-                        ) : (
-                          <ToggleSwitch
-                            checked={webSearch}
-                            onChange={(next) => {
-                              setWebSearch(next);
-                              onWebSearchChange?.(next);
-                            }}
-                            label={t("chat:header.webSearchToggle")}
-                          />
-                        )}
-                      </div>
-                    </div>
-                  )}
-
-                  {showReasoningEffort && (
-                    <div className="flex items-center gap-3">
-                      <span
-                        className={`${labelText} uppercase tracking-wide font-semibold text-gray-300/80`}
-                      >
-                        {t("chat:header.reasoningEffort")}
-                      </span>
-                      <TooltipIcon
-                        id="reasoning-effort"
-                        side={isNarrow ? "bottom-right" : "right"}
-                      />
-                      <select
-                        aria-label={t("chat:header.reasoningEffort")}
-                        value={reasoningEffort}
-                        onChange={(e) => {
-                          const next = e.target.value;
-                          setReasoningEffort(next);
-                          onReasoningEffortChange?.(next);
-                        }}
-                        className="ml-auto text-[11px] font-semibold rounded-md border border-emerald-400/25 bg-emerald-500/10 text-emerald-200/90 px-2 py-1 focus:outline-none focus:border-emerald-400/50 transition-colors cursor-pointer"
-                      >
-                        {REASONING_EFFORT_LEVELS.map((level) => (
-                          <option key={level} value={level}>
-                            {t(`chat:header.reasoningEffortLevels.${level}`)}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-
-                  {showCompactionThreshold && (
-                    <div className="flex items-center gap-3">
-                      <span
-                        className={`${labelText} uppercase tracking-wide font-semibold text-gray-300/80`}
-                      >
-                        {t("chat:header.compactionThreshold")}
-                      </span>
-                      <TooltipIcon
-                        id="compaction-threshold"
-                        side={isNarrow ? "bottom-right" : "right"}
-                      />
-                      <select
-                        aria-label={t("chat:header.compactionThreshold")}
-                        value={compactionThreshold}
-                        onChange={(e) => {
-                          const next = Number(e.target.value);
-                          setCompactionThreshold(next);
-                          onCompactionThresholdChange?.(next);
-                        }}
-                        className="ml-auto text-[11px] font-semibold rounded-md border border-emerald-400/25 bg-emerald-500/10 text-emerald-200/90 px-2 py-1 focus:outline-none focus:border-emerald-400/50 transition-colors cursor-pointer"
-                      >
-                        {COMPACTION_THRESHOLDS.map((value) => (
-                          <option key={value} value={value}>
-                            {formatCompactionThreshold(value)}
-                          </option>
-                        ))}
-                      </select>
-                    </div>
-                  )}
-
                   <div className={`flex ${actionsLayout} gap-3 w-full`}>
                     <div
                       className={`flex ${
@@ -613,19 +425,8 @@ HeaderBar.propTypes = {
   initialTemperature: PropTypes.number,
   initialTopP: PropTypes.number,
   onApply: PropTypes.func.isRequired,
-  onLiveChange: PropTypes.func,
+  onLiveChange: PropTypes.func.isRequired,
   onCustomizePrompt: PropTypes.func.isRequired,
-  showWebSearch: PropTypes.bool,
-  initialWebSearch: PropTypes.bool,
-  onWebSearchChange: PropTypes.func,
-  webSearchDisabled: PropTypes.bool,
-  webSearchDisabledTooltip: PropTypes.string,
-  showReasoningEffort: PropTypes.bool,
-  initialReasoningEffort: PropTypes.oneOf(REASONING_EFFORT_LEVELS),
-  onReasoningEffortChange: PropTypes.func,
-  showCompactionThreshold: PropTypes.bool,
-  initialCompactionThreshold: PropTypes.oneOf(COMPACTION_THRESHOLDS),
-  onCompactionThresholdChange: PropTypes.func,
   disabled: PropTypes.bool,
   models: PropTypes.arrayOf(
     PropTypes.shape({
@@ -635,7 +436,4 @@ HeaderBar.propTypes = {
   ),
   currentModel: PropTypes.string,
   onModelChange: PropTypes.func,
-  pickerAttention: PropTypes.bool,
-  pickerAttentionMessage: PropTypes.string,
-  noPublisherRecommendation: PropTypes.bool,
 };

@@ -29,7 +29,6 @@ vi.mock("../components/Sidebar", () => ({ default: () => null }));
 vi.mock("../components/ChatCollapsibleSection", () => ({ default: () => null }));
 vi.mock("../components/GradientBox", () => ({ default: ({ children }) => <div>{children}</div> }));
 vi.mock("../components/QuestionInput", () => ({ default: () => null }));
-vi.mock("../components/modals/CustomizePromptModal", () => ({ default: () => null }));
 vi.mock("../components/modals/ErrorModal", () => ({ default: () => null }));
 
 import apiClient from "../services/api/client";

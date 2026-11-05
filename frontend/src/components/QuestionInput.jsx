@@ -1,7 +1,8 @@
-import React, { useState, useRef, useEffect } from "react";
+import React, { useState, useRef, useEffect, useId } from "react";
 import PropTypes from "prop-types";
 import { ArrowRight, FileText, ImagePlus, Paperclip, Plus, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
+import { matchCommands, parseSlashCommand } from "../utils/slashCommands";
 
 const DEFAULT_MAX_IMAGES = 4;
 // Raster formats the vision pipeline can actually decode. SVG and other vector
@@ -42,6 +43,11 @@ export default function QuestionInput({
   canAttachImages = true,
   maxImages = DEFAULT_MAX_IMAGES,
   maxAttachments = DEFAULT_MAX_ATTACHMENTS,
+  // Slash commands (#585): the registry entries this page offers, and what
+  // runs one. Without commands (the Arena) the composer has no drop-up and
+  // every message goes to the model.
+  commands = [],
+  onCommand,
 }) {
   const { t } = useTranslation();
   const effectivePlaceholder = placeholder ?? t("chat:composer.placeholder");
@@ -54,6 +60,16 @@ export default function QuestionInput({
   const [attachError, setAttachError] = useState("");
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
+  // The drop-up: the commands matching what is typed, the highlighted one,
+  // and the text it was closed on with Escape (it stays closed until the
+  // text changes).
+  const listId = useId();
+  const [highlight, setHighlight] = useState(0);
+  const [dismissedFor, setDismissedFor] = useState(null);
+  const matches = disabled ? [] : matchCommands(value, commands);
+  const menuOpen = matches.length > 0 && value !== dismissedFor;
+  const highlighted = menuOpen ? matches[Math.min(highlight, matches.length - 1)] : null;
+  const optionId = (name) => `${listId}-${name}`;
 
   const canSend = !disabled && (value.trim() !== "" || images.length > 0 || attachments.length > 0);
 
@@ -172,9 +188,27 @@ export default function QuestionInput({
     setAttachError("");
   };
 
+  const updateValue = (next) => {
+    setValue(next);
+    setHighlight(0);
+  };
+
+  // A command never reaches the model; the composer is cleared, and the
+  // attachments stay for the next message.
+  const runCommand = (command) => {
+    onCommand?.(command);
+    updateValue("");
+    setDismissedFor(null);
+  };
+
   const handleSend = () => {
     const trimmed = value.trim();
     if (!trimmed && images.length === 0 && attachments.length === 0) {
+      return;
+    }
+    const command = commands.length > 0 ? parseSlashCommand(trimmed, commands) : null;
+    if (command) {
+      runCommand(command);
       return;
     }
     onSend?.(
@@ -191,6 +225,36 @@ export default function QuestionInput({
   };
 
   const handleKeyDown = (e) => {
+    // An input method (Chinese, Japanese) is composing: its Enter confirms a
+    // character, never a command or a message.
+    if (e.nativeEvent?.isComposing || e.keyCode === 229) {
+      return;
+    }
+    if (menuOpen) {
+      if (e.key === "ArrowDown" || e.key === "ArrowUp") {
+        e.preventDefault();
+        const step = e.key === "ArrowDown" ? 1 : -1;
+        const current = matches.indexOf(highlighted);
+        setHighlight((current + step + matches.length) % matches.length);
+        return;
+      }
+      if (e.key === "Tab") {
+        e.preventDefault();
+        updateValue(`/${highlighted.name}`);
+        return;
+      }
+      if (e.key === "Escape") {
+        e.preventDefault();
+        setDismissedFor(value);
+        return;
+      }
+      if (e.key === "Enter" && !e.shiftKey) {
+        e.preventDefault();
+        // A complete command runs as typed; a partial name runs the highlight.
+        runCommand(parseSlashCommand(value, commands) ?? { name: highlighted.name, arg: null });
+        return;
+      }
+    }
     if (e.key === "Enter" && !e.shiftKey) {
       e.preventDefault();
       handleSend();
@@ -265,6 +329,47 @@ export default function QuestionInput({
 
   return (
     <div className={["relative w-full", className].join(" ")}>
+      {/* The command drop-up: above the whole composer, outside the pill
+          (whose overflow is hidden). */}
+      {menuOpen && (
+        <ul
+          id={listId}
+          role="listbox"
+          aria-label={t("chat:commands.listLabel")}
+          className={[
+            "absolute bottom-full left-0 right-0 mb-2 z-40 py-1.5 overflow-hidden",
+            "rounded-[18px] border border-white/10",
+            "bg-[rgba(18,34,30,0.92)] backdrop-blur-[18px] saturate-[1.4]",
+            "shadow-[0_10px_30px_-6px_rgba(0,0,0,0.5)]",
+          ].join(" ")}
+        >
+          {matches.map((command) => {
+            const active = command === highlighted;
+            return (
+              <li
+                key={command.name}
+                id={optionId(command.name)}
+                role="option"
+                aria-selected={active}
+                data-command={command.name}
+                // Keep the focus in the textarea while clicking.
+                onMouseDown={(e) => e.preventDefault()}
+                onClick={() => runCommand({ name: command.name, arg: null })}
+                onMouseEnter={() => setHighlight(matches.indexOf(command))}
+                className={[
+                  "flex items-baseline gap-3 px-4 py-2 cursor-pointer",
+                  active ? "bg-emerald-500/15" : "hover:bg-white/5",
+                ].join(" ")}
+              >
+                <span className="font-mono text-sm text-emerald-300">{`/${command.name}`}</span>
+                <span className="text-xs text-gray-300/80 truncate">
+                  {t(`chat:commands.${command.name}.description`)}
+                </span>
+              </li>
+            );
+          })}
+        </ul>
+      )}
       {/* Attached images live in their own glass panel (matching the chat
           header) above the composer; the text input yields beneath it. */}
       {(images.length > 0 || attachments.length > 0 || attachError) && (
@@ -410,8 +515,11 @@ export default function QuestionInput({
           rows={1}
           placeholder={effectivePlaceholder}
           value={value}
-          onChange={(e) => setValue(e.target.value)}
+          onChange={(e) => updateValue(e.target.value)}
           onKeyDown={handleKeyDown}
+          aria-autocomplete={commands.length > 0 ? "list" : undefined}
+          aria-controls={menuOpen ? listId : undefined}
+          aria-activedescendant={highlighted ? optionId(highlighted.name) : undefined}
           onPaste={handlePaste}
           disabled={disabled}
           style={{ maxHeight: "160px" }}
@@ -451,4 +559,11 @@ QuestionInput.propTypes = {
   canAttachImages: PropTypes.bool,
   maxImages: PropTypes.number,
   maxAttachments: PropTypes.number,
+  commands: PropTypes.arrayOf(
+    PropTypes.shape({
+      name: PropTypes.string.isRequired,
+      args: PropTypes.arrayOf(PropTypes.string).isRequired,
+    })
+  ),
+  onCommand: PropTypes.func,
 };

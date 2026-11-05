@@ -21,7 +21,9 @@ class ResizeObserverStub {
 globalThis.ResizeObserver = globalThis.ResizeObserver || ResizeObserverStub;
 
 const renderBar = (props = {}) =>
-  render(<HeaderBar onApply={() => {}} onCustomizePrompt={() => {}} {...props} />);
+  render(
+    <HeaderBar onApply={() => {}} onLiveChange={() => {}} onCustomizePrompt={() => {}} {...props} />
+  );
 
 // The controls live behind the settings toggle; open it before querying them.
 const openSettings = () => fireEvent.click(screen.getByLabelText("Toggle settings"));

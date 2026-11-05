@@ -34,9 +34,8 @@ vi.mock("react-router-dom", () => ({
 // bubble text is assertable. TraceStrip is the real component under test.
 vi.mock("../components/Sidebar", () => ({ default: () => null }));
 vi.mock("../components/ChatCollapsibleSection", () => ({ default: () => null }));
-vi.mock("../components/HeaderBar", () => ({ default: () => null }));
+vi.mock("../components/ConversationHeader", () => ({ default: () => null }));
 vi.mock("../components/TypingIndicator", () => ({ default: () => null }));
-vi.mock("../components/modals/CustomizePromptModal", () => ({ default: () => null }));
 vi.mock("../components/MarkdownRenderer", () => ({
   default: ({ content }) => <div data-testid="answer">{content}</div>,
 }));

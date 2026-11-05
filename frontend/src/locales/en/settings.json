@@ -4,13 +4,13 @@
   "subtitle": "Preferences that apply across the whole app.",
   "webSearch": {
     "title": "Web Search",
-    "description": "Sets whether web search starts on or off for new conversations. Each conversation keeps its own web search toggle in its chat header afterwards, so changing this setting never affects a conversation that already exists.",
+    "description": "Sets whether web search starts on or off for new conversations, on every model with no value saved with /config global. Each conversation keeps its own web search switch in /config afterwards, so changing this setting never affects a conversation that already exists.",
     "note": "Off by default. When a tool-capable model decides to search, the searched query is sent to external search engines — nothing else leaves your machine.",
     "toggleLabel": "Web search"
   },
   "reasoningEffort": {
     "title": "Default reasoning effort",
-    "description": "Sets the starting reasoning effort for new conversations. Each conversation keeps its own reasoning effort control in its chat header afterwards, so changing this setting never affects a conversation that already exists.",
+    "description": "Sets the starting reasoning effort for new conversations, on every model with no level saved with /config global. Each conversation keeps its own level in /config and /effort afterwards, so changing this setting never affects a conversation that already exists.",
     "note": "Medium by default. Higher levels let the model deliberate more before answering; None asks it to answer directly.",
     "selectLabel": "Default reasoning effort",
     "levels": {
@@ -23,7 +23,7 @@
   },
   "compactionThreshold": {
     "title": "Default compaction threshold",
-    "description": "Sets the starting compaction threshold for new conversations: older messages are summarized when a conversation fills this share of the model's context window. Each conversation keeps its own compaction threshold control in its chat header afterwards, so changing this setting never affects a conversation that already exists.",
+    "description": "Sets the starting compaction threshold for new conversations, on every model with no threshold saved with /config global: older messages are summarized when a conversation fills this share of the model's context window. Each conversation keeps its own threshold in /config afterwards, so changing this setting never affects a conversation that already exists.",
     "note": "80% by default. Lower: summarizes sooner and more often, keeping the conversation shorter. Higher: keeps more of it word for word and summarizes less often.",
     "selectLabel": "Default compaction threshold"
   },
