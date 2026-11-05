@@ -12,8 +12,10 @@ there is one. `auto_download_updates` (**Download updates automatically**) and
 `auto_install_updates` (**Install downloaded updates when I quit**) are opt-ins, `false`
 by default and `false` after the migration that added them, whatever automatic updates did
 before. Both only act while the check is on: with `auto_update_enabled` off they are inert,
-and the Settings page disables them. The manual **Update Erudi** card works whatever the
-three say. See [What leaves your machine](../privacy.md).
+and the Settings page disables them. When the renderer cannot read the settings, main
+checks, downloads and installs nothing until a later launch reads them. The manual
+**Update Erudi** card works whatever the three say. See
+[What leaves your machine](../privacy.md).
 
 `default_reasoning_effort` (`none`, `low`, `medium`, `high`, `xhigh`, `medium` by default)
 is what a NEW conversation starts at and what an arena panel runs at, on every model that has
