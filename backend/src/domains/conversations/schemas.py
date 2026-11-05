@@ -50,9 +50,19 @@ Pydantic schemas for conversation-related data validation.
 """
 from pydantic import BaseModel, Field, validator
 from datetime import datetime
-from typing import List, Optional
+from typing import Annotated, List, Optional
 
 from src.domains.user_settings.schemas import CompactionThreshold, ReasoningEffort
+from src.entities.Conversation import TEMPERATURE_MAX, TEMPERATURE_MIN, TOP_P_MAX, TOP_P_MIN
+
+# The conversation values a request may carry, with the bounds the entity
+# enforces (``src.entities.Conversation``). Shared by the conversation
+# creation, the Arena query and the per-model defaults
+# (``src.domains.llms.schemas.ConversationDefaultsUpdate``).
+Temperature = Annotated[float, Field(ge=TEMPERATURE_MIN, le=TEMPERATURE_MAX)]
+TopP = Annotated[float, Field(ge=TOP_P_MIN, le=TOP_P_MAX)]
+CUSTOM_PROMPT_MAX_CHARS = 4096
+CustomPrompt = Annotated[str, Field(max_length=CUSTOM_PROMPT_MAX_CHARS)]
 
 
 class MessageBase(BaseModel):

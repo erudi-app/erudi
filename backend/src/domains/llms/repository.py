@@ -29,11 +29,13 @@ import time
 from datetime import datetime, timedelta, timezone
 from typing import List, Optional
 
+from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.orm import Session
 
 from src.database.core import SessionLocal
 from src.entities.Llm import Llm
 from src.entities.DownloadJob import DownloadJobModel
+from src.entities.ModelDefaults import ModelDefaults
 from src.core.logging import logger
 from src.core import config
 
@@ -272,6 +274,36 @@ class Llm_Repository:
 
         self.db.delete(llm)
         self.db.flush()
+
+
+class Model_Defaults_Repository:
+    """Data access for the conversation defaults saved per model (#609).
+
+    Mutations are flushed, not committed: the caller owns the transaction.
+    """
+
+    def __init__(self, db: Session):
+        self.db = db
+
+    def get(self, llm_id: int) -> Optional[ModelDefaults]:
+        """The row saved for ``llm_id``, or None when nothing was ever saved."""
+        return self.db.get(ModelDefaults, llm_id)
+
+    def save(self, llm_id: int, values: dict) -> ModelDefaults:
+        """Write ``values`` (field -> value, None clears) into the row of
+        ``llm_id``, creating it first when it does not exist.
+
+        The row is created with ``INSERT ... ON CONFLICT DO NOTHING``, so two
+        concurrent first saves for the same model both land on one row.
+        Values are validated by the entity (``ValueError`` on a value off its
+        scale).
+        """
+        self.db.execute(pg_insert(ModelDefaults).values(llm_id=llm_id).on_conflict_do_nothing())
+        row = self.db.get(ModelDefaults, llm_id, populate_existing=True)
+        for field, value in values.items():
+            setattr(row, field, value)
+        self.db.flush()
+        return row
 
 
 class Download_Job_Repository:

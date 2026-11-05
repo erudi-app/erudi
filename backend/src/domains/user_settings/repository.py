@@ -4,6 +4,8 @@ Mirrors ``Startup_Variables_Repository``: get-or-create on a one-row table,
 mutations flushed (not committed) so the caller controls the transaction.
 """
 
+from typing import Optional
+
 from sqlalchemy.orm import Session
 
 from src.agents.reasoning_effort import DEFAULT_REASONING_EFFORT
@@ -44,6 +46,15 @@ class User_Settings_Repository:
             self.db.flush()
             self.db.refresh(settings)
         return settings
+
+    def get(self) -> Optional[UserSettings]:
+        """The singleton row, or None when it does not exist yet.
+
+        Read-only: conversation creation and arena turns resolve their
+        defaults from it (``src.domains.llms.conversation_defaults``) and must
+        not write; a missing row means every setting is at its default.
+        """
+        return self.db.query(UserSettings).first()
 
     def get_web_search_enabled(self) -> bool:
         """The global web-search default (False until the user opts in).

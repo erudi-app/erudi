@@ -54,6 +54,44 @@ from sqlalchemy.sql import func
 from src.database.core import Base
 
 
+# Bounds of the sampling values a conversation runs with. The request schemas
+# (``src.domains.conversations.schemas.Temperature`` / ``TopP``) read them too.
+TEMPERATURE_MIN, TEMPERATURE_MAX = 0.0, 2.0
+TOP_P_MIN, TOP_P_MAX = 0.0, 1.0
+
+
+# The rules of the per-conversation values, shared by every row that stores
+# one: a conversation, and the defaults saved for a model (``ModelDefaults``).
+def check_temperature(temperature: float) -> float:
+    """Return ``temperature``, or raise ValueError outside [0.0, 2.0]."""
+    if not TEMPERATURE_MIN <= temperature <= TEMPERATURE_MAX:
+        raise ValueError(f"Temperature must be between {TEMPERATURE_MIN} and {TEMPERATURE_MAX}")
+    return temperature
+
+
+def check_top_p(top_p: float) -> float:
+    """Return ``top_p``, or raise ValueError outside [0.0, 1.0]."""
+    if not TOP_P_MIN <= top_p <= TOP_P_MAX:
+        raise ValueError(f"Top_p must be between {TOP_P_MIN} and {TOP_P_MAX}")
+    return top_p
+
+
+def check_reasoning_effort(reasoning_effort: str) -> str:
+    """Return the level, or raise ValueError when it is not in REASONING_EFFORT_LEVELS."""
+    if reasoning_effort not in REASONING_EFFORT_LEVELS:
+        raise ValueError(f"Reasoning effort must be one of {REASONING_EFFORT_LEVELS}")
+    return reasoning_effort
+
+
+def check_compaction_threshold(compaction_threshold: int) -> int:
+    """Return the percentage, or raise ValueError when it is not an int in
+    COMPACTION_THRESHOLDS (50-90, step 5); a bool, a float or a string is
+    rejected."""
+    if not is_compaction_threshold(compaction_threshold):
+        raise ValueError(f"Compaction threshold must be one of {COMPACTION_THRESHOLDS}")
+    return compaction_threshold
+
+
 class Conversation(Base):
     """SQLAlchemy model for conversation sessions with generation parameter validation.
 
@@ -104,19 +142,21 @@ class Conversation(Base):
     max_tokens = Column(Integer, default=FALLBACK_MAX_TOKENS)
     custom_prompt = Column(Text, default="")
     name = Column(String(255), nullable=False, index=True, default="New Conversation")
-    # Per-conversation web-search toggle (#310): copied from the GLOBAL
-    # user-settings default at creation; the conversation owns it afterwards
-    # (a later global change never retro-affects existing conversations).
+    # Per-conversation web-search toggle (#310): set at creation from the
+    # value saved for the model (#609), else the GLOBAL user-settings default;
+    # the conversation owns it afterwards (a later change never retro-affects
+    # existing conversations).
     web_search_enabled = Column(Boolean, default=False, nullable=False)
     # How much the model may deliberate before answering (1.1.2), one of
-    # REASONING_EFFORT_LEVELS. Same lifecycle as the web-search toggle: copied
-    # from the GLOBAL user-settings default at creation, owned by the
-    # conversation afterwards.
+    # REASONING_EFFORT_LEVELS. Same lifecycle as the web-search toggle: the
+    # model's saved value, else the GLOBAL user-settings default, at creation;
+    # owned by the conversation afterwards.
     reasoning_effort = Column(String(8), default=DEFAULT_REASONING_EFFORT, nullable=False)
     # The share of the working window, in whole percent, at which this
     # conversation compacts (#607), one of COMPACTION_THRESHOLDS. Same
-    # lifecycle as the reasoning effort: copied from the GLOBAL user-settings
-    # default at creation, owned by the conversation afterwards.
+    # lifecycle as the reasoning effort: the model's saved value, else the
+    # GLOBAL user-settings default, at creation; owned by the conversation
+    # afterwards.
     compaction_threshold = Column(
         SmallInteger, default=DEFAULT_COMPACTION_THRESHOLD, nullable=False
     )
@@ -135,39 +175,13 @@ class Conversation(Base):
 
     @validates("temperature")
     def validate_temperature(self, key: str, temperature: float) -> float:
-        """Validate temperature parameter is within allowed range.
-
-        Args:
-            key: Column name ("temperature").
-            temperature: Temperature value to validate.
-
-        Returns:
-            Validated temperature value.
-
-        Raises:
-            ValueError: If temperature not in range [0.0, 2.0].
-        """
-        if not 0.0 <= temperature <= 2.0:
-            raise ValueError("Temperature must be between 0.0 and 2.0")
-        return temperature
+        """Validate the temperature (``check_temperature``)."""
+        return check_temperature(temperature)
 
     @validates("top_p")
     def validate_top_p(self, key: str, top_p: float) -> float:
-        """Validate top_p parameter is within allowed range.
-
-        Args:
-            key: Column name ("top_p").
-            top_p: Top_p value to validate.
-
-        Returns:
-            Validated top_p value.
-
-        Raises:
-            ValueError: If top_p not in range [0.0, 1.0].
-        """
-        if not 0.0 <= top_p <= 1.0:
-            raise ValueError("Top_p must be between 0.0 and 1.0")
-        return top_p
+        """Validate top_p (``check_top_p``)."""
+        return check_top_p(top_p)
 
     @validates("max_tokens")
     def validate_max_tokens(self, key: str, max_tokens: int) -> int:
@@ -189,40 +203,13 @@ class Conversation(Base):
 
     @validates("reasoning_effort")
     def validate_reasoning_effort(self, key: str, reasoning_effort: str) -> str:
-        """Validate the reasoning effort is one of the five levels.
-
-        Args:
-            key: Column name ("reasoning_effort").
-            reasoning_effort: Level to validate.
-
-        Returns:
-            Validated level.
-
-        Raises:
-            ValueError: If the level is not in REASONING_EFFORT_LEVELS.
-        """
-        if reasoning_effort not in REASONING_EFFORT_LEVELS:
-            raise ValueError(f"Reasoning effort must be one of {REASONING_EFFORT_LEVELS}")
-        return reasoning_effort
+        """Validate the reasoning effort (``check_reasoning_effort``)."""
+        return check_reasoning_effort(reasoning_effort)
 
     @validates("compaction_threshold")
     def validate_compaction_threshold(self, key: str, compaction_threshold: int) -> int:
-        """Validate the compaction threshold is a whole percent on the scale.
-
-        Args:
-            key: Column name ("compaction_threshold").
-            compaction_threshold: Percentage to validate.
-
-        Returns:
-            Validated percentage.
-
-        Raises:
-            ValueError: If it is not an int in COMPACTION_THRESHOLDS (50-90,
-                step 5); a bool, a float or a string is rejected.
-        """
-        if not is_compaction_threshold(compaction_threshold):
-            raise ValueError(f"Compaction threshold must be one of {COMPACTION_THRESHOLDS}")
-        return compaction_threshold
+        """Validate the compaction threshold (``check_compaction_threshold``)."""
+        return check_compaction_threshold(compaction_threshold)
 
     @hybrid_property
     def message_count(self) -> int:
