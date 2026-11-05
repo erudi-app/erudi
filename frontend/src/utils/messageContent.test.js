@@ -108,6 +108,8 @@ describe("generic failure (#615)", () => {
   const cause = { t: "error_detail", text: "boom", request_id: "be-1" };
 
   it("is the exact apology line the backend writes", () => {
+    // Pinned from the other side by backend/tests/test_error_detail.py, which
+    // reads this module and asserts that ERROR_MESSAGE appears in it verbatim.
     expect(GENERIC_ERROR_LINE).toBe(
       "[ERROR_MESSAGE_SYSTEM] I apologize, but I encountered an error while generating a response. Please try asking your question again."
     );

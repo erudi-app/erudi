@@ -617,7 +617,10 @@ export default function ConversationPage() {
             }
           } catch (streamError) {
             log.error("Streaming error during response generation", streamError);
-            answerText += `\n\n${ERROR_SENTINEL} ${t("chat:errors.connectionInterrupted")}`;
+            answerText = joinFailure(
+              answerText,
+              `${ERROR_SENTINEL} ${t("chat:errors.connectionInterrupted")}`
+            );
             sawError = true;
             flushMessage();
           } finally {

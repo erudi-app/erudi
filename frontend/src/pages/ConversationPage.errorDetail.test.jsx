@@ -193,6 +193,28 @@ describe("a generic failure, live", () => {
     expect(bubble.textContent).toBe(`*A notice.*\n\n❌ ${APOLOGY_EN}`);
   });
 
+  it.each([
+    ["nothing", [], "❌ Connection interrupted while generating response."],
+    [
+      "a notice",
+      [encoder.encode('{"t":"answer","text":"*A notice.*\\n\\n"}\n')],
+      "*A notice.*\n\n❌ Connection interrupted while generating response.",
+    ],
+  ])("joins the connection-interrupted line cleanly after %s", async (_label, chunks, expected) => {
+    const read = vi.fn();
+    chunks.forEach((value) => read.mockResolvedValueOnce({ done: false, value }));
+    read.mockRejectedValueOnce(new Error("socket reset"));
+    tracedFetchMock.mockImplementation(
+      routeFetch({ query: () => ({ ok: true, body: { getReader: () => ({ read }) } }) })
+    );
+    await renderAndSettle();
+
+    await send();
+
+    const bubble = await screen.findByText(/Connection interrupted while generating response/);
+    expect(bubble.textContent).toBe(expected);
+  });
+
   it("logs a generic failure at ERROR", async () => {
     tracedFetchMock.mockImplementation(
       routeFetch({ query: () => streamOf(genericWire, { t: "done" }) })
