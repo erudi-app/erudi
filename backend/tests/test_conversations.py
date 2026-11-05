@@ -1048,7 +1048,9 @@ class TestConversationService:
         assert _SENTINEL in messages[1].content
         assert "Traceback" not in messages[1].content
         assert "/secret/leak/path" not in messages[1].content
-        assert messages[1].trace is None
+        # The only trace an unexpected failure keeps is its cleaned cause (#615).
+        assert [e["t"] for e in messages[1].trace] == ["error_detail"]
+        assert messages[1].trace[0]["text"] == "model load failed: path"
 
     async def test_query_stream_persists_thinking_trace(
         self, test_db_session, mock_llm, monkeypatch
@@ -1252,6 +1254,184 @@ class TestConversationService:
         assert messages[1].content.startswith(_SENTINEL)
         assert messages[1].trace == [done]
 
+    async def test_a_generic_failure_event_carries_its_detail_and_persists_it(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        """#615: the wire error event carries the detail and the request id; the
+        failed message's trace keeps ``error_detail`` next to its compactions."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+        done = {
+            "t": "compaction",
+            "phase": "done",
+            "summarized": 3,
+            "reason": "memory",
+            "summary": "S.",
+            "summary_lost": False,
+        }
+
+        async def fake_stream(**kwargs):
+            yield dict(done)
+            yield {"t": "thinking", "text": "hm"}
+            yield {
+                "t": "answer",
+                "text": agent_runner.ERROR_MESSAGE,
+                "detail": "boom",
+                "request_id": "be-abc12345",
+            }
+
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        result = [
+            t
+            async for t in service.query_and_respond_stream(
+                conversation.id, ConversationQuery(question="Go on")
+            )
+        ]
+
+        error = next(e for e in _parse_ndjson(result) if e["t"] == "error")
+        assert error["text"] == agent_runner.ERROR_MESSAGE
+        assert error["detail"] == "boom" and error["request_id"] == "be-abc12345"
+        assert "curated" not in error
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[1].trace == [
+            done,
+            {"t": "error_detail", "text": "boom", "request_id": "be-abc12345"},
+        ]
+
+    async def test_a_curated_failure_is_flagged_and_has_no_detail(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+
+        async def fake_stream(**kwargs):
+            yield {
+                "t": "answer",
+                "text": f"{_SENTINEL} The conversation no longer fits.",
+                "curated": True,
+            }
+
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        result = [
+            t
+            async for t in service.query_and_respond_stream(
+                conversation.id, ConversationQuery(question="Go on")
+            )
+        ]
+
+        error = next(e for e in _parse_ndjson(result) if e["t"] == "error")
+        assert error["curated"] is True
+        assert "detail" not in error and "request_id" not in error
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[1].trace is None
+
+    async def test_a_failure_after_partial_text_ends_red_and_keeps_the_text(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        """The last-resort handler: text already streamed stays, the turn ends
+        with the generic headline and its Details."""
+        from src.core.request_context import request_id_var
+
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+
+        async def fake_stream(**kwargs):
+            yield {"t": "answer", "text": "Half an answer"}
+            raise ValueError("kaput at /home/jane/work/state.db")
+
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        token = request_id_var.set("be-feed0001")
+        try:
+            result = [
+                t
+                async for t in service.query_and_respond_stream(
+                    conversation.id, ConversationQuery(question="Go on")
+                )
+            ]
+        finally:
+            request_id_var.reset(token)
+
+        events = _parse_ndjson(result)
+        error = next(e for e in events if e["t"] == "error")
+        assert error["text"] == agent_runner.ERROR_MESSAGE
+        assert error["detail"] == "kaput at state.db"
+        assert error["request_id"] == "be-feed0001"
+        assert events[-1] == {"t": "done"}
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[1].content == f"Half an answer\n\n{agent_runner.ERROR_MESSAGE}"
+        assert messages[1].trace == [
+            {"t": "error_detail", "text": "kaput at state.db", "request_id": "be-feed0001"}
+        ]
+
+    @pytest.mark.parametrize("raise_after", [True, False])
+    async def test_the_red_line_follows_a_notice_after_one_blank_line(
+        self, test_db_session, mock_llm, monkeypatch, raise_after
+    ):
+        """A notice already ends with a blank line: the failure adds none."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+
+        async def fake_stream(**kwargs):
+            yield {"t": "answer", "text": "*A notice.*\n\n"}
+            if raise_after:
+                raise ValueError("kaput")
+            yield {"t": "answer", "text": agent_runner.ERROR_MESSAGE}
+
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        [
+            t
+            async for t in service.query_and_respond_stream(
+                conversation.id, ConversationQuery(question="Go on")
+            )
+        ]
+
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[1].content == f"*A notice.*\n\n{agent_runner.ERROR_MESSAGE}"
+
+    async def test_a_failure_before_any_text_ends_red_with_its_detail(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+
+        async def fake_stream(**kwargs):
+            raise ValueError("Message content too long (max 32K chars)")
+            yield  # pragma: no cover - makes this an async generator
+
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        result = [
+            t
+            async for t in service.query_and_respond_stream(
+                conversation.id, ConversationQuery(question="Go on")
+            )
+        ]
+
+        error = next(e for e in _parse_ndjson(result) if e["t"] == "error")
+        assert error["detail"] == "Message content too long (max 32K chars)"
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[1].content == agent_runner.ERROR_MESSAGE
+        assert messages[1].trace[0]["t"] == "error_detail"
+
     async def test_an_error_turn_without_a_compaction_persists_no_trace(
         self, test_db_session, mock_llm, monkeypatch
     ):
@@ -1394,6 +1574,17 @@ class TestTraceHelpers:
         assert capped[:3] == [done, second, {"t": "truncated"}]
         assert capped[-1] == events[-1]
         assert events[1] not in capped
+
+    def test_cap_trace_pins_the_error_detail(self):
+        """#615: the failed turn's cause is the last thing a cap may drop."""
+        detail = {"t": "error_detail", "text": "boom", "request_id": "be-1"}
+        events = [detail] + [{"t": "thinking", "text": "x" * 1000} for _ in range(50)]
+
+        capped = _cap_trace(events)
+
+        assert len(json.dumps(capped)) <= TRACE_MAX_BYTES
+        assert capped[0] == detail
+        assert capped[1] == {"t": "truncated"}
 
     def test_cap_trace_marks_nothing_when_only_compactions_overflow(self):
         """Compactions alone over the cap are kept whole; nothing was elided,

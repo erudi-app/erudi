@@ -10,6 +10,7 @@ fallbacks, and the welcome-popup endpoint.
 
 from __future__ import annotations
 
+import json
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
 
@@ -126,6 +127,28 @@ class TestConversationServiceGaps:
         payload = SimpleNamespace(question="hello", images=None, attachments=None)
         events = [chunk async for chunk in service.query_and_respond_stream(987654, payload)]
         assert any('"error"' in e and ERROR_MESSAGE in e for e in events)
+        assert '"done"' in events[-1]
+
+    async def test_query_stream_load_failure_carries_detail_and_request_id(self, test_db_session):
+        from src.core.request_context import request_id_var
+
+        service = ConversationService(test_db_session)
+        payload = SimpleNamespace(question="hello", images=None, attachments=None)
+        token = request_id_var.set("be-load0001")
+        try:
+            with patch.object(
+                service, "_load_conversation_and_llm", side_effect=ValueError("no row at /srv/db/x")
+            ):
+                events = [c async for c in service.query_and_respond_stream(7, payload)]
+        finally:
+            request_id_var.reset(token)
+        error = json.loads(events[0])
+        assert error == {
+            "t": "error",
+            "text": ERROR_MESSAGE,
+            "detail": "no row at x",
+            "request_id": "be-load0001",
+        }
         assert '"done"' in events[-1]
 
     async def test_title_stream_saves_default_when_conversation_missing(self, test_db_session):

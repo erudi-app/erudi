@@ -91,7 +91,9 @@ function ModelCard({
       <div className="flex flex-col h-full">
         <div className="flex items-start justify-between mb-3">
           <div className="flex items-center gap-1.5 min-w-0">
-            <h3 className="text-lg font-semibold text-white">{model.name}</h3>
+            <h3 className="min-w-0 truncate text-lg font-semibold text-white" title={model.name}>
+              {model.name}
+            </h3>
             {isTestedModel(model) && (
               <span
                 className="flex items-center shrink-0 text-emerald-400"
@@ -113,7 +115,7 @@ function ModelCard({
           )}
           {type === "local" && (
             <button
-              className="p-1 bg-red-500/20 hover:bg-red-500/40 rounded-lg transition-colors ml-8"
+              className="p-1 bg-red-500/20 hover:bg-red-500/40 rounded-lg transition-colors ml-2"
               onClick={(e) => {
                 e.stopPropagation();
                 onDelete && onDelete(model);

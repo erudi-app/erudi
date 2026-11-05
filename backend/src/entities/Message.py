@@ -62,7 +62,7 @@ class Message(Base):
     # thinking / tool_call / tool_result and the compaction ``done`` events
     # (#614), with a truncated marker when steps were dropped by the cap.
     # Nullable: user messages and turns with no thinking, tool or compaction
-    # have none (an error turn keeps its compactions only).
+    # have none (an error turn keeps its compactions and error_detail only).
     trace = Column(JSON, nullable=True)
 
     # Relationships

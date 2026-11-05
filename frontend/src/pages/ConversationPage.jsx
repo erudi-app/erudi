@@ -13,6 +13,7 @@ import TypingIndicator from "../components/TypingIndicator";
 import MarkdownRenderer from "../components/MarkdownRenderer";
 import TraceStrip from "../components/TraceStrip";
 import CompactionMarker from "../components/CompactionMarker";
+import ErrorDetails from "../components/ErrorDetails";
 import { API_BASE_URL } from "../config/api.js";
 import apiClient, { tracedFetch } from "../services/api/client";
 import { createLogger } from "../utils/logger";
@@ -25,9 +26,15 @@ import {
   getAttachmentNames,
   getDisplayContent,
   getImagePaths,
+  isGenericFailure,
 } from "../utils/messageContent";
 import { formatBytes } from "../utils/formatBytes";
-import { compactionMarkers, compactionsOnly, hasStripEvents } from "../utils/traceEvents";
+import {
+  compactionMarkers,
+  errorDetailOf,
+  errorTurnTrace,
+  hasStripEvents,
+} from "../utils/traceEvents";
 
 const log = createLogger("ConversationPage");
 
@@ -35,6 +42,14 @@ const log = createLogger("ConversationPage");
 // bubble styling detect it, so it stays untranslated and only the text after it
 // is localized.
 const ERROR_SENTINEL = "[ERROR_MESSAGE_SYSTEM]";
+
+// The red line of a failed turn goes below whatever the model had already
+// written, as the backend stores it (a paragraph of its own).
+const joinFailure = (partial, failure) => {
+  // Exactly one blank line: a notice already ends with one.
+  const head = partial.replace(/\n+$/, "");
+  return head ? `${head}\n\n${failure}` : failure;
+};
 
 // Presentation-only tokens kept out of the JSX tree (they are class names and
 // CSS, not copy).
@@ -151,6 +166,10 @@ export default function ConversationPage() {
   // it did (the effect depended on it), so toggling it near the bottom snapped
   // the view back down and the user could not scroll freely.
   const userScrolledUpRef = useRef(false);
+  // The pending 100 ms re-check of the scroll position. Held in a ref so that
+  // sending a message can cancel it: a re-check that fires after the send
+  // would mark the view as scrolled up again.
+  const scrollCheckTimerRef = useRef(null);
 
   // Refs to avoid putting messages.length in useCallback deps, which
   // would cascade into the loadConversationData useEffect and overwrite
@@ -295,6 +314,11 @@ export default function ConversationPage() {
     async (question, images = [], imagePaths = [], attachmentPaths = []) => {
       setLoading(true);
       isStreamingRef.current = true;
+
+      // Sending is the user's return to the bottom: the view follows the
+      // answer again, and a pending scroll re-check must not undo that.
+      clearTimeout(scrollCheckTimerRef.current);
+      userScrolledUpRef.current = false;
 
       const isFirstMessage = messagesLengthRef.current === 0;
 
@@ -505,11 +529,25 @@ export default function ConversationPage() {
                 compacting = false;
                 // The backend has the traceback; this side records that the
                 // turn failed, on which conversation, and the engine's reason.
-                log.error(`Generation failed for conversation ${id}`, {
+                // A curated turn (a prompt that does not fit, a timeout, the
+                // loop limit) is the app's own answer, not a defect: WARNING,
+                // so it does not badge the bug counter. A generic one is ERROR.
+                (evt.curated ? log.warn : log.error)(`Generation failed for conversation ${id}`, {
                   code: evt.code || null,
                   raw: evt.raw || null,
                 });
-                answerText = evt.text || `${ERROR_SENTINEL} ${t("chat:errors.generationFailed")}`;
+                // Text streamed before the failure stays above the red line.
+                answerText = joinFailure(
+                  answerText,
+                  evt.text || `${ERROR_SENTINEL} ${t("chat:errors.generationFailed")}`
+                );
+                if (evt.detail) {
+                  traceEvents.push({
+                    t: "error_detail",
+                    text: evt.detail,
+                    request_id: evt.request_id || null,
+                  });
+                }
                 // The engine identified WHY it failed (a card the bundled CUDA
                 // build cannot drive, a driver too old, VRAM exhaustion): raise
                 // the dialog that offers the matching remedy. Untyped failures
@@ -597,7 +635,10 @@ export default function ConversationPage() {
             }
           } catch (streamError) {
             log.error("Streaming error during response generation", streamError);
-            answerText += `\n\n${ERROR_SENTINEL} ${t("chat:errors.connectionInterrupted")}`;
+            answerText = joinFailure(
+              answerText,
+              `${ERROR_SENTINEL} ${t("chat:errors.connectionInterrupted")}`
+            );
             sawError = true;
             flushMessage();
           } finally {
@@ -609,16 +650,16 @@ export default function ConversationPage() {
               setMemoryWarning(null);
             }
             // Turn is over: stop the live strip (it settles to the collapsed
-            // summary) and keep only the compactions of an error turn's trace
-            // to match persisted history (the backend persists nothing else
-            // for error turns).
+            // summary) and keep only the compactions and the failure's cause
+            // of an error turn's trace to match persisted history (the backend
+            // persists nothing else for error turns).
             setMessages((prev) =>
               prev.map((msg) =>
                 msg.id === assistantMessage.id
                   ? {
                       ...msg,
                       content: answerText,
-                      trace: sawError ? compactionsOnly(traceEvents) : traceEvents.slice(),
+                      trace: sawError ? errorTurnTrace(traceEvents) : traceEvents.slice(),
                       streaming: false,
                       reloading: false,
                       compacting: false,
@@ -815,7 +856,6 @@ export default function ConversationPage() {
       return;
     }
 
-    let scrollTimeout;
     let lastScrollTop = scrollContainer.scrollTop;
 
     const handleScroll = () => {
@@ -829,10 +869,10 @@ export default function ConversationPage() {
       lastScrollTop = currentScrollTop;
 
       // Clear any pending timeout
-      clearTimeout(scrollTimeout);
+      clearTimeout(scrollCheckTimerRef.current);
 
       // Wait a bit before checking position to avoid false positives during auto-scroll
-      scrollTimeout = setTimeout(() => {
+      scrollCheckTimerRef.current = setTimeout(() => {
         const { scrollTop, scrollHeight, clientHeight } = scrollContainer;
         const isAtBottom = scrollHeight - scrollTop - clientHeight < 100; // Increased threshold to 100px
 
@@ -843,7 +883,7 @@ export default function ConversationPage() {
 
     scrollContainer.addEventListener("scroll", handleScroll);
     return () => {
-      clearTimeout(scrollTimeout);
+      clearTimeout(scrollCheckTimerRef.current);
       scrollContainer.removeEventListener("scroll", handleScroll);
     };
   }, []);
@@ -983,7 +1023,7 @@ export default function ConversationPage() {
 
               // Reasoning/trace strip (#90): only for assistant turns that carried
               // thinking or tool activity, never for error turns (their persisted
-              // trace holds compactions only). `traceLive` is true while the strip
+              // trace holds compactions and the failure's cause only). `traceLive` is true while the strip
               // is the only content (streaming, no answer yet) -> expanded; it
               // flips false on the first answer event -> auto-collapse.
               const traceEvents = !isUser ? msg.trace : null;
@@ -1026,7 +1066,16 @@ export default function ConversationPage() {
                   : getAttachmentNames(msg.content)
                 : [];
               const hasAttachments = attachmentNames.length > 0;
-              const displayText = getDisplayContent(msg.content);
+              // An unexpected failure (#615): its headline is the interface
+              // language's, whatever the stored English line; its trace holds
+              // the cleaned cause behind Details. A turn stored before it
+              // existed has the headline only.
+              const failureDetail = isError ? errorDetailOf(msg.trace) : null;
+              const failureHeadline =
+                isError && isGenericFailure(msg.content, msg.trace)
+                  ? t("chat:errors.generationFailed")
+                  : undefined;
+              const displayText = getDisplayContent(msg.content, failureHeadline);
 
               return (
                 <div key={msg.id} className={`group flex flex-col mb-2 ${alignmentClass}`}>
@@ -1109,6 +1158,7 @@ export default function ConversationPage() {
                           {displayText && (
                             <pre className="whitespace-pre-wrap font-sans">{displayText}</pre>
                           )}
+                          {failureDetail && <ErrorDetails detail={failureDetail} />}
                         </div>
                       ) : (
                         // Assistant normal messages: render markdown
@@ -1146,10 +1196,12 @@ export default function ConversationPage() {
                       onClick={() => {
                         // Copy the readable text the user sees, not the raw
                         // stored content with internal attachment markers.
-                        navigator.clipboard.writeText(getDisplayContent(msg.content)).then(() => {
-                          setCopiedMessageId(msg.id);
-                          setTimeout(() => setCopiedMessageId(null), 1000);
-                        });
+                        navigator.clipboard
+                          .writeText(getDisplayContent(msg.content, failureHeadline))
+                          .then(() => {
+                            setCopiedMessageId(msg.id);
+                            setTimeout(() => setCopiedMessageId(null), 1000);
+                          });
                       }}
                       className="text-gray-400 hover:text-white transition-colors"
                       title={t("chat:message.copy")}

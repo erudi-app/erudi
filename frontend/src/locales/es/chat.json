@@ -194,6 +194,12 @@
     "body": "Los modelos base se han entrenado masivamente con datos en inglés. Obtendrás resultados bastante mejores si chateas en inglés.",
     "frenchAside": "Para quienes hablan español, será un buen entrenamiento :)"
   },
+  "errorDetails": {
+    "show": "Detalles",
+    "hide": "Ocultar detalles",
+    "requestId": "Identificador de solicitud",
+    "copy": "Copiar los detalles"
+  },
   "errors": {
     "network": "Error de red",
     "loadModels": "No se pudieron cargar los modelos: {{error}}",
