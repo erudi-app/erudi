@@ -679,10 +679,18 @@ def put_conversation_defaults(
 
     Raises:
         ModelNotFoundException: If the model does not exist (404).
+        StateConflictException: If the model is not downloaded (``local`` is
+            not 1: a catalog entry or a download in progress), 400.
     """
     llm = llm_repo.get_by_id(llm_id)
     if not llm:
         raise ModelNotFoundException(f"LLM {llm_id}")
+    if llm.local != 1:
+        # A catalog entry or a download placeholder never backs a
+        # conversation, and a download creates a new row anyway.
+        raise StateConflictException(
+            f"Cannot save conversation defaults for LLM {llm_id}: it is not downloaded"
+        )
     changes = payload.changes()
     try:
         Model_Defaults_Repository(db).save(llm_id, changes)

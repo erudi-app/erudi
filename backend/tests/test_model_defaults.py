@@ -284,6 +284,7 @@ class TestTheRoutes:
             {"compaction_threshold": 45},
             {"web_search_enabled": "sometimes"},
             {"custom_prompt": "x" * 4097},
+            {"custom_prompt": "x" * 5000},
             {"max_tokens": 512},
         ],
     )
@@ -294,6 +295,23 @@ class TestTheRoutes:
         flat = _flat(client.get(_url(hinted_llm.id)).json())
         assert flat["top_p"] == (0.8, "model")
         assert flat["temperature"] == (1.1, "saved")
+
+    @pytest.mark.parametrize("local", [0, 2])
+    def test_put_refuses_a_model_that_is_not_downloaded(
+        self, client, test_db_session, hinted_llm, local
+    ):
+        # A catalog row (0) or a download placeholder (2) never backs a
+        # conversation and is replaced by a new row once downloaded.
+        hinted_llm.local = local
+        test_db_session.commit()
+
+        response = client.put(_url(hinted_llm.id), json={"reasoning_effort": "high"})
+
+        assert response.status_code == 400, response.text
+        assert response.json()["error"]["type"] == "STATE_CONFLICT"
+        assert _saved_rows(test_db_session, hinted_llm.id) == 0
+        # Reading stays open: it answers what a conversation would start from.
+        assert client.get(_url(hinted_llm.id)).status_code == 200
 
     def test_saving_one_model_never_moves_another(self, client, hinted_llm, mock_llm):
         client.put(_url(hinted_llm.id), json={"reasoning_effort": "high", "temperature": 1.1})

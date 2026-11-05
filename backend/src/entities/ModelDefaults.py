@@ -2,7 +2,9 @@
 
 ``/config global`` saves a conversation's values as the defaults of its model:
 a new conversation on that model starts from them, ``/model`` brings them
-along, and an Arena panel runs at them. One row per model at most, keyed by
+along, and an Arena panel runs at the saved effort, temperature and top_p
+(the Arena has no threshold or instructions, and its web search follows the
+global setting). One row per model at most, keyed by
 the model's id; every value column is nullable and NULL means "not saved"
 (the value then comes from the Settings or the model, see
 ``src.domains.llms.conversation_defaults``).
