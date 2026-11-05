@@ -1119,16 +1119,15 @@ class TestConversationService:
         assert messages[1].trace is not None
         assert not any(e.get("t") == "memory_warning" for e in messages[1].trace)
 
-    @pytest.mark.parametrize(
-        "reload_event", [{"t": "memory_reload"}, {"t": "memory_reload", "reason": "idle"}]
-    )
+    @pytest.mark.parametrize("reason", ["memory", "idle", "manual"])
     async def test_memory_reload_reaches_the_wire_but_never_the_trace(
-        self, test_db_session, mock_llm, monkeypatch, reload_event
+        self, test_db_session, mock_llm, monkeypatch, reason
     ):
-        """The memory brake (or, with ``reason: "idle"``, the idle timeout)
-        unloaded the model: the reload is announced on the wire as is, before
-        the answer, and never persisted -- it describes this machine at that
-        moment, not the conversation."""
+        """The memory brake (``memory``), the idle delay (``idle``) or the
+        user's Unload button (``manual``) unloaded the model: the reload is
+        announced on the wire as is, before the answer, and never persisted
+        -- it describes this machine at that moment, not the conversation."""
+        reload_event = {"t": "memory_reload", "reason": reason}
         monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
         service = ConversationService(test_db_session, InMemorySaver())
         conversation = service.create_conversation(

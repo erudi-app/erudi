@@ -774,3 +774,35 @@ def test_no_warning_respawn_when_the_idle_reap_is_near(world):
     )
     assert CPU_Engine.brake_point("idle") == BrakeOutcome()
     assert len(world.spawns) == 1
+
+
+def test_with_the_idle_delay_at_never_the_brake_still_respawns_while_away(world, monkeypatch):
+    """Never means no idle reap is coming: the brake's warning respawn is not
+    held back for one, however long the user has been away."""
+    monkeypatch.setattr(CPU_Engine, "_max_idle_time", CPU_Engine._max_idle_time)
+    CPU_Engine.set_idle_unload_minutes(0)
+    _load(world)
+    world.level = 2
+    world.damage = 64 * MIB
+    CPU_Engine.brake_point("turn_end")
+    CPU_Engine._model["brake"].last_sample_at -= mb.BRAKE_IDLE_INTERVAL_S
+    CPU_Engine._last_used = datetime.now() - timedelta(hours=2)
+    outcome = CPU_Engine.brake_point("idle")
+    assert outcome.action == "respawn"
+    assert len(world.spawns) == 2
+    assert CPU_Engine._model["context_tokens"] == int(W * mb.SHRINK_FACTOR)
+
+
+async def test_a_manual_unload_keeps_the_window_memory_like_an_idle_reap(world):
+    """The header's Unload button goes through the same cleanup as the idle
+    reap: a window the brake reduced recently stays reduced at the next load."""
+    _load(world)
+    CPU_Engine._window_memory["erudi-7"] = {"cap": 20_480, "faulty": 30_720, "at": time.time()}
+    assert await CPU_Engine.unload() == 7
+    assert CPU_Engine._model is None
+    assert CPU_Engine._idle_unload == {"model_id": 7, "reason": "manual"}
+    assert "erudi-7" in CPU_Engine._window_memory
+    handle = _load(world)
+    assert handle["context_tokens"] == 20_480
+    assert handle["brake"].cap == 20_480
+    CPU_Engine._idle_unload = None

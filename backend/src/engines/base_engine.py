@@ -75,6 +75,13 @@ _NO_NVIDIA_DRIVER_ERRORS = frozenset({"NVMLError_LibraryNotFound", "NVMLError_Dr
 GENERATION_BUSY_WAIT_S = 2.0
 _GENERATION_BUSY_POLL_S = 0.05
 
+# Why an unload left a reload record (``BaseEngine._idle_unload``): the idle
+# delay ran out, or the user pressed Unload. The next turn's ``memory_reload``
+# event carries it as its ``reason`` (the memory brake's own reloads say
+# ``memory``).
+UNLOAD_REASON_IDLE = "idle"
+UNLOAD_REASON_MANUAL = "manual"
+
 
 class _GenerationLock(asyncio.Lock):
     """The engine's generation lock, with its ``demand``: how many holders
@@ -233,7 +240,9 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         _generation_ended_at: ``time.monotonic()`` when the last generation
             released the lock (immune to a wall-clock jump).
         _cleanup_task: Async task monitoring idle time.
-        _max_idle_time: Seconds before automatic memory cleanup (default: 300).
+        _max_idle_time: Seconds of idle before automatic memory cleanup, or
+            None to never unload an idle model. 300 until the lifespan applies
+            the Settings delay (``set_idle_unload_minutes``).
         MODEL_MAPPING: Dictionary mapping model architectures to classes.
 
     Context windows -- two numbers that must never be confused:
@@ -282,13 +291,18 @@ class BaseEngine(ABC, metaclass=EngineMeta):
 
     # --- Lifecycle management ---
     _cleanup_task = None
-    _max_idle_time = 300  # 5 min
-    # What the last idle-timeout reap unloaded (``{"model_id": ...}``), so the
-    # next turn for that model can say why it reloads (``take_idle_reload``).
-    # Only ``_cleanup_tick`` writes it; every other ``cleanup()`` (delete,
-    # shutdown, the brake's unload) clears it. A model switch does not call
-    # ``cleanup()``: ``take_idle_reload`` drops a record found while a model
-    # is loaded, which is what keeps a switch from being read as an idle reap.
+    # The Settings idle delay in seconds (five minutes by default), None for
+    # "Never". Written on the engine class that runs, by the lifespan and by
+    # the settings PUT (``set_idle_unload_minutes``).
+    _max_idle_time: ClassVar[Optional[int]] = 300
+    # What the last idle-delay reap or manual unload unloaded, and why
+    # (``{"model_id": ..., "reason": "idle" | "manual"}``), so the next turn
+    # for that model can say why it reloads (``take_idle_reload``). Only
+    # ``_cleanup_tick`` and ``unload`` write it; every other ``cleanup()``
+    # (delete, shutdown, the brake's unload) clears it. A model switch does
+    # not call ``cleanup()``: ``take_idle_reload`` drops a record found while
+    # a model is loaded, which is what keeps a switch from being read as an
+    # unload.
     _idle_unload: ClassVar[Optional[dict]] = None
 
     # HF library tag identifying THIS engine's runnable format ("mlx" / "gguf").
@@ -991,10 +1005,26 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         # acquires too, so cleanup cannot run while a generation holds it.
         # The tick's pre-check reads this without the lock, so another thread
         # may run `cleanup()` at any moment: `_last_used` is read once.
+        # A delay of None is the Settings "Never": an idle model stays.
         last_used = cls._last_used
-        if last_used is None or cls._model is None:
+        max_idle = cls._max_idle_time
+        if last_used is None or cls._model is None or max_idle is None:
             return False
-        return datetime.now() - last_used > timedelta(seconds=cls._max_idle_time)
+        return datetime.now() - last_used > timedelta(seconds=max_idle)
+
+    @classmethod
+    def set_idle_unload_minutes(cls, minutes: int) -> None:
+        """Apply the Settings idle delay to this engine class: ``minutes`` of
+        idle before the model is unloaded, 0 for never.
+
+        Called on the engine that actually runs (``config.LLM_Engine``, after
+        the lifespan's CUDA-to-CPU swap) at boot and on every settings PUT
+        that carries the delay, so a change applies without a relaunch. The
+        next idle tick (every ``_cleanup_interval_s``) reads it.
+        """
+        cls._max_idle_time = minutes * 60 if minutes else None
+        delay = f"{minutes} min" if minutes else "never"
+        logger.info(f"[{cls.__name__}] Idle unload delay: {delay}")
 
     @classmethod
     def _should_not_reload_model(cls, llm_id: str) -> bool:
@@ -1176,37 +1206,71 @@ class BaseEngine(ABC, metaclass=EngineMeta):
             return
         async with cls._acquire_generation_lock():
             if cls._should_cleanup():
-                reaped_id = cls._model_id
-                await asyncio.to_thread(cls.cleanup)
-                # After cleanup(), which clears the record: only this path
-                # leaves one.
-                cls._idle_unload = {"model_id": reaped_id}
+                await cls._unload_and_record(UNLOAD_REASON_IDLE)
 
     @classmethod
-    def take_idle_reload(cls, llm_id: Any) -> bool:
-        """Whether this turn reloads ``llm_id`` after an idle-timeout reap.
+    async def _unload_and_record(cls, reason: str) -> None:
+        """Unload the model and leave the reload record with ``reason``.
 
-        True once (the record is consumed) when the reap unloaded ``llm_id``
-        and nothing is loaded. A record found while a model is loaded is stale
-        (the title request of a new conversation reloaded it first) and is
-        dropped. Identity is ``llm.id``, as in ``_should_not_reload_model``.
+        The caller holds the generation lock. ``cleanup()`` (which kills the
+        child) runs off the event loop; the record is written after it,
+        since ``cleanup()`` clears it.
+        """
+        unloaded_id = cls._model_id
+        await asyncio.to_thread(cls.cleanup)
+        cls._idle_unload = {"model_id": unloaded_id, "reason": reason}
+
+    @classmethod
+    async def unload(cls) -> Optional[Any]:
+        """Unload the model now (the header's Unload button, #619).
+
+        Taken through ``try_generation_guard``: while an answer, a reload, a
+        brake sample or the idle check holds the engine it is refused with
+        ``EngineBusyException`` (409) and nothing is interrupted. Otherwise
+        the model goes exactly as on an idle reap (same ``cleanup()``, so on
+        llama.cpp the per-model window memory survives and the next load
+        keeps a recent brake reduction), and the record says ``manual`` so
+        the next turn of that model says the user unloaded it.
+
+        Returns:
+            The unloaded model's id, or None when nothing was loaded (a no-op
+            that leaves any earlier record alone).
+        """
+        async with cls.try_generation_guard():
+            if cls._model is None:
+                return None
+            unloaded_id = cls._model_id
+            await cls._unload_and_record(UNLOAD_REASON_MANUAL)
+        logger.info(f"Unloaded model {unloaded_id} on request")
+        return unloaded_id
+
+    @classmethod
+    def take_idle_reload(cls, llm_id: Any) -> Optional[str]:
+        """Why this turn reloads ``llm_id``, when an idle reap or a manual
+        unload unloaded it: ``"idle"`` or ``"manual"``, else None.
+
+        Returned once (the record is consumed) when the unload took
+        ``llm_id`` and nothing is loaded. A record found while a model is
+        loaded is stale (the title request of a new conversation reloaded it
+        first) and is dropped. Identity is ``llm.id``, as in
+        ``_should_not_reload_model``.
         """
         record = cls._idle_unload
         if not isinstance(record, dict):
-            return False
+            return None
         if cls._model is not None:
             cls._idle_unload = None
-            return False
+            return None
         if record.get("model_id") != llm_id:
-            return False
+            return None
         cls._idle_unload = None
-        return True
+        return record.get("reason")
 
-    # Seconds between idle-cleanup ticks. The idle threshold stays 300 s; a
-    # 30 s tick releases an idle model about 300-330 s after its last use
-    # instead of up to 600 s (the monitor sleeps after each tick, and a reap
-    # can queue behind a generation or a pressure tick). A class attribute so
-    # tests can run the monitor loop at speed.
+    # Seconds between idle-cleanup ticks: a model idle past the delay is
+    # released within one tick of it (300-330 s at the default five minutes;
+    # the monitor sleeps after each tick, and a reap can queue behind a
+    # generation or a pressure tick). A class attribute so tests can run the
+    # monitor loop at speed.
     _cleanup_interval_s: ClassVar[float] = 30.0
 
     @classmethod
