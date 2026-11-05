@@ -324,6 +324,7 @@ cd frontend
 npm run lint:check
 npm run format:check
 npm run test:run
+npm run build
 ```
 
 **Full-app smoke** (`.github/workflows/app-build-smoke.yml`) also blocks the merge.
