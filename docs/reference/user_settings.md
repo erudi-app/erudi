@@ -1,8 +1,19 @@
 # User Settings
 
 Persisted user preferences exposed over the `/erudi/user_settings` routes: the global
-web-search default, the interface language, the automatic-update preference, the
+web-search default, the interface language, the three update switches, the
 inference backend, the default reasoning effort and the default compaction threshold.
+
+The three update switches are read by the Electron main process, which owns
+electron-updater; the renderer reads them here and hands them over at launch and on every
+change. `auto_update_enabled` is **Check for updates** (`true` by default): the app asks
+the update feed for a new version at launch, then every 4 hours, and shows a banner when
+there is one. `auto_download_updates` (**Download updates automatically**) and
+`auto_install_updates` (**Install downloaded updates when I quit**) are opt-ins, `false`
+by default and `false` after the migration that added them, whatever automatic updates did
+before. Both only act while the check is on: with `auto_update_enabled` off they are inert,
+and the Settings page disables them. The manual **Update Erudi** card works whatever the
+three say. See [What leaves your machine](../privacy.md).
 
 `default_reasoning_effort` (`none`, `low`, `medium`, `high`, `xhigh`, `medium` by default)
 is what a NEW conversation starts at and what an arena panel runs at, on every model that has

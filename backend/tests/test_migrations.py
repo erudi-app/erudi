@@ -421,6 +421,64 @@ def test_model_defaults_table_lands_on_a_populated_database(fresh_cluster):
 
 
 @pytest.mark.integration
+@pytest.mark.parametrize("check_for_updates", [True, False])
+def test_update_opt_ins_land_off_on_a_populated_database(fresh_cluster, check_for_updates):
+    # #563: downloading and installing become two opt-ins. An install updated
+    # from 1.1.3 starts with both off whatever automatic updates did before,
+    # and its old switch keeps its value as "Check for updates".
+    url = fresh_cluster.sqlalchemy_url
+    cfg = _alembic_config(url)
+    command.upgrade(cfg, "e2c7a9f4b6d1")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO user_settings (web_search_enabled, auto_update_enabled) "
+                    "VALUES (true, :check)"
+                ),
+                {"check": check_for_updates},
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO llms (name, local, link, type, quantized, is_base, category, "
+                    "is_attached_to_kb) VALUES ('Old', 1, 'org/old', 'qwen', true, false, "
+                    "'general', false)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO conversations (llm_id, name, web_search_enabled) "
+                    "SELECT id, 'Old chat', false FROM llms WHERE link='org/old'"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    run_migrations(fresh_cluster)
+
+    assert _alembic_version(url) == _head_revision(cfg)
+    command.check(cfg)
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(
+                text(
+                    "SELECT web_search_enabled, auto_update_enabled, auto_download_updates, "
+                    "auto_install_updates FROM user_settings"
+                )
+            ).one()
+            columns = {c["name"]: c for c in inspect(conn).get_columns("user_settings")}
+            assert conn.execute(text("SELECT count(*) FROM conversations")).scalar() == 1
+    finally:
+        engine.dispose()
+    assert row == (True, check_for_updates, False, False)
+    for name in ("auto_download_updates", "auto_install_updates"):
+        assert columns[name]["nullable"] is False, name
+        assert str(columns[name]["type"]) == "BOOLEAN", name
+
+
+@pytest.mark.integration
 def test_backup_database_writes_a_dump(fresh_cluster):
     # pg_dump (custom format) of the LIVE cluster produces a non-empty snapshot.
     engine = create_engine(fresh_cluster.sqlalchemy_url)

@@ -406,6 +406,8 @@ class TestUserSettingsCompactionThreshold:
             "web_search_enabled": False,
             "language": "fr",
             "auto_update_enabled": True,
+            "auto_download_updates": False,
+            "auto_install_updates": False,
             "inference_backend": "auto",
             "default_reasoning_effort": "medium",
             "default_compaction_threshold": 60,
