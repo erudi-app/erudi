@@ -4,7 +4,7 @@ Why the agent's LangGraph stream is not iterated in the request's own task
 ---------------------------------------------------------------------------
 Starlette (1.3.1, anyio task group) delivers a client disconnect as an anyio
 cancellation, and anyio RE-DELIVERS it at every await of the cancelled scope.
-langgraph (1.2.11) unwinds a run in ``AsyncPregelLoop.__aexit__`` by running
+langgraph (1.2.14) unwinds a run in ``AsyncPregelLoop.__aexit__`` by running
 its exit stack in a separate task that it awaits; a re-delivered cancellation
 cancels that task before it even starts, so ``AsyncBackgroundExecutor`` never
 cancels the in-flight node. The model call inside that node then keeps

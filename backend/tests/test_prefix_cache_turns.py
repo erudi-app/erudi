@@ -475,7 +475,7 @@ async def test_an_anyio_cancelled_consumer_releases_the_guard_and_flags_the_chil
 
 
 async def test_an_anyio_cancelled_consumer_closes_the_in_flight_node_inside_the_guard(monkeypatch):
-    """langgraph 1.2.11 unwinds ``AsyncPregelLoop.__aexit__`` in a separate
+    """langgraph 1.2.14 unwinds ``AsyncPregelLoop.__aexit__`` in a separate
     task it awaits; a cancellation anyio re-delivers would cancel that task
     before it runs and leave the model node streaming after the guard is
     released. The runner consumes LangGraph from a child task, which gets ONE
