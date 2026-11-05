@@ -210,6 +210,19 @@ def _hints_of(llm: Any) -> Dict[str, Any]:
     return hints if isinstance(hints, dict) else {}
 
 
+def trained_context_window(llm: Any) -> Optional[int]:
+    """The model's TRAINED context window in tokens, or None when unknown.
+
+    A fact of the artifact (``generation_hints.context_length``: the GGUF
+    metadata for llama.cpp entries, ``config.json`` elsewhere): it survives
+    restarts and machines, unlike the window a loaded child was allocated.
+    """
+    window = _hints_of(llm).get("context_length")
+    if isinstance(window, int) and not isinstance(window, bool) and window > 0:
+        return window
+    return None
+
+
 def max_tokens_cap(context_length: Any, engine: Any = None) -> int:
     """``min(model context window, engine context window)``, both optional.
 

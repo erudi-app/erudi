@@ -376,3 +376,52 @@ class CompactionResponse(BaseModel):
     summarized: int
     reason: Optional[str] = None
     summary: Optional[str] = None
+
+
+class ContextCategories(BaseModel):
+    """The context panel's blocks, in estimated tokens.
+
+    ``system_prompt + tools + messages + summary`` is what the next request
+    would carry (``used``); ``free`` is what is left below the compaction
+    threshold and ``autocompaction_buffer`` the reserve above it, so the six
+    add up to the working window while ``used`` fits in it.
+    """
+
+    system_prompt: int
+    tools: int
+    messages: int
+    summary: int
+    free: int
+    autocompaction_buffer: int
+
+
+class ContextWindow(BaseModel):
+    """The window the counts are a share of.
+
+    ``working`` is the denominator: the allocated window folded with the
+    memory ceiling when this conversation's model is loaded
+    (``model_loaded``), the trained window otherwise; ``None`` when neither is
+    known. ``allocated`` exists only while the model is loaded;
+    ``reduced_by_memory`` says this computer's memory bounds it.
+    """
+
+    working: Optional[int] = None
+    allocated: Optional[int] = None
+    trained: Optional[int] = None
+    reduced_by_memory: bool
+    model_loaded: bool
+
+
+class ContextUsageResponse(BaseModel):
+    """``GET /conversations/{id}/context``: a snapshot, never stored.
+
+    ``kb_excerpts_excluded``: an assistant that searches its knowledge base on
+    every question is counted without the excerpts a question retrieves.
+    ``over_window``: the next request would not fit the window (it will be
+    summarized first).
+    """
+
+    categories: ContextCategories
+    window: ContextWindow
+    kb_excerpts_excluded: bool
+    over_window: bool

@@ -97,7 +97,7 @@ from src.agents.token_accounting import (
     stale_result_copy,
     weighted_cost,
 )
-from src.database.generation_hints import resolve_sampling_defaults
+from src.database.generation_hints import resolve_sampling_defaults, trained_context_window
 from src.agents.think_splitter import ThinkSplitter
 from src.core import config
 from src.core.exceptions import (
@@ -2705,6 +2705,88 @@ class AgentRunner:
         await agent.aupdate_state(run_config, {"messages": update}, as_node="model")
         await reset_prefix_after_rewrite(engine)
         await persist_marker(event)
+
+    async def acontext_usage(
+        self,
+        *,
+        llm,
+        thread_id: str,
+        system_prompt: str,
+        tools: list,
+        compaction_threshold: int,
+    ) -> dict:
+        """What the conversation's NEXT request would carry, by category,
+        against the window it works with (``/context``, #608).
+
+        Read only: no lock, no model load, no write. ``used`` is
+        ``project_next_request`` over the COMMITTED thread with ``system_prompt``
+        and ``tools`` as O -- the counting the compaction and the amber
+        warning use, in real tokens, weighed once on the whole set and then
+        split: the system prompt and the tool schemas share O's weight in
+        proportion to their estimates, and the previous summary is never
+        inside the messages.
+
+        ``W`` is the working window (``_compaction_windows``: the allocated
+        window folded with the memory ceiling) when this conversation's
+        model is the loaded one, else the model's trained window; ``T =
+        trigger_tokens(W, compaction_threshold)``. ``free = max(0, T - used)``
+        and the auto-compaction reserve ``max(0, W - max(T, used))``, so the
+        blocks add up to ``W`` while ``used <= W`` (``over_window`` past it).
+        Unknown ``W``: both are 0. ``reduced_by_memory`` says the machine's
+        memory bounds the loaded child's window (``compaction_reason``).
+        """
+        engine = config.LLM_Engine
+        messages = await self._committed_messages({"configurable": {"thread_id": thread_id}})
+        trained = trained_context_window(llm)
+        probe = getattr(engine, "loaded_child_for", None)
+        loaded = bool(probe(getattr(llm, "id", None))) if callable(probe) else False
+        allocated, working, reduced = None, None, False
+        if loaded:
+            budget = await run_in_threadpool(MemoryBudget.from_engine, engine)
+            allocated, working = self._compaction_windows(budget)
+            reduced = compaction_reason(engine, working, allocated) == COMPACTION_REASON_MEMORY
+        window = working if _known_window(working) else trained
+        overhead = request_overhead(system_prompt, None, "", tools)
+        projection = project_next_request(
+            messages,
+            window,
+            overhead=overhead,
+            allocated_window=allocated,
+            compaction_threshold=compaction_threshold,
+        )
+        system_tokens = overhead_tokens(
+            RequestOverhead(
+                fixed_est=request_overhead(system_prompt).fixed_est,
+                fixed_text=overhead.fixed_text,
+            ),
+            projection.ratio,
+            dense=COUNTER_DENSE_TOKENS,
+            weight_floor=COUNTER_WEIGHT_FLOOR,
+        )
+        used = projection.conversation_tokens
+        free = buffer = 0
+        if _known_window(window):
+            trigger = trigger_tokens(window, compaction_threshold)
+            free = max(0, trigger - used)
+            buffer = max(0, window - max(trigger, used))
+        return {
+            "categories": {
+                "system_prompt": system_tokens,
+                "tools": projection.overhead_tokens - system_tokens,
+                "messages": projection.message_tokens,
+                "summary": projection.summary_tokens,
+                "free": free,
+                "autocompaction_buffer": buffer,
+            },
+            "window": {
+                "working": window,
+                "allocated": allocated,
+                "trained": trained,
+                "reduced_by_memory": reduced,
+                "model_loaded": loaded,
+            },
+            "over_window": _known_window(window) and used > window,
+        }
 
     @staticmethod
     async def _brake_turn_end(engine: Any) -> None:

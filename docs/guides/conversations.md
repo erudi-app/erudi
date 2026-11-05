@@ -487,6 +487,51 @@ the separator could not be saved.", one error with its traceback). A client that
 the summary releases the model with nothing written; once the stores are being written, they are
 finished first.
 
+### Context usage
+
+```bash
+curl http://127.0.0.1:27182/erudi/conversations/42/context
+```
+
+What the conversation's **next** request would carry (`/context` in the composer), a snapshot the
+panel renders and never stores:
+
+```json
+{
+  "categories": {"system_prompt": 412, "tools": 0, "messages": 2310, "summary": 180,
+                 "free": 3651, "autocompaction_buffer": 1639},
+  "window": {"working": 8192, "allocated": 8192, "trained": 40960,
+             "reduced_by_memory": false, "model_loaded": true},
+  "kb_excerpts_excluded": false,
+  "over_window": false
+}
+```
+
+The counts are estimates in real tokens, from the same projection the compaction trigger and the
+memory notice use (`project_next_request`): the committed thread, past knowledge-base and web
+results as the short marker that replaces them in every request, an empty next question, the
+weights frozen once on the whole set and then split by category — the system prompt and the tool
+schemas share the overhead's weight, and the previous summary is never counted inside the
+messages. The system prompt is planned the way a turn plans it: the conversation's own
+instructions (its stored value), its starred messages, its reasoning-effort section, and the tools
+its mode carries. An assistant that searches its knowledge base on every question is counted in
+that mode — its knowledge-base instructions, no tools — without the excerpts a question retrieves
+(`kb_excerpts_excluded: true`); an assistant that searches through a tool counts the tool and the
+markers of its earlier searches.
+
+`used` is `system_prompt + tools + messages + summary`. The denominator `W` is the working window
+when this conversation's model is the loaded one — the allocated window, folded with the memory
+ceiling on Apple Silicon; `reduced_by_memory` says this computer's memory bounds it — and the
+model's trained window otherwise (`model_loaded: false`; the window this computer allows is known
+once the model loads). With `T` the compaction trigger at the conversation's threshold
+(`trigger_tokens(W, pct)`), `free = max(0, T − used)` and `autocompaction_buffer = max(0, W −
+max(T, used))`: the six blocks add up to `W` while the request fits. Past the threshold `free` is 0
+and the next turn compacts first; past the window (`over_window: true`) every block is used. With
+no window known at all, both are 0.
+
+The request takes no lock, never loads the model and never writes: a conversation whose model was
+deleted is a 409 (`detail.reason: "no_model"`) and is never re-assigned one.
+
 ### Record a failed generation
 
 ```bash

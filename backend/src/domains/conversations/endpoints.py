@@ -45,6 +45,7 @@ Endpoints:
     - POST /{conversation_id}/query → Stream AI response
     - POST /{conversation_id}/generate_title → Stream title generation
     - POST /{conversation_id}/compact → Summarize earlier messages now
+    - GET /{conversation_id}/context → Context usage of the next request
     - GET /{conversation_id}/fetch_messages → List messages
     - PATCH /messages/{message_id}/star → Star/unstar message
 
@@ -100,6 +101,7 @@ from src.database.core import get_db
 from src.agents.checkpoint import get_checkpointer
 from src.domains.conversations.schemas import (
     CompactionResponse,
+    ContextUsageResponse,
     ConversationCreate,
     ConversationQuery,
     ConversationResponse,
@@ -640,6 +642,28 @@ async def compact_conversation(
             f"nothing was changed: {exc.trace}"
         )
         return app_error_response(exc)
+
+
+@router.get("/{conversation_id}/context", response_model=ContextUsageResponse)
+async def get_context_usage(
+    conversation_id: int,
+    service: ConversationService = Depends(get_conversation_service),
+):
+    """The conversation's context usage (``/context``, #608): a snapshot.
+
+    What the next request would carry -- system prompt, tool schemas,
+    messages (past search results as their short placeholder) and the
+    previous summary -- in estimated tokens, counted as the compaction counts
+    them, plus the free space below the compaction threshold and the
+    auto-compaction reserve above it, against the window the conversation
+    works with (allocated when its model is loaded, trained otherwise).
+    Never loads the model, never waits for it, never writes anything.
+
+    Errors: 404 unknown conversation; 409 ``STATE_CONFLICT`` when the
+    conversation has no model (``detail.reason: "no_model"``, never
+    re-assigned).
+    """
+    return await service.context_usage(conversation_id)
 
 
 @router.post("/{conversation_id}/store_error_message")

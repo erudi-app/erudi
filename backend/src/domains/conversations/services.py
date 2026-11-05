@@ -828,6 +828,48 @@ class ConversationService:
         )
         return {key: event[key] for key in ("summarized", "reason", "summary") if key in event}
 
+    async def context_usage(self, conversation_id: int) -> dict:
+        """The conversation's context usage for the panel (``/context``, #608).
+
+        The NEXT request is planned the way a turn plans it -- the system
+        prompt with the conversation's own instructions (its column), its
+        starred messages and its reasoning-effort section, the tools its
+        mode carries -- without retrieving anything (``plan_turn``'s
+        ``context_count``): an assistant that searches its knowledge base on
+        every question is counted in that mode with no excerpts, which
+        ``kb_excerpts_excluded`` says. The runner counts it
+        (``AgentRunner.acontext_usage``). Read only: the conversation is
+        never re-assigned a model (409 asking to pick one first), nothing is
+        committed, the model is never loaded.
+        """
+        conversation, llm = await run_in_threadpool(
+            self._load_conversation_and_llm_read_only, conversation_id
+        )
+        starred = await run_in_threadpool(self.message_repo.get_starred_messages, conversation_id)
+        effort_plan = await run_in_threadpool(
+            plan_reasoning_effort, llm, conversation.reasoning_effort
+        )
+        plan = await run_in_threadpool(
+            plan_turn,
+            llm,
+            question="",
+            # Never called: the count retrieves nothing.
+            retrieve=list,
+            custom_prompt=conversation.custom_prompt,
+            starred_messages=starred,
+            web_search_enabled=bool(conversation.web_search_enabled),
+            effort_section=effort_plan.prompt_section,
+            context_count=True,
+        )
+        usage = await self.runner.acontext_usage(
+            llm=llm,
+            thread_id=str(conversation_id),
+            system_prompt=plan.system_prompt,
+            tools=plan.tools,
+            compaction_threshold=conversation.compaction_threshold,
+        )
+        return {**usage, "kb_excerpts_excluded": plan.systematic_kb}
+
     def _load_conversation_and_llm_read_only(self, conversation_id: int):
         """The conversation and its model, read only: never re-assigned, never
         committed (unlike ``_load_conversation_and_llm``). A conversation
