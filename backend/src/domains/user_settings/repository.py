@@ -9,7 +9,6 @@ from typing import Optional
 from sqlalchemy.orm import Session
 
 from src.agents.reasoning_effort import DEFAULT_REASONING_EFFORT
-from src.engines.working_window import DEFAULT_COMPACTION_THRESHOLD
 from src.entities.UserSettings import (
     DEFAULT_INFERENCE_BACKEND,
     DEFAULT_LANGUAGE,
@@ -112,17 +111,6 @@ class User_Settings_Repository:
         self.db.flush()
         self.db.refresh(settings)
         return settings
-
-    def get_default_compaction_threshold(self) -> int:
-        """The global default compaction threshold, in percent (80 until the
-        user changes it).
-
-        Read-only, like ``get_default_reasoning_effort``: conversation
-        creation must not write, and a missing singleton row IS the default.
-        """
-        settings = self.db.query(UserSettings).first()
-        value = settings.default_compaction_threshold if settings else None
-        return value or DEFAULT_COMPACTION_THRESHOLD
 
     def set_default_compaction_threshold(self, settings: UserSettings, value: int) -> UserSettings:
         """Update the global default compaction threshold (flushed, not committed).

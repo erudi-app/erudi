@@ -36,11 +36,9 @@ def _conversation(db, llm_id, **overrides):
 @pytest.mark.integration
 class TestConversationEndpointGaps:
     def test_create_with_unknown_llm_rolls_back(self, client):
-        # FK violation surfaces as a wrapped DatabaseException (500), and the
+        # Creation resolves its values for the model first (#609), so an
+        # unknown model is a clean 404 even when every value is sent, and the
         # endpoint's rollback branch must leave the session usable afterwards.
-        # Explicit sampling values keep the request off the model lookup (#388:
-        # omitted values resolve from the Llm row first, which is a clean 404 --
-        # see test_sampling_contracts) so the FK path itself stays exercised.
         resp = client.post(
             "/erudi/conversations/",
             json={
@@ -50,7 +48,7 @@ class TestConversationEndpointGaps:
                 "max_tokens": 64,
             },
         )
-        assert resp.status_code == 500
+        assert resp.status_code == 404
         assert client.get("/erudi/conversations/").status_code == 200
         assert client.post("/erudi/conversations/", json={"llm_id": 987654}).status_code == 404
 

@@ -374,8 +374,8 @@ async def create_conversation(
         db.commit()
         logger.info(
             f"Conversation created: id={conv.id}, llm_id={payload.llm_id}, "
-            f"temperature={payload.temperature}, top_p={payload.top_p}, "
-            f"max_tokens={payload.max_tokens}, "
+            f"temperature={conv.temperature}, top_p={conv.top_p}, "
+            f"max_tokens={conv.max_tokens}, "
             f"web_search_enabled={conv.web_search_enabled}, "
             f"reasoning_effort={conv.reasoning_effort}, "
             f"compaction_threshold={conv.compaction_threshold}"
@@ -464,8 +464,11 @@ async def update_conversation(
 
     Note:
         Only provided fields are updated. Omitted fields remain unchanged.
+        An ``llm_id`` different from the stored one switches the model and
+        brings its saved values and recommended sampling
+        (``ConversationService.update_conversation`` has the rule); the
+        response is the updated conversation.
     """
-    """Update conversation fields (name and llm_id)."""
     try:
         result = await run_in_threadpool(
             service.update_conversation,
