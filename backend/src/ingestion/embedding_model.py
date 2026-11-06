@@ -121,8 +121,8 @@ def resolve_embedding_device() -> Optional[str]:
 
     Apple Silicon is the primary desktop platform, so MPS stays preferred
     whenever Metal genuinely works. ``is_available()`` is only a support flag
-    though: a virtualised macOS host (the macOS CI runner) answers True
-    and then refuses the model's ~366 MiB allocation, and a real Mac under
+    though: a virtualised macOS host can answer True and then refuse
+    the model's ~366 MiB allocation, and a real Mac under
     memory pressure fails the same way (#335). ``load_sentence_transformer``
     turns that failure into this cached CPU verdict.
 

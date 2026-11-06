@@ -3,8 +3,8 @@
 Apple Silicon is the primary desktop platform, so the embedding model must keep
 loading on MPS whenever Metal actually works. But ``torch.backends.mps.is_available()``
 answers "this build/OS supports MPS", not "an allocation will succeed": a
-virtualised macOS host (the macOS CI runner) reports available and then
-refuses the 366 MiB the model needs, and a real Mac under memory pressure fails
+virtualised macOS host can report available and then refuse the 366 MiB
+the model needs, and a real Mac under memory pressure fails
 the same way. That failure is recoverable, so it must degrade to CPU with a
 warning instead of taking the Knowledge Base down.
 

@@ -277,12 +277,17 @@ DLLs. Real hardware in the QA pass is the first thing that runs either.
 The `mac-arm` leg runs on a newer macOS than the app's floor
 (`mac.minimumSystemVersion` in `electron-builder.yml`, 14.0), and pip prefers
 the wheels built for the runner's own macOS (mlx, mlx-metal and orjson publish
-one per release). So the leg downloads the requirements with
-`--only-binary=:all: --platform macosx_<floor>_arm64` into a wheelhouse and
-installs from it alone, then `scripts/ci/check_macos_floor.sh backend/dist <floor>`
+wheels built for recent macOS releases). So the leg installs through
+`scripts/ci/install_backend_requirements.sh`, which downloads the requirements
+with `--only-binary=:all: --platform macosx_<floor>_arm64` into a wheelhouse and
+installs from it alone. Restricting pip to the floor's wheels could make it fall
+back to an older release of an unpinned dependency, so the script also resolves
+the file natively (`pip install --dry-run --report`) and fails when an installed
+version differs from it. Then `scripts/ci/check_macos_floor.sh backend/dist <floor>`
 reads the minimum macOS of every Mach-O file in the frozen backend (`otool -l`)
-and fails the leg on any file above the floor. `app-build-smoke.yml` does the
-same on its macOS leg.
+and fails the leg on any file above the floor. `app-build-smoke.yml` calls the
+same two scripts on its macOS leg, so the smoke gate installs what a release
+installs.
 
 The CUDA legs inject `-c.publish.channel=cuda` (plus a distinct artifact name)
 so the GPU builds feed a separate `cuda` auto-update channel while the CPU

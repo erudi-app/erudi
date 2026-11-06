@@ -8,8 +8,10 @@
 # (mac.minimumSystemVersion). The frozen backend inherits the floor of every
 # wheel pip picked on the build runner, and pip prefers the wheel built for the
 # runner's own macOS: on a newer runner it takes a newer wheel (mlx, mlx-metal
-# and orjson publish one per macOS release), and the backend then dies at
-# import time on the older systems the installer still accepts. This walks every
+# and orjson publish wheels built for recent macOS releases), and the backend
+# then dies at import time on the older systems the installer still accepts.
+# scripts/ci/install_backend_requirements.sh installs the floor's wheels; this
+# checks the result. It walks every
 # Mach-O file (`file` says "Mach-O"; universal binaries included, each slice
 # read), reads its minimum macOS from `otool -l` (LC_BUILD_VERSION `minos`, or
 # LC_VERSION_MIN_MACOSX `version` for older binaries), and lists every file
@@ -53,10 +55,20 @@ checked=0
 unversioned=0
 too_new=()
 highest=0
+# The walk goes to a file first so a failing `find` or `file` stops the check
+# instead of leaving a partial one that passes.
+listing=$(mktemp)
+trap 'rm -f "$listing"' EXIT
+if ! find "$dir" -type f -exec file -0 {} + > "$listing"; then
+  echo "error: could not list the files under $dir" >&2
+  exit 2
+fi
+
 # `file -0` prints "<path>\0: <description>\n". For a universal binary it then
 # prints one "<path> (for architecture <arch>): ..." line per slice, which this
 # reads in front of the next path: the path is the last line of what precedes
-# the NUL.
+# the NUL. A path that itself contains a newline is cut at it, so otool cannot
+# open it and the check exits 2 (PyInstaller never writes such names).
 while IFS= read -r -d '' chunk && IFS= read -r description; do
   path=${chunk##*$'\n'}
   case "$description" in
@@ -85,7 +97,7 @@ while IFS= read -r -d '' chunk && IFS= read -r description; do
   if version_gt "$file_min" "$floor"; then
     too_new+=("$file_min  $path")
   fi
-done < <(find "$dir" -type f -exec file -0 {} +)
+done < "$listing"
 
 if [ "$checked" -eq 0 ]; then
   echo "error: no Mach-O file under $dir; nothing was checked" >&2
