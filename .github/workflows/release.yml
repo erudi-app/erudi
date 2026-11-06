@@ -33,7 +33,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14 # Apple Silicon (MLX inference, no llama-server)
+          - os: macos-15 # Apple Silicon (MLX inference, no llama-server)
             variant: mac-arm
             reqs: mac-silicon-prod.txt
             spec: backend-mac-silicon.spec
@@ -140,8 +140,7 @@ jobs:
       # ── Backend: Python deps + PyInstaller ───────────────────────────────────
       - name: Install backend dependencies
         run: |
-          python -m pip install --upgrade pip wheel setuptools
-          pip install -r backend/requirements/entrypoints/prod/${{ matrix.reqs }}
+          bash scripts/ci/install_backend_requirements.sh backend/requirements/entrypoints/prod/${{ matrix.reqs }}
           pip install pyinstaller
 
       # ── Windows/Linux: compile llama-server from the submodule. The variant-aware
@@ -174,6 +173,12 @@ jobs:
 
       - name: Build backend bundle
         run: pyinstaller backend/${{ matrix.spec }} --distpath backend/dist
+
+      # The installer refuses systems below the floor; this refuses a frozen
+      # backend that would not load on the systems the installer accepts.
+      - name: Check the frozen backend's macOS floor
+        if: runner.os == 'macOS'
+        run: bash scripts/ci/check_macos_floor.sh backend/dist "$MACOS_FLOOR"
 
       # backend.spec already refuses to build without llama-server, but it can
       # only check what it was handed: PyInstaller could still drop the file on
