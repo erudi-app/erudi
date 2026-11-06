@@ -27,7 +27,7 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14 # Apple Silicon
+          - os: macos-15 # Apple Silicon
             reqs: mac-silicon-prod.txt
             spec: backend-mac-silicon.spec
             dist_script: dist:mac
@@ -72,10 +72,13 @@ jobs:
           # backend.spec fails hard there, on purpose.
           ERUDI_ALLOW_MISSING_INFERENCE_BINARY: "1"
         run: |
-          python -m pip install --upgrade pip wheel setuptools
-          pip install -r backend/requirements/entrypoints/prod/${{ matrix.reqs }}
+          bash scripts/ci/install_backend_requirements.sh backend/requirements/entrypoints/prod/${{ matrix.reqs }}
           pip install pyinstaller
           pyinstaller backend/${{ matrix.spec }} --distpath backend/dist
+
+      - name: Check the frozen backend's macOS floor
+        if: runner.os == 'macOS'
+        run: bash scripts/ci/check_macos_floor.sh backend/dist "$MACOS_FLOOR"
 
       - name: Build packaged app (unsigned, no publish)
         working-directory: frontend

@@ -44,7 +44,7 @@ jobs:
             reqs: win-cpu.txt
             venv_bin: Scripts
             fail_fast: '-x'
-          - os: macos-14 # Apple Silicon
+          - os: macos-15 # Apple Silicon
             reqs: mac-silicon.txt
             venv_bin: bin
             fail_fast: '-x'
@@ -95,8 +95,8 @@ jobs:
           cd backend
           venv/${{ matrix.venv_bin }}/python -c "from src.main import app; print('OK')"
 
-      # `-m "not mlx_only"` is kept on EVERY leg on purpose, macos-14 included.
-      # macos-14 is the first runner where the mlx_only tests could actually
+      # `-m "not mlx_only"` is kept on EVERY leg on purpose, macos-15 included.
+      # macos-15 is the one runner where the mlx_only tests could actually
       # execute, and they pull a ~280 MB fixture model (mlx_test_model_path in
       # tests/conftest.py). This workflow is here to get signal on the shared
       # suite; adding a model download to CI is a separate decision. Deliberate
