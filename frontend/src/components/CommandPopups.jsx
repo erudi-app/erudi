@@ -1,7 +1,9 @@
 import React from "react";
 import PropTypes from "prop-types";
+import { useTranslation } from "react-i18next";
 import ConfigPopup from "./modals/ConfigPopup";
 import ConfigGlobalPopup from "./modals/ConfigGlobalPopup";
+import ConfirmDialog from "./modals/ConfirmDialog";
 import EffortPopup from "./modals/EffortPopup";
 import ModelPopup from "./modals/ModelPopup";
 
@@ -9,15 +11,27 @@ import ModelPopup from "./modals/ModelPopup";
  * The popups the slash commands open (#585), one at a time: `command` is the
  * `{ name, arg }` being run (from the composer or the header panel), or null.
  * Every popup reads and writes the conversation through `settings` (the
- * useConversationSettings owner); /model hands the picked model to the page.
+ * useConversationSettings owner); /model hands the picked model to the page,
+ * and /compact's confirmation hands the go-ahead to it (`onCompact`, on a
+ * conversation only).
  */
-export default function CommandPopups({ command, onClose, settings, model, models, onPickModel }) {
+export default function CommandPopups({
+  command,
+  onClose,
+  settings,
+  model,
+  models,
+  onPickModel,
+  onCompact,
+}) {
+  const { t } = useTranslation();
   const isOpen = (name, arg = null) => command?.name === name && (command.arg ?? null) === arg;
   const open = {
     config: isOpen("config"),
     configGlobal: isOpen("config", "global"),
     effort: isOpen("effort"),
     model: isOpen("model"),
+    compact: isOpen("compact"),
   };
   return (
     <>
@@ -36,6 +50,19 @@ export default function CommandPopups({ command, onClose, settings, model, model
         currentId={settings.values.llm_id}
         onPick={onPickModel}
       />
+      {onCompact && (
+        <ConfirmDialog
+          isOpen={open.compact}
+          title={t("chat:compactDialog.title")}
+          message={t("chat:compactDialog.body")}
+          confirmLabel={t("chat:compactDialog.confirm")}
+          onConfirm={() => {
+            onClose();
+            onCompact();
+          }}
+          onClose={onClose}
+        />
+      )}
     </>
   );
 }
@@ -47,4 +74,5 @@ CommandPopups.propTypes = {
   model: PropTypes.object,
   models: PropTypes.array.isRequired,
   onPickModel: PropTypes.func.isRequired,
+  onCompact: PropTypes.func,
 };

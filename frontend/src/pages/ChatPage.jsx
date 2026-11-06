@@ -1,5 +1,5 @@
 import React, { useEffect, useState, useCallback } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
 import ChatCollapsibleSection from "../components/ChatCollapsibleSection";
@@ -19,19 +19,23 @@ import { createLogger } from "../utils/logger";
 import { conversationPath } from "../utils/routes";
 import { canAttachImages } from "../utils/modelCapabilities";
 import { hasMissingWeights } from "../utils/modelWeights";
-import { COMMAND_SCOPES, commandsFor } from "../utils/slashCommands";
+import { COMMAND_SCOPES, commandsFor, commandsOutside } from "../utils/slashCommands";
 import useConversationSettings, { DRAFT } from "../shared/hooks/useConversationSettings";
+import CommandNotice from "../components/CommandNotice";
 
 const log = createLogger("ChatPage");
 
 // The slash commands the new-conversation page offers: they edit the draft
-// the conversation is created from.
+// the conversation is created from. /compact and /context need a
+// conversation: typed here, they send nothing and a notice says why.
 const COMMANDS = commandsFor(COMMAND_SCOPES.DRAFT);
+const NEEDS_CONVERSATION = commandsOutside(COMMAND_SCOPES.DRAFT);
 
 export default function ChatPage() {
   const { t } = useTranslation();
   const navigate = useNavigate();
   const [searchParams] = useSearchParams();
+  const location = useLocation();
   const { completionCount } = useDownloadModal();
 
   const [models, setModels] = useState([]);
@@ -49,6 +53,27 @@ export default function ChatPage() {
   const { selectModel, ready, createPayload } = draft;
   // The command being run (its popup is open), or null.
   const [openCommand, setOpenCommand] = useState(null);
+  // Why a command typed here did nothing, or null; first, the notice a
+  // conversation page handed over when it sent the user here (a /compact
+  // that found its conversation deleted).
+  const [commandNotice, setCommandNotice] = useState(() => location.state?.notice ?? null);
+  // Read once: the history entry forgets it, so a reload of the window
+  // (which keeps the entry's state) never shows it again.
+  const handedOverNotice = Boolean(location.state?.notice);
+  useEffect(() => {
+    if (handedOverNotice) {
+      navigate(`${location.pathname}${location.search}`, { replace: true, state: null });
+    }
+  }, [handedOverNotice, location.pathname, location.search, navigate]);
+  const runCommand = (command) => {
+    setCommandNotice(null);
+    setOpenCommand(command);
+  };
+  const explainUnavailable = (command) =>
+    setCommandNotice({
+      tone: "info",
+      text: t("chat:commands.needsConversation", { command: `/${command.name}` }),
+    });
 
   const toggleSidebar = () => {
     setCollapsed((prev) => !prev);
@@ -297,7 +322,7 @@ export default function ChatPage() {
               modelName={selectedModel}
               attention={!selectedModel}
               commands={COMMANDS}
-              onCommand={setOpenCommand}
+              onCommand={runCommand}
             >
               {/* Re-read the loaded model when the draft's model changes. */}
               <UnloadModelButton refreshKey={llm?.id} />
@@ -305,13 +330,16 @@ export default function ChatPage() {
 
             {/* Question Input - Always visible */}
             <div className="mt-6">
+              <CommandNotice notice={commandNotice} onDismiss={() => setCommandNotice(null)} />
               <QuestionInput
                 onSend={handleAsk}
                 disabled={!selectedModel}
                 placeholder={t("chat:composer.placeholderNew")}
                 canAttachImages={canAttachImages(llm)}
                 commands={COMMANDS}
-                onCommand={setOpenCommand}
+                onCommand={runCommand}
+                unavailableCommands={NEEDS_CONVERSATION}
+                onUnavailableCommand={explainUnavailable}
               />
             </div>
             {/* Language Warning */}

@@ -49,7 +49,17 @@
     "model": {
       "label": "Model",
       "description": "Switch to another installed model"
-    }
+    },
+    "compact": {
+      "label": "Compact",
+      "description": "Summarize earlier messages now to free up context"
+    },
+    "context": {
+      "label": "Context",
+      "description": "Show how much of the model's context this conversation uses"
+    },
+    "needsConversation": "{{command}} works once the conversation exists: send a first message.",
+    "pickModelFirst": "This conversation has no model: pick one with Model first."
   },
   "config": {
     "title": "Conversation settings",
@@ -166,7 +176,57 @@
     "lost": "Earlier messages could not be summarized and were dropped from what the model sees.",
     "showSummary": "Show summary",
     "showKeptSummary": "Show the summary the model keeps",
-    "hideSummary": "Hide summary"
+    "hideSummary": "Hide summary",
+    "manual_one": "You summarized {{count}} earlier message.",
+    "manual_other": "You summarized {{count}} earlier messages.",
+    "manualNoCount": "You summarized earlier messages."
+  },
+  "compactDialog": {
+    "title": "Summarize earlier messages?",
+    "body": "The earlier messages of this conversation are replaced, for the model, by a summary: the same one it writes on its own when the conversation fills its context. Your latest exchange is kept word for word and the whole conversation stays on screen. Details the summary leaves out are no longer seen by the model.",
+    "confirm": "Summarize"
+  },
+  "compact": {
+    "nothingToCompact": "Nothing to compact yet.",
+    "errors": {
+      "busy": "The model is busy; try again in a moment.",
+      "unansweredQuestion": "The last question has no answer yet; send it again or ask something new first.",
+      "notFound": "This conversation no longer exists.",
+      "failed": "The summary could not be written; nothing was changed.",
+      "separatorNotSaved": "The earlier messages were summarized, but the separator could not be saved.",
+      "failedWithMessage": "The summary failed: {{message}}",
+      "unknown": "The summary did not come back; the conversation shows where it stands."
+    }
+  },
+  "context": {
+    "title": "Context usage",
+    "estimates": "Estimates, out of a window of {{window}} tokens",
+    "estimatesNoWindow": "Estimates",
+    "gridLabel": "Context usage: {{used}} of {{window}} tokens used",
+    "legendLabel": "Context usage by category",
+    "dismiss": "Close context usage",
+    "categories": {
+      "system_prompt": "System prompt",
+      "tools": "Tools",
+      "messages": "Messages",
+      "summary": "Summary",
+      "free": "Free space",
+      "autocompaction_buffer": "Auto-compaction reserve"
+    },
+    "value_one": "{{tokens}} token · {{share}}",
+    "value_other": "{{tokens}} tokens · {{share}}",
+    "valueNoShare_one": "{{tokens}} token",
+    "valueNoShare_other": "{{tokens}} tokens",
+    "notes": {
+      "reducedByMemory": "The model supports up to {{trained}} tokens; this computer's memory limits this conversation to {{working}}.",
+      "reducedByMemoryNoTrained": "This computer's memory limits this conversation to {{working}} tokens.",
+      "notLoaded": "The model is not loaded: this is the window it was trained for. The window this computer allows is known once the model is loaded.",
+      "unknownWindow": "The model's window is not known, so no share is shown.",
+      "kbExcluded": "The counts leave out the knowledge-base excerpts each question retrieves.",
+      "pastThreshold": "The conversation is past its compaction threshold: the next turn will summarize earlier messages first.",
+      "overWindow": "The next request would not fit the model's window: the next turn will summarize earlier messages first."
+    },
+    "failed": "The context usage could not be read."
   },
   "trace": {
     "summary": "Reasoning",

@@ -440,12 +440,15 @@ part of the answer was written keeps that text above the red headline, with Deta
 ## Session controls in the app: the header and the slash commands
 
 A conversation's header reads a static "You are chatting with <model>". Its settings icon opens a
-panel with one button per command (Model, Config, Effort), each opening that command's popup exactly
-as typing the command does. When the conversation's model was deleted, the line turns into a red
-"Please select a model" and the composer is blocked; the panel's Model button still works, and
-picking a model there unblocks sending. The composer also stays blocked until the conversation's
+panel with one button per command (Model, Config, Effort, Compact, Context), each running that
+command exactly as typing it does. When the conversation's model was deleted, the line turns into a
+red "Please select a model" and the composer is blocked; the panel's Model button still works, and
+picking a model there unblocks sending (Compact and Context then say to pick a model first and ask
+the backend nothing). The composer also stays blocked until the conversation's
 values are loaded, so no turn goes out without them; when the conversation cannot be read, an error
-line with a Retry button shows above the composer and runs the load again. Model is disabled while an answer streams.
+line with a Retry button shows above the composer and runs the load again. Model and Context are
+disabled from the moment a message is sent until its answer starts, and a context panel opened
+while the answer streams goes when the turn ends (it describes a request already sent).
 
 While a model is loaded, the panel (here and on the new-conversation page) also shows a small red
 **Unload <model>** button naming the model in memory, whichever conversation loaded it; it asks
@@ -462,9 +465,9 @@ reloading it…" until the model answers (see [Model residency](#model-residency
 The same commands are typed in the composer. Their names are fixed English identifiers in every
 interface language (`frontend/src/utils/slashCommands.js`); their descriptions and popups are
 translated. A message runs a command only when it is exactly one of `/config`, `/config global`,
-`/effort` or `/model` (surrounding spaces aside); anything else is an ordinary message sent to the
-model — an unknown name (`/foo`), an argument a command does not take (`/effort high`), or text
-before the command. A command never reaches the model, clears the composer and keeps the files
+`/context`, `/compact`, `/effort` or `/model` (surrounding spaces aside); anything else is an
+ordinary message sent to the model — an unknown name (`/foo`), an argument a command does not take
+(`/effort high`, `/compact now`), or text before the command. A command never reaches the model, clears the composer and keeps the files
 attached to it for the next message.
 
 The composer is a combobox whose popup is that drop-up. Typing `/` at the start of the composer
@@ -512,9 +515,63 @@ closes the help alone. An engine failure that opens its dialog closes any comman
   applies the new model's saved values and recommended sampling (see
   [Update a conversation](#update-a-conversation)) and the page adopts the conversation it
   returns; when the switch fails, the page re-reads the conversation and shows its model.
+- **`/compact`** first opens a confirmation (`frontend/src/components/modals/ConfirmDialog.jsx`)
+  saying the earlier messages are replaced, for the model, by the same summary it writes on its
+  own, that the latest exchange is kept word for word and the whole conversation stays on screen;
+  Cancel (which takes the focus), Escape or the close button compact nothing, and the dialog
+  confirms once per opening (a second click during its closing animation does nothing). Confirming
+  sends `POST /erudi/conversations/{id}/compact` (see [Compact a conversation now](#compact-a-conversation-now))
+  through `tracedFetch`, without the API client's 30-second timeout and with a ceiling of 10
+  minutes. One run per conversation: the runs are held for the whole window session
+  (`frontend/src/shared/compactingConversations.js`), so a second confirmation starts nothing, and
+  a conversation left and opened again while its summary runs is still locked with its status
+  row (a reload of the window forgets it; the backend still refuses a second run); when that run
+  ends, the page re-reads the conversation. While it runs a status row at the end of the thread
+  reads "Summarizing earlier messages to make room…", and the composer, the commands and every
+  header button are disabled; another conversation stays free, and the header's Compact button
+  stays usable while an answer streams, so the backend can answer that the model is busy. What
+  follows the answer happens only while the page still shows that conversation:
+  - A summary re-reads the conversation, the separator appears below the last answer, and the
+    `/context` panels go. The status row waits for that re-read at most a minute, so the
+    conversation is always unlocked (a re-read that lands later still shows).
+  - `{"summarized": 0}` shows "Nothing to compact yet." for a few seconds and re-reads nothing.
+  - A conversation whose model is gone (`no_model`) is loaded again, so its header asks for a
+    model, and the notice says to pick one.
+  - A conversation deleted meanwhile (404) is left for the new-conversation page, which shows
+    "This conversation no longer exists." (no re-read: it could only fail). The page hands the
+    notice over in the history entry's state and clears it from there once read, so a reload of
+    the window does not show it again.
+  - Every other refusal or failure shows its message above the composer until it is closed or the
+    next command runs — the model is busy, the last question has no answer yet, the summary could
+    not be written (nothing was changed), the separator could not be saved, "The summary failed:
+    <message>" for an error without its own copy that carries the server's message, or, for an
+    answer without one, a request that failed or the 10-minute ceiling, that the summary did not
+    come back — and re-reads the conversation, so a summary that succeeded on the server still
+    shows its separator.
+- **`/context`** reads `GET /erudi/conversations/{id}/context` (see [Context usage](#context-usage))
+  and draws a panel at the end of the thread (`frontend/src/components/ContextUsagePanel.jsx`): a
+  grid of 100 small blocks coloured per category — system prompt, tools, messages, the summary
+  when there is one, the free space as empty blocks and the auto-compaction reserve as dashed
+  ones — and a legend giving each category's tokens and share of the window, labelled as
+  estimates (`frontend/src/utils/contextUsage.js`: the blocks are shared out, by largest
+  remainders, over what the categories hold together, which is the window while the request fits
+  and what is used past it; the grid always has 100 blocks when anything is counted, and a
+  category that holds tokens always keeps at least one). Notes say, as they apply, that this
+  computer's memory limits the window the model supports, that a model not loaded is measured
+  against its trained window (the window this computer allows is known once it loads), that a
+  knowledge-base assistant's counts leave out the excerpts a question retrieves, that the
+  conversation is past its compaction threshold or the next request would not fit the window
+  (the next turn summarizes first), or that no window is known (counts without shares). Opening it
+  never loads the model. The panels are a list of their own, never part of the messages and never
+  stored: each has a close button, and sending a message, the end of its turn, the re-read after
+  `/compact`, opening another conversation or reloading the page removes them; a usage read that
+  lands after any of these is dropped. A new panel brings the end of the thread into view;
+  closing one never moves it. A read that fails says the usage could not be read; for a
+  conversation whose model is gone it loads the conversation again and says to pick a model first.
 
 The new-conversation page carries the same header and commands, editing the draft the conversation
-is created from. Picking a model reads its resolved values with `GET
+is created from. `/compact` and `/context` are neither in its drop-up nor in its header panel;
+typed exactly, they send nothing and a notice says they work once the conversation exists. Picking a model reads its resolved values with `GET
 /erudi/llms/{id}/conversation_defaults` (when that read fails, the sliders show the model's
 recommended sampling and the shipped defaults); an answer for a model the user has since left is
 ignored. On a model switch, the values the user did not set take the new model's; those set before
@@ -1048,7 +1105,9 @@ answer text from the `model` node only.
 - **A manual compaction** (`POST /conversations/{id}/compact`) has no turn of its own: its `done`
   event, with `manual: true` and the same other keys, is appended to the trace of the
   conversation's last answer (without re-running the trace cap: a full trace may exceed it by that
-  one event), and the separator is drawn **below** that answer.
+  one event), and the separator is drawn **below** that answer: "You summarized N earlier
+  messages." whatever its reason ("You summarized earlier messages." with N at 0), with the same
+  Show summary / Hide summary. A failed answer carries it too, below its red bubble.
 
 The announcements never cost a turn: a direct call of the middleware (no runtime) has no channel
 and stays silent, and a channel that fails is one warning in `backend.log` per turn.

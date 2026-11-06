@@ -238,6 +238,62 @@ describe("the new-conversation page", () => {
   });
 });
 
+describe("/compact and /context before the conversation exists (#585)", () => {
+  it("offers neither in the drop-up nor in the header panel", async () => {
+    await renderPage();
+    fireEvent.change(composer(), { target: { value: "/" } });
+    const names = screen.getAllByRole("option").map((o) => o.getAttribute("data-command"));
+    expect(names).toEqual(["config", "effort", "model"]);
+    fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
+    expect(screen.queryByRole("button", { name: /^Compact/ })).toBeNull();
+    expect(screen.queryByRole("button", { name: /^Context/ })).toBeNull();
+  });
+
+  it.each(["/compact", "/context"])(
+    "sends nothing for an exact %s, and says it works once the conversation exists",
+    async (command) => {
+      await renderPage();
+      typeAndEnter(command);
+      expect(
+        await screen.findByText(
+          `${command} works once the conversation exists: send a first message.`
+        )
+      ).toBeTruthy();
+      expect(createCalls()).toHaveLength(0);
+      expect(navigateMock).not.toHaveBeenCalled();
+      expect(composer().value).toBe("");
+    }
+  );
+});
+
+describe("arriving from a conversation that no longer exists", () => {
+  it("shows the notice the conversation page handed over", async () => {
+    render(
+      <MemoryRouter
+        initialEntries={[
+          {
+            pathname: "/erudi/chat",
+            state: { notice: { tone: "error", text: "This conversation no longer exists." } },
+          },
+        ]}
+      >
+        <ChatPage />
+      </MemoryRouter>
+    );
+    const notice = await screen.findByText("This conversation no longer exists.");
+    expect(notice.closest('[role="alert"]')).toBeTruthy();
+    // The history entry forgets it, so a reload never shows it again.
+    await waitFor(() =>
+      expect(navigateMock).toHaveBeenCalledWith("/erudi/chat", { replace: true, state: null })
+    );
+  });
+
+  it("leaves the history entry alone when nothing was handed over", async () => {
+    await renderPage();
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
+});
+
 describe("a model whose weights are missing (#376)", () => {
   const ORPHAN = { id: 9, name: "Orphan assistant", weights_available: false };
 

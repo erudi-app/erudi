@@ -48,6 +48,10 @@ export default function QuestionInput({
   // every message goes to the model.
   commands = [],
   onCommand,
+  // The registry's commands this page does not offer: typed exactly, they
+  // send nothing and `onUnavailableCommand` says why (never listed).
+  unavailableCommands = [],
+  onUnavailableCommand,
 }) {
   const { t } = useTranslation();
   const effectivePlaceholder = placeholder ?? t("chat:composer.placeholder");
@@ -209,6 +213,13 @@ export default function QuestionInput({
     const command = commands.length > 0 ? parseSlashCommand(trimmed, commands) : null;
     if (command) {
       runCommand(command);
+      return;
+    }
+    const unavailable = parseSlashCommand(trimmed, unavailableCommands);
+    if (unavailable) {
+      onUnavailableCommand?.(unavailable);
+      updateValue("");
+      setDismissedFor(null);
       return;
     }
     onSend?.(
@@ -570,4 +581,11 @@ QuestionInput.propTypes = {
     })
   ),
   onCommand: PropTypes.func,
+  unavailableCommands: PropTypes.arrayOf(
+    PropTypes.shape({
+      name: PropTypes.string.isRequired,
+      args: PropTypes.arrayOf(PropTypes.string).isRequired,
+    })
+  ),
+  onUnavailableCommand: PropTypes.func,
 };

@@ -13,10 +13,19 @@ import { useTranslation } from "react-i18next";
 // text (never markdown: it is the model's working memory, shown as written).
 // A lost summary says the earlier messages were dropped, and offers the
 // previous summary the model still keeps, when there is one.
+//
+// A /compact run (#585, `manual: true`) is drawn the same way BELOW the answer
+// it was saved on, with its own copy ("You summarized N earlier messages.")
+// whatever its reason.
 
 const REASON_KEYS = {
   length: { counted: "chat:compaction.length", uncounted: "chat:compaction.lengthNoCount" },
   memory: { counted: "chat:compaction.memory", uncounted: "chat:compaction.memoryNoCount" },
+};
+
+const MANUAL_KEYS = {
+  counted: "chat:compaction.manual",
+  uncounted: "chat:compaction.manualNoCount",
 };
 
 function reasonKeys(reason) {
@@ -31,7 +40,7 @@ function CompactionSeparator({ event }) {
   // Unique per separator, so each toggle names its own panel.
   const panelId = useId();
   const count = Number.isInteger(event.summarized) && event.summarized > 0 ? event.summarized : 0;
-  const keys = reasonKeys(event.reason);
+  const keys = event.manual === true ? MANUAL_KEYS : reasonKeys(event.reason);
   const lost = event.summary_lost === true;
   let label;
   if (lost) {
@@ -85,17 +94,18 @@ CompactionSeparator.propTypes = {
     reason: PropTypes.string,
     summary: PropTypes.string,
     summary_lost: PropTypes.bool,
+    manual: PropTypes.bool,
   }).isRequired,
 };
 
-export default function CompactionMarker({ events }) {
+export default function CompactionMarker({ events, below = false }) {
   if (!Array.isArray(events) || events.length === 0) {
     return null;
   }
   // Keyed by the event's index within the message: each separator keeps its
   // own open/closed state while the turn's trace grows.
   return (
-    <div className="mb-2 flex flex-col gap-2 self-stretch">
+    <div className={`${below ? "mt-2" : "mb-2"} flex flex-col gap-2 self-stretch`}>
       {events.map((event, i) => (
         <CompactionSeparator key={i} event={event} />
       ))}
@@ -106,4 +116,7 @@ export default function CompactionMarker({ events }) {
 CompactionMarker.propTypes = {
   // The turn's {"t":"compaction","phase":"done",...} events, in order.
   events: PropTypes.arrayOf(PropTypes.object),
+  // The separators sit below the answer (the /compact runs saved on it)
+  // rather than above it (the compactions its turn ran).
+  below: PropTypes.bool,
 };
