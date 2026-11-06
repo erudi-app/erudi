@@ -307,7 +307,7 @@ Don't call Node APIs directly from renderer code.
 Run the same gates CI runs, locally, before you push.
 
 **Backend** (`.github/workflows/backend-ci.yml`, Python 3.12, blocking on
-`ubuntu-latest`, `windows-latest` and `macos-14`):
+`ubuntu-latest`, `windows-latest` and `macos-15`):
 
 ```bash
 ruff check backend scripts
