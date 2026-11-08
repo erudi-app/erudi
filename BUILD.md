@@ -213,63 +213,80 @@ including `Resources/`, and signs every binary file it finds there.
 Installing over an existing Erudi, by hand or through the auto-updater, makes
 the new installer run the uninstaller of the installed version with `--updated`.
 That uninstaller (electron-builder's `un.atomicRMDir`) moves every file of the
-install into `%TEMP%\nsXXXX.tmp\old-install\` with NSIS `Rename`, a `MoveFileW`
-call without the `\\?\` prefix, so it cannot write a path of 260 characters or
-more. On the first file it cannot move, it moves the others back and exits with
-code 2, and electron-builder's installer stops with "Failed to uninstall old
-application files".
+install into `%TEMP%\nsXXXX.tmp\old-install\`: it recreates each directory there
+with `CreateDirectory` and moves each file with NSIS `Rename` (`MoveFileW`), both
+without the `\\?\` prefix, so it cannot write a directory of 248 characters or
+more, nor a file of 260 or more. On the first file it cannot move, it moves the
+others back and exits with code 2, and electron-builder's installer stops with
+"Failed to uninstall old application files".
 
 The deepest files of the install are the license notices that wheels ship in
 `resources\backend\_internal\<name>.dist-info\licenses\`: torch's vendored
-`third_party` tree puts one 200 characters below the install directory, which
-crosses 260 under `C:\Users\<user>\AppData\Local\Temp\nsXXXX.tmp\old-install\`
-for a user name of about 8 characters. The notices ship on purpose (torch's
-BSD license requires them).
+`third_party` tree puts a `LICENSE.txt` 200 characters below the install
+directory, in a directory 188 characters below it. The destination prefix
+`C:\Users\<user>\AppData\Local\Temp\nsXXXX.tmp\old-install` is 48 characters
+plus the user name plus the 1 to 4 hex digits of the plugins directory name
+(`nsX`, hex, `.tmp`, picked at random), and both limits are reached at the same
+length: the failure starts at a user name of 8 to 11 characters, possible from
+8, certain from 11. The notices ship on purpose (torch's BSD license requires
+them).
 
 `nsis.include` in `electron-builder.yml` adds
 `frontend/assets/installers/installer.nsh` to the installer. It removes the
 `*.dist-info\licenses` folders under the old install's
-`resources\backend\_internal\` before the old uninstaller has to move them. The
-old install's directory comes from the registry (`InstallLocation`, as
+`resources\backend\_internal\`, so the old uninstaller never has to move them.
+The old install's directory comes from the registry (`InstallLocation`, as
 electron-builder reads it), must be an absolute drive path holding `Erudi.exe`
 and the frozen backend, and is addressed through a `\\?\` path so the deletion
 itself has no length limit. Nothing else is deleted, and the new install ships
-the same notices again. It does so at one of two points:
+the same notices again. The removal runs at two points:
 
-- **On an update** (`--updated` on the installer's command line, which is how
-  electron-updater starts it, silently at quit or interactively from "Install
-  now"): in `customInit`, at the end of the installer's `.onInit`, before the
-  install section runs the old uninstaller. Its first attempt then succeeds,
-  and electron-builder never reaches its retry loop or its dialog.
-- **On a manual install over an existing one** (no `--updated`): in
-  `customUnInstallCheck` and `customUnInstallCheckCurrentUser`, which
-  electron-builder's `handleUninstallResult` runs instead of its own check of
-  the old uninstaller's exit code. They keep that check (an uninstaller that
-  cannot start is logged and the install goes on; a non-zero exit shows the
-  failure message, sets exit code 2 and quits) and add one recovery before
-  giving up: remove the folders, run the old uninstaller once more. When the
-  old uninstaller succeeds the first time, none of this runs.
+- **Before the old uninstaller, on every install over an existing one** (an
+  update, which electron-updater starts with `--updated`, silently at quit or
+  interactively from "Install now", or an installer started by hand): in
+  `customInit`, at the end of the installer's `.onInit`. The old uninstaller's
+  first attempt then succeeds, so electron-builder never reaches its retry loop
+  (five attempts, one second apart) or its "Erudi cannot be closed. Please close
+  it manually and click Retry to continue." dialog, whose Retry repeats the
+  failing uninstall. `.onInit` runs before the installer's pages: a user who
+  cancels an interactive install at that point keeps the old install, which
+  works, without its license notices until the next install.
+- **After a failed uninstall, as a safety net** (an old install that
+  `customInit` did not clean): in `customUnInstallCheck` and
+  `customUnInstallCheckCurrentUser`, which electron-builder's
+  `handleUninstallResult` runs instead of its own check of the old
+  uninstaller's exit code. They keep that check (an uninstaller that cannot
+  start is logged and the install goes on; a non-zero exit shows the failure
+  message, sets exit code 2 and quits) and add one recovery before giving up:
+  remove the folders, run the old uninstaller once more. When the old
+  uninstaller succeeds the first time, none of this runs.
 
-The manual path recovers only after electron-builder's own retries of the old
-uninstaller (five attempts, one second apart). A silent install goes straight
-on to the recovery; an interactive one first shows "Erudi cannot be closed.
-Please close it manually and click Retry to continue.", where Retry runs the
-same failing uninstall again and Cancel moves on to the recovery. Updates never
-show it, because the folders are already gone.
+`app-build-smoke.yml` exercises the path on its Windows leg with
+`scripts/ci/check_win_update_over_release.ps1 -BaseTag v1.1.2`. The base release
+is pinned: v1.1.2 carries the torch license tree, and on the runner's user,
+`runneradmin`, its deepest file lands at exactly 260 characters under
+old-install (48 + 11 + 1 + 200) with the shortest plugins directory name, so a
+later release without that tree could not reproduce the failure. The script
+points `TEMP` at its long form and fails when the old install's deepest file
+would land below 260 characters, since such a run would prove nothing.
 
-`app-build-smoke.yml` exercises both points on its Windows leg with
-`scripts/ci/check_win_update_over_release.ps1`. It installs the latest published
-release's CPU installer silently and runs the freshly built installer over it
-with `/S` alone (the manual path), removes the result with its own uninstaller,
-installs the release again and runs the new installer with `--updated /S` (what
-electron-updater passes when it installs at quit). After each update it checks
-the exit code, the installed version and files, and that no `old-install`
-folder is left behind. It also counts the starts of the old uninstaller through
-`Win32_ProcessStartTrace`: more than one on the manual path (the first attempt
-failed and the recovery ran), exactly one on the update path. The runner's
-user, `runneradmin`, is long enough to hit the limit; the script points `TEMP`
-at its long form and fails when the old install's deepest file would land below
-260 characters, since such a run would prove nothing.
+It installs the base release's CPU installer silently and runs the freshly
+built installer over it with `/S` alone (an installer started by hand), removes
+the result with its own uninstaller, installs the base release again and runs
+the new installer with `--updated /S` (what electron-updater passes when it
+installs at quit). After each update it checks the exit code, the installed
+version and files, and that no `old-install` folder is left behind. It also
+counts the starts of the old uninstaller through `Win32_ProcessStartTrace`, and
+requires exactly one on both passes: a second start means the first attempt
+failed.
+
+Before installing anything, the script also checks the margins of the new
+build outside the license folders it removes: under
+`C:\Users\<20-character name>\AppData\Local\Temp\nsa0.tmp\old-install\`, its
+deepest directory must stay below 248 characters and its deepest file below
+260, so a new deep path in the bundle fails the gate before it reaches users.
+It logs the deepest path of the base release's CUDA installer too, without
+failing on it.
 
 ---
 

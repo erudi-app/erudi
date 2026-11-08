@@ -3,34 +3,45 @@
 # Installing over an existing Erudi (a manual install or an auto-update) runs the
 # uninstaller of the INSTALLED version with --updated. That uninstaller
 # (electron-builder's un.atomicRMDir) moves every file of the install into
-# %TEMP%\nsXXXX.tmp\old-install\ with NSIS `Rename`, a MoveFileW call without
-# the \\?\ prefix, so it fails on any destination of MAX_PATH (260) characters
-# or more. It then moves back what it had moved and exits with code 2, leaving
-# the old install intact. The deepest files of the install are license notices
-# that wheels ship under <name>.dist-info\licenses\ (torch carries its vendored
-# third_party tree a dozen directories deep): 200 characters below the install
-# directory, so under C:\Users\<user>\AppData\Local\Temp\nsXXXX.tmp\old-install\
-# they reach 260 for a user name of about 8 characters (the plugins directory
-# name, nsX plus 1 to 4 hex digits plus .tmp, moves the limit by a character or
-# two).
+# %TEMP%\nsXXXX.tmp\old-install\: it recreates each directory there with
+# CreateDirectory and moves each file with NSIS `Rename` (MoveFileW), both
+# without the \\?\ prefix, so a directory of 248 characters or more, or a file of
+# 260 (MAX_PATH) or more, cannot be written. On the first file it cannot move it
+# moves back what it had moved and exits with code 2, leaving the old install
+# intact.
+#
+# The deepest files of the install are license notices that wheels ship under
+# <name>.dist-info\licenses\ (torch carries its vendored third_party tree a
+# dozen directories deep): LICENSE.txt files 200 characters below the install
+# directory, in directories 188 characters below it. Under
+#   C:\Users\<user>\AppData\Local\Temp\nsXXXX.tmp\old-install
+# (48 characters plus the user name plus the 1 to 4 hex digits of the plugins
+# directory name, nsX + hex + .tmp) both limits are reached at the same length,
+# so the failure starts at a user name of 8 to 11 characters, depending on that
+# random name: possible from 8, certain from 11.
 #
 # Two macros remove the dist-info license folders of the OLD install's backend
-# before its uninstaller has to move them. The old install is being replaced,
-# the new one ships the same notices again, and nothing else is touched.
+# so its uninstaller never has to move them. Nothing else is touched, and the new
+# install ships the same notices again.
 #
-# - customInit (end of .onInit), when the installer runs with --updated, which
-#   is how electron-updater starts it: the folders go before the first
-#   uninstall attempt, so that attempt succeeds and electron-builder never
-#   reaches its retry loop or its "cannot be closed" dialog.
-# - customUnInstallCheck / customUnInstallCheckCurrentUser, for an installer
-#   started by hand over an existing install (no --updated). electron-builder's
-#   handleUninstallResult (installUtil.nsh) inserts them IN PLACE OF its own
-#   check of the old uninstaller's exit code, so they reproduce that check: an
-#   uninstaller that cannot be launched is logged and the install goes on; an
-#   uninstaller that exits non-zero shows $(uninstallFailed), sets exit code 2
-#   and quits. Before giving up on a non-zero exit, they remove the folders and
-#   run the old uninstaller once more. A successful uninstall (exit code 0)
-#   takes none of this code.
+# - customInit (end of .onInit) removes them for every install over an existing
+#   one, an update (--updated, how electron-updater starts the installer) or an
+#   installer started by hand. The old uninstaller's first attempt then
+#   succeeds, and electron-builder never reaches its retry loop (five attempts)
+#   or its "cannot be closed... click Retry" dialog, whose Retry repeats the
+#   failing uninstall. The cost: .onInit runs before the installer's pages, so
+#   a user who cancels an interactive install after it keeps the old install,
+#   working, without its license notices until the next install.
+# - customUnInstallCheck / customUnInstallCheckCurrentUser are the safety net
+#   for an old install that customInit did not clean (an unrecognised location,
+#   a folder it could not delete). electron-builder's handleUninstallResult
+#   (installUtil.nsh) inserts them IN PLACE OF its own check of the old
+#   uninstaller's exit code, so they reproduce that check: an uninstaller that
+#   cannot be launched is logged and the install goes on; an uninstaller that
+#   exits non-zero shows $(uninstallFailed), sets exit code 2 and quits. Before
+#   giving up on a non-zero exit, they remove the folders and run the old
+#   uninstaller once more. A successful uninstall (exit code 0) takes none of
+#   this code.
 
 !include "LogicLib.nsh"
 
@@ -94,19 +105,13 @@
 !macroend
 
 !macro customInit
-  # ${isUpdated} tests the command line into $R9.
-  Push $R9
-  ${If} ${isUpdated}
-    Pop $R9
-    # initMultiUser has just pointed SHELL_CONTEXT at the existing install's
-    # hive; a per-machine install also replaces a per-user one, as the install
-    # section does.
-    !insertmacro erudiRemoveOldBackendLicenses SHELL_CONTEXT
-    ${If} $installMode == "all"
-      !insertmacro erudiRemoveOldBackendLicenses HKEY_CURRENT_USER
-    ${EndIf}
-  ${Else}
-    Pop $R9
+  # initMultiUser has just pointed SHELL_CONTEXT at the existing install's
+  # hive; a per-machine install also replaces a per-user one, as the install
+  # section does. With no existing install the registry value is empty and
+  # nothing is removed.
+  !insertmacro erudiRemoveOldBackendLicenses SHELL_CONTEXT
+  ${If} $installMode == "all"
+    !insertmacro erudiRemoveOldBackendLicenses HKEY_CURRENT_USER
   ${EndIf}
 !macroend
 

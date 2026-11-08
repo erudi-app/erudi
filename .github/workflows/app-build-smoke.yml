@@ -6,7 +6,7 @@ name: App Build Smoke
 # This validates that what we ship BUILDS and BOOTS (backend freeze + electron
 # packaging + backend bundling) on the real shippable artifact, without inference
 # (inference/scenarios stay in the manual draft QA). The Windows leg also installs
-# the latest published release and updates it with the new installer, the path
+# a pinned published release (v1.1.2) and updates it with the new installer, the path
 # every Windows user takes to get the new version. It supersedes the backend-only
 # win smoke. Heavy, so it runs only when a PR is ready (not draft) or in the merge
 # queue — never on every draft commit.
@@ -111,18 +111,20 @@ jobs:
           SMOKE_TIMEOUT: 300
         run: python scripts/ci/smoke_boot.py "${{ steps.locate.outputs.exe }}" --port 27182
 
-      # Windows only: install the latest published release, then run the
-      # installer built above over it, by hand (/S) and the way electron-updater
-      # does (--updated /S), and check each update lands. Installing over an
-      # existing Erudi runs the old version's uninstaller, which fails on a path
-      # of 260 characters or more under %TEMP%;
-      # frontend/assets/installers/installer.nsh removes the deepest files
-      # before the update and recovers on a manual install. The script fails
-      # when the run cannot reach that limit, and on any download error (the
-      # release is read with this workflow's token).
-      - name: Update over the latest published release
+      # Windows only: install v1.1.2, then run the installer built above over
+      # it, by hand (/S) and the way electron-updater does (--updated /S), and
+      # check each update lands with the old uninstaller succeeding at its first
+      # attempt. Installing over an existing Erudi runs the old version's
+      # uninstaller, which fails on a directory of 248 characters or a file of
+      # 260 under %TEMP%; frontend/assets/installers/installer.nsh removes the
+      # deepest files before it runs. The base release is pinned: v1.1.2 carries
+      # the torch license tree that reaches the limit on this runner, with no
+      # margin. The script fails when the run cannot reach that limit, when the
+      # new build comes too close to it, and on any download error (the release
+      # is read with this workflow's token).
+      - name: Update over v1.1.2
         if: runner.os == 'Windows'
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
-        run: ./scripts/ci/check_win_update_over_release.ps1 -DistDir frontend/dist
+        run: ./scripts/ci/check_win_update_over_release.ps1 -DistDir frontend/dist -BaseTag v1.1.2
