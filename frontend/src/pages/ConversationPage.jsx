@@ -294,6 +294,10 @@ export default function ConversationPage() {
   // sending a message can cancel it: a re-check that fires after the send
   // would mark the view as scrolled up again.
   const scrollCheckTimerRef = useRef(null);
+  // The pending reset of the "copied" tick. Held in a ref so a second copy
+  // restarts it and leaving the page cancels it.
+  const copiedTimerRef = useRef(null);
+  useEffect(() => () => clearTimeout(copiedTimerRef.current), []);
 
   // Refs to avoid putting messages.length in useCallback deps, which
   // would cascade into the loadConversationData useEffect and overwrite
@@ -1506,7 +1510,11 @@ export default function ConversationPage() {
                           .writeText(getDisplayContent(msg.content, failureHeadline))
                           .then(() => {
                             setCopiedMessageId(msg.id);
-                            setTimeout(() => setCopiedMessageId(null), 1000);
+                            clearTimeout(copiedTimerRef.current);
+                            copiedTimerRef.current = setTimeout(
+                              () => setCopiedMessageId(null),
+                              1000
+                            );
                           });
                       }}
                       className="text-gray-400 hover:text-white transition-colors"

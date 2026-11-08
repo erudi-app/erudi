@@ -252,6 +252,31 @@ describe("ConversationPage first-message title stream", () => {
     );
     expect(JSON.parse(titleCall[1].body)).toEqual({ question: "hi" });
   });
+
+  it("names the conversation untitled when the generated title is blank", async () => {
+    const convRow = { id: 7, name: "Earlier name", last_message_time: "2026-01-01" };
+    tracedFetchMock.mockImplementation(async (url) => {
+      const u = String(url);
+      if (u.includes("generate_title")) return streamOf("  ");
+      if (u.includes("/query")) return new Promise(() => {});
+      if (u.endsWith("/conversations/7")) return { ok: true, json: async () => conversationDetail };
+      if (u.includes("fetch_messages")) return { ok: true, json: async () => [] };
+      return { ok: true, json: async () => [convRow] };
+    });
+    await renderAndSettle();
+    await waitFor(() =>
+      expect(screen.getByTestId("history").textContent).toContain("Earlier name")
+    );
+
+    fireEvent.click(screen.getByText("SEND"));
+    await settle();
+    await settle();
+
+    await waitFor(() =>
+      expect(screen.getByTestId("history").textContent).toContain("New Conversation")
+    );
+    expect(screen.getByTestId("history").textContent).not.toContain("Earlier name");
+  });
 });
 
 describe("ConversationPage post-delete navigation (#228)", () => {
