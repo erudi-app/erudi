@@ -5,7 +5,9 @@ name: App Build Smoke
 # the BUNDLED backend (Contents/Resources/backend) and assert it reaches "ready".
 # This validates that what we ship BUILDS and BOOTS (backend freeze + electron
 # packaging + backend bundling) on the real shippable artifact, without inference
-# (inference/scenarios stay in the manual draft QA). It supersedes the backend-only
+# (inference/scenarios stay in the manual draft QA). The Windows leg also installs
+# the latest published release and updates it with the new installer, the path
+# every Windows user takes to get the new version. It supersedes the backend-only
 # win smoke. Heavy, so it runs only when a PR is ready (not draft) or in the merge
 # queue — never on every draft commit.
 on:
@@ -108,3 +110,17 @@ jobs:
         env:
           SMOKE_TIMEOUT: 300
         run: python scripts/ci/smoke_boot.py "${{ steps.locate.outputs.exe }}" --port 27182
+
+      # Windows only: install the latest published release, then run the
+      # installer built above over it the way electron-updater does, and check
+      # the update lands. Installing over an existing Erudi runs the old
+      # version's uninstaller, which fails on a path of 260 characters or more
+      # under %TEMP%; frontend/assets/installers/installer.nsh recovers from it.
+      # The script fails when the run cannot reach that limit, and on any
+      # download error (the release is read with this workflow's token).
+      - name: Update over the latest published release
+        if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/ci/check_win_update_over_release.ps1 -DistDir frontend/dist

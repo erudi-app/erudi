@@ -329,9 +329,11 @@ npm run build
 
 **Full-app smoke** (`.github/workflows/app-build-smoke.yml`) also blocks the merge.
 It builds the complete shippable app on all three platforms, then boots the bundled
-backend and asserts it reaches `ready`. You cannot reproduce it in one command, but
-it is the gate most likely to catch a packaging or dependency change, so expect it
-to run for a while after you mark a pull request ready for review. Its **Linux leg
+backend and asserts it reaches `ready`. On Windows it also installs the latest
+published release and updates it with the installer it just built. You cannot
+reproduce it in one command, but it is the gate most likely to catch a packaging
+or dependency change, so expect it to run for a while after you mark a pull
+request ready for review. Its **Linux leg
 is advisory** — Linux has never had a manual pass on real hardware, so a red Linux
 leg is a warning worth reading rather than a merge blocker.
 

@@ -208,6 +208,53 @@ macOS builds set `hardenedRuntime`, apply `assets/entitlements.mac.plist`,
 own signing walk already recurses through the whole `Contents/` tree,
 including `Resources/`, and signs every binary file it finds there.
 
+### Windows update over an existing install
+
+Installing over an existing Erudi, by hand or through the auto-updater, makes
+the new installer run the uninstaller of the installed version with `--updated`.
+That uninstaller (electron-builder's `un.atomicRMDir`) moves every file of the
+install into `%TEMP%\nsXXXX.tmp\old-install\` with NSIS `Rename`, a `MoveFileW`
+call without the `\\?\` prefix, so it cannot write a path of 260 characters or
+more. On the first file it cannot move, it moves the others back and exits with
+code 2, and electron-builder's installer stops with "Failed to uninstall old
+application files".
+
+The deepest files of the install are the license notices that wheels ship in
+`resources\backend\_internal\<name>.dist-info\licenses\`: torch's vendored
+`third_party` tree puts one 200 characters below the install directory, which
+crosses 260 under `C:\Users\<user>\AppData\Local\Temp\nsXXXX.tmp\old-install\`
+for a user name of about 8 characters. The notices ship on purpose (torch's
+BSD license requires them).
+
+`nsis.include` in `electron-builder.yml` adds
+`frontend/assets/installers/installer.nsh` to the installer. It defines
+`customUnInstallCheck` and `customUnInstallCheckCurrentUser`, which
+electron-builder's `handleUninstallResult` runs instead of its own check of the
+old uninstaller's exit code. They keep that check (an uninstaller that cannot
+start is logged and the install goes on; a non-zero exit shows the failure
+message, sets exit code 2 and quits) and add one recovery before giving up:
+they read the old install's directory from the registry, delete the
+`*.dist-info\licenses` folders under its `resources\backend\_internal\`
+through a `\\?\` path, and run the old uninstaller once more. The new install
+ships the same notices again. When the old uninstaller succeeds the first time,
+none of this runs.
+
+The recovery runs after electron-builder's own retries of the old uninstaller
+(five attempts, one second apart). A silent install goes straight on to it; an
+interactive one first shows "Erudi cannot be closed. Please close it manually
+and click Retry to continue.", where Retry runs the same failing uninstall again
+and Cancel moves on to the recovery.
+
+`app-build-smoke.yml` exercises the path on its Windows leg with
+`scripts/ci/check_win_update_over_release.ps1`: it installs the latest published
+release's CPU installer silently, runs the freshly built installer over it with
+`--updated /S` (what electron-updater passes when it installs at quit), and
+checks the exit code, the installed version and files, and that no
+`old-install` folder is left behind. The runner's user, `runneradmin`, is long
+enough to hit the limit; the script points `TEMP` at its long form and fails
+when the old install's deepest file would land below 260 characters, since such
+a run would prove nothing.
+
 ---
 
 ## Development mode
