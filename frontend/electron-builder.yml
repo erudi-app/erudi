@@ -72,6 +72,15 @@ nsis:
   createDesktopShortcut: true
   createStartMenuShortcut: true
   shortcutName: Erudi
+  # Installing over an existing Erudi (manual or auto-update) runs the old
+  # version's uninstaller, which moves every file under %TEMP% and fails on a
+  # directory of 248 characters or a file of 260: the backend's deepest
+  # dist-info license notices reach both from a user name of 8 to 11 characters.
+  # The include removes those license folders of the old install before the
+  # uninstaller runs, and retries a failed uninstall once without them; the new
+  # install ships them again. See BUILD.md (Windows update over an existing
+  # install).
+  include: assets/installers/installer.nsh
 
 # ---------- macOS ----------
 # electron-updater needs the zip target for delta updates; the DMG is the

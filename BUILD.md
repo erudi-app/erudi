@@ -208,6 +208,59 @@ macOS builds set `hardenedRuntime`, apply `assets/entitlements.mac.plist`,
 own signing walk already recurses through the whole `Contents/` tree,
 including `Resources/`, and signs every binary file it finds there.
 
+### Windows update over an existing install
+
+Installing over an existing Erudi, by hand or through the auto-updater, makes
+the new installer run the uninstaller of the installed version with `--updated`.
+That uninstaller (electron-builder's `un.atomicRMDir`) moves every file of the
+install into `%TEMP%\nsXXXX.tmp\old-install\`: it recreates each directory there
+with `CreateDirectory` and moves each file with NSIS `Rename` (`MoveFileW`), both
+without the `\\?\` prefix, so it cannot write a directory of 248 characters or
+more, nor a file of 260 or more. On the first file it cannot move, it moves the
+others back and exits with code 2, and electron-builder's installer stops with
+"Failed to uninstall old application files".
+
+The deepest files of the install are the license notices that wheels ship in
+`resources\backend\_internal\<name>.dist-info\licenses\`: torch's vendored
+`third_party` tree puts a `LICENSE.txt` 200 characters below the install
+directory, in a directory 188 characters below it. The destination prefix
+`C:\Users\<user>\AppData\Local\Temp\nsXXXX.tmp\old-install` is 48 characters
+plus the user name plus the 1 to 4 hex digits of the plugins directory name
+(`nsX`, hex, `.tmp`, picked at random), and both limits are reached at the same
+length: the failure starts at a user name of 8 to 11 characters, possible from
+8, certain from 11. The notices ship on purpose (torch's BSD license requires
+them).
+
+`nsis.include` in `electron-builder.yml` adds
+`frontend/assets/installers/installer.nsh` to the installer. It removes the
+`*.dist-info\licenses` folders under the old install's
+`resources\backend\_internal\`, so the old uninstaller never has to move them.
+The old install's directory comes from the registry (`InstallLocation`, as
+electron-builder reads it), must be an absolute drive path holding `Erudi.exe`
+and the frozen backend, and is addressed through a `\\?\` path so the deletion
+itself has no length limit. Nothing else is deleted, and the new install ships
+the same notices again. The removal runs at two points:
+
+- **Before the old uninstaller, on every install over an existing one** (an
+  update, which electron-updater starts with `--updated`, silently at quit or
+  interactively from "Install now", or an installer started by hand): in
+  `customInit`, at the end of the installer's `.onInit`. The old uninstaller's
+  first attempt then succeeds, so electron-builder never reaches its retry loop
+  (five attempts, one second apart) or its "Erudi cannot be closed. Please close
+  it manually and click Retry to continue." dialog, whose Retry repeats the
+  failing uninstall. `.onInit` runs before the installer's pages: a user who
+  cancels an interactive install at that point keeps the old install, which
+  works, without its license notices until the next install.
+- **After a failed uninstall, as a safety net** (an old install that
+  `customInit` did not clean): in `customUnInstallCheck` and
+  `customUnInstallCheckCurrentUser`, which electron-builder's
+  `handleUninstallResult` runs instead of its own check of the old
+  uninstaller's exit code. They keep that check (an uninstaller that cannot
+  start is logged and the install goes on; a non-zero exit shows the failure
+  message, sets exit code 2 and quits) and add one recovery before giving up:
+  remove the folders, run the old uninstaller once more. When the old
+  uninstaller succeeds the first time, none of this runs.
+
 ---
 
 ## Development mode
