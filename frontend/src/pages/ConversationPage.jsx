@@ -213,7 +213,6 @@ export default function ConversationPage() {
   // the same conversation — otherwise a previously-viewed chat's images bleed
   // onto a different chat by matching index/content.
   const loadedConvIdRef = useRef(null);
-  const [, setCurrentTitle] = useState("");
 
   // A turn that died because the graphics card could not run the model carries
   // an engine code on its error event. The red bubble stays as it is; the code
@@ -453,7 +452,6 @@ export default function ConversationPage() {
       const isFirstMessage = messagesLengthRef.current === 0;
 
       if (isFirstMessage) {
-        setCurrentTitle("");
         setFirstReplyPending(true);
       }
 
@@ -527,16 +525,10 @@ export default function ConversationPage() {
                   const chunk = decoder.decode(value, { stream: true });
                   fullTitle += chunk;
 
-                  setCurrentTitle(() => {
-                    setConversations((prevConvs) =>
-                      prevConvs.map((conv) =>
-                        conv.id === Number(id)
-                          ? { ...conv, name: fullTitle.trim() || t("chat:conversation.untitled") }
-                          : conv
-                      )
-                    );
-                    return fullTitle;
-                  });
+                  const name = fullTitle.trim() || t("chat:conversation.untitled");
+                  setConversations((prevConvs) =>
+                    prevConvs.map((conv) => (conv.id === Number(id) ? { ...conv, name } : conv))
+                  );
                 }
               }
             } catch (err) {
@@ -843,7 +835,6 @@ export default function ConversationPage() {
       }
 
       if (isFirstMessage) {
-        setTimeout(() => setCurrentTitle(""), 3000);
         setFirstReplyPending(false);
       }
 
