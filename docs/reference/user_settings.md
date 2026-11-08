@@ -53,7 +53,7 @@ other value, a boolean, a float or a numeric string is a 422. Nothing below five
 offered: the memory brake's idle timings are calibrated against a reap at five minutes or
 later. With Never the memory brake still frees memory when the computer runs short, and the
 header's Unload button still unloads the model. The delay does not apply to the knowledge-base
-embedding model, which stays loaded in the backend until Erudi quits once used. See [LLMs](../guides/llms.md#memory-and-the-idle-unload).
+embedding model, which, once used, stays loaded until the backend stops. See [LLMs](../guides/llms.md#memory-and-the-idle-unload).
 
 ::: src.domains.user_settings.endpoints
 

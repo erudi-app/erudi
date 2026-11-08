@@ -544,7 +544,7 @@ longer than `_max_idle_time`: the Settings card "Unload the model when idle" (5,
 default 5 minutes the model goes about 300 to 330 seconds after its last use. The lifespan
 applies the delay to the engine that runs, after the CUDA-to-CPU swap, and the settings PUT
 applies a change at once. The knowledge-base embedding model is not governed by it: once
-used, it stays loaded in the backend until Erudi quits.
+used, it stays loaded until the backend stops.
 A tick with nothing to reap returns without touching the lock; one that finds an idle model
 takes the same lock as `generation_guard`, so it waits for a generation in flight to release
 it — and the guard refreshes `_last_used` on release — which is what keeps a model from being
