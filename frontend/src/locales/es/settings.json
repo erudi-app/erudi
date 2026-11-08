@@ -30,7 +30,7 @@
   "idleUnload": {
     "title": "Liberar el modelo sin uso",
     "description": "Un modelo sin usar sale de la memoria tras este tiempo, lo que la libera para tus otras aplicaciones, y se recarga con tu siguiente mensaje. El tiempo cuenta desde la última respuesta del modelo y se aplica al momento, sin reiniciar Erudi.",
-    "note": "5 minutos por defecto. Nunca mantiene el modelo cargado por mucho tiempo que pase sin usarse; el modelo se libera igualmente cuando a tu equipo le falta memoria, y el botón Liberar de los ajustes de una conversación lo libera siempre que no se esté escribiendo una respuesta. El modelo de búsqueda de las bases de conocimiento tiene su propio tiempo.",
+    "note": "5 minutos por defecto. Nunca mantiene el modelo cargado por mucho tiempo que pase sin usarse; el modelo se libera igualmente cuando a tu equipo le falta memoria, y el botón Liberar de los ajustes de una conversación lo libera siempre que no se esté escribiendo una respuesta. No se aplica al modelo de búsqueda de las bases de conocimiento.",
     "selectLabel": "Liberar el modelo sin uso",
     "minutes": "{{minutes}} minutos",
     "never": "Nunca"

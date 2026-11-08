@@ -313,7 +313,7 @@ model is released about 300 to 330 seconds after its last use; with Never it sta
 long it is unused. The lifespan applies the stored delay to the engine that runs, after the
 CUDA-to-CPU swap, and `PUT /erudi/user_settings/` applies a change at once, without a relaunch
 (`BaseEngine.set_idle_unload_minutes`). It governs the chat model only: the knowledge-base embedding
-model keeps its own idle release. Nothing shorter than five minutes is offered, because the memory
+model, once used, stays loaded in the backend until Erudi quits. Nothing shorter than five minutes is offered, because the memory
 brake's idle timings are calibrated against a reap at five minutes or later; with Never the brake
 still acts when the computer runs short of memory.
 
