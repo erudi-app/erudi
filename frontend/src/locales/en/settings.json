@@ -30,7 +30,7 @@
   "idleUnload": {
     "title": "Unload the model when idle",
     "description": "An unused model leaves memory after this delay, which frees it for your other apps, and reloads at your next message. The delay counts from the model's last answer and applies at once, without restarting Erudi.",
-    "note": "5 minutes by default. Never keeps the model loaded however long it stays unused; the model is still unloaded when your computer runs short of memory, and the Unload button in a conversation's settings unloads it whenever no answer is being written. The knowledge-base search model has its own delay.",
+    "note": "5 minutes by default. Never keeps the model loaded however long it stays unused; the model is still unloaded when your computer runs short of memory, and the Unload button in a conversation's settings unloads it whenever no answer is being written. This delay does not apply to the knowledge-base search model.",
     "selectLabel": "Unload the model when idle",
     "minutes": "{{minutes}} minutes",
     "never": "Never"

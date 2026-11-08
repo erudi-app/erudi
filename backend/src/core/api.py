@@ -366,7 +366,8 @@ def apply_idle_unload_preference() -> None:
     attribute, so it must land on the engine left once CUDA may have been
     swapped for CPU, and before the idle monitor starts. The settings PUT
     applies later changes to the same ``config.LLM_Engine``. The knowledge-base
-    embedding model keeps its own idle release.
+    embedding model is not governed by it: once used, it stays loaded until the
+    backend stops.
     """
     from src.domains.user_settings.repository import read_idle_unload_minutes
 

@@ -30,7 +30,7 @@
   "idleUnload": {
     "title": "Décharger le modèle inutilisé",
     "description": "Un modèle inutilisé quitte la mémoire après ce délai, ce qui la libère pour vos autres applications, et se recharge à votre prochain message. Le délai part de la dernière réponse du modèle et s'applique immédiatement, sans redémarrer Erudi.",
-    "note": "5 minutes par défaut. Jamais garde le modèle chargé quelle que soit la durée d'inactivité ; le modèle est tout de même déchargé quand votre ordinateur manque de mémoire, et le bouton Décharger des réglages d'une conversation le décharge dès qu'aucune réponse n'est en cours d'écriture. Le modèle de recherche des bases de connaissances a son propre délai.",
+    "note": "5 minutes par défaut. Jamais garde le modèle chargé quelle que soit la durée d'inactivité ; le modèle est tout de même déchargé quand votre ordinateur manque de mémoire, et le bouton Décharger des réglages d'une conversation le décharge dès qu'aucune réponse n'est en cours d'écriture. Ce délai ne s'applique pas au modèle de recherche des bases de connaissances.",
     "selectLabel": "Décharger le modèle inutilisé",
     "minutes": "{{minutes}} minutes",
     "never": "Jamais"

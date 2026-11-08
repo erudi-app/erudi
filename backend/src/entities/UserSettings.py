@@ -93,8 +93,8 @@ class UserSettings(Base):
             model stays loaded once unused before it is unloaded, 0 for never
             (#619). 5 by default, the delay every row that predates the column
             holds. Applied to the running engine at boot and on every change,
-            without a relaunch; the knowledge-base embedding model has its own
-            idle release and ignores it.
+            without a relaunch. The knowledge-base embedding model ignores it:
+            once used, it stays loaded until the backend stops.
 
     Constraints:
         - web_search_enabled must be a Boolean (enforced by validator).
