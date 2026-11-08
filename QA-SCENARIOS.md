@@ -383,13 +383,13 @@ non-functional behavior.
 - [ ] When the selected base model **already has a KB**, then submitting **updates** the existing KB with the new files instead of creating a new assistant.
 
 **Embeddings run without the torch stack (footprint)**
-- [ ] When I create an assistant and ask a document question, then ingestion and retrieval work exactly as before — embeddings now come from a **dedicated child** (`llama-server --embeddings` on Windows/Linux, `mlx_vlm.server` on Apple Silicon), not from the in-process sentence-transformers stack.
-- [ ] When retrieval is compared to the previous version on the **same KB** (golden questions), then answers ground on the same passages — no regression from the engine swap.
-- [ ] When the embedding child has been **idle**, then it is unloaded to free memory, and the next KB operation transparently reloads it. *(The Settings idle delay governs the chat model only, not this one.)*
-- [ ] When I inspect the installed app, then on Windows/Linux the **torch/transformers tree is gone**, and on Apple Silicon torch/sklearn/sentence-transformers are gone (transformers stays as an mlx-vlm dependency) — with no loss of KB function.
-- [ ] *(Apple Silicon)* When the KB embeds, then the app serves `intfloat/multilingual-e5-small` **as-is** through mlx_vlm — vectors match the previous output, so **no reindex** is needed.
-- [ ] *(Windows/Linux)* When the KB embeds, then the app serves the **published GGUF (F16)** through `llama-server --embeddings` — 384-dim, mean-pooled, L2-normalized, with the `query:`/`passage:` prefixes applied.
-- [ ] When chunking counts tokens, then it uses the pure `tokenizers` package (no HF `transformers`) and produces the same chunk boundaries as before.
+- [ ] *(not built yet: embeddings outside the backend, #594 — record as not applicable)* When I create an assistant and ask a document question, then ingestion and retrieval work exactly as before — embeddings now come from a **dedicated child** (`llama-server --embeddings` on Windows/Linux, `mlx_vlm.server` on Apple Silicon), not from the in-process sentence-transformers stack.
+- [ ] *(not built yet: embeddings outside the backend, #594 — record as not applicable)* When retrieval is compared to the previous version on the **same KB** (golden questions), then answers ground on the same passages — no regression from the engine swap.
+- [ ] *(not built yet: embeddings outside the backend, #594 — record as not applicable)* When the embedding child has been **idle**, then it is unloaded to free memory, and the next KB operation transparently reloads it. *(The Settings idle delay governs the chat model only, not this one.)*
+- [ ] *(not built yet: embeddings outside the backend, #594 — record as not applicable)* When I inspect the installed app, then on Windows/Linux the **torch/transformers tree is gone**, and on Apple Silicon torch/sklearn/sentence-transformers are gone (transformers stays as an mlx-vlm dependency) — with no loss of KB function.
+- [ ] *(not built yet: embeddings outside the backend, #594 — record as not applicable)* *(Apple Silicon)* When the KB embeds, then the app serves `intfloat/multilingual-e5-small` **as-is** through mlx_vlm — vectors match the previous output, so **no reindex** is needed.
+- [ ] *(not built yet: embeddings outside the backend, #594 — record as not applicable)* *(Windows/Linux)* When the KB embeds, then the app serves the **published GGUF (F16)** through `llama-server --embeddings` — 384-dim, mean-pooled, L2-normalized, with the `query:`/`passage:` prefixes applied.
+- [ ] *(not built yet: embeddings outside the backend, #594 — record as not applicable)* When chunking counts tokens, then it uses the pure `tokenizers` package (no HF `transformers`) and produces the same chunk boundaries as before.
 
 ## Settings — `/erudi/settings`
 

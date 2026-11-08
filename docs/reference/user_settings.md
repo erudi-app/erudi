@@ -52,8 +52,8 @@ and a `PUT` carrying it applies it to that engine at once, so no relaunch is nee
 other value, a boolean, a float or a numeric string is a 422. Nothing below five minutes is
 offered: the memory brake's idle timings are calibrated against a reap at five minutes or
 later. With Never the memory brake still frees memory when the computer runs short, and the
-header's Unload button still unloads the model. The knowledge-base embedding model keeps its
-own idle release. See [LLMs](../guides/llms.md#memory-and-the-idle-unload).
+header's Unload button still unloads the model. The delay does not apply to the knowledge-base
+embedding model, which, once used, stays loaded until the backend stops. See [LLMs](../guides/llms.md#memory-and-the-idle-unload).
 
 ::: src.domains.user_settings.endpoints
 
