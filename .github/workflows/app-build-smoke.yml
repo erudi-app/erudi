@@ -112,12 +112,14 @@ jobs:
         run: python scripts/ci/smoke_boot.py "${{ steps.locate.outputs.exe }}" --port 27182
 
       # Windows only: install the latest published release, then run the
-      # installer built above over it the way electron-updater does, and check
-      # the update lands. Installing over an existing Erudi runs the old
-      # version's uninstaller, which fails on a path of 260 characters or more
-      # under %TEMP%; frontend/assets/installers/installer.nsh recovers from it.
-      # The script fails when the run cannot reach that limit, and on any
-      # download error (the release is read with this workflow's token).
+      # installer built above over it, by hand (/S) and the way electron-updater
+      # does (--updated /S), and check each update lands. Installing over an
+      # existing Erudi runs the old version's uninstaller, which fails on a path
+      # of 260 characters or more under %TEMP%;
+      # frontend/assets/installers/installer.nsh removes the deepest files
+      # before the update and recovers on a manual install. The script fails
+      # when the run cannot reach that limit, and on any download error (the
+      # release is read with this workflow's token).
       - name: Update over the latest published release
         if: runner.os == 'Windows'
         shell: pwsh

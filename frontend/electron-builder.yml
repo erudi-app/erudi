@@ -76,10 +76,11 @@ nsis:
   # version's uninstaller, which moves every file under %TEMP% and fails on a
   # destination of 260 characters or more: the backend's deepest dist-info
   # license notices reach it for a user name of about 8 characters. The include
-  # retries that uninstall once without those license folders of the old
-  # install (the new install ships them again). See BUILD.md (Windows update
-  # over an existing install); app-build-smoke.yml installs over the latest
-  # release to prove it.
+  # removes those license folders of the old install before an update
+  # (--updated), and retries a failed uninstall once without them on a manual
+  # install; the new install ships them again. See BUILD.md (Windows update over
+  # an existing install); app-build-smoke.yml installs over the latest release
+  # both ways to prove it.
   include: assets/installers/installer.nsh
 
 # ---------- macOS ----------

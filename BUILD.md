@@ -227,33 +227,49 @@ for a user name of about 8 characters. The notices ship on purpose (torch's
 BSD license requires them).
 
 `nsis.include` in `electron-builder.yml` adds
-`frontend/assets/installers/installer.nsh` to the installer. It defines
-`customUnInstallCheck` and `customUnInstallCheckCurrentUser`, which
-electron-builder's `handleUninstallResult` runs instead of its own check of the
-old uninstaller's exit code. They keep that check (an uninstaller that cannot
-start is logged and the install goes on; a non-zero exit shows the failure
-message, sets exit code 2 and quits) and add one recovery before giving up:
-they read the old install's directory from the registry, delete the
-`*.dist-info\licenses` folders under its `resources\backend\_internal\`
-through a `\\?\` path, and run the old uninstaller once more. The new install
-ships the same notices again. When the old uninstaller succeeds the first time,
-none of this runs.
+`frontend/assets/installers/installer.nsh` to the installer. It removes the
+`*.dist-info\licenses` folders under the old install's
+`resources\backend\_internal\` before the old uninstaller has to move them. The
+old install's directory comes from the registry (`InstallLocation`, as
+electron-builder reads it), must be an absolute drive path holding `Erudi.exe`
+and the frozen backend, and is addressed through a `\\?\` path so the deletion
+itself has no length limit. Nothing else is deleted, and the new install ships
+the same notices again. It does so at one of two points:
 
-The recovery runs after electron-builder's own retries of the old uninstaller
-(five attempts, one second apart). A silent install goes straight on to it; an
-interactive one first shows "Erudi cannot be closed. Please close it manually
-and click Retry to continue.", where Retry runs the same failing uninstall again
-and Cancel moves on to the recovery.
+- **On an update** (`--updated` on the installer's command line, which is how
+  electron-updater starts it, silently at quit or interactively from "Install
+  now"): in `customInit`, at the end of the installer's `.onInit`, before the
+  install section runs the old uninstaller. Its first attempt then succeeds,
+  and electron-builder never reaches its retry loop or its dialog.
+- **On a manual install over an existing one** (no `--updated`): in
+  `customUnInstallCheck` and `customUnInstallCheckCurrentUser`, which
+  electron-builder's `handleUninstallResult` runs instead of its own check of
+  the old uninstaller's exit code. They keep that check (an uninstaller that
+  cannot start is logged and the install goes on; a non-zero exit shows the
+  failure message, sets exit code 2 and quits) and add one recovery before
+  giving up: remove the folders, run the old uninstaller once more. When the
+  old uninstaller succeeds the first time, none of this runs.
 
-`app-build-smoke.yml` exercises the path on its Windows leg with
-`scripts/ci/check_win_update_over_release.ps1`: it installs the latest published
-release's CPU installer silently, runs the freshly built installer over it with
-`--updated /S` (what electron-updater passes when it installs at quit), and
-checks the exit code, the installed version and files, and that no
-`old-install` folder is left behind. The runner's user, `runneradmin`, is long
-enough to hit the limit; the script points `TEMP` at its long form and fails
-when the old install's deepest file would land below 260 characters, since such
-a run would prove nothing.
+The manual path recovers only after electron-builder's own retries of the old
+uninstaller (five attempts, one second apart). A silent install goes straight
+on to the recovery; an interactive one first shows "Erudi cannot be closed.
+Please close it manually and click Retry to continue.", where Retry runs the
+same failing uninstall again and Cancel moves on to the recovery. Updates never
+show it, because the folders are already gone.
+
+`app-build-smoke.yml` exercises both points on its Windows leg with
+`scripts/ci/check_win_update_over_release.ps1`. It installs the latest published
+release's CPU installer silently and runs the freshly built installer over it
+with `/S` alone (the manual path), removes the result with its own uninstaller,
+installs the release again and runs the new installer with `--updated /S` (what
+electron-updater passes when it installs at quit). After each update it checks
+the exit code, the installed version and files, and that no `old-install`
+folder is left behind. It also counts the starts of the old uninstaller through
+`Win32_ProcessStartTrace`: more than one on the manual path (the first attempt
+failed and the recovery ran), exactly one on the update path. The runner's
+user, `runneradmin`, is long enough to hit the limit; the script points `TEMP`
+at its long form and fails when the old install's deepest file would land below
+260 characters, since such a run would prove nothing.
 
 ---
 
