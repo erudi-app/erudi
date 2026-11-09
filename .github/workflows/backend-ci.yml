@@ -38,14 +38,17 @@ jobs:
         include:
           - os: ubuntu-latest # x64 CPU
             reqs: linux-cpu.txt
+            lock: linux-cpu-prod.txt
             venv_bin: bin
             fail_fast: '-x'
           - os: windows-latest # x64 CPU
             reqs: win-cpu.txt
+            lock: win-cpu-prod.txt
             venv_bin: Scripts
             fail_fast: '-x'
           - os: macos-15 # Apple Silicon
             reqs: mac-silicon.txt
+            lock: mac-silicon-prod.txt
             venv_bin: bin
             fail_fast: '-x'
     env:
@@ -69,10 +72,13 @@ jobs:
       - name: Install pip, wheel, setuptools
         run: python -m pip install --upgrade pip wheel setuptools
 
+      # Constrained to the prod lock of this OS, so the tests run on the versions
+      # a release ships. The dev tools (pytest, ruff, ...) are not in the lock and
+      # resolve freely, within the locked versions of what they share with it.
       - name: Create venv & install requirements
         run: |
           python -m venv backend/venv
-          backend/venv/${{ matrix.venv_bin }}/python -m pip install -r backend/requirements/entrypoints/dev/${{ matrix.reqs }}
+          backend/venv/${{ matrix.venv_bin }}/python -m pip install -r backend/requirements/entrypoints/dev/${{ matrix.reqs }} -c backend/requirements/lock/${{ matrix.lock }}
 
       - name: Syntax check
         run: backend/venv/${{ matrix.venv_bin }}/python -m compileall backend/src -q

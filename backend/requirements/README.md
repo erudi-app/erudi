@@ -67,8 +67,11 @@ That is what puts `colorama` and `tzdata` in the Windows locks and `greenlet`
 in the Linux and Windows ones from a macOS host. A marker on the running kernel
 (`platform_release`, `platform_version`) cannot be emulated and stops the run.
 
-The locks only cover the prod entrypoints, the ones a build installs. The dev
-entrypoints resolve freely.
+The dev entrypoints have no lock of their own. backend-ci installs each one
+constrained to the prod lock of its OS (`-c lock/linux-cpu-prod.txt`,
+`win-cpu-prod.txt`, `mac-silicon-prod.txt`), so the tests run on the versions a
+release ships; the dev tools (pytest, ruff, …) are not in a lock and resolve
+freely, within the locked versions of what they share with it.
 
 ## Key design notes
 
@@ -151,13 +154,14 @@ transitive dependency to satisfy the package you asked for. The generator
 resolves each entrypoint from nothing (`--dry-run --ignore-installed`), so it
 fails where CI would.
 
-The dev entrypoints are not locked. Check a bump to one the way CI will, in a
-throwaway environment:
+A dev tool bump (`meta/dev.txt`) needs no lock change. Check it the way
+backend-ci installs it, in a throwaway environment:
 
 ```bash
 python3.12 -m venv /tmp/resolvenv
 /tmp/resolvenv/bin/python -m pip install --dry-run \
-    -r requirements/entrypoints/dev/<platform>.txt
+    -r requirements/entrypoints/dev/<platform>.txt \
+    -c requirements/lock/<platform>-prod.txt
 ```
 
 `--dry-run` resolves and prints what it *would* install without building

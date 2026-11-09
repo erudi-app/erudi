@@ -127,6 +127,18 @@ def test_builds_install_pyinstaller_only_through_the_locked_script(workflow):
     ), "PyInstaller is installed by install_backend_requirements.sh, locked (meta/build.txt)"
 
 
+@pytest.mark.unit
+def test_backend_ci_installs_the_dev_entrypoint_within_the_prod_lock_of_its_os():
+    (job,) = _workflow("backend-ci.yml")["jobs"].values()
+    legs = job["strategy"]["matrix"]["include"]
+    assert legs
+    for leg in legs:
+        assert leg["lock"] == leg["reqs"].replace(".txt", "-prod.txt"), leg
+        assert lock_tool.lock_path(lock_tool.PROD_DIR / leg["lock"]).exists(), leg
+    (install,) = [step for step in job["steps"] if "entrypoints/dev/" in step.get("run", "")]
+    assert "-c backend/requirements/lock/${{ matrix.lock }}" in install["run"]
+
+
 def _report(*items):
     """A pip --report holding the given (name, version, requires_dist, requested) items."""
     return {
