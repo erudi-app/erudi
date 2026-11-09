@@ -39,6 +39,13 @@ requirements/
 - **transformers is pinned once in `base.txt` (5.14.1)** for every platform. The
   floor comes from mlx-vlm 0.6.17 (`transformers>=5.14.0`); it is coupled to
   torch (imports `torch.float8_e8m0fnu`, needing torch>=2.7).
+- **Transitive packages are pinned to the tested build in `base.txt`** (and
+  `miniaudio` in `mac-silicon-specs.txt`). A build bundles whatever pip
+  resolves on the day, and an unsigned `.pyd` published hours before a build
+  has no reputation yet: Windows Smart App Control refuses to load it. A
+  rebuild must bundle what was tested, so any transitive package that moves
+  between the tested build and a rebuild is pinned back (compare the
+  `Successfully installed` lines of the two release runs).
 - Fine-tuning deps (peft/accelerate/datasets/bitsandbytes) were removed — the
   feature is unimplemented dead code (see the fine-tuning cleanup issue).
 
