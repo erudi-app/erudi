@@ -138,8 +138,9 @@ jobs:
           df -h /
 
       # ── Backend: Python deps + PyInstaller ───────────────────────────────────
-      # The script installs the entrypoint and PyInstaller (meta/build.txt)
-      # constrained to the entrypoint's lock, and fails on any difference from it.
+      # The script installs the lock (backend + PyInstaller) into a fresh venv,
+      # fails on any difference from it, and puts the venv on PATH for the
+      # steps that follow (pyinstaller below).
       - name: Install backend dependencies
         run: bash scripts/ci/install_backend_requirements.sh backend/requirements/entrypoints/prod/${{ matrix.reqs }}
 

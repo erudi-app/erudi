@@ -4,38 +4,48 @@
     python3.12 scripts/dev/lock_backend_requirements.py
     python3.12 scripts/dev/lock_backend_requirements.py --upgrade-package regex
     python3.12 scripts/dev/lock_backend_requirements.py --upgrade
+    py -3.12 scripts\\dev\\lock_backend_requirements.py          (Windows)
 
 For every file in backend/requirements/entrypoints/prod/ it resolves the
 entrypoint together with backend/requirements/meta/build.txt (PyInstaller, the
-build tool) and writes backend/requirements/lock/<same name>: every package of
-the resolution as `name==version`, sorted. scripts/ci/install_backend_requirements.sh
-installs both files constrained to the lock and fails when the installed set
-differs, so a release build bundles the locked versions and nothing else.
+build tool) and writes backend/requirements/lock/<same name>: the index options
+of the requirement files, then every package of the resolution as
+`name==version --hash=sha256:<hash>`, sorted. The hash is the one of the file
+pip selected for the target, so the lock names files, not just versions: a wheel
+published later for a locked version (a new build tag or platform tag) cannot
+enter a build. scripts/ci/install_backend_requirements.sh installs the lock alone
+in hash-checking mode (`-r <lock> --require-hashes --no-deps`) into a fresh venv
+and fails when the installed set differs from it.
 
 Each entrypoint is resolved for the platform its build runs on, from any host:
 `pip install --dry-run --report` with `--only-binary=:all: --platform <tags>
 --python-version 3.12`. The tags are the ones the build runner's own pip
-accepts: win_amd64; manylinux up to the glibc of the oldest Linux release runner;
-macOS arm64 at the app's floor (mac.minimumSystemVersion in
-frontend/electron-builder.yml), which is what the macOS leg installs. `--platform`
+accepts, in its order of preference: win_amd64; manylinux up to the glibc of the
+oldest Linux release runner, so the file is the one that runner takes (a newer
+runner accepts it too, and the hash makes it take the same one); macOS arm64 at
+the app's floor (mac.minimumSystemVersion in frontend/electron-builder.yml), so
+the frozen backend loads on every macOS the installer accepts. `--platform`
 only selects wheels: pip still evaluates environment markers (`sys_platform`,
 `platform_machine`, ...) against the interpreter running it, so a Windows lock
 generated on macOS would miss `colorama; sys_platform == "win32"`. pip is
 therefore run with its marker environment replaced by the target's, and the
-result is verified: the dependency graph walked from the requested packages with
-the target's markers must reach exactly the resolved set, at versions every
+result is verified: the dependency graph walked from the declared requirements
+with the target's markers must reach exactly the resolved set, at versions every
 dependent accepts. A marker on `platform_release` or `platform_version` cannot be
 emulated off the target and stops the run.
 
 The resolution is seeded with the existing lock: its versions are passed as
-constraints, so a regeneration only moves what the change requires. A locked
-version that the requirement files no longer accept leaves the seed on its own;
-anything else moves only when asked, with `--upgrade-package NAME` (repeatable)
-or `--upgrade` (every package, newest that resolves).
+constraints, and a package whose version does not move keeps its locked file,
+so a regeneration only moves what the change requires. A locked version that the
+requirement files no longer accept leaves the seed on its own; anything else
+moves only when asked, with `--upgrade-package NAME` (repeatable) or `--upgrade`
+(every package, newest that resolves).
 
-Each lock records the digest of the requirement lines it was generated from
-(comments and blank lines excluded); backend/tests/test_requirements_lock.py
-fails when a requirement file changes without the locks being regenerated.
+Each lock records a digest of the requirement lines it was generated from
+(comments and blank lines excluded), of the target's platform tags and of its
+own body; backend/tests/test_requirements_lock.py fails when a requirement file
+or the macOS floor changes without the locks being regenerated, and when a lock
+is edited by hand.
 
 Stdlib only, plus pip, which it drives (`pip._vendor.packaging` evaluates the
 markers and specifiers). Run it with Python 3.12, the backend's version: the
@@ -51,35 +61,46 @@ import re
 import subprocess
 import sys
 import tempfile
-from dataclasses import dataclass
+import urllib.request
+from dataclasses import dataclass, field
 from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 REQUIREMENTS_DIR = REPO_ROOT / "backend" / "requirements"
 PROD_DIR = REQUIREMENTS_DIR / "entrypoints" / "prod"
 LOCK_DIR = REQUIREMENTS_DIR / "lock"
-# Resolved and locked with every prod entrypoint; installed beside it by
-# scripts/ci/install_backend_requirements.sh.
+# Resolved and locked with every prod entrypoint.
 BUILD_REQUIREMENTS = Path("meta") / "build.txt"
 ELECTRON_BUILDER = REPO_ROOT / "frontend" / "electron-builder.yml"
 
 PYTHON_VERSION = (3, 12)
-REGENERATE_COMMAND = "python3.12 scripts/dev/lock_backend_requirements.py"
-DIGEST_PREFIX = "# inputs-sha256: "
+REGENERATE_COMMANDS = (
+    "python3.12 scripts/dev/lock_backend_requirements.py",
+    "py -3.12 scripts\\dev\\lock_backend_requirements.py   (Windows)",
+)
+REGENERATE_COMMAND = f"{REGENERATE_COMMANDS[0]} (Windows: py -3.12 scripts\\dev\\...)"
+DIGEST_PREFIX = "# sha256: "
 
 # glibc of the oldest runner that installs a Linux lock: release.yml builds on
 # ubuntu-22.04 (glibc 2.35); app-build-smoke.yml on ubuntu-latest, newer. A wheel
 # tagged above it would not install there.
 LINUX_GLIBC_MINOR = 35
+# The legacy manylinux names, at the glibc they stand for.
+_MANYLINUX_ALIASES = {17: "manylinux2014", 12: "manylinux2010", 5: "manylinux1"}
 
 # Markers that describe the running kernel: they cannot be emulated for another
 # machine, so meeting one stops the run.
 UNEMULATED_MARKERS = ("platform_release", "platform_version")
 
+# The requirement-file options a lock carries over, so it installs on its own.
+_INDEX_OPTIONS = ("--index-url", "--extra-index-url", "--find-links", "--trusted-host")
+
 # pip's own comment rule for requirement files.
 _COMMENT_RE = re.compile(r"(^|\s+)#.*$")
 _INCLUDE_RE = re.compile(r"^(-r|--requirement|-c|--constraint)(\s+|=)(?P<path>\S+)$")
-_LOCK_LINE_RE = re.compile(r"^(?P<name>[a-z0-9][a-z0-9.-]*)==(?P<version>\S+)$")
+_LOCK_LINE_RE = re.compile(
+    r"^(?P<name>[a-z0-9][a-z0-9.-]*)==(?P<version>\S+) --hash=sha256:(?P<hash>[0-9a-f]{64})$"
+)
 
 # Runs pip with the marker environment of the target platform. Marker.evaluate
 # looks up default_environment() at call time, and the report module imports it
@@ -100,7 +121,7 @@ sys.exit(main(sys.argv[2:]))
 
 
 class LockError(Exception):
-    """A lock cannot be generated; the message says why."""
+    """A lock cannot be generated or read; the message says why."""
 
 
 @dataclass(frozen=True)
@@ -108,6 +129,17 @@ class Target:
     description: str
     platforms: tuple[str, ...]
     markers: dict[str, str]
+
+
+@dataclass
+class Lock:
+    """A parsed lock file."""
+
+    options: list[str] = field(default_factory=list)
+    pins: dict[str, str] = field(default_factory=dict)
+    hashes: dict[str, str] = field(default_factory=dict)
+    body: list[str] = field(default_factory=list)
+    digest: str | None = None
 
 
 def canonical_name(name: str) -> str:
@@ -160,38 +192,52 @@ def input_files(entrypoint: Path) -> list[Path]:
     return seen
 
 
-def inputs_digest(entrypoint: Path) -> str:
+def index_options(entrypoint: Path) -> list[str]:
+    """The index options of the entrypoint's files, in order, once each."""
+    options: list[str] = []
+    for path in input_files(entrypoint):
+        for line in requirement_lines(path):
+            if line.split()[0].split("=")[0] in _INDEX_OPTIONS and line not in options:
+                options.append(line)
+    return options
+
+
+def lock_digest(entrypoint: Path, target: Target, body: list[str]) -> str:
+    """Digest of what a lock is generated from and of what it says."""
     digest = hashlib.sha256()
     for path in input_files(entrypoint):
         digest.update(f"--- {_relative(path)}\n".encode())
         for line in requirement_lines(path):
             digest.update(f"{line}\n".encode())
+    digest.update(f"--- target {' '.join(target.platforms)}\n".encode())
+    digest.update("--- lock\n".encode())
+    for line in body:
+        digest.update(f"{line}\n".encode())
     return digest.hexdigest()
 
 
-def read_lock(path: Path) -> tuple[dict[str, str], str | None]:
-    """The pins of a lock file (canonical name -> version) and its inputs digest."""
-    pins: dict[str, str] = {}
-    digest = None
+def read_lock(path: Path) -> Lock:
+    lock = Lock()
     for number, line in enumerate(path.read_text(encoding="utf-8").splitlines(), 1):
         if line.startswith(DIGEST_PREFIX):
-            digest = line[len(DIGEST_PREFIX) :].strip()
+            lock.digest = line[len(DIGEST_PREFIX) :].strip()
             continue
         if not line or line.startswith("#"):
             continue
+        lock.body.append(line)
+        if line.startswith("--"):
+            lock.options.append(line)
+            continue
         match = _LOCK_LINE_RE.match(line)
         if not match:
-            raise LockError(f"{path}:{number}: not a `name==version` line: {line!r}")
-        pins[match.group("name")] = match.group("version")
-    return pins, digest
+            raise LockError(f"{path}:{number}: not a `name==version --hash=sha256:...` line")
+        lock.pins[match.group("name")] = match.group("version")
+        lock.hashes[match.group("name")] = match.group("hash")
+    return lock
 
 
 def macos_floor() -> str:
-    """mac.minimumSystemVersion from the top-level `mac:` block of electron-builder.yml.
-
-    Same reading as scripts/ci/install_backend_requirements.sh, which installs
-    the wheels built for this floor on the macOS leg.
-    """
+    """mac.minimumSystemVersion from the top-level `mac:` block of electron-builder.yml."""
     floors = []
     in_mac = False
     for line in ELECTRON_BUILDER.read_text(encoding="utf-8").splitlines():
@@ -204,6 +250,16 @@ def macos_floor() -> str:
         raise LockError(f"Expected one mac.minimumSystemVersion in {ELECTRON_BUILDER}: {floors}")
     major, _, minor = floors[0].partition(".")
     return f"{major}_{minor or 0}"
+
+
+def _linux_platforms() -> tuple[str, ...]:
+    """The tags of a glibc 2.LINUX_GLIBC_MINOR x86_64 runner, in its pip's order."""
+    platforms = []
+    for minor in range(LINUX_GLIBC_MINOR, 4, -1):
+        platforms.append(f"manylinux_2_{minor}_x86_64")
+        if minor in _MANYLINUX_ALIASES:
+            platforms.append(f"{_MANYLINUX_ALIASES[minor]}_x86_64")
+    return (*platforms, "linux_x86_64")
 
 
 def target_for(entrypoint: Path) -> Target:
@@ -220,14 +276,9 @@ def target_for(entrypoint: Path) -> Target:
             },
         )
     if name.startswith("linux-"):
-        manylinux = [f"manylinux_2_{minor}_x86_64" for minor in range(LINUX_GLIBC_MINOR, 4, -1)] + [
-            "manylinux2014_x86_64",
-            "manylinux2010_x86_64",
-            "manylinux1_x86_64",
-        ]
         return Target(
             f"manylinux_2_{LINUX_GLIBC_MINOR}_x86_64 and older",
-            (*manylinux, "linux_x86_64"),
+            _linux_platforms(),
             {
                 "os_name": "posix",
                 "sys_platform": "linux",
@@ -256,14 +307,14 @@ def _packaging():
     return markers, requirements, specifiers, version
 
 
-def declared_requirements(entrypoint: Path) -> list:
-    """Every requirement line of the entrypoint's files, parsed."""
+def declared_requirements(entrypoint: Path) -> list[tuple[str, object]]:
+    """Every requirement line of the entrypoint's files, parsed, with its file."""
     _, requirements, _, _ = _packaging()
     declared = []
     for path in input_files(entrypoint):
         for line in requirement_lines(path):
             if not line.startswith("-"):
-                declared.append(requirements.Requirement(line))
+                declared.append((_relative(path), requirements.Requirement(line)))
     return declared
 
 
@@ -273,9 +324,9 @@ def seed_constraints(entrypoint: Path, upgrade: bool, upgrade_packages: set[str]
     if upgrade or not path.exists():
         return []
     _, _, _, version = _packaging()
-    pins, _ = read_lock(path)
+    pins = read_lock(path).pins
     refused = set(upgrade_packages)
-    for requirement in declared_requirements(entrypoint):
+    for _, requirement in declared_requirements(entrypoint):
         name = canonical_name(requirement.name)
         locked = pins.get(name)
         if locked and not requirement.specifier.contains(version.Version(locked), prereleases=True):
@@ -331,12 +382,13 @@ def resolve(entrypoint: Path, target: Target, constraints: list[str], work: Path
 
 
 def verify(entrypoint: Path, target: Target, report: dict) -> list[str]:
-    """Walk the dependency graph with the target's markers.
+    """Walk the dependency graph from the declared requirements with the target's markers.
 
-    Every package reachable from the requested ones must be resolved, at a
-    version its dependents accept, and every resolved package must be reachable.
-    Returns the requirements the target's markers decide otherwise than the
-    host's: what a resolution without the emulation would have got wrong.
+    Every declared requirement that applies to the target, and every package it
+    reaches, must be resolved at a version its dependents accept, and every
+    resolved package must be reached. Returns the requirements the target's
+    markers decide otherwise than the host's: what a resolution without the
+    emulation would have got wrong.
     """
     markers, requirements, _, version = _packaging()
     host = markers.default_environment()
@@ -351,7 +403,9 @@ def verify(entrypoint: Path, target: Target, report: dict) -> list[str]:
             return True
         text = str(requirement.marker)
         if any(name in text for name in UNEMULATED_MARKERS):
+            # Not evaluated: the host's kernel version may not even parse.
             problems.append(f"{owner}: `{text}` depends on the running kernel")
+            return False
 
         def holds(base: dict) -> bool:
             return any(
@@ -363,41 +417,39 @@ def verify(entrypoint: Path, target: Target, report: dict) -> list[str]:
             flipped.add(f"{owner}: {requirement} ({'kept' if on_target else 'dropped'})")
         return on_target
 
-    for path in input_files(entrypoint):
-        for line in requirement_lines(path):
-            if not line.startswith("-"):
-                applies(_relative(path), requirements.Requirement(line), set())
+    def check(owner: str, requirement) -> str | None:
+        name = canonical_name(requirement.name)
+        item = resolved.get(name)
+        if item is None:
+            problems.append(f"{owner} requires {requirement}: missing from the resolution")
+            return None
+        if not requirement.specifier.contains(
+            version.Version(item["metadata"]["version"]), prereleases=True
+        ):
+            problems.append(
+                f"{owner} requires {requirement}, resolved {name}=={item['metadata']['version']}"
+            )
+        return name
 
     reached: dict[str, set[str]] = {}
-    pending = [
-        (name, set(item.get("requested_extras", [])))
-        for name, item in resolved.items()
-        if item.get("requested")
-    ]
+    pending: list[tuple[str, set[str]]] = []
+    for owner, requirement in declared_requirements(entrypoint):
+        if applies(owner, requirement, set()):
+            name = check(owner, requirement)
+            if name:
+                pending.append((name, set(requirement.extras)))
     while pending:
         name, extras = pending.pop()
         if name in reached and extras <= reached[name]:
             continue
         extras = reached.setdefault(name, set()) | extras
         reached[name] = extras
-        item = resolved.get(name)
-        if item is None:
-            problems.append(f"{name} is required on the target but missing from the resolution")
-            continue
-        for line in item["metadata"].get("requires_dist", []):
+        for line in resolved[name]["metadata"].get("requires_dist", []):
             requirement = requirements.Requirement(line)
-            if not applies(name, requirement, extras):
-                continue
-            dependency = canonical_name(requirement.name)
-            dependency_item = resolved.get(dependency)
-            if dependency_item is not None and not requirement.specifier.contains(
-                version.Version(dependency_item["metadata"]["version"]), prereleases=True
-            ):
-                problems.append(
-                    f"{name} requires {requirement}, resolved "
-                    f"{dependency}=={dependency_item['metadata']['version']}"
-                )
-            pending.append((dependency, set(requirement.extras)))
+            if applies(name, requirement, extras):
+                dependency = check(name, requirement)
+                if dependency:
+                    pending.append((dependency, set(requirement.extras)))
 
     for name in sorted(set(resolved) - set(reached)):
         problems.append(f"{name} is resolved but nothing on the target requires it")
@@ -409,21 +461,62 @@ def verify(entrypoint: Path, target: Target, report: dict) -> list[str]:
     return sorted(flipped)
 
 
-def render_lock(entrypoint: Path, target: Target, report: dict) -> str:
-    pins = sorted(
-        (canonical_name(item["metadata"]["name"]), item["metadata"]["version"])
-        for item in report["install"]
-    )
+def selected_hash(item: dict) -> str:
+    """sha256 of the file pip selected for this package.
+
+    The index gives it beside the link, except the PyTorch index for the copies
+    of PyPI packages it serves (Jinja2): that file is downloaded and hashed.
+    """
+    info = item.get("download_info", {})
+    archive = info.get("archive_info", {})
+    digest = archive.get("hashes", {}).get("sha256")
+    if not digest and archive.get("hash", "").startswith("sha256="):
+        digest = archive["hash"].split("=", 1)[1]
+    if digest:
+        return digest
+    url = info.get("url", "")
+    if not url.startswith("https://"):
+        raise LockError(f"{item['metadata']['name']}: no sha256 and no https URL to hash")
+    sha256 = hashlib.sha256()
+    with urllib.request.urlopen(url, timeout=120) as response:
+        for chunk in iter(lambda: response.read(1 << 20), b""):
+            sha256.update(chunk)
+    return sha256.hexdigest()
+
+
+def render_lock(
+    entrypoint: Path, target: Target, report: dict, previous: Lock | None, upgrade: set[str]
+) -> tuple[str, list[str]]:
+    """The lock text, and the packages that keep a locked file pip no longer prefers."""
+    kept = []
+    pins = []
+    for item in report["install"]:
+        name = canonical_name(item["metadata"]["name"])
+        pinned = item["metadata"]["version"]
+        digest = selected_hash(item)
+        if (
+            previous
+            and name not in upgrade
+            and previous.pins.get(name) == pinned
+            and previous.hashes[name] != digest
+        ):
+            # Same version, another file preferred today (a wheel added since):
+            # the build keeps the file it was locked to.
+            digest = previous.hashes[name]
+            kept.append(name)
+        pins.append((name, f"{name}=={pinned} --hash=sha256:{digest}"))
+    body = index_options(entrypoint) + [line for _, line in sorted(pins)]
     header = [
         f"# Locked set of {_relative(entrypoint)} and {BUILD_REQUIREMENTS.as_posix()}",
         f"# for CPython {PYTHON_VERSION[0]}.{PYTHON_VERSION[1]}, {target.description}.",
         "# Generated by scripts/dev/lock_backend_requirements.py; do not edit by hand.",
         "# Regenerate after any change to the entrypoint or a file it includes:",
-        f"#   {REGENERATE_COMMAND}",
+        *(f"#   {command}" for command in REGENERATE_COMMANDS),
+        "# Install: pip install -r <this file> --require-hashes --no-deps",
         "# See backend/requirements/README.md.",
-        f"{DIGEST_PREFIX}{inputs_digest(entrypoint)}",
+        f"{DIGEST_PREFIX}{lock_digest(entrypoint, target, body)}",
     ]
-    return "\n".join(header + [f"{name}=={pin}" for name, pin in pins]) + "\n"
+    return "\n".join(header + body) + "\n", sorted(kept)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -477,16 +570,23 @@ def main(argv: list[str] | None = None) -> int:
             for entrypoint in entrypoints:
                 target = target_for(entrypoint)
                 print(f"Resolving {entrypoint.name} for {target.description}...", flush=True)
+                path = lock_path(entrypoint)
+                previous = None if args.upgrade or not path.exists() else read_lock(path)
                 constraints = seed_constraints(entrypoint, args.upgrade, upgrade_packages)
                 report = resolve(entrypoint, target, constraints, Path(tmp))
                 flipped = verify(entrypoint, target, report)
-                path = lock_path(entrypoint)
-                path.write_text(render_lock(entrypoint, target, report), encoding="utf-8")
+                text, kept = render_lock(entrypoint, target, report, previous, upgrade_packages)
+                path.write_text(text, encoding="utf-8")
                 print(f"  {path.relative_to(REPO_ROOT)}: {len(report['install'])} packages")
                 if flipped:
                     print("  Decided by the target's markers, not this host's:")
                 for line in flipped:
                     print(f"    {line}")
+                if kept:
+                    print(
+                        "  Kept their locked file although pip now prefers another file of "
+                        f"the same version (--upgrade-package to take it): {', '.join(kept)}"
+                    )
     except LockError as error:
         print(f"error: {error}", file=sys.stderr)
         return 1

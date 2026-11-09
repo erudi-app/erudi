@@ -66,6 +66,11 @@ jobs:
           cache: npm
           cache-dependency-path: frontend/package-lock.json
 
+      # Installs the lock (backend + PyInstaller) into a fresh venv and fails on
+      # any difference from it; the venv is on PATH from the next step on.
+      - name: Install backend dependencies
+        run: bash scripts/ci/install_backend_requirements.sh backend/requirements/entrypoints/prod/${{ matrix.reqs }}
+
       - name: Build frozen backend (PyInstaller)
         env:
           # This gate proves the backend boots to `ready`; it does not compile
@@ -73,9 +78,7 @@ jobs:
           # to ship without an inference binary. Releases must not set this -
           # backend.spec fails hard there, on purpose.
           ERUDI_ALLOW_MISSING_INFERENCE_BINARY: "1"
-        run: |
-          bash scripts/ci/install_backend_requirements.sh backend/requirements/entrypoints/prod/${{ matrix.reqs }}
-          pyinstaller backend/${{ matrix.spec }} --distpath backend/dist
+        run: pyinstaller backend/${{ matrix.spec }} --distpath backend/dist
 
       - name: Check the frozen backend's macOS floor
         if: runner.os == 'macOS'
