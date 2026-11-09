@@ -75,7 +75,6 @@ jobs:
           ERUDI_ALLOW_MISSING_INFERENCE_BINARY: "1"
         run: |
           bash scripts/ci/install_backend_requirements.sh backend/requirements/entrypoints/prod/${{ matrix.reqs }}
-          pip install pyinstaller -c backend/requirements/lock/${{ matrix.reqs }}
           pyinstaller backend/${{ matrix.spec }} --distpath backend/dist
 
       - name: Check the frozen backend's macOS floor

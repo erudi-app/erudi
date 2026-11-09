@@ -1,5 +1,6 @@
 #!/usr/bin/env bash
-# Install a backend requirements entrypoint the way the shipped build needs it.
+# Install a backend requirements entrypoint, and the build tool, the way the
+# shipped build needs them.
 #
 # Usage: scripts/ci/install_backend_requirements.sh <requirements file>
 #        scripts/ci/install_backend_requirements.sh backend/requirements/entrypoints/prod/mac-silicon-prod.txt
@@ -7,14 +8,16 @@
 # app-build-smoke.yml and release.yml both call this, so the smoke gate installs
 # exactly what a release installs.
 #
-# The entrypoint is installed constrained to its lock,
-# backend/requirements/lock/<same name> (`-c`), which pins every package of the
+# The entrypoint and backend/requirements/meta/build.txt (PyInstaller) are
+# installed together, constrained to the entrypoint's lock,
+# backend/requirements/lock/<same name> (`-c`), which pins every package of their
 # resolution, so a rebuild bundles the versions the lock names and nothing that
-# was published since. scripts/ci/check_installed_lock.py then fails the step
-# when the installed set is not exactly the lock: a requirement file changed
-# without the locks being regenerated (scripts/dev/lock_backend_requirements.py).
+# was published since, PyInstaller's bootloader and hooks included.
+# scripts/ci/check_installed_lock.py then fails the step when the installed set
+# is not exactly the lock: a requirement file changed without the locks being
+# regenerated (scripts/dev/lock_backend_requirements.py).
 #
-# Off macOS the install is a plain `pip install -r <file> -c <lock>`. On macOS the
+# Off macOS the install is a plain `pip install -r <file> -r <build> -c <lock>`. On macOS the
 # runner is newer than the app's floor (mac.minimumSystemVersion in
 # frontend/electron-builder.yml), and pip prefers the wheels built for the
 # runner's own macOS, which the frozen backend then needs at import time. So it
@@ -29,6 +32,7 @@ if [ "$#" -ne 1 ]; then
   exit 2
 fi
 reqs=$1
+build=backend/requirements/meta/build.txt
 lock="backend/requirements/lock/$(basename "$reqs")"
 if [ ! -f "$lock" ]; then
   echo "::error::No lock for $reqs: expected $lock. Generate it with scripts/dev/lock_backend_requirements.py."
@@ -38,7 +42,7 @@ fi
 python -m pip install --upgrade pip wheel setuptools
 
 if [ "$(uname -s)" != "Darwin" ]; then
-  pip install -r "$reqs" -c "$lock"
+  pip install -r "$reqs" -r "$build" -c "$lock"
   python scripts/ci/check_installed_lock.py "$lock"
   exit 0
 fi
@@ -78,6 +82,7 @@ echo "macOS floor $floor: installing the $platform wheels."
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-pip download -r "$reqs" -c "$lock" -d "$work/wheelhouse" --only-binary=:all: --platform "$platform"
-pip install --no-index --find-links "$work/wheelhouse" -r "$reqs" -c "$lock"
+pip download -r "$reqs" -r "$build" -c "$lock" -d "$work/wheelhouse" \
+  --only-binary=:all: --platform "$platform"
+pip install --no-index --find-links "$work/wheelhouse" -r "$reqs" -r "$build" -c "$lock"
 python scripts/ci/check_installed_lock.py "$lock"

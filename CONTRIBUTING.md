@@ -255,7 +255,7 @@ each prod entrypoint's resolution, transitive ones included, and the release and
 smoke builds fail when what they install differs from it.
 
 1. Change the declared requirement (a pin in `meta/base.txt`, a new line in a
-   `meta/*-specs.txt`, …).
+   `meta/*-specs.txt`, the PyInstaller pin in `meta/build.txt`, …).
 2. Regenerate the locks, from any OS, with Python 3.12:
 
    ```bash

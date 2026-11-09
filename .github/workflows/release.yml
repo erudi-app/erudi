@@ -138,13 +138,10 @@ jobs:
           df -h /
 
       # ── Backend: Python deps + PyInstaller ───────────────────────────────────
-      # The script installs the entrypoint constrained to its lock and fails on
-      # any difference from it; PyInstaller is constrained to the same lock so
-      # it cannot move a locked package on its way in.
+      # The script installs the entrypoint and PyInstaller (meta/build.txt)
+      # constrained to the entrypoint's lock, and fails on any difference from it.
       - name: Install backend dependencies
-        run: |
-          bash scripts/ci/install_backend_requirements.sh backend/requirements/entrypoints/prod/${{ matrix.reqs }}
-          pip install pyinstaller -c backend/requirements/lock/${{ matrix.reqs }}
+        run: bash scripts/ci/install_backend_requirements.sh backend/requirements/entrypoints/prod/${{ matrix.reqs }}
 
       # ── Windows/Linux: compile llama-server from the submodule. The variant-aware
       #    spec then bundles artifacts/llama-cpp/cpu/bin (cpu legs) or both

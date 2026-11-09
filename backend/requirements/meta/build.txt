@@ -1,0 +1,9 @@
+# The build tool of a release, not a runtime dependency: no entrypoint includes
+# this file. scripts/ci/install_backend_requirements.sh installs it beside the
+# prod entrypoint, and scripts/dev/lock_backend_requirements.py resolves it with
+# each prod entrypoint, so lock/<entrypoint>.txt also pins PyInstaller and what
+# it pulls in (pyinstaller-hooks-contrib, altgraph; macholib on macOS; pefile and
+# pywin32-ctypes on Windows). Its bootloader becomes the backend executable and
+# its hooks decide what the bundle carries, so a new release of either must not
+# reach a rebuild unasked.
+pyinstaller==6.22.3

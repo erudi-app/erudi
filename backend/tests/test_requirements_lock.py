@@ -101,6 +101,32 @@ def test_the_macos_lock_targets_the_floor_the_mac_leg_installs():
     assert lock_tool.target_for(mac).platforms == (f"macosx_{major}_{minor or 0}_arm64",)
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS, ids=lambda path: path.name)
+def test_lock_pins_the_build_tool(entrypoint):
+    # PyInstaller's bootloader becomes the backend executable and its hooks
+    # decide what the bundle carries: a rebuild must not pick up a new release.
+    pins, _ = lock_tool.read_lock(lock_tool.lock_path(entrypoint))
+    assert {"pyinstaller", "pyinstaller-hooks-contrib"} <= set(pins)
+
+
+def _workflow(name):
+    import yaml  # a transformers dependency, installed on every leg
+
+    return yaml.safe_load((REPO_ROOT / ".github/workflows" / name).read_text(encoding="utf-8"))
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("workflow", ["release.yml", "app-build-smoke.yml"])
+def test_builds_install_pyinstaller_only_through_the_locked_script(workflow):
+    (job,) = _workflow(workflow)["jobs"].values()
+    runs = [step.get("run", "") for step in job["steps"]]
+    assert any("scripts/ci/install_backend_requirements.sh" in run for run in runs)
+    assert not any(
+        re.search(r"pip install\b.*\bpyinstaller", run) for run in runs
+    ), "PyInstaller is installed by install_backend_requirements.sh, locked (meta/build.txt)"
+
+
 def _report(*items):
     """A pip --report holding the given (name, version, requires_dist, requested) items."""
     return {
@@ -116,9 +142,18 @@ def _report(*items):
 
 @pytest.fixture
 def windows_entrypoint(tmp_path, monkeypatch):
-    monkeypatch.setattr(lock_tool, "REQUIREMENTS_DIR", tmp_path)
-    entrypoint = tmp_path / "win-test-prod.txt"
-    entrypoint.write_text("tqdm==4.67.1\n", encoding="utf-8")
+    return _requirements_tree(tmp_path, monkeypatch, "tqdm==4.67.1\n")
+
+
+def _requirements_tree(root, monkeypatch, entrypoint_text, build_text=""):
+    """A requirements directory holding one Windows prod entrypoint and meta/build.txt."""
+    monkeypatch.setattr(lock_tool, "REQUIREMENTS_DIR", root)
+    monkeypatch.setattr(lock_tool, "LOCK_DIR", root / "lock")
+    (root / "lock").mkdir()
+    (root / "meta").mkdir()
+    (root / "meta" / "build.txt").write_text(build_text, encoding="utf-8")
+    entrypoint = root / "win-test-prod.txt"
+    entrypoint.write_text(entrypoint_text, encoding="utf-8")
     return entrypoint
 
 
@@ -171,24 +206,26 @@ def test_verify_refuses_markers_on_the_running_kernel(windows_entrypoint):
 
 @pytest.mark.unit
 def test_seed_keeps_locked_versions_the_requirement_files_still_accept(tmp_path, monkeypatch):
-    monkeypatch.setattr(lock_tool, "REQUIREMENTS_DIR", tmp_path)
-    monkeypatch.setattr(lock_tool, "LOCK_DIR", tmp_path / "lock")
-    (tmp_path / "lock").mkdir()
-    entrypoint = tmp_path / "win-test-prod.txt"
-    entrypoint.write_text("tqdm==4.68.0\ncmake>=4.1.2\n", encoding="utf-8")
+    entrypoint = _requirements_tree(
+        tmp_path, monkeypatch, "tqdm==4.68.0\ncmake>=4.1.2\n", "pyinstaller==6.22.3\n"
+    )
     (tmp_path / "lock" / entrypoint.name).write_text(
-        "# header\ncmake==4.4.4\ncolorama==0.4.6\nregex==2026.9.29\ntqdm==4.67.1\n",
+        "# header\ncmake==4.4.4\ncolorama==0.4.6\npyinstaller==6.22.2\n"
+        "pyinstaller-hooks-contrib==2026.9\nregex==2026.9.29\ntqdm==4.67.1\n",
         encoding="utf-8",
     )
-    # tqdm's pin moved: its locked version leaves the seed; the rest stays.
+    # The pins of tqdm and of the build tool moved: their locked versions leave
+    # the seed; the rest stays.
     assert lock_tool.seed_constraints(entrypoint, False, set()) == [
         "cmake==4.4.4",
         "colorama==0.4.6",
+        "pyinstaller-hooks-contrib==2026.9",
         "regex==2026.9.29",
     ]
     assert lock_tool.seed_constraints(entrypoint, False, {"regex"}) == [
         "cmake==4.4.4",
         "colorama==0.4.6",
+        "pyinstaller-hooks-contrib==2026.9",
     ]
     assert lock_tool.seed_constraints(entrypoint, True, set()) == []
 

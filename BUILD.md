@@ -23,7 +23,7 @@ PyInstaller cannot cross-compile, so **each platform is built on that platform**
 | Python | **exactly 3.12** | `pgserver` only ships cp312 wheels; CI pins `3.12` |
 | Node.js | **22.18+, 24.11+ or 26+** | the CI runners use Node 22; Babel 8 and Vitest 5 together accept `^22.18.0 || ^24.11.0 || >=26.0.0` |
 | npm | bundled with Node 22 | |
-| PyInstaller | latest | installed into the backend venv |
+| PyInstaller | pinned in `backend/requirements/meta/build.txt` | installed into the backend venv; locked with each prod entrypoint |
 | CUDA toolkit | any **12.x**; releases use **12.8** | only for the Windows/Linux CUDA legs, to compile `llama-server`. 12.8 is the first that emits native code for Blackwell (RTX 50); on an older 12.x the build scripts drop `120-real` and those cards JIT from PTX instead. Not needed for a CPU or macOS build — and never needed to *run* Erudi. |
 
 Backend dependencies are not a single `requirements.txt`. Composed entrypoints
@@ -88,7 +88,8 @@ npm version 1.1.3 --no-git-tag-version --allow-same-version
 bash scripts/build/build-mac-silicon.sh
 ```
 
-The script verifies the backend venv and npm, installs PyInstaller if missing,
+The script verifies the backend venv and npm, installs PyInstaller if missing
+(the version `backend/requirements/meta/build.txt` pins),
 runs `backend-mac-silicon.spec` into `backend/dist/backend/`, copies the bundle
 to `frontend/backend/`, then runs `npm run dist:mac`. The DMG lands in
 `frontend/dist/`.
@@ -180,8 +181,7 @@ see below) or run the manual sequence.
 cd backend
 source venv/bin/activate                       # venv\Scripts\activate on Windows
 pip install -r requirements/entrypoints/prod/<platform>-prod.txt \
-    -c requirements/lock/<platform>-prod.txt
-pip install pyinstaller -c requirements/lock/<platform>-prod.txt
+    -r requirements/meta/build.txt -c requirements/lock/<platform>-prod.txt
 pyinstaller <spec> --distpath dist             # -> backend/dist/backend/
 
 # 2. Frontend
@@ -361,13 +361,13 @@ DLLs. Real hardware in the QA pass is the first thing that runs either.
 
 Every leg installs its requirements through
 `scripts/ci/install_backend_requirements.sh`, which installs the prod entrypoint
-constrained to its lock (`-c backend/requirements/lock/<entrypoint>.txt`) and
-then runs `scripts/ci/check_installed_lock.py`: the step fails unless the
+and PyInstaller (`backend/requirements/meta/build.txt`) constrained to the
+entrypoint's lock (`-c backend/requirements/lock/<entrypoint>.txt`) and then runs `scripts/ci/check_installed_lock.py`: the step fails unless the
 installed set is exactly the lock — a package missing from it, or at another
 version, means a requirement file changed without the locks being regenerated,
-and the message says how to regenerate them. PyInstaller is installed afterwards,
-constrained to the same lock. A rebuild of a tag therefore bundles the versions
-its lock names, whatever was published since. `app-build-smoke.yml` calls the
+and the message says how to regenerate them. A rebuild of a tag therefore
+bundles the versions its lock names, whatever was published since, PyInstaller's
+bootloader and hooks (`pyinstaller-hooks-contrib`) included. `app-build-smoke.yml` calls the
 same script on its three legs, so the smoke gate installs what a release
 installs. The smoke builds no CUDA variant, so a release tag is the first
 install of the two CUDA locks; they differ from the CPU ones by `pynvml` and

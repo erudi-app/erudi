@@ -4,7 +4,8 @@
 Usage: python scripts/ci/check_installed_lock.py backend/requirements/lock/<entrypoint>.txt
 
 scripts/ci/install_backend_requirements.sh runs it right after installing an
-entrypoint constrained to its lock. Every locked package must be installed at
+entrypoint and the build tool (meta/build.txt) constrained to the entrypoint's
+lock. Every locked package must be installed at
 its locked version, and every installed package must be locked, except pip,
 setuptools and wheel, which the install script brings itself (when the lock
 names setuptools, as torch requires it, its version is checked like any other).
