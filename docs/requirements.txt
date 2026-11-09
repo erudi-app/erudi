@@ -8,7 +8,7 @@
 # mkdocstrings is still an mkdocs plugin under the hood; Zensical's own build
 # pulls it in as a dependency and drives it through its mkdocs-compatibility
 # layer.
-zensical==0.0.74
+zensical==0.1.0
 mkdocs==1.6.1
 mkdocstrings[python]==1.0.8
 mkdocstrings-python==2.0.10
