@@ -53,6 +53,17 @@ openpyxl==3.1.5
 # mlx-vlm swap brings in; same langid.MODEL_FILE/LanguageIdentifier API as 0.2.2.
 py3langid==0.3.0
 
+# ===== Transitive pins for the Windows bundle =====
+# Native extensions that reach the frozen backend through other packages.
+# Pinned so a rebuild bundles the binaries the release was tested with: an
+# unsigned .pyd published hours before a build has no reputation yet, and
+# Windows Smart App Control (on by default on a fresh Windows 11) refuses to
+# load it. regex 2026.11.8 was blocked that way, which broke every Knowledge
+# Base search and ingestion (regex is imported by transformers' tokenizer).
+# typer moved in the same rebuild and is held with it.
+regex==2026.9.29
+typer==0.27.3
+
 # ===== Web search agent tool (issue #310) =====
 # Keyless multi-engine metasearch (DDG/Bing/Brave/Mojeek/... with automatic
 # failover) backing the web_search tool. Deferred import: loaded on the first

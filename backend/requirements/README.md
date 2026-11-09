@@ -39,6 +39,12 @@ requirements/
 - **transformers is pinned once in `base.txt` (5.14.1)** for every platform. The
   floor comes from mlx-vlm 0.6.17 (`transformers>=5.14.0`); it is coupled to
   torch (imports `torch.float8_e8m0fnu`, needing torch>=2.7).
+- **Native transitive deps can be pinned in `base.txt`.** A Windows build
+  bundles whatever the resolver picks on the day, and an unsigned `.pyd`
+  published hours before a build has no reputation yet: Windows Smart App
+  Control (on by default on a fresh Windows 11) refuses to load it. `regex` and
+  `typer` are pinned for that reason; pin any other transitive dependency the
+  same way when a rebuild must reproduce what was tested.
 - Fine-tuning deps (peft/accelerate/datasets/bitsandbytes) were removed — the
   feature is unimplemented dead code (see the fine-tuning cleanup issue).
 
