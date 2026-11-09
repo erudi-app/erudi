@@ -8,22 +8,29 @@ Covers:
   anti-B1 rule (create_tables must not rely on an imported-by-value engine).
 """
 
+import json
 import logging
+import os
 import platform
 import re
 import stat
 import subprocess
 import sys
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
+import pgserver.postgres_server as _pg_server_mod
+import psutil
 import psycopg
 import pytest
+from pgserver.utils import PostmasterInfo
 from sqlalchemy import create_engine, inspect as sa_inspect, text
 
 from src.core.subprocess_flags import hidden_console_creationflags
 from src.launcher import postgres_runtime
 from src.launcher.postgres_runtime import (
+    HANDLE_PIDS_FILE_NAME,
     PASSWORD_FILE_NAME,
     _console_isolated,
     _enforce_password_auth,
@@ -509,40 +516,319 @@ class TestUriWithPassword:
         with pytest.raises(ValueError):
             _uri_with_password("postgresql://127.0.0.1:1/postgres", "x")
 
-    @pytest.mark.integration
-    def test_stale_handle_pids_are_pruned(self, tmp_path_factory):
-        """pgserver refcounts cluster users in <pgdata>/.handle_pids.json but
-        never prunes dead pids: a crashed/SIGKILLed backend leaves a ghost
-        entry that makes every later cleanup() skip the server stop forever.
-        start_postgres must prune dead pids so the last live handle really
-        stops the cluster."""
-        import json
-        import os
-        import signal
-        import subprocess
 
-        data_dir = tmp_path_factory.mktemp("pgdata-prune")
-        try:
-            first = start_postgres(data_dir)
-            stop_postgres(first)
+def _spawn_sleeper() -> subprocess.Popen:
+    """A live process that is not an Erudi backend, on any platform.
 
-            # Simulate a previous owner that died brutally (pid is real but dead).
-            ghost = subprocess.Popen(["sleep", "0"])
-            ghost.wait()
-            (data_dir / ".handle_pids.json").write_text(json.dumps([ghost.pid]))
+    Returns once its Python code runs: until then the interpreter may still be
+    re-executing itself (the macOS framework build does), under another name.
+    """
+    proc = subprocess.Popen(
+        [sys.executable, "-c", "import time; print('ready', flush=True); time.sleep(300)"],
+        stdout=subprocess.PIPE,
+        text=True,
+    )
+    assert proc.stdout.readline().strip() == "ready"
+    return proc
 
-            handle = start_postgres(data_dir)
+
+def _stop_sleeper(proc: subprocess.Popen) -> None:
+    proc.kill()
+    proc.wait()
+    proc.stdout.close()
+
+
+def _dead_pid() -> int:
+    """The pid of a process that has exited (and been reaped)."""
+    proc = subprocess.Popen([sys.executable, "-c", "pass"])
+    proc.wait()
+    return proc.pid
+
+
+def _write_handle_pids(data_dir: Path, pids: list[int], *, written_at: float | None = None) -> None:
+    handle_file = data_dir / HANDLE_PIDS_FILE_NAME
+    handle_file.write_text(json.dumps(pids))
+    if written_at is not None:
+        os.utime(handle_file, (written_at, written_at))
+
+
+def _read_handle_pids(data_dir: Path) -> list[int]:
+    return json.loads((data_dir / HANDLE_PIDS_FILE_NAME).read_text())
+
+
+def _postmaster_running(data_dir: Path) -> bool:
+    info = PostmasterInfo.read_from_pgdata(data_dir)
+    return info is not None and info.is_running()
+
+
+def _force_stop(data_dir: Path) -> None:
+    """Never leak a postmaster or a cached pgserver handle past a test."""
+    _pg_server_mod.PostgresServer._instances.pop(Path(data_dir).resolve(), None)
+    if _postmaster_running(data_dir):
+        _pg_server_mod.pg_ctl(["-w", "stop", "-m", "fast"], pgdata=data_dir)
+    _write_handle_pids(data_dir, [])
+
+
+class TestHandlePidsPruning:
+    """#695 - pgserver's handle list only names live Erudi backends at start.
+
+    pgserver stops the postmaster on ``cleanup()`` only when
+    ``<pgdata>/.handle_pids.json`` is exactly the current process. An entry
+    left by a backend that never exited cleanly blocks every later stop, and
+    on Windows its pid is soon reused by an unrelated process, so "the pid
+    exists" is not enough to keep it. These run the pruning alone, on a plain
+    directory: no cluster is needed to decide which entries are stale.
+    """
+
+    @pytest.fixture
+    def sleeper(self):
+        proc = _spawn_sleeper()
+        yield proc
+        _stop_sleeper(proc)
+
+    @pytest.mark.unit
+    def test_a_dead_pid_is_pruned(self, tmp_path, caplog):
+        dead = _dead_pid()
+        _write_handle_pids(tmp_path, [dead])
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            postgres_runtime._prune_stale_handle_pids(tmp_path)
+
+        assert _read_handle_pids(tmp_path) == []
+        pruned = [r for r in caplog.records if "handle" in r.getMessage()]
+        assert len(pruned) == 1
+        assert pruned[0].levelno == logging.INFO
+        assert str(dead) in pruned[0].getMessage()
+
+    @pytest.mark.unit
+    def test_a_reused_pid_started_after_the_list_was_written_is_pruned(self, tmp_path, sleeper):
+        # The list was last written an hour before this process existed: the
+        # pid it names belonged to someone else then.
+        started = psutil.Process(sleeper.pid).create_time()
+        _write_handle_pids(tmp_path, [sleeper.pid], written_at=started - 3600)
+
+        postgres_runtime._prune_stale_handle_pids(tmp_path)
+
+        assert _read_handle_pids(tmp_path) == []
+        assert sleeper.poll() is None  # pruning never touches the process
+
+    @pytest.mark.unit
+    def test_a_reused_pid_held_by_another_program_is_pruned(self, tmp_path, sleeper, monkeypatch):
+        # Registered after the process started, as a real handle would be, but
+        # the process is not the backend's executable.
+        _write_handle_pids(tmp_path, [sleeper.pid])
+        monkeypatch.setattr(
+            postgres_runtime,
+            "_own_identity",
+            lambda: ("/nowhere/not-the-backend", "not-the-backend"),
+        )
+
+        postgres_runtime._prune_stale_handle_pids(tmp_path)
+
+        assert _read_handle_pids(tmp_path) == []
+
+    @pytest.mark.unit
+    def test_a_live_backend_that_registered_is_kept(self, tmp_path, sleeper, caplog):
+        # Same executable as this process, started before the list was written:
+        # indistinguishable from a second backend sharing the data dir.
+        _write_handle_pids(tmp_path, [sleeper.pid])
+        before = (tmp_path / HANDLE_PIDS_FILE_NAME).read_bytes()
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            postgres_runtime._prune_stale_handle_pids(tmp_path)
+
+        assert (tmp_path / HANDLE_PIDS_FILE_NAME).read_bytes() == before
+        assert not [r for r in caplog.records if "handle" in r.getMessage()]
+
+    @pytest.mark.unit
+    def test_this_process_is_kept(self, tmp_path):
+        dead = _dead_pid()
+        # An hour-old list: only the pid check can keep our own entry.
+        _write_handle_pids(tmp_path, [os.getpid(), dead], written_at=time.time() - 3600)
+
+        postgres_runtime._prune_stale_handle_pids(tmp_path)
+
+        assert _read_handle_pids(tmp_path) == [os.getpid()]
+
+    @pytest.mark.unit
+    def test_a_corrupt_list_is_reset(self, tmp_path, caplog):
+        # pgserver's own reader would raise on it and fail the start.
+        (tmp_path / HANDLE_PIDS_FILE_NAME).write_text("[12, ")
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            postgres_runtime._prune_stale_handle_pids(tmp_path)
+
+        assert _read_handle_pids(tmp_path) == []
+        assert [r.levelno for r in caplog.records if "handle" in r.getMessage()] == [
+            logging.WARNING
+        ]
+
+    @pytest.mark.unit
+    def test_no_list_is_left_alone(self, tmp_path):
+        postgres_runtime._prune_stale_handle_pids(tmp_path)
+        assert not (tmp_path / HANDLE_PIDS_FILE_NAME).exists()
+
+    @pytest.mark.unit
+    def test_the_list_is_rewritten_under_pgservers_lock(self, tmp_path, monkeypatch):
+        events = []
+
+        class _SpyLock:
+            def __enter__(self):
+                events.append("lock")
+
+            def __exit__(self, *exc):
+                events.append("unlock")
+
+        real_write = Path.write_text
+
+        def spy_write(self, *args, **kwargs):
+            if self.name == HANDLE_PIDS_FILE_NAME:
+                events.append("write")
+            return real_write(self, *args, **kwargs)
+
+        _write_handle_pids(tmp_path, [_dead_pid()])
+        monkeypatch.setattr(_pg_server_mod.PostgresServer, "_lock", _SpyLock())
+        monkeypatch.setattr(Path, "write_text", spy_write)
+
+        postgres_runtime._prune_stale_handle_pids(tmp_path)
+
+        assert events == ["lock", "write", "unlock"]
+
+    @pytest.mark.unit
+    def test_a_failed_fallback_stop_is_an_error_and_not_a_stop(self, tmp_path, monkeypatch, caplog):
+        def refuse(args, pgdata=None, **kwargs):
+            raise subprocess.CalledProcessError(1, ["pg_ctl", *args])
+
+        monkeypatch.setattr(postgres_runtime, "_live_postmaster", lambda data_dir: object())
+        monkeypatch.setattr(_pg_server_mod, "pg_ctl", refuse)
+        _write_handle_pids(tmp_path, [_dead_pid()])
+        handle = SimpleNamespace(server=SimpleNamespace(cleanup=lambda: None), data_dir=tmp_path)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
             stop_postgres(handle)
 
-            # Without pruning, the ghost pid would block the stop and the
-            # postmaster would survive (postmaster.pid still present).
-            assert not (data_dir / "postmaster.pid").exists()
+        errors = [r for r in caplog.records if r.levelno == logging.ERROR]
+        assert len(errors) == 1
+        assert errors[0].exc_info is not None
+        assert not any("Embedded PostgreSQL stopped" in r.getMessage() for r in caplog.records)
+
+
+class TestCleanStopWhateverTheHandleList:
+    """#695 - a stop leaves no postmaster behind unless another backend uses it.
+
+    One dedicated cluster for the class (never the session cluster); every
+    test leaves it stopped, its handle list empty and pgserver's cache clear.
+    """
+
+    @pytest.fixture(scope="class")
+    def initialized_dir(self, tmp_path_factory):
+        data_dir = tmp_path_factory.mktemp("pgdata-handles")
+        try:
+            stop_postgres(start_postgres(data_dir))
         finally:
-            # The red scenario is precisely "the stop is skipped": never leak
-            # a live postmaster on the dev machine when this test regresses.
-            pid_file = data_dir / "postmaster.pid"
-            if pid_file.exists():
-                os.kill(int(pid_file.read_text().splitlines()[0]), signal.SIGTERM)
+            _force_stop(data_dir)
+        return data_dir
+
+    @pytest.fixture
+    def data_dir(self, initialized_dir):
+        yield initialized_dir
+        _force_stop(initialized_dir)
+
+    @pytest.fixture
+    def pg_ctl_calls(self, monkeypatch):
+        calls = []
+        real = _pg_server_mod.pg_ctl
+
+        def spy(args, pgdata=None, **kwargs):
+            calls.append(list(args))
+            return real(args, pgdata=pgdata, **kwargs)
+
+        monkeypatch.setattr(_pg_server_mod, "pg_ctl", spy)
+        return calls
+
+    @staticmethod
+    def _fallback_stops(calls) -> list[list[str]]:
+        return [args for args in calls if "stop" in args and "fast" in args]
+
+    @pytest.mark.integration
+    def test_a_dead_pid_left_at_start_does_not_block_the_stop(self, data_dir):
+        _write_handle_pids(data_dir, [_dead_pid()])
+
+        handle = start_postgres(data_dir)
+        assert _read_handle_pids(data_dir) == [os.getpid()]
+        stop_postgres(handle)
+
+        assert not (data_dir / "postmaster.pid").exists()
+        assert _read_handle_pids(data_dir) == []
+
+    @pytest.mark.integration
+    def test_a_live_foreign_process_on_a_stale_pid_does_not_block_the_stop(self, data_dir):
+        sleeper = _spawn_sleeper()
+        try:
+            started = psutil.Process(sleeper.pid).create_time()
+            _write_handle_pids(data_dir, [sleeper.pid], written_at=started - 3600)
+
+            handle = start_postgres(data_dir)
+            assert _read_handle_pids(data_dir) == [os.getpid()]
+            stop_postgres(handle)
+
+            assert not (data_dir / "postmaster.pid").exists()
+            assert sleeper.poll() is None
+        finally:
+            _stop_sleeper(sleeper)
+
+    @pytest.mark.integration
+    def test_a_clean_run_logs_and_stops_as_before(self, data_dir, pg_ctl_calls, caplog):
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            handle = start_postgres(data_dir)
+            caplog.clear()
+            stop_postgres(handle)
+
+        assert [r.getMessage() for r in caplog.records if r.name == "erudi"] == [
+            f"Stopping the embedded PostgreSQL cluster (data_dir={data_dir})",
+            "Embedded PostgreSQL stopped",
+        ]
+        assert not self._fallback_stops(pg_ctl_calls)
+        assert not (data_dir / "postmaster.pid").exists()
+
+    @pytest.mark.integration
+    def test_the_postmaster_is_stopped_when_pgserver_declines(self, data_dir, pg_ctl_calls, caplog):
+        handle = start_postgres(data_dir)
+        # A stale entry that reached the list after the start's pruning.
+        _write_handle_pids(data_dir, [*_read_handle_pids(data_dir), _dead_pid()])
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            stop_postgres(handle)
+
+        assert len(self._fallback_stops(pg_ctl_calls)) == 1
+        assert not (data_dir / "postmaster.pid").exists()
+        assert _read_handle_pids(data_dir) == []
+        warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert len(warnings) == 1
+        assert "handle" in warnings[0].getMessage()
+        # The cached handle is gone: a later start in this process boots anew.
+        assert Path(data_dir).resolve() not in _pg_server_mod.PostgresServer._instances
+
+    @pytest.mark.integration
+    def test_a_postmaster_another_backend_uses_is_left_running(
+        self, data_dir, pg_ctl_calls, caplog
+    ):
+        sleeper = _spawn_sleeper()
+        try:
+            # Registered after it started: a second backend on this data dir.
+            _write_handle_pids(data_dir, [sleeper.pid])
+
+            handle = start_postgres(data_dir)
+            with caplog.at_level(logging.INFO, logger="erudi"):
+                stop_postgres(handle)
+
+            assert _postmaster_running(data_dir)
+            assert not self._fallback_stops(pg_ctl_calls)
+            assert _read_handle_pids(data_dir) == [sleeper.pid]
+            assert not [r for r in caplog.records if r.levelno >= logging.WARNING]
+            assert any(str(sleeper.pid) in r.getMessage() for r in caplog.records)
+        finally:
+            _stop_sleeper(sleeper)
 
 
 class TestCorruptPgdataRecovery:

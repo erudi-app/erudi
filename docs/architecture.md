@@ -446,6 +446,18 @@ psycopg3 (`postgresql+psycopg://`).
 Never import `db_engine` by value — read it through `src.database.core` attributes after
 initialization.
 
+`pgserver` counts the processes using the cluster in `<pgdata>/.handle_pids.json` and stops
+the postmaster on `cleanup()` only when that list is exactly the calling process. A backend
+that dies without cleaning up (a crash, a forced kill, the computer shut down with Erudi
+open) leaves its pid in the list, and that pid soon belongs to another process. So every
+start first drops each entry that is not a live backend — a live process running the same
+program, started before the list was last written — and every stop checks the postmaster
+afterwards: when `cleanup()` left it running and no other live backend holds it, the backend
+stops it itself with `pg_ctl -w stop -m fast` and logs one `WARNING`. A second app instance
+shares the cluster, so its backend's entry is kept and the cluster is left running for it.
+Both steps run under `pgserver`'s own inter-process lock. Without them the postmaster would
+die with the backend at every quit, and every start would run a crash recovery.
+
 One database, three tenants:
 
 | Tenant | Location | Owner |
