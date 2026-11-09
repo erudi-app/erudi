@@ -246,6 +246,47 @@ Test-mode environment variables:
 - `ERUDI_FORCE_CPU=1` — short-circuit GPU detection in
   `BaseEngine.get_engine()` to force `CPU_Engine` for testing fallback paths
 
+### Updating a dependency
+
+Backend dependencies are declared in `backend/requirements/meta/` and composed
+by the entrypoints (`backend/requirements/README.md`). What a release bundles is
+locked: `backend/requirements/lock/<platform>-prod.txt` pins every package of
+each prod entrypoint's resolution, transitive ones and PyInstaller included, to
+one file by its sha256, and the release and smoke builds install that lock and
+nothing else.
+
+1. Change the declared requirement (a pin in `meta/base.txt`, a new line in a
+   `meta/*-specs.txt`, the PyInstaller pin in `meta/build.txt`, …). A dev tool
+   (`meta/dev.txt`) is not locked: backend-ci installs the dev entrypoints
+   within the prod lock of their OS, so the tests run on the shipped versions,
+   and only the tool's own packages resolve freely.
+2. Regenerate the locks, from any OS, with Python 3.12:
+
+   ```bash
+   python3.12 scripts/dev/lock_backend_requirements.py
+   py -3.12 scripts\dev\lock_backend_requirements.py      # Windows
+   ```
+
+   The existing locks seed the resolution, so only what your change requires
+   moves. To move a transitive package on purpose (a security fix in a package
+   nothing declares), name it: `--upgrade-package <name>`. When pip reports a
+   conflict with a locked version, rerun with `--upgrade-package` for the
+   package it names.
+3. Commit the requirement change and the locks together. The lock diff is the
+   list of everything the change moves in the shipped app: say in the pull
+   request why each native package that changes is expected to. backend-ci fails
+   when a requirement file changed without the locks being regenerated, or a
+   lock was edited by hand (`backend/tests/test_requirements_lock.py`), and when
+   a lock does not resolve on its own OS (`scripts/ci/check_backend_lock.py
+   resolution`).
+
+Dependabot does not open version updates for the backend's Python requirements
+(`.github/dependabot.yml` explains why). A security alert on a backend package
+is fixed by hand the same way: bump the declared pin, or `--upgrade-package` a
+transitive one, and regenerate. A Dependabot security pull request that edits a
+requirement or lock file without the generator is closed and redone that way,
+since nothing has resolved the set it proposes.
+
 ---
 
 ## Frontend guide

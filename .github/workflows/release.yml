@@ -138,10 +138,11 @@ jobs:
           df -h /
 
       # ── Backend: Python deps + PyInstaller ───────────────────────────────────
+      # The script installs the lock (backend + PyInstaller) into a fresh venv,
+      # fails on any difference from it, and puts the venv on PATH for the
+      # steps that follow (pyinstaller below).
       - name: Install backend dependencies
-        run: |
-          bash scripts/ci/install_backend_requirements.sh backend/requirements/entrypoints/prod/${{ matrix.reqs }}
-          pip install pyinstaller
+        run: bash scripts/ci/install_backend_requirements.sh backend/requirements/entrypoints/prod/${{ matrix.reqs }}
 
       # ── Windows/Linux: compile llama-server from the submodule. The variant-aware
       #    spec then bundles artifacts/llama-cpp/cpu/bin (cpu legs) or both

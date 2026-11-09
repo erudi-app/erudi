@@ -63,8 +63,9 @@ ok "npm found: $(command -v npm)"
 # ── PyInstaller ────────────────────────────────────────────────────────────────
 step "Checking PyInstaller..."
 if ! "$VENV_PYTHON" -m PyInstaller --version >/dev/null 2>&1; then
-    step "PyInstaller not installed. Installing..."
-    "$VENV_PIP" install pyinstaller || fail "Failed to install PyInstaller."
+    step "PyInstaller not installed. Installing the version a release builds with..."
+    "$VENV_PIP" install -r "$BACKEND_ROOT/requirements/meta/build.txt" \
+        || fail "Failed to install PyInstaller."
 fi
 PYINSTALLER_VERSION=$("$VENV_PYTHON" -m PyInstaller --version 2>/dev/null)
 ok "PyInstaller $PYINSTALLER_VERSION"

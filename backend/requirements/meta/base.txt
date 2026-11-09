@@ -26,9 +26,9 @@ sqlalchemy==2.0.40
 requests==2.33.0
 
 # ===== LangChain agent stack (conversation/arena refactor — PR1) =====
-# Pinned to the versions resolved on first install. Transitive deps
-# (langchain-core, langgraph-checkpoint, openai, tiktoken, ormsgpack)
-# resolve automatically. See requirements/README.md.
+# Pinned to the versions resolved on first install. Their transitive deps
+# (langchain-core, langgraph-checkpoint, openai, tiktoken, ormsgpack) are not
+# declared here: the locks in requirements/lock/ pin them. See requirements/README.md.
 langchain==1.3.9
 langchain-openai==1.2.2
 langgraph==1.2.14
@@ -52,25 +52,6 @@ openpyxl==3.1.5
 # prompt. 0.3.0 declares numpy>=2.0.0, aligned with the numpy 2.x bump the
 # mlx-vlm swap brings in; same langid.MODEL_FILE/LanguageIdentifier API as 0.2.2.
 py3langid==0.3.0
-
-# ===== Transitive packages pinned to the tested build =====
-# These reach the frozen backend through other packages, so pip would take
-# whatever is newest on the day of a build. They are pinned to the versions of
-# the build the release was tested with, so a rebuild bundles the same files.
-# The native ones matter most: an unsigned .pyd published hours before a build
-# has no reputation yet, and Windows Smart App Control (enforced on many fresh
-# Windows 11 installs) refuses to load it. regex 2026.11.8 was blocked that way
-# and broke every Knowledge Base search and ingestion (transformers and tiktoken
-# import regex). Native: regex, ormsgpack (langgraph's checkpoint serializer),
-# jiter (openai). Pure Python, pinned because they moved in the same rebuild:
-# typer, click, jsonpatch, jsonpointer.
-regex==2026.9.29
-ormsgpack==1.13.0
-jiter==0.18.0
-typer==0.27.3
-click==8.5.0
-jsonpatch==1.43
-jsonpointer==3.9
 
 # ===== Web search agent tool (issue #310) =====
 # Keyless multi-engine metasearch (DDG/Bing/Brave/Mojeek/... with automatic

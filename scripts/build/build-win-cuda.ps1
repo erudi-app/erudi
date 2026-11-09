@@ -122,8 +122,8 @@ try {
     $pyiVersion = & $VenvPython -m PyInstaller --version 2>$null
 } catch { }
 if (-not $pyiVersion) {
-    Write-Step "PyInstaller not installed. Installing..."
-    & $VenvPip install pyinstaller
+    Write-Step "PyInstaller not installed. Installing the version a release builds with..."
+    & $VenvPip install -r (Join-Path $BackendRoot "requirements\meta\build.txt")
     if ($LASTEXITCODE -ne 0) { Write-Fail "Failed to install PyInstaller." }
     $pyiVersion = & $VenvPython -m PyInstaller --version 2>$null
 }

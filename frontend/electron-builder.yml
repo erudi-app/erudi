@@ -92,11 +92,13 @@ mac:
   # Below 14 the app launched and the backend died at import time ("built for
   # macOS 14.0 which is newer than running OS") behind a generic "Backend failed
   # to load" screen (#343). Declare the real floor so the installer refuses older
-  # systems with Apple's own dialog. The macOS build legs (release.yml,
-  # app-build-smoke.yml) read this value through
-  # scripts/ci/install_backend_requirements.sh: they install the wheels built for it
-  # rather than for the newer runner, and scripts/ci/check_macos_floor.sh fails
-  # the build when a file in the frozen backend needs a newer macOS.
+  # systems with Apple's own dialog. scripts/dev/lock_backend_requirements.py
+  # locks the wheels built for this value (backend/requirements/lock/
+  # mac-silicon-prod.txt, one hash per file), so the macOS build legs
+  # (release.yml, app-build-smoke.yml) install them rather than the ones built
+  # for the newer runner; changing it without regenerating that lock fails
+  # backend-ci. scripts/ci/check_macos_floor.sh fails the build when a file in
+  # the frozen backend needs a newer macOS.
   minimumSystemVersion: "14.0"
   target:
     - target: dmg

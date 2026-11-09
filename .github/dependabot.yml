@@ -14,8 +14,13 @@
 # absent. Its packages are coupled -- langchain moves with langgraph,
 # transformers with torch and mlx-vlm, pgserver pins the Python version itself
 # -- so a one-package pull request is often unmergeable on its own and needs a
-# companion bump nobody asked Dependabot for. We bump those by hand, resolving
-# the whole entrypoint in a clean venv first (backend/requirements/README.md).
+# companion bump nobody asked Dependabot for. And what a release installs is
+# locked (backend/requirements/lock/, every transitive package pinned):
+# Dependabot would open one pull request per transitive package there, and
+# edit a lock without resolving the set it proposes. We bump by hand: change
+# the declared pin, then regenerate the locks with
+# scripts/dev/lock_backend_requirements.py (CONTRIBUTING.md, "Updating a
+# dependency").
 version: 2
 updates:
   - package-ecosystem: github-actions
