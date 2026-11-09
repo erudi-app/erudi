@@ -15,6 +15,16 @@ processes) and registers an atexit cleanup. We still stop the cluster
 explicitly from the FastAPI lifespan shutdown for a deterministic order
 (checkpointer first, cluster last).
 
+Handle list (#695). pgserver's refcount is ``<pgdata>/.handle_pids.json``, and
+its ``cleanup()`` stops the postmaster only when that list is exactly the
+calling process. A backend that dies without cleaning up (a crash, a forced
+kill, Windows shut down with the app open) leaves its pid there for good, and
+on Windows that pid soon names an unrelated process. So ``start_postgres``
+first drops every entry that is not a live backend (same program, started
+before the list was last written), and ``stop_postgres`` stops a postmaster
+that ``cleanup()`` left running when no live backend still uses it. Both run
+under pgserver's own inter-process lock.
+
 Authentication (#462). pgserver runs ``initdb --auth=trust --auth-local=trust``
 and, on Windows, where there are no Unix sockets, starts the postmaster on a
 loopback TCP port -- so any process under the user's account could open the
@@ -66,6 +76,18 @@ ROLE_NAME = "postgres"
 # the half-initialised-dir recovery wipes it together with the cluster it
 # belongs to. Never logged.
 PASSWORD_FILE_NAME = "erudi_db_password"
+
+# pgserver's list of the processes holding a handle on the cluster, inside
+# PGDATA (postgres_server.py: ``DiskList(pgdata / '.handle_pids.json')``). Its
+# ``cleanup()`` stops the postmaster only when this list is exactly the
+# calling process.
+HANDLE_PIDS_FILE_NAME = ".handle_pids.json"
+
+# A process that registered in the handle list existed before the list was
+# last written. Wall-clock create times and file mtimes are compared, so allow
+# for coarse clocks: Linux derives a create time from the boot time, which it
+# reports in whole seconds.
+HANDLE_REGISTRATION_SLACK_SECONDS = 2.0
 
 # How long a WAL crash-recovery may take before we give up on the boot. Must
 # stay under run.py's STARTUP_TIMEOUT_SECONDS (120s non-first-run) minus the
@@ -227,27 +249,121 @@ def _attach_postmaster_log(exc: BaseException, data_dir: Path) -> None:
         pass
 
 
-def _prune_stale_handle_pids(data_dir: Path) -> None:
-    """Drop dead pids from pgserver's per-cluster refcount registry.
-
-    pgserver tracks cluster users in ``<pgdata>/.handle_pids.json`` but never
-    prunes dead entries: a crashed/SIGKILLed backend leaves a ghost pid that
-    makes every later ``cleanup()`` skip the server stop — forever. Pruning
-    before joining the cluster guarantees the LAST live handle really stops
-    the postmaster on graceful shutdown.
-    """
-    handle_file = data_dir / ".handle_pids.json"
-    if not handle_file.exists():
-        return
+def _own_identity() -> tuple[str | None, str | None]:
+    """This process's executable path and name: what a backend looks like."""
+    me = psutil.Process()
     try:
-        pids = json.loads(handle_file.read_text() or "[]")
-        alive = [pid for pid in pids if psutil.pid_exists(pid)]
-        if alive != pids:
-            handle_file.write_text(json.dumps(alive))
-            logger.info(f"Pruned stale pgserver handle pids: {sorted(set(pids) - set(alive))}")
-    except (OSError, ValueError) as exc:
-        # Unreadable/corrupt registry — pgserver will rebuild it on boot.
-        logger.warning(f"Could not prune pgserver handle pids: {exc}")
+        exe = me.exe()
+    except psutil.Error:
+        exe = None
+    return exe, me.name()
+
+
+def _is_live_backend(
+    pid: int, registered_by: float, identity: tuple[str | None, str | None]
+) -> bool:
+    """Whether ``pid`` can be a live backend that registered a handle by ``registered_by``.
+
+    Three checks, because a pid alone proves nothing once its process is gone:
+    Windows hands a freed pid to the next process within seconds, and after a
+    reboot a stale entry names whatever system service now holds that number.
+
+    - the process is alive (not a zombie);
+    - it runs the backend's program: the same executable as this process, or
+      the same name (a Windows venv starts Python through a launcher whose
+      path differs from the interpreter's, under the same name);
+    - it existed when the list was last written (``registered_by``, the
+      file's mtime): a handle is registered by a running process, so one
+      started later is a stranger that inherited the number.
+
+    Anything unreadable (another user's process) is not a backend: the
+    backend always runs under the account that starts this one.
+    """
+    exe, name = identity
+    try:
+        proc = psutil.Process(pid)
+        if proc.status() == psutil.STATUS_ZOMBIE:
+            return False
+        if proc.create_time() > registered_by + HANDLE_REGISTRATION_SLACK_SECONDS:
+            return False
+        if proc.name() == name:
+            return True
+        try:
+            return exe is not None and proc.exe() == exe
+        except psutil.Error:
+            return False
+    except psutil.Error:
+        return False
+
+
+def _read_handle_pids(handle_file: Path) -> tuple[list[int], float] | None:
+    """The handle list and the time it was last written; ``None`` without a file.
+
+    Raises ``ValueError`` for a file that is not a JSON list of pids.
+    """
+    try:
+        registered_by = handle_file.stat().st_mtime
+    except FileNotFoundError:
+        return None
+    pids = json.loads(handle_file.read_text() or "[]")
+    if not isinstance(pids, list) or not all(
+        isinstance(pid, int) and not isinstance(pid, bool) for pid in pids
+    ):
+        raise ValueError(f"expected a JSON list of pids, got {pids!r}")
+    return pids, registered_by
+
+
+def _prune_stale_handle_pids(data_dir: Path) -> None:
+    """Keep only live backends in pgserver's handle list before joining the cluster.
+
+    pgserver records every process holding a handle in
+    ``<pgdata>/.handle_pids.json`` and never removes an entry whose process
+    died without calling ``cleanup()`` (a crash, a forced kill, Windows shut
+    down with the app open). Its ``cleanup()`` stops the postmaster only when
+    the list is exactly the calling process, so one such entry used to keep
+    every later quit from stopping the cluster: the OS then killed the
+    postmaster with the backend, and every start ran a crash recovery.
+
+    An entry survives when it is this process (a restart of the cluster from
+    inside the same backend, where the cached pgserver handle is reused
+    without registering again) or a live backend (:func:`_is_live_backend`):
+    nothing keeps a second app instance from starting, and its backend shares
+    this data dir. Everything else is dropped.
+
+    Runs under pgserver's own inter-process lock (the one its constructor and
+    ``cleanup()`` hold while they read and write the list), so it never
+    interleaves with another process joining or leaving the cluster. A file
+    that is not a list of pids is reset: pgserver's reader would raise on it
+    and fail the start.
+    """
+    handle_file = data_dir / HANDLE_PIDS_FILE_NAME
+    with _pg_server_mod.PostgresServer._lock:
+        try:
+            listed = _read_handle_pids(handle_file)
+        except ValueError as exc:
+            handle_file.write_text("[]")
+            logger.warning(f"Reset pgserver's unreadable handle list {handle_file}: {exc}")
+            return
+        except OSError:
+            # Not logged here: pgserver reads the same file next and fails the
+            # start with this error, which the start's caller records once.
+            return
+        if listed is None:
+            return
+        pids, registered_by = listed
+        identity = _own_identity()
+        kept = [
+            pid
+            for pid in pids
+            if pid == os.getpid() or _is_live_backend(pid, registered_by, identity)
+        ]
+        if kept == pids:
+            return
+        handle_file.write_text(json.dumps(kept))
+    pruned = [pid for pid in pids if pid not in kept]
+    logger.info(
+        f"Pruned pgserver handle pids that are not live Erudi backends: {pruned} (kept: {kept})"
+    )
 
 
 def _recover_corrupt_pgdata(data_dir: Path) -> None:
@@ -685,11 +801,102 @@ def start_postgres(data_dir: Path | str) -> PostgresHandle:
     )
 
 
+def _live_postmaster(data_dir: Path) -> psutil.Process | None:
+    """The postmaster ``postmaster.pid`` names, if that process is a live postgres.
+
+    The name check matters: a postmaster killed with the OS leaves its pid
+    file behind, and the pid it names may since belong to another program,
+    which ``pg_ctl stop`` would signal.
+    """
+    try:
+        info = PostmasterInfo.read_from_pgdata(data_dir)
+    except (OSError, ValueError, AssertionError):
+        # Absent, unreadable, or half-written: no postmaster to stop here.
+        return None
+    if info is None or info.process is None:
+        return None
+    try:
+        proc = info.process
+        if (
+            proc.is_running()
+            and proc.status() != psutil.STATUS_ZOMBIE
+            and proc.name().lower().startswith("postgres")
+        ):
+            return proc
+    except psutil.Error:
+        # Exited (or became unreadable) between the pid file and the check.
+        pass
+    return None
+
+
+def _stop_postmaster_pgserver_kept(handle: PostgresHandle) -> bool:
+    """Stop the postmaster ``cleanup()`` left running, unless a live backend uses it.
+
+    pgserver's ``cleanup()`` returns without stopping anything when its handle
+    list holds anything besides this process. The start prunes the list
+    (:func:`_prune_stale_handle_pids`), but an entry can still arrive later,
+    and a postmaster left running at quit is killed with the backend, which
+    costs a crash recovery on the next start. Under pgserver's lock: when no
+    remaining entry is a live backend, stop the postmaster with
+    ``pg_ctl -w stop -m fast`` (the console-isolated wrapper) and empty the
+    list; when one is, leave the cluster to it.
+
+    Either way pgserver's cached handle is evicted when it is still ours: it
+    no longer counts this process, so a later start in this process must
+    register again rather than reuse it.
+
+    Returns whether the cluster is stopped.
+    """
+    cache = _pg_server_mod.PostgresServer._instances
+    for key, server in list(cache.items()):
+        if server is handle.server:
+            del cache[key]
+    data_dir = Path(handle.data_dir)
+    handle_file = data_dir / HANDLE_PIDS_FILE_NAME
+    with _pg_server_mod.PostgresServer._lock:
+        if _live_postmaster(data_dir) is None:
+            return True
+        try:
+            listed = _read_handle_pids(handle_file)
+        except (OSError, ValueError):
+            # Nothing readable says another backend is there.
+            listed = None
+        pids, registered_by = listed if listed is not None else ([], 0.0)
+        identity = _own_identity()
+        users = [pid for pid in pids if _is_live_backend(pid, registered_by, identity)]
+        if users:
+            logger.info(
+                f"Embedded PostgreSQL left running: another live backend uses it (pids {users})"
+            )
+            return False
+        logger.warning(
+            f"pgserver's handle count did not allow a clean stop (handles left: {pids}); "
+            "stopping the embedded PostgreSQL cluster with pg_ctl"
+        )
+        try:
+            _pg_server_mod.pg_ctl(["-w", "stop", "-m", "fast"], pgdata=data_dir)
+        except (subprocess.CalledProcessError, OSError) as exc:
+            logger.error(
+                "Could not stop the embedded PostgreSQL cluster; the next start "
+                "will run a crash recovery",
+                exc_info=exc,
+            )
+            return False
+        handle_file.write_text("[]")
+    return True
+
+
 def stop_postgres(handle: PostgresHandle) -> None:
-    """Stop the embedded cluster explicitly (deterministic shutdown order)."""
+    """Stop the embedded cluster explicitly (deterministic shutdown order).
+
+    pgserver's ``cleanup()`` stops the postmaster when this process holds the
+    only handle; :func:`_stop_postmaster_pgserver_kept` stops it when pgserver
+    declined and no other live backend uses it.
+    """
     # Announced before the call: pgserver's cleanup() stops the postmaster
     # (pg_ctl stop, then a kill), and a shutdown that hangs or throws there
     # would otherwise leave the log ending on the last thing the app did.
     logger.info(f"Stopping the embedded PostgreSQL cluster (data_dir={handle.data_dir})")
     handle.server.cleanup()
-    logger.info("Embedded PostgreSQL stopped")
+    if _stop_postmaster_pgserver_kept(handle):
+        logger.info("Embedded PostgreSQL stopped")
