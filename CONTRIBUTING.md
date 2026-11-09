@@ -246,6 +246,40 @@ Test-mode environment variables:
 - `ERUDI_FORCE_CPU=1` — short-circuit GPU detection in
   `BaseEngine.get_engine()` to force `CPU_Engine` for testing fallback paths
 
+### Updating a dependency
+
+Backend dependencies are declared in `backend/requirements/meta/` and composed
+by the entrypoints (`backend/requirements/README.md`). What a release bundles is
+locked: `backend/requirements/lock/<platform>-prod.txt` pins every package of
+each prod entrypoint's resolution, transitive ones included, and the release and
+smoke builds fail when what they install differs from it.
+
+1. Change the declared requirement (a pin in `meta/base.txt`, a new line in a
+   `meta/*-specs.txt`, …).
+2. Regenerate the locks, from any OS, with Python 3.12:
+
+   ```bash
+   python3.12 scripts/dev/lock_backend_requirements.py
+   ```
+
+   The existing locks seed the resolution, so only what your change requires
+   moves. To move a transitive package on purpose (a security fix in a package
+   nothing declares), name it: `--upgrade-package <name>`. When pip reports a
+   conflict with a locked version, rerun with `--upgrade-package` for the
+   package it names.
+3. Commit the requirement change and the locks together. The lock diff is the
+   list of everything the change moves in the shipped app: say in the pull
+   request why each native package that changes is expected to. backend-ci fails
+   when a requirement file changed without the locks being regenerated
+   (`backend/tests/test_requirements_lock.py`).
+
+Dependabot does not open version updates for the backend's Python requirements
+(`.github/dependabot.yml` explains why). A security alert on a backend package
+is fixed by hand the same way: bump the declared pin, or `--upgrade-package` a
+transitive one, and regenerate. A Dependabot security pull request that edits a
+requirement or lock file without the generator is closed and redone that way,
+since nothing has resolved the set it proposes.
+
 ---
 
 ## Frontend guide

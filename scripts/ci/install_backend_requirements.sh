@@ -7,20 +7,21 @@
 # app-build-smoke.yml and release.yml both call this, so the smoke gate installs
 # exactly what a release installs.
 #
-# Off macOS it is a plain `pip install -r`. On macOS the runner is newer than the
-# app's floor (mac.minimumSystemVersion in frontend/electron-builder.yml), and pip
-# prefers the wheels built for the runner's own macOS, which the frozen backend
-# then needs at import time. So it downloads the wheels built for the floor
-# (`--only-binary=:all: --platform macosx_<floor>_arm64`) into a wheelhouse,
-# installs from it alone, and exports MACOS_FLOOR to $GITHUB_ENV for
-# scripts/ci/check_macos_floor.sh.
+# The entrypoint is installed constrained to its lock,
+# backend/requirements/lock/<same name> (`-c`), which pins every package of the
+# resolution, so a rebuild bundles the versions the lock names and nothing that
+# was published since. scripts/ci/check_installed_lock.py then fails the step
+# when the installed set is not exactly the lock: a requirement file changed
+# without the locks being regenerated (scripts/dev/lock_backend_requirements.py).
 #
-# Restricting pip to the floor's wheels can make it pick an older version of a
-# package whose newest release has no wheel for the floor; most transitive
-# dependencies are not pinned, so that would ship a version the native install of
-# backend-ci never tested. The script resolves the same file natively
-# (`pip install --dry-run --report`) and fails when any installed version differs,
-# naming the packages: pin them, or raise the floor.
+# Off macOS the install is a plain `pip install -r <file> -c <lock>`. On macOS the
+# runner is newer than the app's floor (mac.minimumSystemVersion in
+# frontend/electron-builder.yml), and pip prefers the wheels built for the
+# runner's own macOS, which the frozen backend then needs at import time. So it
+# downloads the wheels built for the floor (`--only-binary=:all: --platform
+# macosx_<floor>_arm64`) into a wheelhouse, installs from it alone, and exports
+# MACOS_FLOOR to $GITHUB_ENV for scripts/ci/check_macos_floor.sh. The macOS lock
+# is generated for that same floor, so every locked version has a wheel there.
 set -euo pipefail
 
 if [ "$#" -ne 1 ]; then
@@ -28,17 +29,24 @@ if [ "$#" -ne 1 ]; then
   exit 2
 fi
 reqs=$1
+lock="backend/requirements/lock/$(basename "$reqs")"
+if [ ! -f "$lock" ]; then
+  echo "::error::No lock for $reqs: expected $lock. Generate it with scripts/dev/lock_backend_requirements.py."
+  exit 1
+fi
 
 python -m pip install --upgrade pip wheel setuptools
 
 if [ "$(uname -s)" != "Darwin" ]; then
-  pip install -r "$reqs"
+  pip install -r "$reqs" -c "$lock"
+  python scripts/ci/check_installed_lock.py "$lock"
   exit 0
 fi
 
 # Read minimumSystemVersion from the top-level `mac:` block only (dmg, mas and
 # pkg blocks may carry their own), accepting a quoted or bare value and a
-# trailing comment.
+# trailing comment. scripts/dev/lock_backend_requirements.py reads it the same
+# way to generate the macOS lock.
 floors=$(awk '
   /^[^[:space:]#]/ { in_mac = ($0 ~ /^mac:/) }
   in_mac && /^[[:space:]]+minimumSystemVersion:/ {
@@ -70,43 +78,6 @@ echo "macOS floor $floor: installing the $platform wheels."
 
 work=$(mktemp -d)
 trap 'rm -rf "$work"' EXIT
-pip download -r "$reqs" -d "$work/wheelhouse" --only-binary=:all: --platform "$platform"
-pip install --dry-run --ignore-installed --quiet --report "$work/native.json" -r "$reqs"
-pip install --no-index --find-links "$work/wheelhouse" -r "$reqs"
-pip list --format=freeze > "$work/installed.txt"
-
-# Every package the native resolution picked must be installed at that version.
-python - "$work/native.json" "$work/installed.txt" <<'PY'
-import json
-import re
-import sys
-
-def canon(name):
-    return re.sub(r"[-_.]+", "-", name).lower()
-
-with open(sys.argv[1], encoding="utf-8") as f:
-    native = {
-        canon(item["metadata"]["name"]): item["metadata"]["version"]
-        for item in json.load(f)["install"]
-    }
-installed = {}
-with open(sys.argv[2], encoding="utf-8") as f:
-    for line in f:
-        name, sep, version = line.strip().partition("==")
-        if sep:
-            installed[canon(name)] = version
-drift = sorted(
-    f"{name}: {installed.get(name, 'missing')} installed, {version} natively"
-    for name, version in native.items()
-    if installed.get(name) != version
-)
-if drift:
-    print(
-        "::error::The floor's wheels resolve to other versions than a native install; "
-        "pin these or raise mac.minimumSystemVersion:"
-    )
-    for line in drift:
-        print("  " + line)
-    sys.exit(1)
-print(f"{len(native)} packages installed at the versions a native install resolves.")
-PY
+pip download -r "$reqs" -c "$lock" -d "$work/wheelhouse" --only-binary=:all: --platform "$platform"
+pip install --no-index --find-links "$work/wheelhouse" -r "$reqs" -c "$lock"
+python scripts/ci/check_installed_lock.py "$lock"
