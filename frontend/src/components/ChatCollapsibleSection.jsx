@@ -140,6 +140,7 @@ export default function ChatCollapsibleSection({
             {isEditing ? (
               <input
                 value={tempName}
+                placeholder={displayName(conv.name)}
                 onChange={(e) => setTempName(e.target.value)}
                 onKeyDown={async (e) => {
                   if (e.key === "Enter" && tempName.trim()) {
@@ -165,7 +166,7 @@ export default function ChatCollapsibleSection({
                 onClick={(e) => {
                   e.stopPropagation();
                   setEditingId(conv.id);
-                  setTempName(displayName(conv.name));
+                  setTempName(conv.name === DEFAULT_CONVERSATION_NAME ? "" : conv.name);
                 }}
                 className="w-4 h-4 text-gray-400 hover:text-gray-200 cursor-pointer"
               />
