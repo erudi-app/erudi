@@ -7,6 +7,9 @@ import { useTranslation } from "react-i18next";
 // or absent phases show the generic "Starting" one.
 const KNOWN_PHASES = [
   "starting",
+  // Sent by the Electron main process, not the backend: the previous
+  // backend still holds the data folder (DATA_DIR_IN_USE) and main waits.
+  "waiting_previous_session",
   "preparing_database",
   "recovering_database",
   "running_migrations",

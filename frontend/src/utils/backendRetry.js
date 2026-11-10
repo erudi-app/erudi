@@ -21,6 +21,14 @@ export const TRANSIENT_CODES = new Set(["NO_PORT_AVAILABLE", "PORT_TIMEOUT"]);
 export const DATA_DIR_WAIT_MS = 30000;
 export const DATA_DIR_RETRY_MS = 2000;
 
+/**
+ * True for a startup_error main waits out: it is not forwarded to the window
+ * (which would show the error screen over a wait that usually ends well).
+ */
+export function isWaitedOutStartupError(event) {
+  return Boolean(event) && event.event === "startup_error" && event.code === "DATA_DIR_IN_USE";
+}
+
 /** Whether to respawn after DATA_DIR_IN_USE, `waitedMs` into the wait. */
 export function shouldWaitForDataDir(code, waitedMs) {
   return code === "DATA_DIR_IN_USE" && waitedMs < DATA_DIR_WAIT_MS;

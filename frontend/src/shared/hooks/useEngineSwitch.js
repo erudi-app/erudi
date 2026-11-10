@@ -68,6 +68,9 @@ export function useEngineSwitch({ persist, settled } = {}) {
       // Read at confirmation time, not when the question was asked: a download
       // that has finished since has nothing left to cancel.
       if (cancelDownloadFirst && downloading.current) {
+        // Resolves only once the job has ended: a cancel refused because the
+        // download is being installed (409) waits for it to complete, so the
+        // restart below never lands under its finalization.
         await cancelDownload();
       }
       try {

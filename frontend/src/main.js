@@ -15,12 +15,11 @@ const os = require("os");
 // Pure, unit-tested startup helpers (shared with the renderer).
 const { confirmBackendHealth } = require("./utils/backendHealth");
 const { classifyStderrLine } = require("./utils/backendStderr");
+const { isWaitedOutStartupError } = require("./utils/backendRetry");
 const {
-  DATA_DIR_RETRY_MS,
-  DATA_DIR_WAIT_MS,
-  shouldRetrySpawn,
-  shouldWaitForDataDir,
-} = require("./utils/backendRetry");
+  createBackendSupervisor,
+  WAITING_PREVIOUS_SESSION_PHASE,
+} = require("./utils/backendSupervisor");
 const { buildBackendSpawnOptions, buildBackendEnv } = require("./utils/backendSpawn");
 const { gracefulShutdown } = require("./utils/backendShutdown");
 const { singleFlight } = require("./utils/singleFlight");
@@ -94,12 +93,6 @@ let shuttingDown = false;
 // renderer queries `backend:getInfo` on mount).
 let resolvedPort = null;
 let backendIsReady = false;
-// Transient failures (port contention) may auto-respawn; deterministic ones
-// fail fast and wait for a manual retry.
-const MAX_SPAWN_ATTEMPTS = 2;
-// When the current wait for a data folder still held by the previous backend
-// began (DATA_DIR_IN_USE), null when not waiting.
-let dataDirWaitSince = null;
 
 // Kill the backend process and its entire child tree.
 // On Windows, SIGTERM only kills the parent — llama-server.exe is left orphaned.
@@ -398,8 +391,11 @@ const startRealBackend = () => {
           continue; // ordinary (non-JSON) log line
         }
         if (!event || !event.event) continue;
-        // Forward every structured event to the renderer (starting/phase/ready/…).
-        if (mainWindow && !mainWindow.isDestroyed()) {
+        // Forward every structured event to the renderer (starting/phase/ready/…),
+        // except a startup_error main is waiting out (DATA_DIR_IN_USE): the
+        // supervisor sends a phase for it, and the error screen only if the
+        // wait runs out.
+        if (mainWindow && !mainWindow.isDestroyed() && !isWaitedOutStartupError(event)) {
           mainWindow.webContents.send("backend-event", event);
         }
         if (event.event === "starting" && event.port) {
@@ -484,62 +480,45 @@ const startRealBackend = () => {
   });
 };
 
-// Supervise a backend spawn: auto-respawn only transient failures (port
-// contention), fail fast + surface deterministic ones for a manual retry.
-async function startBackendSupervised(attempt = 0) {
-  try {
-    log(`Backend startup attempt ${attempt + 1}...`);
-    const { port } = await startRealBackend();
-    dataDirWaitSince = null;
-    resolvedPort = port;
-    backendIsReady = true;
-    log(`Backend is ready on port ${port}.`);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("backend-event", { event: "backend_ready", port });
-    }
-  } catch (error) {
-    const code = (error && error.message) || "BACKEND_STARTUP_FAILED";
-    log(`Backend start attempt ${attempt + 1} failed: ${code}`);
-    if (code === "DATA_DIR_IN_USE") {
-      // The previous backend is still ending (a quit followed by a quick
-      // relaunch): respawn until it lets go of the data folder.
-      if (dataDirWaitSince === null) {
-        dataDirWaitSince = Date.now();
-        log("The data folder is still held by the previous backend; waiting for it to exit");
-      }
-      if (shouldWaitForDataDir(code, Date.now() - dataDirWaitSince)) {
-        requestStop(backendProcess);
-        killBackend(backendProcess);
-        backendProcess = null;
-        await new Promise((r) => setTimeout(r, DATA_DIR_RETRY_MS));
-        return startBackendSupervised(attempt);
-      }
-      dataDirWaitSince = null;
-      logError(
-        `Backend start failed (DATA_DIR_IN_USE): the data folder stayed held for ${DATA_DIR_WAIT_MS / 1000}s`
-      );
-    }
-    if (shouldRetrySpawn(code, attempt, MAX_SPAWN_ATTEMPTS)) {
-      logWarn(`Transient backend start failure (${code}); respawning`);
-      requestStop(backendProcess);
-      killBackend(backendProcess);
-      backendProcess = null;
-      await new Promise((r) => setTimeout(r, 2000));
-      return startBackendSupervised(attempt + 1);
-    }
-    // The failure itself is already recorded (one ERROR, by startRealBackend's
-    // tracker, which knows the cause); this line only says it reached the user.
-    log(`Backend startup failed (${code}); surfacing to the user`);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("backend-event", {
-        event: "startup_error",
-        code,
-        message: (error && error.message) || code,
-        source: "startup",
-      });
-    }
+// Supervise the backend's start: respawn transient failures, wait out a data
+// folder the previous backend still holds, surface the rest. One loop at a
+// time (utils/backendSupervisor.js): a Retry supersedes the running loop and
+// a quit stands it down.
+function sendBackendEvent(event) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("backend-event", event);
   }
 }
+
+const backendSupervisor = createBackendSupervisor({
+  startBackend: startRealBackend,
+  stopBackend: () => {
+    requestStop(backendProcess);
+    killBackend(backendProcess);
+    backendProcess = null;
+  },
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  now: () => Date.now(),
+  isQuitting: () => shuttingDown,
+  log,
+  logWarn,
+  logError,
+  onReady: (port) => {
+    resolvedPort = port;
+    backendIsReady = true;
+    sendBackendEvent({ event: "backend_ready", port });
+  },
+  onWaiting: () => sendBackendEvent({ event: "phase", phase: WAITING_PREVIOUS_SESSION_PHASE }),
+  onFailed: (code, error) =>
+    sendBackendEvent({
+      event: "startup_error",
+      code,
+      message: (error && error.message) || code,
+      source: "startup",
+    }),
+});
+
+const startBackendSupervised = () => backendSupervisor.start();
 
 // Create application menu with Help options
 const createApplicationMenu = () => {

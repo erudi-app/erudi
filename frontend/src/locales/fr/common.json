@@ -63,6 +63,7 @@
     "logoAlt": "Logo erudi",
     "phase": {
       "starting": "Démarrage d'Erudi…",
+      "waiting_previous_session": "La session précédente se ferme encore…",
       "preparing_database": "Préparation de la base de données…",
       "recovering_database": "Récupération de la base de données…",
       "running_migrations": "Mise à jour de la base de données…",

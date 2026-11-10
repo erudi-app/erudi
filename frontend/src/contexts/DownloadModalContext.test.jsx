@@ -336,6 +336,83 @@ describe("DownloadModalContext cancel refused while the download completes", () 
     expect(onError).not.toHaveBeenCalled();
     expect(onComplete).toHaveBeenCalledTimes(1);
   });
+
+  it("resolves the cancel only once the completing download has ended", async () => {
+    // The engine switch awaits the cancel and then restarts the backend: a
+    // refused cancel must not hand back while the download still finalizes.
+    let status = "running";
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status, progress: 100, time_left: 0 }),
+    });
+    cancelResponder = () => ({ ok: false, status: 409, statusText: "Conflict" });
+    renderProvider();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("OPEN"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("CONFIRM"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    let resolved = false;
+    let pending;
+    await act(async () => {
+      pending = seenContext.cancelDownload().then(() => {
+        resolved = true;
+      });
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(resolved).toBe(false);
+
+    status = "completed";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+      await pending;
+    });
+    expect(resolved).toBe(true);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("DownloadModalContext cancel concluded by a poll first", () => {
+  it("reports the cancel once when a poll sees it before the cancel answers", async () => {
+    // The cancel commits at once and then waits for the transfer to stop:
+    // a status poll meanwhile already reads `cancelled`.
+    let status = "running";
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status, progress: 10, time_left: 60 }),
+    });
+    let answerCancel;
+    cancelResponder = () => {
+      status = "cancelled";
+      return new Promise((resolve) => {
+        answerCancel = () => resolve({ ok: true });
+      });
+    };
+    renderProvider();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("OPEN"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("CONFIRM"));
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    let pending;
+    await act(async () => {
+      pending = seenContext.cancelDownload();
+      await vi.advanceTimersByTimeAsync(2000); // a poll reads cancelled
+    });
+    await act(async () => {
+      answerCancel();
+      await pending;
+    });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(DOWNLOAD_CANCELLED);
+  });
 });
 
 // Switching the inference engine restarts the backend, which would kill a

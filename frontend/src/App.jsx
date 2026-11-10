@@ -78,6 +78,9 @@ export default function App() {
         if (evt?.event === "phase") setPhase(evt.phase);
         if (isReadyEvent(evt)) {
           log.log("Backend is ready");
+          // A respawn main made on its own came up after an error was shown:
+          // the error is over.
+          setBackendError(null);
           setIsBackendReady(true);
         }
       });

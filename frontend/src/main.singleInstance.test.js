@@ -34,7 +34,18 @@ describe("single instance", () => {
 
   it("waits for a data folder the previous backend still holds", () => {
     expect(source).toMatch(/quietCodes: new Set\(\["DATA_DIR_IN_USE"\]\)/);
-    expect(source).toMatch(/shouldWaitForDataDir\(code, Date\.now\(\) - dataDirWaitSince\)/);
+    // One supervisor loop, stood down on a quit; a Retry (backend:restart)
+    // supersedes the running loop instead of starting a second one.
+    expect(source).toMatch(/const backendSupervisor = createBackendSupervisor\(\{/);
+    expect(source).toMatch(/isQuitting: \(\) => shuttingDown/);
+    expect(source).not.toMatch(/async function startBackendSupervised/);
+  });
+
+  it("never shows the error screen for a code it is waiting out", () => {
+    // Each attempt's startup_error DATA_DIR_IN_USE stays in main; the window
+    // gets a phase saying the previous session is closing instead.
+    expect(source).toMatch(/!isWaitedOutStartupError\(event\)/);
+    expect(source).toMatch(/phase: WAITING_PREVIOUS_SESSION_PHASE/);
   });
 
   it("never starts a window or a backend without the lock", () => {

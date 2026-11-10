@@ -32,6 +32,10 @@ const log = createLogger("DownloadModalContext");
 // FINALIZE_STALL_TICKS consecutive polls, the job is not coming back on its own.
 const POLL_INTERVAL_MS = 2000;
 const FINALIZE_STALL_TICKS = 90; // 90 x 2s = 3 minutes stuck at 100%
+// A refused cancel (the download was completing) resolves only once the job
+// has ended, so the engine switch never restarts the backend under a
+// download being installed; bounded by the same stall window.
+const COMPLETING_WAIT_MS = FINALIZE_STALL_TICKS * POLL_INTERVAL_MS;
 
 // The widget starts as a pill and opens by itself once the confirmation has
 // gone and the first poll is about to land.
@@ -369,13 +373,23 @@ export function DownloadModalProvider({ children }) {
 
     const outcome = await requestCancel(jobId);
     if (outcome === "ended") {
-      // Nothing was cancelled: the job ended on its own between two polls.
-      // Let its status conclude it (a completed model is counted and shown as
-      // such) rather than claim a cancel the backend refused.
+      // Nothing was cancelled: the job ended on its own between two polls, or
+      // it is being installed (409). Let its status conclude it (a completed
+      // model is counted and shown as such) rather than claim a cancel the
+      // backend refused, and return only once it has: the engine switch
+      // restarts the backend right after this resolves.
+      const giveUpAt = Date.now() + COMPLETING_WAIT_MS;
       await checkDownloadStatus(jobId);
+      while (activeJobRef.current === jobId && Date.now() < giveUpAt) {
+        await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+        if (activeJobRef.current === jobId) await checkDownloadStatus(jobId);
+      }
       return;
     }
 
+    // A status poll may already have concluded the job as cancelled while the
+    // cancel request waited for the transfer to stop: report it once.
+    if (activeJobRef.current !== jobId) return;
     // The backend drops the job on acknowledgement: one more status poll would
     // only be answered with a not-found warning in its log. Settle locally
     // right away -- and do the same when the cancel call itself failed, so the

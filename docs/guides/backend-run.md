@@ -135,6 +135,7 @@ uvicorn they are a no-op.
 | `recovering_database` | waiting for a PostgreSQL cluster to finish WAL crash recovery after an unclean shutdown |
 | `running_migrations` | the Alembic upgrade to head |
 | `loading_catalog` | seeding and reconciling the model catalog from the bundled snapshot |
+| `waiting_previous_session` | sent by the Electron main process, not the backend: the previous backend still holds the data folder (`DATA_DIR_IN_USE`) and main is waiting for it |
 
 Phases are informational. Readiness is the `ready` event or a confirming health check —
 never a phase.
@@ -234,9 +235,13 @@ shares the lock's key with an installed Erudi and spawns no backend of its own.
 
 Right after a quit the previous backend can still hold the folder for a while (up to about
 20 s with a request to drain). The Electron main process waits it out: on
-`DATA_DIR_IN_USE` it respawns the backend every 2 s for up to 30 s, and only then shows
-the error screen ("The previous session is still closing"). The backend writes the refusal
-at INFO; main writes one ERROR if the wait runs out.
+`DATA_DIR_IN_USE` it respawns the backend every 2 s for up to 30 s. Meanwhile it does not
+forward that `startup_error` to the window; it sends a `phase` event,
+`waiting_previous_session`, and the loader says the previous session is still closing.
+Only when the wait runs out does the error screen show. The backend writes the refusal at
+INFO; main writes one ERROR if the wait runs out. One supervision loop runs at a time
+(`frontend/src/utils/backendSupervisor.js`): a Retry supersedes the running loop, and a
+quit stands it down before any respawn.
 
 ## Usage
 

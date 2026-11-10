@@ -13,6 +13,10 @@ import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 
 const source = readFileSync(fileURLToPath(new URL("./main.js", import.meta.url)), "utf8");
+const supervisorSource = readFileSync(
+  fileURLToPath(new URL("./utils/backendSupervisor.js", import.meta.url)),
+  "utf8"
+);
 
 describe("main-process crash handlers", () => {
   it("observes uncaught exceptions without replacing Electron's default handling", () => {
@@ -50,28 +54,23 @@ describe("main-process crash handlers", () => {
     // tracker); no site writes its own ERROR next to it.
     const start = source.slice(
       source.indexOf("const startRealBackend"),
-      source.indexOf("async function startBackendSupervised")
+      source.indexOf("const backendSupervisor = createBackendSupervisor(")
     );
     const errorCalls = start.match(/logError\(/g) || [];
     // The two allowed ERROR writers before the tracker exists: the missing
     // executable and the dev backend that does not answer.
     expect(errorCalls.length).toBeLessThanOrEqual(2);
     expect(start).not.toMatch(/logError\([^;]*startup_error/);
-    const supervisor = source.slice(
-      source.indexOf("async function startBackendSupervised"),
-      source.indexOf("const createApplicationMenu")
-    );
-    expect(supervisor).toMatch(
+    expect(supervisorSource).toMatch(
       /log\(`Backend startup failed \(\$\{code\}\); surfacing to the user`\)/
     );
-    // One exception: DATA_DIR_IN_USE is waited out (a respawn every 2 s for
-    // up to 30 s), so the tracker writes each attempt unlevelled
-    // (quietCodes) and the supervisor writes the one ERROR when the wait
-    // runs out.
-    const errorWrites = supervisor.match(/logError\(\s*`[^`]*`/g) || [];
-    expect(errorWrites).toEqual([
-      "logError(\n        `Backend start failed (DATA_DIR_IN_USE): the data folder stayed held for ${DATA_DIR_WAIT_MS / 1000}s`",
-    ]);
+    // Exactly one ERROR writer in the supervisor: DATA_DIR_IN_USE is waited
+    // out (a respawn every 2 s for up to 30 s), so the tracker writes each
+    // attempt unlevelled (quietCodes) and the supervisor writes the one ERROR
+    // when the wait runs out. Every other failure's ERROR is the tracker's.
+    const supervisorErrors = supervisorSource.match(/logError\(/g) || [];
+    expect(supervisorErrors).toHaveLength(1);
+    expect(supervisorSource).toMatch(/logError\(\s*`Backend start failed \(DATA_DIR_IN_USE\)/);
   });
 
   it("keeps the requested-stop state on the child process, never in a global", () => {

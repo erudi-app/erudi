@@ -63,6 +63,7 @@
     "logoAlt": "erudi 标志",
     "phase": {
       "starting": "正在启动 Erudi…",
+      "waiting_previous_session": "上一个会话仍在关闭…",
       "preparing_database": "正在准备数据库…",
       "recovering_database": "正在恢复数据库…",
       "running_migrations": "正在更新数据库…",

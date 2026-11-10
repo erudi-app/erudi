@@ -63,6 +63,7 @@
     "logoAlt": "Logotipo de erudi",
     "phase": {
       "starting": "Iniciando Erudi…",
+      "waiting_previous_session": "La sesión anterior aún se está cerrando…",
       "preparing_database": "Preparando la base de datos…",
       "recovering_database": "Recuperando la base de datos…",
       "running_migrations": "Actualizando la base de datos…",
