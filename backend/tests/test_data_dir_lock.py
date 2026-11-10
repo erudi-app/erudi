@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import os
+import signal
 import subprocess
 import sys
 import textwrap
@@ -52,12 +53,12 @@ def test_two_data_folders_do_not_share_a_lock(tmp_path):
 
 HOLDER_SOURCE = textwrap.dedent(
     """
-    import sys, time
+    import os, sys, time
     from pathlib import Path
     from src.launcher.data_dir_lock import acquire_data_dir_lock
 
     lock = acquire_data_dir_lock(Path(sys.argv[1]))
-    print("held", flush=True)
+    print("held", os.getpid(), flush=True)
     time.sleep(120)
     """
 )
@@ -73,12 +74,22 @@ def test_the_lock_dies_with_the_process_that_held_it(tmp_path):
         text=True,
     )
     try:
-        assert holder.stdout.readline().strip() == "held"
+        word, pid = holder.stdout.readline().split()
+        assert word == "held"
+        # The interpreter's own pid: on Windows a venv's python.exe is a
+        # launcher that runs the real interpreter as its child, so the
+        # Popen pid is not the process holding the lock.
+        holder_pid = int(pid)
         with pytest.raises(DataDirInUse) as refused:
             acquire_data_dir_lock(tmp_path)
-        assert refused.value.holder_pid == holder.pid
+        assert refused.value.holder_pid == holder_pid
     finally:
-        # A hard kill: no cleanup runs in the holder, the OS releases the lock.
+        # A hard kill of the interpreter itself (SIGKILL on POSIX,
+        # TerminateProcess on Windows): no cleanup runs, the OS releases the lock.
+        try:
+            os.kill(holder_pid, getattr(signal, "SIGKILL", signal.SIGTERM))
+        except (NameError, OSError):
+            pass
         holder.kill()
         holder.wait(30)
         holder.stdout.close()
