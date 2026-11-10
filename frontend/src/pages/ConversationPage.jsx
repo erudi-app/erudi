@@ -1254,6 +1254,10 @@ export default function ConversationPage() {
     }
   };
 
+  // The header's picker and the Model popup pick through the same path: the
+  // model's saved or recommended values come with it.
+  const pickModel = (model) => changeModel(model.id);
+
   // A command from the composer or the header panel. /context draws its
   // panel; every other one opens its popup (/compact: its confirmation). A
   // conversation without a usable model is told to pick one for /compact and
@@ -1322,6 +1326,9 @@ export default function ConversationPage() {
           <ConversationHeader
             modelName={assignedModel?.name ?? ""}
             attention={isModelOrphaned}
+            models={models}
+            currentModelId={conversationSettings.values.llm_id}
+            onPickModel={pickModel}
             commands={COMMANDS}
             disabledCommands={
               compactingHere ? ALL_COMMAND_NAMES : loading ? COMMANDS_DISABLED_WHILE_ANSWERING : []
@@ -1649,10 +1656,11 @@ export default function ConversationPage() {
       <CommandPopups
         command={openCommand}
         onClose={() => setOpenCommand(null)}
+        onCommand={runCommand}
         settings={conversationSettings}
         model={assignedModel}
         models={models}
-        onPickModel={(model) => changeModel(model.id)}
+        onPickModel={pickModel}
         onCompact={compactConversation}
       />
 

@@ -28,7 +28,7 @@
     }
   },
   "conversationHeader": {
-    "chattingWith": "正在与 <model>{{model}}</model> 对话",
+    "chattingWith": "正在与 <model/> 对话",
     "settings": "对话设置",
     "pickerAttention": "请选择一个模型",
     "unload": "卸载 {{model}}",
@@ -112,6 +112,10 @@
       "noInstructions": "无",
       "on": "开启",
       "off": "关闭"
+    },
+    "saveAsDefaults": {
+      "label": "保存为 {{model}} 的默认值",
+      "hint": "使用此模型的新对话将以这些值开始。"
     }
   },
   "effortPopup": {
@@ -125,6 +129,11 @@
     "help": "仅列出权重位于此电脑上的已安装模型。",
     "current": "当前",
     "empty": "目前没有可用的已安装模型。"
+  },
+  "modelPicker": {
+    "listLabel": "已安装的模型",
+    "current": "当前",
+    "empty": "没有可用的已安装模型。请打开“模型”下载一个，或在“知识库”中将助手重新绑定到其他模型。"
   },
   "composer": {
     "placeholder": "提出一个问题…",

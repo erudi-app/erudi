@@ -28,7 +28,7 @@
     }
   },
   "conversationHeader": {
-    "chattingWith": "You are chatting with <model>{{model}}</model>",
+    "chattingWith": "You are chatting with <model/>",
     "settings": "Conversation settings",
     "pickerAttention": "Please select a model",
     "unload": "Unload {{model}}",
@@ -112,6 +112,10 @@
       "noInstructions": "None",
       "on": "On",
       "off": "Off"
+    },
+    "saveAsDefaults": {
+      "label": "Save as defaults for {{model}}",
+      "hint": "New conversations on this model start with these values."
     }
   },
   "effortPopup": {
@@ -125,6 +129,11 @@
     "help": "Only installed models whose weights are on this computer are listed.",
     "current": "Current",
     "empty": "No installed model can be used right now."
+  },
+  "modelPicker": {
+    "listLabel": "Installed models",
+    "current": "Current",
+    "empty": "No installed model can be used. Open Models to download one, or re-bind the assistant to another model in Knowledge Base."
   },
   "composer": {
     "placeholder": "Ask a question…",

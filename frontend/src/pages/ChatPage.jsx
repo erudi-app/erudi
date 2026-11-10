@@ -69,6 +69,8 @@ export default function ChatPage() {
     setCommandNotice(null);
     setOpenCommand(command);
   };
+  // The header's picker and the Model popup pick through the same path.
+  const pickModel = (model) => setSelectedModel(model.name);
   const explainUnavailable = (command) =>
     setCommandNotice({
       tone: "info",
@@ -334,6 +336,9 @@ export default function ChatPage() {
             <ConversationHeader
               modelName={selectedModel}
               attention={!selectedModel}
+              models={models}
+              currentModelId={llm?.id}
+              onPickModel={pickModel}
               commands={COMMANDS}
               onCommand={runCommand}
             >
@@ -423,10 +428,11 @@ export default function ChatPage() {
       <CommandPopups
         command={openCommand}
         onClose={() => setOpenCommand(null)}
+        onCommand={runCommand}
         settings={draft}
         model={llm}
         models={models}
-        onPickModel={(model) => setSelectedModel(model.name)}
+        onPickModel={pickModel}
       />
     </div>
   );

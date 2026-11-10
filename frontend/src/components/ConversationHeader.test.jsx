@@ -14,20 +14,88 @@ afterEach(cleanup);
 
 const COMMANDS = commandsFor(COMMAND_SCOPES.CONVERSATION);
 
+const MODELS = [
+  { id: 1, name: "Qwen3-4B" },
+  { id: 2, name: "Gemma-3-4B" },
+];
+
+const noop = () => {};
+
 const openPanel = () =>
   fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
 
 describe("ConversationHeader", () => {
-  it("reads a static line naming the model, with no dropdown", () => {
-    render(<ConversationHeader modelName="Qwen3-4B" commands={COMMANDS} onCommand={vi.fn()} />);
+  it("reads a line naming the model, on a button that opens the installed models", () => {
+    render(
+      <ConversationHeader
+        models={MODELS}
+        onPickModel={noop}
+        modelName="Qwen3-4B"
+        commands={COMMANDS}
+        onCommand={vi.fn()}
+      />
+    );
     expect(screen.getByRole("heading").textContent).toBe("You are chatting with Qwen3-4B");
-    expect(screen.queryByRole("combobox")).toBeNull();
+    expect(screen.getByRole("heading").querySelector("button")).toBeTruthy();
     expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("picks a model from the name, through onPickModel", () => {
+    const onPickModel = vi.fn();
+    render(
+      <ConversationHeader
+        modelName="Qwen3-4B"
+        commands={COMMANDS}
+        onCommand={vi.fn()}
+        models={MODELS}
+        currentModelId={1}
+        onPickModel={onPickModel}
+      />
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Qwen3-4B/ }));
+    fireEvent.click(screen.getByRole("option", { name: "Gemma-3-4B" }));
+    expect(onPickModel).toHaveBeenCalledWith(MODELS[1]);
+  });
+
+  it("locks the name picker with the Model command", () => {
+    render(
+      <ConversationHeader
+        modelName="Qwen3-4B"
+        commands={COMMANDS}
+        disabledCommands={["model"]}
+        onCommand={vi.fn()}
+        models={MODELS}
+        onPickModel={vi.fn()}
+      />
+    );
+    expect(screen.getByRole("button", { name: /Qwen3-4B/ }).disabled).toBe(true);
+  });
+
+  it("shows no slash command name in the panel", () => {
+    render(
+      <ConversationHeader
+        models={MODELS}
+        onPickModel={noop}
+        modelName="Qwen3-4B"
+        commands={COMMANDS}
+        onCommand={vi.fn()}
+      />
+    );
+    openPanel();
+    expect(document.body.textContent).not.toMatch(/\/(model|config|effort|compact|context)/);
   });
 
   it("opens a panel with one button per command, each running it", () => {
     const onCommand = vi.fn();
-    render(<ConversationHeader modelName="Qwen3-4B" commands={COMMANDS} onCommand={onCommand} />);
+    render(
+      <ConversationHeader
+        models={MODELS}
+        onPickModel={noop}
+        modelName="Qwen3-4B"
+        commands={COMMANDS}
+        onCommand={onCommand}
+      />
+    );
     expect(screen.queryByRole("button", { name: /Config/ })).toBeNull();
     openPanel();
     const buttons = ["Config", "Effort", "Model", "Compact", "Context"].map((label) =>
@@ -46,25 +114,29 @@ describe("ConversationHeader", () => {
   });
 
   it("orders the panel's buttons Model, Config, Effort, Compact, Context", () => {
-    render(<ConversationHeader modelName="Qwen3-4B" commands={COMMANDS} onCommand={vi.fn()} />);
+    render(
+      <ConversationHeader
+        models={MODELS}
+        onPickModel={noop}
+        modelName="Qwen3-4B"
+        commands={COMMANDS}
+        onCommand={vi.fn()}
+      />
+    );
     openPanel();
     const labels = screen
       .getAllByRole("button")
       .map((b) => b.textContent)
-      .filter((text) => text.includes("/"));
-    expect(labels).toEqual([
-      "Model/model",
-      "Config/config",
-      "Effort/effort",
-      "Compact/compact",
-      "Context/context",
-    ]);
+      .filter((text) => ["Model", "Config", "Effort", "Compact", "Context"].includes(text));
+    expect(labels).toEqual(["Model", "Config", "Effort", "Compact", "Context"]);
   });
 
   it("disables a command the page says is unavailable", () => {
     const onCommand = vi.fn();
     render(
       <ConversationHeader
+        models={MODELS}
+        onPickModel={noop}
         modelName="Qwen3-4B"
         commands={COMMANDS}
         disabledCommands={["model"]}
@@ -78,8 +150,17 @@ describe("ConversationHeader", () => {
 
   it("shows the red attention state for an orphaned conversation, its Model button still working", () => {
     const onCommand = vi.fn();
-    render(<ConversationHeader modelName="" attention commands={COMMANDS} onCommand={onCommand} />);
-    expect(screen.getByRole("alert").textContent).toBe("Please select a model");
+    render(
+      <ConversationHeader
+        models={MODELS}
+        onPickModel={noop}
+        modelName=""
+        attention
+        commands={COMMANDS}
+        onCommand={onCommand}
+      />
+    );
+    expect(screen.getByRole("button", { name: "Please select a model" })).toBeTruthy();
     openPanel();
     fireEvent.click(screen.getByRole("button", { name: /^Model/ }));
     expect(onCommand).toHaveBeenCalledWith({ name: "model", arg: null });
@@ -87,7 +168,13 @@ describe("ConversationHeader", () => {
 
   it("renders what the page adds to the panel after the command buttons", () => {
     render(
-      <ConversationHeader modelName="Qwen3-4B" commands={COMMANDS} onCommand={vi.fn()}>
+      <ConversationHeader
+        models={MODELS}
+        onPickModel={noop}
+        modelName="Qwen3-4B"
+        commands={COMMANDS}
+        onCommand={vi.fn()}
+      >
         <button>extra action</button>
       </ConversationHeader>
     );
@@ -97,7 +184,14 @@ describe("ConversationHeader", () => {
 
   it("shows a failed save", () => {
     render(
-      <ConversationHeader modelName="Qwen3-4B" commands={COMMANDS} onCommand={vi.fn()} saveFailed />
+      <ConversationHeader
+        models={MODELS}
+        onPickModel={noop}
+        modelName="Qwen3-4B"
+        commands={COMMANDS}
+        onCommand={vi.fn()}
+        saveFailed
+      />
     );
     expect(screen.getByRole("alert").textContent).toBe("Your change could not be saved.");
   });

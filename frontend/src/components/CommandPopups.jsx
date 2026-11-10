@@ -7,17 +7,22 @@ import ConfirmDialog from "./modals/ConfirmDialog";
 import EffortPopup from "./modals/EffortPopup";
 import ModelPopup from "./modals/ModelPopup";
 
+// /config global, which the settings window's Save as defaults button runs.
+const CONFIG_GLOBAL = { name: "config", arg: "global" };
+
 /**
  * The popups the slash commands open (#585), one at a time: `command` is the
  * `{ name, arg }` being run (from the composer or the header panel), or null.
  * Every popup reads and writes the conversation through `settings` (the
  * useConversationSettings owner); /model hands the picked model to the page,
  * and /compact's confirmation hands the go-ahead to it (`onCompact`, on a
- * conversation only).
+ * conversation only). /config's "Save as defaults" button runs /config global
+ * through `onCommand` (the page's own command runner).
  */
 export default function CommandPopups({
   command,
   onClose,
+  onCommand,
   settings,
   model,
   models,
@@ -35,7 +40,13 @@ export default function CommandPopups({
   };
   return (
     <>
-      <ConfigPopup isOpen={open.config} onClose={onClose} settings={settings} model={model} />
+      <ConfigPopup
+        isOpen={open.config}
+        onClose={onClose}
+        settings={settings}
+        model={model}
+        onSaveAsDefaults={() => onCommand(CONFIG_GLOBAL)}
+      />
       <ConfigGlobalPopup
         isOpen={open.configGlobal}
         onClose={onClose}
@@ -70,6 +81,7 @@ export default function CommandPopups({
 CommandPopups.propTypes = {
   command: PropTypes.shape({ name: PropTypes.string.isRequired, arg: PropTypes.string }),
   onClose: PropTypes.func.isRequired,
+  onCommand: PropTypes.func.isRequired,
   settings: PropTypes.object.isRequired,
   model: PropTypes.object,
   models: PropTypes.array.isRequired,

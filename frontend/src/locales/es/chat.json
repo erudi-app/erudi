@@ -28,7 +28,7 @@
     }
   },
   "conversationHeader": {
-    "chattingWith": "Estás chateando con <model>{{model}}</model>",
+    "chattingWith": "Estás chateando con <model/>",
     "settings": "Ajustes de la conversación",
     "pickerAttention": "Selecciona un modelo",
     "unload": "Liberar {{model}}",
@@ -112,6 +112,10 @@
       "noInstructions": "Ninguna",
       "on": "Activada",
       "off": "Desactivada"
+    },
+    "saveAsDefaults": {
+      "label": "Guardar como valores predeterminados de {{model}}",
+      "hint": "Las conversaciones nuevas con este modelo empiezan con estos valores."
     }
   },
   "effortPopup": {
@@ -125,6 +129,11 @@
     "help": "Solo se muestran los modelos instalados cuyos pesos están en este ordenador.",
     "current": "Actual",
     "empty": "Ningún modelo instalado se puede usar ahora mismo."
+  },
+  "modelPicker": {
+    "listLabel": "Modelos instalados",
+    "current": "Actual",
+    "empty": "No se puede usar ningún modelo instalado. Abre Modelos para descargar uno, o vuelve a vincular el asistente a otro modelo en Base de conocimiento."
   },
   "composer": {
     "placeholder": "Haz una pregunta…",

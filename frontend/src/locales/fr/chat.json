@@ -28,7 +28,7 @@
     }
   },
   "conversationHeader": {
-    "chattingWith": "Vous discutez avec <model>{{model}}</model>",
+    "chattingWith": "Vous discutez avec <model/>",
     "settings": "Réglages de la conversation",
     "pickerAttention": "Veuillez sélectionner un modèle",
     "unload": "Décharger {{model}}",
@@ -112,6 +112,10 @@
       "noInstructions": "Aucune",
       "on": "Activée",
       "off": "Désactivée"
+    },
+    "saveAsDefaults": {
+      "label": "Enregistrer comme valeurs par défaut pour {{model}}",
+      "hint": "Les nouvelles conversations avec ce modèle démarrent avec ces valeurs."
     }
   },
   "effortPopup": {
@@ -125,6 +129,11 @@
     "help": "Seuls les modèles installés dont les poids sont sur cet ordinateur sont proposés.",
     "current": "Actuel",
     "empty": "Aucun modèle installé n'est utilisable pour le moment."
+  },
+  "modelPicker": {
+    "listLabel": "Modèles installés",
+    "current": "Actuel",
+    "empty": "Aucun modèle installé n'est utilisable. Ouvrez Modèles pour en télécharger un, ou rattachez l'assistant à un autre modèle dans Base de connaissances."
   },
   "composer": {
     "placeholder": "Posez une question…",

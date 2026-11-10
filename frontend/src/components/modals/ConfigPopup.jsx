@@ -72,10 +72,12 @@ SaveFailedNotice.propTypes = { shown: PropTypes.bool };
 /**
  * /config (#609): every adjustable value of the conversation, or of the draft
  * on the new-conversation page, each saved through the settings hook as it
- * changes. No Apply button, no section for new-conversation defaults (that is
- * /config global).
+ * changes. No Apply button. At the bottom, "Save as defaults for <model>"
+ * (#704) hands over to `onSaveAsDefaults`, which opens the same popup as
+ * /config global: the same save and the same confirmation. The instructions
+ * being edited are saved first, so the defaults carry what is on screen.
  */
-export default function ConfigPopup({ isOpen, onClose, settings, model }) {
+export default function ConfigPopup({ isOpen, onClose, settings, model, onSaveAsDefaults }) {
   const { t } = useTranslation();
   const { values, setField, saveFailed, isDraft } = settings;
   const ids = {
@@ -120,6 +122,10 @@ export default function ConfigPopup({ isOpen, onClose, settings, model }) {
   const close = () => {
     saveInstructions();
     onClose();
+  };
+  const saveAsDefaults = () => {
+    saveInstructions();
+    onSaveAsDefaults();
   };
 
   const effortLabel = t("chat:config.effort.label");
@@ -282,6 +288,19 @@ export default function ConfigPopup({ isOpen, onClose, settings, model }) {
         </div>
       </div>
       <SaveFailedNotice shown={saveFailed} />
+      {onSaveAsDefaults && (
+        <div className="mt-6 flex flex-wrap items-center justify-between gap-3 border-t border-white/10 pt-4">
+          <p className="text-xs text-gray-400">{t("chat:config.saveAsDefaults.hint")}</p>
+          <button
+            type="button"
+            disabled={!model}
+            onClick={saveAsDefaults}
+            className="rounded-full px-4 py-1.5 text-sm font-semibold bg-white/10 hover:bg-white/15 text-gray-100 border border-white/20 transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
+          >
+            {t("chat:config.saveAsDefaults.label", { model: model?.name ?? "" })}
+          </button>
+        </div>
+      )}
     </ModalShell>
   );
 }
@@ -297,4 +316,5 @@ ConfigPopup.propTypes = {
     isDraft: PropTypes.bool,
   }).isRequired,
   model: PropTypes.object,
+  onSaveAsDefaults: PropTypes.func,
 };

@@ -522,7 +522,9 @@ describe("an orphaned conversation", () => {
       detail = { ...DETAIL, llm_id: llmId };
       render(<ConversationPage />);
       await waitFor(() =>
-        expect(screen.getByRole("alert").textContent).toBe("Please select a model")
+        expect(screen.getByRole("button", { name: "Please select a model" }).textContent).toBe(
+          "Please select a model"
+        )
       );
       openSettings();
       fireEvent.click(screen.getByRole("button", { name: /^Context/ }));
