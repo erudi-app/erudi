@@ -11,6 +11,10 @@ import { conversationPath } from "../utils/routes";
 const log = createLogger("ChatCollapsibleSection");
 // Route of the new-chat screen (mirrors the Sidebar link).
 const CHAT_PATH = "/erudi/chat";
+// The name the backend stores for a conversation with no title (a new one, a
+// greeting, a title that did not come out); shown translated, so the stored
+// name stays right when the interface language changes.
+const DEFAULT_CONVERSATION_NAME = "New Conversation";
 
 ChatCollapsibleSection.propTypes = {
   title: PropTypes.string.isRequired,
@@ -49,6 +53,8 @@ export default function ChatCollapsibleSection({
   disabled = false,
 }) {
   const { t } = useTranslation();
+  const displayName = (name) =>
+    name === DEFAULT_CONVERSATION_NAME ? t("chat:conversation.untitled") : name;
   const [open, setOpen] = useState(true);
   const [editingId, setEditingId] = useState(null);
   const [tempName, setTempName] = useState("");
@@ -134,6 +140,7 @@ export default function ChatCollapsibleSection({
             {isEditing ? (
               <input
                 value={tempName}
+                placeholder={displayName(conv.name)}
                 onChange={(e) => setTempName(e.target.value)}
                 onKeyDown={async (e) => {
                   if (e.key === "Enter" && tempName.trim()) {
@@ -149,7 +156,7 @@ export default function ChatCollapsibleSection({
                 className="w-full bg-transparent focus:outline-none focus:ring-0 focus:shadow-none focus:border-transparent border-b border-emerald-400"
               />
             ) : (
-              <span>{conv.name}</span>
+              <span>{displayName(conv.name)}</span>
             )}
 
             <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-2 opacity-0 group-hover:opacity-100">
@@ -159,7 +166,7 @@ export default function ChatCollapsibleSection({
                 onClick={(e) => {
                   e.stopPropagation();
                   setEditingId(conv.id);
-                  setTempName(conv.name);
+                  setTempName(conv.name === DEFAULT_CONVERSATION_NAME ? "" : conv.name);
                 }}
                 className="w-4 h-4 text-gray-400 hover:text-gray-200 cursor-pointer"
               />
