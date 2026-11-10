@@ -108,6 +108,81 @@ describe("MarkdownRenderer \\( \\) and \\[ \\] math (#690)", () => {
   it("converts around a closed fence, not inside it", () => {
     const text = "\\(a\\)\n\n```\n\\(b\\)\n```\n\n\\(c\\)";
     const { text: out } = convertTexDelimiters(text);
-    expect(out).toBe("$a$\n\n```\n\\(b\\)\n```\n\n$c$");
+    expect(out).toBe("$$a$$\n\n```\n\\(b\\)\n```\n\n$$c$$");
+  });
+});
+
+describe("display math inside lists and quotes (#690)", () => {
+  it("closes a display block inside a list item and keeps the rest of the answer", () => {
+    const { container } = renderMarkdown(
+      "1. Step:\n   \\[\n   a = b\n   \\]\n2. Next \\(c\\)\n\nAfter \\(d\\)"
+    );
+    expect(container.querySelectorAll(".katex-display").length).toBe(1);
+    expect(container.querySelectorAll("li").length).toBe(2);
+    expect(container.querySelectorAll(".katex").length).toBe(3);
+    expect(container.textContent).toContain("After");
+    expect(container.textContent).not.toContain("$");
+  });
+
+  it("closes a display block inside a blockquote", () => {
+    const { container } = renderMarkdown("> Note:\n> \\[\n> a = b\n> \\]\n\nAfter \\(d\\)");
+    expect(container.querySelector("blockquote .katex-display")).toBeTruthy();
+    expect(container.textContent).not.toContain("$");
+    expect(container.querySelectorAll(".katex").length).toBe(2);
+  });
+});
+
+describe("inline conversion emits double dollars (#690)", () => {
+  it("renders \\[x\\] after a digit mid-line", () => {
+    const { container } = renderMarkdown("Let 2 \\[x\\] be given.");
+    expect(container.querySelector(".katex")).toBeTruthy();
+    expect(container.textContent).not.toContain("$");
+  });
+
+  it("lets a lone currency dollar before converted math stay literal", () => {
+    const { container } = renderMarkdown("Cost 212,75 $ and \\(3x\\) here.");
+    expect(container.querySelectorAll(".katex").length).toBe(1);
+    expect(container.textContent).toContain("212,75 $ and");
+  });
+
+  it("renders a converted span alone on its line", () => {
+    const { container } = renderMarkdown("\\(x+1\\)\n\nnext");
+    expect(container.querySelector(".katex")).toBeTruthy();
+    expect(container.textContent).not.toContain("$");
+  });
+});
+
+describe("what is not converted (#690)", () => {
+  it("stops an inline code span at a blank line", () => {
+    const { text } = convertTexDelimiters("a ` b\n\n\\(x\\) c ` d");
+    expect(text).toBe("a ` b\n\n$$x$$ c ` d");
+  });
+
+  it("leaves a 4-space indented code block alone", () => {
+    const { container } = renderMarkdown("Code:\n\n    \\(x\\) and \\[y\\]\n\nthen \\(z\\)");
+    expect(container.querySelector("pre code").textContent).toContain("\\(x\\) and \\[y\\]");
+    expect(container.querySelectorAll(".katex").length).toBe(1);
+  });
+
+  it("converts the paragraph of a list item indented by four spaces", () => {
+    const { text } = convertTexDelimiters("- item\n\n    more \\(x\\)");
+    expect(text).toBe("- item\n\n    more $$x$$");
+  });
+
+  it("leaves a link destination alone", () => {
+    const { text } = convertTexDelimiters("[a](http://x.test/\\(1\\)) and \\(y\\)");
+    expect(text).toBe("[a](http://x.test/\\(1\\)) and $$y$$");
+  });
+
+  it("leaves \\[text\\](url) alone", () => {
+    const { text } = convertTexDelimiters("see \\[text\\](http://x.test)");
+    expect(text).toBe("see \\[text\\](http://x.test)");
+  });
+
+  it("leaves a citation such as \\[1\\] and \\[1, 2\\] as text", () => {
+    const { container } = renderMarkdown("As shown \\[1\\] and \\[1, 2\\].");
+    expect(container.querySelector(".katex")).toBeNull();
+    expect(container.textContent).toContain("[1]");
+    expect(convertTexDelimiters("As \\[1\\]").text).toBe("As \\[1\\]");
   });
 });
