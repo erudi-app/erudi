@@ -406,6 +406,22 @@ class Download_Job_Repository:
         logger.info(f"Created download job {job.id}")
         return job
 
+    def mark_cancelled_if_active(self, job_id: int) -> int:
+        """Set the job ``cancelled`` if it is still ``pending`` or ``running``.
+
+        One conditional UPDATE, so a job that ended meanwhile (completed,
+        failed, cancelled by someone else) is never turned into a cancel.
+        Returns the rows written (0 or 1). Does not commit.
+        """
+        return (
+            self.db.query(DownloadJobModel)
+            .filter(
+                DownloadJobModel.id == job_id,
+                DownloadJobModel.status.in_(["pending", "running"]),
+            )
+            .update({"status": "cancelled"}, synchronize_session=False)
+        )
+
     def update_status(
         self, job: DownloadJobModel, status: str, error_message: Optional[str] = None
     ) -> None:

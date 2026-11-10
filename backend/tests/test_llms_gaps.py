@@ -214,11 +214,13 @@ class TestRunDownloadTaskFailure:
 
         llm_endpoints._run_download_task("org/model", 1, "/tmp/t", "/tmp/f", job_id=9)
 
-        # Written as a conditional UPDATE that skips a cancelled row (the
-        # real-database race is pinned in test_download_cancel).
+        # Two conditional UPDATEs: the claim (pending -> running), then the
+        # failure, written so that it skips a cancelled row (the
+        # real-database races are pinned in test_download_cancel).
         update = session.query.return_value.filter.return_value.update
-        update.assert_called_once()
-        values = update.call_args.args[0]
+        assert update.call_count == 2
+        assert update.call_args_list[0].args[0] == {"status": "running"}
+        values = update.call_args_list[1].args[0]
         assert values["status"] == "failed"
         assert "network died" in values["error_message"]
         session.close.assert_called_once()

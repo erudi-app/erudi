@@ -129,6 +129,7 @@ from src.domains.llms.services import (
     cancel_download_job,
     download_llm,
     download_task_running,
+    track_download,
 )
 from src.domains.llms.hf_search import search_huggingface
 from src.domains.llms.repository import (
@@ -231,6 +232,19 @@ def _write_job_unless_cancelled(session, job_id: int, values: dict) -> int:
     )
 
 
+def _claim_job(session, job_id: int) -> bool:
+    """Flip the job from ``pending`` to ``running`` and commit; whether it
+    was still pending. False: it was cancelled (or removed) before the task
+    started, and nothing must be downloaded."""
+    claimed = (
+        session.query(DownloadJobModel)
+        .filter(DownloadJobModel.id == job_id, DownloadJobModel.status == "pending")
+        .update({"status": "running"}, synchronize_session=False)
+    )
+    session.commit()
+    return bool(claimed)
+
+
 def _job_cancelled(session, job_id: int) -> bool:
     """Whether the job row reads ``cancelled`` now (a column read, never the
     session's cached object). False when the row is gone."""
@@ -286,9 +300,15 @@ def _run_download(
 
     session = SessionLocal()
     try:
-        job_obj = session.query(DownloadJobModel).get(job_id)
-        job_obj.status = "running"
-        session.commit()
+        # The tracker first, then the claim: a cancel either finds the row
+        # still pending (the claim then fails) or finds the tracker.
+        tracker = track_download(job_id)
+        if not _claim_job(session, job_id):
+            tracker.mark_stopped()  # nothing ran: a cancel waiting on it goes on
+            logger.info(
+                f"Download job {job_id} was cancelled before it started; nothing downloaded"
+            )
+            return
         logger.info(f"Started download job {job_id}")
         asyncio.run(
             download_llm(
@@ -297,6 +317,7 @@ def _run_download(
                 temp_save_dir=temp_save_dir,
                 final_save_dir=final_save_dir,
                 job_id=job_id,
+                tracker=tracker,
             )
         )
         job_obj = session.query(DownloadJobModel).get(job_id)

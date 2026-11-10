@@ -161,6 +161,18 @@ def get_active_download_tracker(job_id: int) -> Optional["DownloadTracker"]:
         return _active_trackers.get(job_id)
 
 
+def track_download(job_id: int) -> "DownloadTracker":
+    """Register a tracker for ``job_id`` and return it, for ``download_llm``.
+
+    The download task does this before it claims its job row: a cancel then
+    either finds the row still pending (and the claim fails) or finds the
+    tracker; it never falls between the two.
+    """
+    tracker = DownloadTracker()
+    _register_tracker(job_id, tracker)
+    return tracker
+
+
 @contextmanager
 def download_task_running(job_id: Optional[int] = None):
     """Mark a download task as running for as long as the block runs.
@@ -913,6 +925,7 @@ async def download_llm(
     temp_save_dir: str,
     final_save_dir: str,
     job_id: Optional[int] = None,
+    tracker: Optional["DownloadTracker"] = None,
 ) -> str:
     """Download a pre-built HuggingFace quant with progress tracking.
 
@@ -969,8 +982,11 @@ async def download_llm(
     fs = HfFileSystem(token=HF_TOKEN)
 
     # Initialize tracking and register for cancellation support
-    job = DownloadTracker()
-    if job_id is not None:
+    # The download task registers the tracker itself, before it claims its
+    # job row, so a cancel can never land where no tracker is registered yet
+    # (``track_download``).
+    job = tracker if tracker is not None else DownloadTracker()
+    if job_id is not None and tracker is None:
         _register_tracker(job_id, job)
 
     try:
@@ -1200,10 +1216,16 @@ def cancel_download_job(job_id: int, job_repo, llm_repo, db) -> dict:
         final_local_model_link=job.final_local_model_link,
     )
 
+    # Conditional: a job that ended since the check above (completed,
+    # failed) is never turned into a cancel, and nothing of it is touched.
+    if not job_repo.mark_cancelled_if_active(job_id):
+        db.rollback()
+        raise StateConflictException(
+            "Cannot cancel a job that is already completed, failed, or cancelled"
+        )
     try:
         # Commit first: the job reads cancelled and the placeholder model is
         # gone before anything waits.
-        job_repo.update_status(job, "cancelled")
         llm_repo.delete(llm)
         db.commit()
     finally:

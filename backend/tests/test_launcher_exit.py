@@ -227,6 +227,23 @@ def test_an_event_to_a_dead_parent_is_dropped_not_raised(monkeypatch):
 
 
 @pytest.mark.unit
+def test_a_payload_that_cannot_be_encoded_raises_and_keeps_the_channel(monkeypatch, capsys):
+    """Only a lost reader is swallowed: a bug in the payload is a bug."""
+    from src.launcher import events
+
+    monkeypatch.setattr(events, "_stdout_lost", False)
+    circular: dict = {"event": "shutdown"}
+    circular["self"] = circular
+
+    with pytest.raises(ValueError):
+        events.emit_event(circular)
+
+    assert events._stdout_lost is False
+    events.emit_event({"event": "shutdown"})
+    assert '"event": "shutdown"' in capsys.readouterr().out
+
+
+@pytest.mark.unit
 def test_after_ready_the_exit_deadline_is_armed_before_anything_is_written(monkeypatch):
     """#706 itself: the parent was SIGKILLed, so stdout is a broken pipe. The
     deadline must be armed whatever writing the `shutdown` event does."""

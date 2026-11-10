@@ -59,8 +59,11 @@ def emit_event(payload: dict) -> None:
     global _stdout_lost
     if _stdout_lost:
         return
+    # Encoded outside the guard: a payload json cannot encode is a bug and
+    # raises; only writing to a reader that is gone is swallowed.
+    line = json.dumps({**payload, "ts": _utc_timestamp()})
     try:
-        print(json.dumps({**payload, "ts": _utc_timestamp()}), flush=True)
+        print(line, flush=True)
     except (OSError, ValueError):
         # BrokenPipeError / EPIPE, or ValueError on a closed stream.
         _stdout_lost = True

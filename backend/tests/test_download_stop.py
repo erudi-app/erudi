@@ -362,7 +362,7 @@ class TestNoCancelOnceFinalizing:
 
         assert refused.value.status_code == 409
         assert harness.events == []
-        harness.job_repo.update_status.assert_not_called()
+        harness.job_repo.mark_cancelled_if_active.assert_not_called()
 
     def test_a_cancel_during_the_finish_leaves_the_model_installed(self, monkeypatch, tmp_path):
         """The cancel lands while the task finalizes (integrity gate, size,

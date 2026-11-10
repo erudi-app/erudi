@@ -175,7 +175,11 @@ at its next chunk; the cancel deletes the partial files once every transfer of t
 stopped (Windows refuses to delete a file still open), waiting up to 10 seconds, and a
 transfer slower than that deletes them itself when it stops, after the cancel has answered.
 Once every file is transferred the download is being installed and a cancel is refused
-with `409`: the job ends `completed`. A cancel logs nothing above INFO.
+with `409`: the job then ends `completed`, or `failed` if the integrity gate rejects the
+files. A cancel of a job that ended meanwhile is refused (`400`) and touches nothing. A
+cancel that lands before the download task started leaves the job `cancelled` and nothing
+is downloaded: the task claims its job only while it is still `pending`. A cancel logs
+nothing above INFO.
 
 Quitting the app is not a cancel: the backend interrupts the download, leaves the job
 `running` and its partial files on disk, and the next start resolves them (the job ends
