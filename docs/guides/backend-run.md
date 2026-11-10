@@ -135,6 +135,7 @@ uvicorn they are a no-op.
 | `recovering_database` | waiting for a PostgreSQL cluster to finish WAL crash recovery after an unclean shutdown |
 | `running_migrations` | the Alembic upgrade to head |
 | `loading_catalog` | seeding and reconciling the model catalog from the bundled snapshot |
+| `waiting_previous_session` | sent by the Electron main process, not the backend: the previous backend still holds the data folder (`DATA_DIR_IN_USE`) and main is waiting for it |
 
 Phases are informational. Readiness is the `ready` event or a confirming health check —
 never a phase.
@@ -175,6 +176,7 @@ per-generation table is in [Hardware Detection](hardware.md).
 
 | Code | Meaning |
 |---|---|
+| `DATA_DIR_IN_USE` | another backend holds the data folder's lock (the frontend respawns for up to 30 s while the previous backend ends) |
 | `NO_PORT_AVAILABLE` | every port in the 27182-27199 scan is busy (transient; the frontend retries) |
 | `CRASH_BEFORE_READY` | the server thread exited before binding a port |
 | `PORT_TIMEOUT` | the server did not bind within the startup window |
@@ -197,9 +199,54 @@ database cluster. Two environment variables control the guards, both documented 
 | `ERUDI_NO_PARENT_WATCHDOG` | Set to `1` to disable the parent-process watchdog for a deliberately detached run. |
 
 The parent watchdog otherwise polls every couple of seconds. Whichever path triggers the
-stop (watchdog, SIGTERM relay, stdin EOF), uvicorn's wait for in-flight requests is
-bounded, then the lifespan shutdown runs: the inference child is terminated and the
-embedded PostgreSQL cluster is stopped.
+stop (watchdog, SIGTERM relay, stdin EOF), it goes through `request_shutdown`, which first
+interrupts every model download: each transfer stops at its next chunk. uvicorn's wait for
+in-flight requests is bounded (a download is a request's background task), then the
+lifespan shutdown runs: the downloads are interrupted again and their tasks awaited for a
+few seconds, the inference child is terminated and the embedded PostgreSQL cluster is
+stopped. An interrupted download writes nothing more: its job stays `running` and its
+partial files stay on disk, and the next start resolves both (a complete artifact is
+kept, anything else removed and the job recorded as interrupted by the shutdown).
+
+The exit itself is bounded. Once the lifespan has stopped its services, the launcher waits
+at most `EXIT_GRACE_SECONDS` (2 s) for the server thread, emits `shutdown`, and arms an exit
+deadline: if a thread still holds the interpreter's exit `EXIT_GRACE_SECONDS` later (the
+exit joins every executor thread, and a transfer parked in a network read is one), the
+process logs which threads and ends. The exit deadline is armed before the `shutdown`
+event is written: when the parent was killed, stdout is a broken pipe, and an event with
+no reader is dropped (said once at INFO), never an error. A shutdown that never reports is
+cut off `SHUTDOWN_HARD_LIMIT_SECONDS` (60 s) after the request, logged at ERROR: that last
+resort can leave the database unstopped, and the next start then runs a crash recovery.
+Each step of the lifespan shutdown is guarded, so a step that fails is logged (ERROR, with
+its traceback) and the next ones, the PostgreSQL stop above all, still run.
+
+### One backend per data folder
+
+Before anything touches the data folder, the launcher takes an exclusive OS lock on
+`<data dir>/backend.lock` (`flock` on macOS and Linux, `msvcrt.locking` on Windows) and
+holds it for the life of the process. A second backend on the same folder stops with
+`DATA_DIR_IN_USE` before it starts the cluster. The lock is the operating system's, so it
+is released however the process ends, and a leftover file never blocks a start; the file
+only carries the holder's pid for the message. Instances started with their own
+`ERUDI_DATA_ROOT` (the integration tests, a QA run beside the app) each lock their own
+folder. A packaged Electron app also holds a single-instance lock: a second launch brings
+the running window forward and quits. A dev run (`npm start`) does not take it, since it
+shares the lock's key with an installed Erudi and spawns no backend of its own.
+
+Right after a quit the previous backend can still hold the folder for a while (up to about
+20 s with a request to drain). The Electron main process waits it out: on
+`DATA_DIR_IN_USE` it respawns the backend every 2 s for up to 30 s. Meanwhile it does not
+forward that `startup_error` to the window; it sends a `phase` event,
+`waiting_previous_session`, and the loader says the previous session is still closing.
+The `starting` event of the next backend clears that line. Only when the wait runs out
+does the error screen show ("The previous session did not close", with the backend's own
+message: which pid holds which folder); without the packaged supervisor (a dev run) the
+code goes straight to the error screen. A child main stops itself before it is ready (a
+Retry, a quit) settles its start quietly: no ERROR, and no safety-cap failure later. A
+quit is marked whether or not a backend runs, so no respawn follows it. The backend writes the refusal at
+INFO; main writes one ERROR if the wait runs out. One supervision loop runs at a time
+(`frontend/src/utils/backendSupervisor.js`): a Retry supersedes the running loop, and a
+quit stands it down before any respawn.
 
 ## Usage
 

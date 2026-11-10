@@ -213,9 +213,11 @@ export default function EngineFailureModal({ notice, onDismiss }) {
                         disabled={switching}
                         className="px-4 py-2 rounded-lg text-[13px] font-medium bg-[#34d399] text-[#02130e] transition-opacity hover:opacity-90 disabled:opacity-60"
                       >
-                        {switching
-                          ? t("errors:engine.modal.switching")
-                          : t("errors:engine.modal.switchToCpu")}
+                        {engineSwitch.waitingForDownload
+                          ? t("downloads:waitingForInstall")
+                          : switching
+                            ? t("errors:engine.modal.switching")
+                            : t("errors:engine.modal.switchToCpu")}
                       </button>
                       <button
                         type="button"

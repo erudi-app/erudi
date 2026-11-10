@@ -5,6 +5,11 @@
     "checkLogsAt": "Consultez les logs dans {{path}} et contactez-nous.",
     "checkLogs": "Consultez les logs du backend et contactez-nous.",
     "codes": {
+      "dataDirInUse": {
+        "title": "La session précédente ne s'est pas fermée",
+        "detail": "La session précédente d'Erudi occupe encore son dossier de données après 30 secondes.",
+        "hint": "Patientez un instant, puis réessayez. Si cela se reproduit, redémarrez votre ordinateur."
+      },
       "portInUse": {
         "title": "Port déjà utilisé",
         "detail": "Un autre processus utilise le port dont Erudi a besoin pour son serveur local.",

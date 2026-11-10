@@ -63,5 +63,6 @@
     "doneBody": "The embedding model was downloaded successfully. The Knowledge Base is ready to use.",
     "errorTitle": "Download failed",
     "errorBody": "The embedding model could not be downloaded. Check your connection and try again."
-  }
+  },
+  "waitingForInstall": "Waiting for the download to finish installing…"
 }

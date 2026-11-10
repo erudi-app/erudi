@@ -74,10 +74,17 @@ export default function App() {
           return;
         }
         if (evt?.port) setBackendPort(evt.port);
-        if (evt?.event === "starting") setFirstRun(!!evt.first_run);
+        if (evt?.event === "starting") {
+          setFirstRun(!!evt.first_run);
+          // A new backend starts: whatever main was waiting for is over.
+          setPhase(null);
+        }
         if (evt?.event === "phase") setPhase(evt.phase);
         if (isReadyEvent(evt)) {
           log.log("Backend is ready");
+          // A respawn main made on its own came up after an error was shown:
+          // the error is over.
+          setBackendError(null);
           setIsBackendReady(true);
         }
       });

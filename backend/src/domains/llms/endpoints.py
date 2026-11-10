@@ -123,7 +123,14 @@ from src.domains.llms.schemas import (
     ConversationDefaultsUpdate,
 )
 from src.domains.llms.conversation_defaults import read_conversation_defaults
-from src.domains.llms.services import DownloadCancelled, download_llm, cancel_download_job
+from src.domains.llms.services import (
+    DownloadCancelled,
+    DownloadInterrupted,
+    cancel_download_job,
+    download_llm,
+    download_task_running,
+    track_download,
+)
 from src.domains.llms.hf_search import search_huggingface
 from src.domains.llms.repository import (
     Llm_Repository,
@@ -225,6 +232,19 @@ def _write_job_unless_cancelled(session, job_id: int, values: dict) -> int:
     )
 
 
+def _claim_job(session, job_id: int) -> bool:
+    """Flip the job from ``pending`` to ``running`` and commit; whether it
+    was still pending. False: it was cancelled (or removed) before the task
+    started, and nothing must be downloaded."""
+    claimed = (
+        session.query(DownloadJobModel)
+        .filter(DownloadJobModel.id == job_id, DownloadJobModel.status == "pending")
+        .update({"status": "running"}, synchronize_session=False)
+    )
+    session.commit()
+    return bool(claimed)
+
+
 def _job_cancelled(session, job_id: int) -> bool:
     """Whether the job row reads ``cancelled`` now (a column read, never the
     session's cached object). False when the row is gone."""
@@ -235,18 +255,43 @@ def _job_cancelled(session, job_id: int) -> bool:
 def _run_download_task(
     model_link: str, model_id: int, temp_save_dir, final_save_dir, job_id: int
 ) -> None:
+    """Run one download as a background task the shutdown can wait for.
+
+    The whole body, finalization included, runs inside
+    ``download_task_running``: the lifespan interrupts the downloads and waits
+    for their tasks (bounded) before it stops the database they write to. Its
+    exit unregisters the job's tracker, which stays registered through the
+    finalization so that a cancel meanwhile is refused (409).
+    """
+    with download_task_running(job_id):
+        _run_download(model_link, model_id, temp_save_dir, final_save_dir, job_id)
+
+
+def _run_download(
+    model_link: str, model_id: int, temp_save_dir, final_save_dir, job_id: int
+) -> None:
     """Background body of a download: flip the job to running, run the download
     (which spawns its own progress updater), and mark failed on error. Module-level
     so both the by-id and by-link download routes share one implementation.
 
-    A cancel is the cancel endpoint's: it flags the transfer's tracker, flushes
-    ``cancelled`` and commits only after its cleanup, so until then this session
-    reads ``running`` (READ COMMITTED). The task therefore takes the cancel from
-    ``download_llm`` itself (``DownloadCancelled``), and ``completed`` or
-    ``failed`` is written only over a row that is not ``cancelled``
-    (``_write_job_unless_cancelled``). A cancel that stopped the transfer and
-    then failed (rolled back) leaves the row ``running``: the task records the
-    cancel itself."""
+    A cancel is the cancel endpoint's: it flags the transfer's tracker,
+    commits ``cancelled`` and the placeholder's deletion at once, and deletes
+    the files once the transfer has stopped. The task takes the cancel from
+    ``download_llm`` itself (``DownloadCancelled``), and its own write of
+    ``cancelled`` then finds the row already cancelled. Once the files are
+    complete the download is finalizing and the endpoint refuses the cancel,
+    so ``completed`` is not raced by one; ``completed`` or ``failed`` is
+    still written only over a row that is not ``cancelled``
+    (``_write_job_unless_cancelled``), for a cancel that found no tracker. A
+    cancel that stopped the transfer and then failed (rolled back) leaves the
+    row ``running``: the task records the cancel itself.
+
+    A download the shutdown interrupted (``DownloadInterrupted``) writes
+    nothing: the database is stopping, and the row left ``running`` is what
+    the next start's cleanup resolves (a complete artifact is kept, anything
+    else removed and the job recorded as interrupted by the shutdown). It is
+    never recorded as ``cancelled``: only the cancel endpoint removes the
+    model's placeholder row, so a cancel recorded here would leave it behind."""
     from src.domains.llms.repository import (
         detect_supports_tools,
         detect_supports_vision,
@@ -255,9 +300,15 @@ def _run_download_task(
 
     session = SessionLocal()
     try:
-        job_obj = session.query(DownloadJobModel).get(job_id)
-        job_obj.status = "running"
-        session.commit()
+        # The tracker first, then the claim: a cancel either finds the row
+        # still pending (the claim then fails) or finds the tracker.
+        tracker = track_download(job_id)
+        if not _claim_job(session, job_id):
+            tracker.mark_stopped()  # nothing ran: a cancel waiting on it goes on
+            logger.info(
+                f"Download job {job_id} was cancelled before it started; nothing downloaded"
+            )
+            return
         logger.info(f"Started download job {job_id}")
         asyncio.run(
             download_llm(
@@ -266,6 +317,7 @@ def _run_download_task(
                 temp_save_dir=temp_save_dir,
                 final_save_dir=final_save_dir,
                 job_id=job_id,
+                tracker=tracker,
             )
         )
         job_obj = session.query(DownloadJobModel).get(job_id)
@@ -368,6 +420,11 @@ def _run_download_task(
                             exc_info=True,
                         )
             logger.info(f"Download job {job_id} completed successfully")
+    except DownloadInterrupted:
+        logger.info(
+            f"Download job {job_id} interrupted by the shutdown; "
+            f"the next start resolves it and its partial files"
+        )
     except DownloadCancelled:
         # The user cancelled during the transfer (#377): the cancel endpoint
         # owns the row and the cleanup; nothing to finalize, nothing failed.

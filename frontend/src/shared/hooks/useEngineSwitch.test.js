@@ -23,6 +23,21 @@ afterEach(() => {
   delete window.backendAPI;
 });
 
+describe("useEngineSwitch — waiting for a download being installed", () => {
+  it("says so while the refused cancel waits for the download to complete", async () => {
+    const { DownloadModalContext } = await import("../../contexts/DownloadModalContext");
+    const React = await import("react");
+    const wrapper = ({ children }) =>
+      React.createElement(
+        DownloadModalContext.Provider,
+        { value: { isDownloading: true, isCompleting: true, cancelDownload: vi.fn() } },
+        children
+      );
+    const { result } = renderHook(() => useEngineSwitch({ persist: vi.fn() }), { wrapper });
+    expect(result.current.waitingForDownload).toBe(true);
+  });
+});
+
 describe("useEngineSwitch — one switch at a time", () => {
   it("joins a second request made while a switch is running instead of starting another", async () => {
     let release;

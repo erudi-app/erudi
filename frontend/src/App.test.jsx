@@ -82,6 +82,41 @@ describe("App readiness", () => {
     await waitFor(() => expect(screen.getByText(/Backend failed to load/i)).toBeTruthy());
   });
 
+  it("leaves the error screen once the backend comes up after all", async () => {
+    // A respawn the main process made on its own (a transient code, the
+    // wait for the previous session) succeeded: the app must not stay on
+    // an error screen until Retry.
+    render(<App />);
+    await act(async () => {
+      emit({ event: "startup_error", code: "NO_PORT_AVAILABLE" });
+    });
+    await screen.findByText("Retry");
+    await act(async () => {
+      emit({ event: "backend_ready", port: 8766 });
+    });
+    await waitFor(() => expect(screen.getByText("MODELS_PAGE")).toBeTruthy());
+  });
+
+  it("says the previous session is closing while main waits for it", async () => {
+    render(<App />);
+    await act(async () => {
+      emit({ event: "phase", phase: "waiting_previous_session" });
+    });
+    expect(screen.getByText("The previous session is still closing…")).toBeTruthy();
+  });
+
+  it("drops the waiting line as soon as the new backend starts", async () => {
+    render(<App />);
+    await act(async () => {
+      emit({ event: "phase", phase: "waiting_previous_session" });
+    });
+    await act(async () => {
+      emit({ event: "starting", port: 8791, first_run: false });
+    });
+    expect(screen.queryByText("The previous session is still closing…")).toBeNull();
+    expect(screen.getByText("Starting Erudi…")).toBeTruthy();
+  });
+
   it("re-spawns the backend when Retry is clicked", async () => {
     render(<App />);
     await act(async () => {
