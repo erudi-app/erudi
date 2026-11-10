@@ -17,12 +17,14 @@ const CONFIG_GLOBAL = { name: "config", arg: "global" };
  * useConversationSettings owner); /model hands the picked model to the page,
  * and /compact's confirmation hands the go-ahead to it (`onCompact`, on a
  * conversation only). /config's "Save as defaults" button runs /config global
- * through `onCommand` (the page's own command runner).
+ * through `onCommand` (the page's own command runner), unless
+ * `saveDefaultsDisabled` (an answer is being written, a compaction runs).
  */
 export default function CommandPopups({
   command,
   onClose,
   onCommand,
+  saveDefaultsDisabled = false,
   settings,
   model,
   models,
@@ -46,6 +48,7 @@ export default function CommandPopups({
         settings={settings}
         model={model}
         onSaveAsDefaults={() => onCommand(CONFIG_GLOBAL)}
+        saveAsDefaultsDisabled={saveDefaultsDisabled}
       />
       <ConfigGlobalPopup
         isOpen={open.configGlobal}
@@ -82,6 +85,7 @@ CommandPopups.propTypes = {
   command: PropTypes.shape({ name: PropTypes.string.isRequired, arg: PropTypes.string }),
   onClose: PropTypes.func.isRequired,
   onCommand: PropTypes.func.isRequired,
+  saveDefaultsDisabled: PropTypes.bool,
   settings: PropTypes.object.isRequired,
   model: PropTypes.object,
   models: PropTypes.array.isRequired,

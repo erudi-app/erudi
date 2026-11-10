@@ -162,4 +162,46 @@ describe("ModelPicker", () => {
     await user.keyboard("{Escape}");
     expect(screen.queryByText(/Open Models to download one/)).toBeNull();
   });
+
+  it("closes when the current model changes under it (another conversation)", () => {
+    const onPick = vi.fn();
+    const props = { modelName: "Qwen3-4B", models: MODELS, onPick };
+    const { rerender } = render(<ModelPicker {...props} currentId={1} />);
+    fireEvent.click(trigger());
+    expect(screen.getByRole("listbox")).toBeTruthy();
+    rerender(<ModelPicker {...props} currentId={2} />);
+    expect(screen.queryByRole("listbox")).toBeNull();
+  });
+
+  it("always names an existing option when the list shrinks while open", async () => {
+    const user = userEvent.setup();
+    const onPick = vi.fn();
+    const props = { modelName: "Qwen3-4B", onPick, currentId: 1 };
+    const { rerender } = render(<ModelPicker {...props} models={MODELS} />);
+    await user.click(trigger());
+    await user.keyboard("{ArrowDown}");
+    rerender(<ModelPicker {...props} models={[MODELS[0]]} />);
+    const listbox = screen.getByRole("listbox");
+    expect(document.getElementById(listbox.getAttribute("aria-activedescendant"))).toBeTruthy();
+  });
+
+  it("moves the focus to the fallback element when it is locked while open", () => {
+    const fallback = React.createRef();
+    const props = { modelName: "Qwen3-4B", models: MODELS, currentId: 1, onPick: vi.fn() };
+    const { rerender } = render(
+      <>
+        <button ref={fallback}>stable</button>
+        <ModelPicker {...props} fallbackFocusRef={fallback} />
+      </>
+    );
+    fireEvent.click(trigger());
+    screen.getByRole("listbox").focus();
+    rerender(
+      <>
+        <button ref={fallback}>stable</button>
+        <ModelPicker {...props} fallbackFocusRef={fallback} disabled />
+      </>
+    );
+    expect(document.activeElement).toBe(fallback.current);
+  });
 });

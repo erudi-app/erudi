@@ -453,7 +453,10 @@ Compact, Context), labelled in words and never by slash name, each running that 
 typing it does. When the conversation's model was deleted, the whole line becomes a red "Please
 select a model" that is the picker's button, and the composer is blocked; picking a model there, or
 with the panel's Model button, unblocks sending (Compact and Context then say to pick a model first
-and ask the backend nothing). The composer also stays blocked until the conversation's
+and ask the backend nothing). The state is also announced in a polite live region, and the picker
+button keeps the keyboard focus when the pick ends it. The list is drawn beside the heading, not
+inside it; it closes when the conversation changes, and a picker locked while open hands the focus
+to the settings icon. The composer also stays blocked until the conversation's
 values are loaded, so no turn goes out without them; when the conversation cannot be read, an error
 line with a Retry button shows above the composer and runs the load again. Model and Context are
 disabled from the moment a message is sent until its answer starts, and a context panel opened
@@ -515,7 +518,9 @@ closes the help alone. An engine failure that opens its dialog closes any comman
   and the send path read one state (`frontend/src/shared/hooks/useConversationSettings.js`), so
   two views never disagree. At the bottom of the window, **Save as defaults for <model>** does what
   `/config global` does (it opens the same popup, after saving the instructions being edited), on a
-  conversation and on the new-conversation page, so the defaults are reachable without typing.
+  conversation and on the new-conversation page, so the defaults are reachable without typing. It
+  is disabled while an answer is being written or a compaction runs, as `/config global` cannot be
+  typed then.
 - **`/config global`** saves the six current values as the defaults of the current model with
   `PUT /erudi/llms/{id}/conversation_defaults` (see
   [Conversation defaults per model](#conversation-defaults-per-model)); the popup names the model,

@@ -30,7 +30,7 @@ const CONVERSATION = {
 };
 const MODEL = { id: 1, name: "Qwen3-4B" };
 
-function Harness({ initial }) {
+function Harness({ initial, saveDefaultsDisabled = false }) {
   const settings = useConversationSettings(7);
   const [command, setCommand] = React.useState(initial);
   React.useEffect(() => {
@@ -41,6 +41,7 @@ function Harness({ initial }) {
       command={command}
       onClose={() => setCommand(null)}
       onCommand={setCommand}
+      saveDefaultsDisabled={saveDefaultsDisabled}
       settings={settings}
       model={MODEL}
       models={[MODEL]}
@@ -76,5 +77,15 @@ describe("Save as defaults", () => {
       custom_prompt: "",
     });
     expect(screen.getByText("Saved as defaults for Qwen3-4B.")).toBeTruthy();
+  });
+
+  it("is disabled while an answer is being written, like /config global", async () => {
+    render(<Harness initial={{ name: "config", arg: null }} saveDefaultsDisabled />);
+    await settle();
+    const button = screen.getByRole("button", { name: "Save as defaults for Qwen3-4B" });
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    await settle();
+    expect(putMock).not.toHaveBeenCalled();
   });
 });

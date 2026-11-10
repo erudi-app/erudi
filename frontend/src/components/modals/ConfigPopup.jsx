@@ -77,7 +77,14 @@ SaveFailedNotice.propTypes = { shown: PropTypes.bool };
  * /config global: the same save and the same confirmation. The instructions
  * being edited are saved first, so the defaults carry what is on screen.
  */
-export default function ConfigPopup({ isOpen, onClose, settings, model, onSaveAsDefaults }) {
+export default function ConfigPopup({
+  isOpen,
+  onClose,
+  settings,
+  model,
+  onSaveAsDefaults,
+  saveAsDefaultsDisabled = false,
+}) {
   const { t } = useTranslation();
   const { values, setField, saveFailed, isDraft } = settings;
   const ids = {
@@ -293,7 +300,7 @@ export default function ConfigPopup({ isOpen, onClose, settings, model, onSaveAs
           <p className="text-xs text-gray-400">{t("chat:config.saveAsDefaults.hint")}</p>
           <button
             type="button"
-            disabled={!model}
+            disabled={!model || saveAsDefaultsDisabled}
             onClick={saveAsDefaults}
             className="rounded-full px-4 py-1.5 text-sm font-semibold bg-white/10 hover:bg-white/15 text-gray-100 border border-white/20 transition active:scale-95 disabled:opacity-40 disabled:cursor-not-allowed"
           >
@@ -317,4 +324,5 @@ ConfigPopup.propTypes = {
   }).isRequired,
   model: PropTypes.object,
   onSaveAsDefaults: PropTypes.func,
+  saveAsDefaultsDisabled: PropTypes.bool,
 };

@@ -1324,6 +1324,7 @@ export default function ConversationPage() {
       <main className="flex-1 flex flex-col bg-gradient-to-br from-[#041915] to-[#0f2d27] overflow-hidden">
         <div className="relative flex justify-center w-full px-8 pt-6">
           <ConversationHeader
+            key={id}
             modelName={assignedModel?.name ?? ""}
             attention={isModelOrphaned}
             models={models}
@@ -1657,6 +1658,7 @@ export default function ConversationPage() {
         command={openCommand}
         onClose={() => setOpenCommand(null)}
         onCommand={runCommand}
+        saveDefaultsDisabled={compactingHere || loading}
         settings={conversationSettings}
         model={assignedModel}
         models={models}

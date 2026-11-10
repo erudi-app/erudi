@@ -337,7 +337,7 @@ export default function ChatPage() {
               modelName={selectedModel}
               attention={!selectedModel}
               models={models}
-              currentModelId={llm?.id}
+              currentModelId={draft.values.llm_id}
               onPickModel={pickModel}
               commands={COMMANDS}
               onCommand={runCommand}

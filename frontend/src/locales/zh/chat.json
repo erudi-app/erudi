@@ -29,6 +29,7 @@
   },
   "conversationHeader": {
     "chattingWith": "正在与 <model/> 对话",
+    "attentionLine": "<gap/><model/>",
     "settings": "对话设置",
     "pickerAttention": "请选择一个模型",
     "unload": "卸载 {{model}}",

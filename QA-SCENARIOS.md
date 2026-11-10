@@ -327,7 +327,7 @@ non-functional behavior.
 - [ ] When I save defaults for a knowledge-base assistant, then they belong to that assistant, not to its base model, and they survive a **Re-bind** of the assistant to another model.
 - [ ] When I create a new conversation on a model whose defaults I saved, then it opens with exactly those values; on a model without saved defaults, it opens with the Settings defaults (effort, web search, threshold), the model's recommended creativity and diversity, and empty custom instructions.
 - [ ] When I delete a model and download it again, then it starts without saved defaults (a fresh download is a new model for the app).
-- [ ] When I open the conversation's settings window, then a **Save as defaults for <model>** button at its bottom does exactly what `/config global` does (same values saved, same confirmation), so the model's defaults are reachable without typing a command. The new-conversation page's settings window has the same button, saving the draft's values for the selected model.
+- [ ] When I open the conversation's settings window, then a **Save as defaults for <model>** button at its bottom does exactly what `/config global` does (same values saved, same confirmation), so the model's defaults are reachable without typing a command. The button is disabled while an answer is being written or a compaction runs. The new-conversation page's settings window has the same button, saving the draft's values for the selected model.
 
 **/effort**
 - [ ] When I run **/effort**, then a popup opens on the **5-notch slider** at the conversation's current effort; changing it is saved at once (survives a reload) and takes effect on the next turn.

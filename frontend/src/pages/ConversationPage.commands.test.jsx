@@ -403,6 +403,16 @@ describe("while an answer streams", () => {
     return stream;
   };
 
+  it("disables Save as defaults in the settings window while the answer streams", async () => {
+    const stream = await streaming();
+    fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Config/ }));
+    const button = await screen.findByRole("button", { name: "Save as defaults for Qwen3-4B" });
+    expect(button.disabled).toBe(true);
+    stream.push('{"t":"done"}');
+    stream.end();
+  });
+
   it("locks the header's model picker while the answer streams", async () => {
     const stream = await streaming();
     expect(screen.getByRole("button", { name: /Qwen3-4B/ }).disabled).toBe(true);

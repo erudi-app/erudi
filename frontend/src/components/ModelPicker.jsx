@@ -1,4 +1,5 @@
 import React, { useEffect, useId, useRef, useState } from "react";
+import { createPortal } from "react-dom";
 import PropTypes from "prop-types";
 import { Check, ChevronDown } from "lucide-react";
 import { useTranslation } from "react-i18next";
@@ -15,7 +16,13 @@ import { offeredModels } from "../utils/modelWeights";
  *
  * Keyboard: Enter, Space, ArrowDown and ArrowUp on the button open it; the
  * arrows, Home and End move, Enter and Space pick, Escape closes and returns
- * the focus to the button, Tab closes. `disabled` closes it too.
+ * the focus to the button, Tab closes. `disabled` closes it too, moving the
+ * focus to `fallbackFocusRef` (the button cannot take it any more), and so
+ * does a change of `currentId` (another conversation).
+ *
+ * The menu is drawn inside `menuHost` (an element the page anchors, outside
+ * the heading the button sits in, so the options never join the heading's
+ * accessible name), or right after the button when none is given.
  */
 export default function ModelPicker({
   modelName,
@@ -24,6 +31,8 @@ export default function ModelPicker({
   currentId,
   onPick,
   disabled = false,
+  menuHost = null,
+  fallbackFocusRef = null,
 }) {
   const { t } = useTranslation();
   const baseId = useId();
@@ -31,13 +40,23 @@ export default function ModelPicker({
   const optionId = (index) => `${baseId}-option-${index}`;
   const rootRef = useRef(null);
   const triggerRef = useRef(null);
+  const menuRef = useRef(null);
   const popupRef = useRef(null);
+  const wasOpenRef = useRef(false);
   const [open, setOpen] = useState(false);
   const [active, setActive] = useState(0);
+  const [seenCurrentId, setSeenCurrentId] = useState(currentId);
 
   const offered = offeredModels(models);
-  // A picker that becomes disabled (an answer starts, a compaction runs)
-  // closes: adjusted while rendering, so no render shows it open.
+  // The highlighted option always exists, whatever the list became meanwhile.
+  const activeIndex = Math.max(0, Math.min(active, offered.length - 1));
+  // A picker that becomes disabled (an answer starts, a compaction runs) or
+  // whose current model changes under it (another conversation) closes:
+  // adjusted while rendering, so no render shows it open.
+  if (seenCurrentId !== currentId) {
+    setSeenCurrentId(currentId);
+    setOpen(false);
+  }
   if (open && disabled) setOpen(false);
   const isOpen = open && !disabled;
 
@@ -61,11 +80,24 @@ export default function ModelPicker({
     if (isOpen) popupRef.current?.focus();
   }, [isOpen]);
 
+  // Locked while open: the focus sat in the menu that just went, and the
+  // disabled button cannot take it back, so it goes to a stable element.
+  useEffect(() => {
+    if (isOpen) {
+      wasOpenRef.current = true;
+      return;
+    }
+    if (!wasOpenRef.current) return;
+    wasOpenRef.current = false;
+    if (disabled && document.activeElement === document.body) fallbackFocusRef?.current?.focus();
+  }, [isOpen, disabled, fallbackFocusRef]);
+
   // A press outside closes it, the focus staying where the user put it.
   useEffect(() => {
     if (!isOpen) return undefined;
     const onPress = (event) => {
-      if (rootRef.current && !rootRef.current.contains(event.target)) setOpen(false);
+      const inside = [rootRef.current, menuRef.current].some((el) => el?.contains(event.target));
+      if (!inside) setOpen(false);
     };
     document.addEventListener("mousedown", onPress);
     return () => document.removeEventListener("mousedown", onPress);
@@ -91,11 +123,11 @@ export default function ModelPicker({
         break;
       case "ArrowDown":
         event.preventDefault();
-        setActive((index) => Math.min(index + 1, last));
+        setActive(Math.min(activeIndex + 1, last));
         break;
       case "ArrowUp":
         event.preventDefault();
-        setActive((index) => Math.max(index - 1, 0));
+        setActive(Math.max(activeIndex - 1, 0));
         break;
       case "Home":
         event.preventDefault();
@@ -108,11 +140,68 @@ export default function ModelPicker({
       case "Enter":
       case " ":
         event.preventDefault();
-        if (offered[active]) pick(offered[active]);
+        if (offered[activeIndex]) pick(offered[activeIndex]);
         break;
       default:
     }
   };
+
+  const menu = isOpen && (
+    <div
+      ref={menuRef}
+      onKeyDown={onPopupKeyDown}
+      className={[
+        "absolute left-0 top-full z-30 mt-2 w-72 max-w-[80vw] rounded-xl p-1.5",
+        "border border-white/10 bg-[rgba(14,28,25,0.95)] backdrop-blur-[18px] shadow-lg",
+        "text-sm font-normal tracking-normal",
+      ].join(" ")}
+    >
+      {offered.length === 0 ? (
+        <p ref={popupRef} tabIndex={-1} className="px-3 py-2 text-gray-300 focus:outline-none">
+          {t("chat:modelPicker.empty")}
+        </p>
+      ) : (
+        <ul
+          ref={popupRef}
+          id={listId}
+          role="listbox"
+          tabIndex={-1}
+          aria-label={t("chat:modelPicker.listLabel")}
+          aria-activedescendant={optionId(activeIndex)}
+          className="max-h-64 overflow-y-auto custom-scroll focus:outline-none"
+        >
+          {offered.map((model, index) => {
+            const current = model.id === currentId;
+            return (
+              <li
+                key={model.id}
+                id={optionId(index)}
+                role="option"
+                aria-selected={current}
+                onMouseMove={() => setActive(index)}
+                onClick={() => pick(model)}
+                className={[
+                  "flex cursor-pointer items-center justify-between gap-3 rounded-lg px-3 py-2",
+                  index === activeIndex ? "bg-white/10" : "",
+                  current ? "text-emerald-200" : "text-gray-100",
+                ].join(" ")}
+              >
+                <span className="truncate" title={model.name}>
+                  {model.name}
+                </span>
+                {current && (
+                  <span className="inline-flex shrink-0 items-center gap-1 text-xs text-emerald-300">
+                    <Check className="w-3.5 h-3.5" aria-hidden />
+                    {t("chat:modelPicker.current")}
+                  </span>
+                )}
+              </li>
+            );
+          })}
+        </ul>
+      )}
+    </div>
+  );
 
   return (
     <span ref={rootRef} className="relative inline-block max-w-full align-bottom">
@@ -143,61 +232,7 @@ export default function ModelPicker({
         />
       </button>
 
-      {isOpen && (
-        <div
-          onKeyDown={onPopupKeyDown}
-          className={[
-            "absolute left-0 top-full z-30 mt-2 w-72 max-w-[80vw] rounded-xl p-1.5",
-            "border border-white/10 bg-[rgba(14,28,25,0.95)] backdrop-blur-[18px] shadow-lg",
-            "text-sm font-normal tracking-normal",
-          ].join(" ")}
-        >
-          {offered.length === 0 ? (
-            <p ref={popupRef} tabIndex={-1} className="px-3 py-2 text-gray-300 focus:outline-none">
-              {t("chat:modelPicker.empty")}
-            </p>
-          ) : (
-            <ul
-              ref={popupRef}
-              id={listId}
-              role="listbox"
-              tabIndex={-1}
-              aria-label={t("chat:modelPicker.listLabel")}
-              aria-activedescendant={optionId(active)}
-              className="max-h-64 overflow-y-auto custom-scroll focus:outline-none"
-            >
-              {offered.map((model, index) => {
-                const current = model.id === currentId;
-                return (
-                  <li
-                    key={model.id}
-                    id={optionId(index)}
-                    role="option"
-                    aria-selected={current}
-                    onMouseMove={() => setActive(index)}
-                    onClick={() => pick(model)}
-                    className={[
-                      "flex cursor-pointer items-center justify-between gap-3 rounded-lg px-3 py-2",
-                      index === active ? "bg-white/10" : "",
-                      current ? "text-emerald-200" : "text-gray-100",
-                    ].join(" ")}
-                  >
-                    <span className="truncate" title={model.name}>
-                      {model.name}
-                    </span>
-                    {current && (
-                      <span className="inline-flex shrink-0 items-center gap-1 text-xs text-emerald-300">
-                        <Check className="w-3.5 h-3.5" aria-hidden />
-                        {t("chat:modelPicker.current")}
-                      </span>
-                    )}
-                  </li>
-                );
-              })}
-            </ul>
-          )}
-        </div>
-      )}
+      {menuHost ? menu && createPortal(menu, menuHost) : menu}
     </span>
   );
 }
@@ -214,4 +249,6 @@ ModelPicker.propTypes = {
   currentId: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
   onPick: PropTypes.func.isRequired,
   disabled: PropTypes.bool,
+  menuHost: PropTypes.instanceOf(Element),
+  fallbackFocusRef: PropTypes.shape({ current: PropTypes.any }),
 };

@@ -1,4 +1,4 @@
-import React, { useId, useState } from "react";
+import React, { useId, useRef, useState } from "react";
 import PropTypes from "prop-types";
 import { motion, AnimatePresence } from "framer-motion";
 import { SlidersHorizontal } from "lucide-react";
@@ -37,6 +37,9 @@ export default function ConversationHeader({
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const panelId = useId();
+  const settingsRef = useRef(null);
+  // Where the picker's list is drawn: beside the heading, never inside it.
+  const [menuHost, setMenuHost] = useState(null);
   const picker = (
     <ModelPicker
       modelName={modelName}
@@ -45,6 +48,8 @@ export default function ConversationHeader({
       currentId={currentModelId}
       onPick={onPickModel}
       disabled={disabledCommands.includes("model")}
+      menuHost={menuHost}
+      fallbackFocusRef={settingsRef}
     />
   );
 
@@ -66,17 +71,27 @@ export default function ConversationHeader({
       />
       <div className="relative z-10 p-5">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="min-w-0 break-words text-[1.15rem] font-semibold tracking-tight text-[#F2F7F4]">
-            {attention ? (
-              picker
-            ) : (
+          <div className="relative min-w-0">
+            <h3 className="break-words text-[1.15rem] font-semibold tracking-tight text-[#F2F7F4]">
+              {/* One tree for both states, the picker in the same slot: the
+                  orphaned line is the slot alone (`gap` keeps its place), so
+                  the button is never remounted and keeps the focus. */}
               <Trans
-                i18nKey="chat:conversationHeader.chattingWith"
-                components={{ model: picker }}
+                i18nKey={
+                  attention
+                    ? "chat:conversationHeader.attentionLine"
+                    : "chat:conversationHeader.chattingWith"
+                }
+                components={{ model: picker, gap: <span aria-hidden /> }}
               />
-            )}
-          </h3>
+            </h3>
+            <span aria-live="polite" className="sr-only">
+              {attention ? t("chat:conversationHeader.pickerAttention") : ""}
+            </span>
+            <div ref={setMenuHost} />
+          </div>
           <button
+            ref={settingsRef}
             type="button"
             aria-label={t("chat:conversationHeader.settings")}
             aria-expanded={open}

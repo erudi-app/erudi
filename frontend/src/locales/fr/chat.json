@@ -29,6 +29,7 @@
   },
   "conversationHeader": {
     "chattingWith": "Vous discutez avec <model/>",
+    "attentionLine": "<gap/><model/>",
     "settings": "Réglages de la conversation",
     "pickerAttention": "Veuillez sélectionner un modèle",
     "unload": "Décharger {{model}}",

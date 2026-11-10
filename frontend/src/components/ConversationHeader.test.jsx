@@ -2,9 +2,11 @@
 import React from "react";
 import { describe, it, expect, vi, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent } from "@testing-library/react";
+import userEvent from "@testing-library/user-event";
 
-// The conversation header (#585): a static line naming the model and a
-// settings icon opening one button per command the page offers. Later
+// The conversation header (#585, #704): a line naming the model, whose name
+// is a picker, and a settings icon opening one button per command the page
+// offers. Later
 // commands and the unload button slot in without changing its structure.
 
 import ConversationHeader from "./ConversationHeader.jsx";
@@ -194,5 +196,95 @@ describe("ConversationHeader", () => {
       />
     );
     expect(screen.getByRole("alert").textContent).toBe("Your change could not be saved.");
+  });
+
+  it("renders the open list outside the heading, which keeps its accessible name", () => {
+    render(
+      <ConversationHeader
+        models={MODELS}
+        onPickModel={noop}
+        modelName="Qwen3-4B"
+        currentModelId={1}
+        commands={COMMANDS}
+        onCommand={vi.fn()}
+      />
+    );
+    fireEvent.click(screen.getByRole("button", { name: /Qwen3-4B/ }));
+    const listbox = screen.getByRole("listbox");
+    expect(listbox.closest("h3")).toBeNull();
+    expect(screen.getByRole("heading").textContent).toBe("You are chatting with Qwen3-4B");
+  });
+
+  it("announces the orphaned state in a polite live region, outside the button", () => {
+    const { rerender } = render(
+      <ConversationHeader
+        models={MODELS}
+        onPickModel={noop}
+        modelName=""
+        attention
+        commands={COMMANDS}
+        onCommand={vi.fn()}
+      />
+    );
+    const status = document.querySelector('[aria-live="polite"]');
+    expect(status.textContent).toBe("Please select a model");
+    expect(status.className).toContain("sr-only");
+    expect(status.closest("button")).toBeNull();
+    rerender(
+      <ConversationHeader
+        models={MODELS}
+        onPickModel={noop}
+        modelName="Qwen3-4B"
+        currentModelId={1}
+        commands={COMMANDS}
+        onCommand={vi.fn()}
+      />
+    );
+    expect(document.querySelector('[aria-live="polite"]').textContent).toBe("");
+  });
+
+  it("keeps the focus on the picker when a pick ends the orphaned state", async () => {
+    const user = userEvent.setup();
+    function Harness() {
+      const [model, setModel] = React.useState(null);
+      return (
+        <ConversationHeader
+          models={MODELS}
+          modelName={model?.name ?? ""}
+          attention={!model}
+          currentModelId={model?.id}
+          onPickModel={setModel}
+          commands={COMMANDS}
+          onCommand={vi.fn()}
+        />
+      );
+    }
+    render(<Harness />);
+    const slot = screen.getByRole("button", { name: "Please select a model" });
+    slot.focus();
+    await user.keyboard("{Enter}");
+    await user.keyboard("{ArrowDown}{Enter}");
+    const trigger = screen.getByRole("button", { name: /Gemma-3-4B/ });
+    expect(trigger).toBe(slot);
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("moves the focus to the settings icon when the picker is locked while open", () => {
+    const props = {
+      models: MODELS,
+      onPickModel: noop,
+      modelName: "Qwen3-4B",
+      currentModelId: 1,
+      commands: COMMANDS,
+      onCommand: vi.fn(),
+    };
+    const { rerender } = render(<ConversationHeader {...props} />);
+    fireEvent.click(screen.getByRole("button", { name: /Qwen3-4B/ }));
+    screen.getByRole("listbox").focus();
+    rerender(<ConversationHeader {...props} disabledCommands={["model"]} />);
+    expect(screen.queryByRole("listbox")).toBeNull();
+    expect(document.activeElement).toBe(
+      screen.getByRole("button", { name: "Conversation settings" })
+    );
   });
 });
