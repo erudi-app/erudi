@@ -4,7 +4,7 @@ import { Check } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import ModalShell from "./ModalShell";
 import { Field } from "./ConfigPopup";
-import { hasMissingWeights } from "../../utils/modelWeights";
+import { offeredModels } from "../../utils/modelWeights";
 
 /**
  * /model (#585): the installed models a conversation can run on. A model
@@ -13,7 +13,7 @@ import { hasMissingWeights } from "../../utils/modelWeights";
  */
 export default function ModelPopup({ isOpen, onClose, models, currentId, onPick }) {
   const { t } = useTranslation();
-  const offered = models.filter((model) => !hasMissingWeights(model));
+  const offered = offeredModels(models);
   const label = t("chat:modelPopup.listLabel");
 
   const pick = (model) => {

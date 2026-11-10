@@ -92,7 +92,9 @@ describe("ChatPage picker and a weights-missing assistant (#376)", () => {
     renderAt();
 
     await waitFor(() =>
-      expect(screen.getByRole("alert").textContent).toBe("Please select a model")
+      expect(screen.getByRole("button", { name: "Please select a model" }).textContent).toBe(
+        "Please select a model"
+      )
     );
     expect(screen.queryByTitle("Nimbus Assistant")).toBeNull();
     expect(screen.getByTestId("composer").getAttribute("data-disabled")).toBe("true");

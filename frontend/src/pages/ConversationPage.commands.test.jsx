@@ -303,6 +303,33 @@ describe("slash commands in the composer", () => {
     });
   });
 
+  it("the header's model name picks through the same PATCH as /model (#704)", async () => {
+    await renderPage();
+    patchMock.mockImplementation(async () => ({
+      ...detail,
+      llm_id: 2,
+      temperature: 0.3,
+      top_p: 0.9,
+    }));
+    fireEvent.click(screen.getByRole("button", { name: /Qwen3-4B/ }));
+    const listbox = screen.getByRole("listbox");
+    expect(within(listbox).queryByText("Orphan assistant")).toBeNull();
+    fireEvent.click(within(listbox).getByRole("option", { name: "Gemma-3-4B" }));
+
+    await waitFor(() => expect(header().textContent).toBe("You are chatting with Gemma-3-4B"));
+    expect(patchMock).toHaveBeenCalledTimes(1);
+    expect(patchMock).toHaveBeenCalledWith("/conversations/7", { llm_id: 2 });
+  });
+
+  it("the settings window's Save as defaults button saves like /config global", async () => {
+    putMock.mockResolvedValue({});
+    await renderPage();
+    typeAndEnter("/config");
+    fireEvent.click(await screen.findByRole("button", { name: "Save as defaults for Qwen3-4B" }));
+    await screen.findByText("Saved as defaults for Qwen3-4B.");
+    expect(putMock).toHaveBeenCalledWith("/llms/1/conversation_defaults", expect.any(Object));
+  });
+
   it("/config global saves the conversation's values for its model", async () => {
     putMock.mockResolvedValue({});
     await renderPage();
@@ -375,6 +402,26 @@ describe("while an answer streams", () => {
     await waitFor(() => expect(composer().disabled).toBe(true));
     return stream;
   };
+
+  it("disables Save as defaults in the settings window while the answer streams", async () => {
+    const stream = await streaming();
+    fireEvent.click(screen.getByRole("button", { name: "Conversation settings" }));
+    fireEvent.click(screen.getByRole("button", { name: /^Config/ }));
+    const button = await screen.findByRole("button", { name: "Save as defaults for Qwen3-4B" });
+    expect(button.disabled).toBe(true);
+    stream.push('{"t":"done"}');
+    stream.end();
+  });
+
+  it("locks the header's model picker while the answer streams", async () => {
+    const stream = await streaming();
+    expect(screen.getByRole("button", { name: /Qwen3-4B/ }).disabled).toBe(true);
+    stream.push('{"t":"done"}');
+    stream.end();
+    await waitFor(() =>
+      expect(screen.getByRole("button", { name: /Qwen3-4B/ }).disabled).toBe(false)
+    );
+  });
 
   it("disables Model in the header panel, and keeps Config and Effort", async () => {
     const stream = await streaming();
@@ -517,11 +564,25 @@ describe("when the conversation cannot be read", () => {
 });
 
 describe("an orphaned conversation", () => {
+  it("unblocks sending when a model is picked from the red header text (#704)", async () => {
+    detail = { ...DETAIL, llm_id: null };
+    render(<ConversationPage />);
+    const slot = await screen.findByRole("button", { name: "Please select a model" });
+    expect(composer().disabled).toBe(true);
+    patchMock.mockImplementation(async (_path, body) => ({ ...detail, ...body }));
+    fireEvent.click(slot);
+    fireEvent.click(screen.getByRole("option", { name: "Qwen3-4B" }));
+    await waitFor(() => expect(composer().disabled).toBe(false));
+    expect(patchMock).toHaveBeenCalledWith("/conversations/7", { llm_id: 1 });
+  });
+
   it("keeps the Model button working while the composer is blocked", async () => {
     detail = { ...DETAIL, llm_id: null };
     render(<ConversationPage />);
     await waitFor(() =>
-      expect(screen.getByRole("alert").textContent).toBe("Please select a model")
+      expect(screen.getByRole("button", { name: "Please select a model" }).textContent).toBe(
+        "Please select a model"
+      )
     );
     expect(composer().disabled).toBe(true);
 
@@ -542,7 +603,9 @@ describe("an orphaned conversation", () => {
     detail = { ...DETAIL, llm_id: llmId };
     render(<ConversationPage />);
     await waitFor(() =>
-      expect(screen.getByRole("alert").textContent).toBe("Please select a model")
+      expect(screen.getByRole("button", { name: "Please select a model" }).textContent).toBe(
+        "Please select a model"
+      )
     );
     expect(composer().disabled).toBe(true);
   });
