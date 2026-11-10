@@ -158,8 +158,49 @@ SUMMARY_PROMPT = (
     "important content and must never be dropped or generalized. "
     "THEN describe in a few sentences what was discussed and what the "
     "assistant did. Do not invent anything; omit nothing the user asked to "
-    "remember.\n\nConversation:\n{messages}"
+    "remember. Use no headings and no labels, only those lines and then "
+    "plain sentences. {language_line}\n\nConversation:\n{messages}"
 )
+# What ``{language_line}`` becomes: the language of the user's recent messages,
+# named when detection is confident, otherwise the generic line (never a
+# default language). The summary has no fixed headings to translate: the
+# structure is language-neutral (facts lines, then sentences), so the one
+# instruction covers the whole text.
+SUMMARY_LANGUAGE_LINE = (
+    "Write the whole summary in {language}, the language of the user's messages."
+)
+SUMMARY_LANGUAGE_LINE_GENERIC = (
+    "Write the whole summary in the same language as the user's messages."
+)
+# How many of the latest user messages decide the summary's language.
+SUMMARY_LANGUAGE_MESSAGES = 6
+
+
+def build_summary_prompt(messages: list, template: str = SUMMARY_PROMPT) -> str:
+    """The summary template with its language line, ``{messages}`` left to fill.
+
+    The language is read from the last user messages of the conversation being
+    summarized; the previous summary (a human-role message the middleware
+    inserts) and the model's own answers do not count.
+    """
+    from src.agents.language import language_name
+
+    users = [
+        m.content
+        for m in messages
+        if getattr(m, "type", None) == "human"
+        and isinstance(m.content, str)
+        and not _is_previous_summary(m)
+        and not m.content.startswith(SUMMARY_MESSAGE_PREFIX)
+    ]
+    language = language_name(users[-SUMMARY_LANGUAGE_MESSAGES:])
+    line = (
+        SUMMARY_LANGUAGE_LINE.format(language=language)
+        if language
+        else SUMMARY_LANGUAGE_LINE_GENERIC
+    )
+    return template.replace("{language_line}", line)
+
 
 # The window-less fallback pair. When no working window is known (a llama
 # ``/props`` read that failed, an MLX artefact without a context length, and
@@ -1326,7 +1367,13 @@ def _summarization_middleware_class():
             """One summary call; the text, or None after a deterministic
             failure (logged). A transient failure propagates."""
             messages = ([previous] if previous is not None else []) + list(trimmed)
-            prompt = self.summary_prompt.format(messages=get_buffer_string(messages)).rstrip()
+            # The language line is filled from these very messages; the
+            # transcript is substituted last, so a "{...}" in it stays text.
+            prompt = (
+                build_summary_prompt(messages, self.summary_prompt)
+                .replace("{messages}", get_buffer_string(messages))
+                .rstrip()
+            )
             try:
                 response = await self.model.ainvoke(
                     prompt, config={"metadata": {"lc_source": SUMMARY_SOURCE_MARKER}}

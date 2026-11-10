@@ -678,10 +678,23 @@ curl -X POST http://127.0.0.1:27182/erudi/conversations/42/generate_title \
   -d '{"question": "Explain quantum entanglement in simple terms"}'
 ```
 
-Streams `text/plain` (not NDJSON) — the title, token by token. The result is sanitized before use:
+Streams `text/plain` (not NDJSON) — the title, sent once generation ends. The result is sanitized before use:
 code fences, backticks, wrapping quotes and list markers are stripped, only the first line is kept,
-consecutive duplicate words are collapsed, and the length is capped. If nothing usable remains, the
-caller keeps the default name.
+consecutive duplicate words are collapsed, and the length is capped. The title follows the language
+of the first message: the prompt names the detected language outright ("Write the title in
+French."), and falls back to a generic "same language as the user's message" line when detection is
+not confident (a very short message), never to English. Only the user's own words are read:
+attachment text, code, URLs, quoted lines and a pasted text following an instruction line do not
+set the language. Letters of a script the message does not use are then dropped (a stray Han word
+in a French title; Latin words and lone Greek letters are always kept, so "iPhone" or "π" survive). The stream carries the checked title, once,
+so the sidebar shows what is stored. If nothing usable remains, the conversation keeps the default
+name.
+
+A first message that is only a greeting ("Bonjour !", "Hi", "Salut, ça va ?", or a greeting followed
+by a short request to introduce oneself, "in two sentences", "briefly") gets no title: the stream is empty, no model is called, and the
+stored name stays `New Conversation`, which the sidebar shows in the interface language (the stored
+value is language-neutral, so it stays right when the interface language changes). A greeting
+followed by a real question is titled normally.
 
 The app requests the title on the first message of a conversation, **before** the chat request:
 the chat starts once the title stream has ended, whether it succeeded or failed (a failed title
@@ -975,7 +988,13 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
    **message-count fallback** takes over: compaction fires at **20 messages** and keeps the last
    **10** — without it, the conversation would grow until every turn overflows. Compaction
    rewrites the checkpointer state: old turns are dropped and replaced by a summary, so the
-   agent's context stays bounded. The `messages` table is untouched — the UI still shows the whole
+   agent's context stays bounded. The summary is written in the language of the user's last six
+   messages (the previous summary, the model's answers and attached or pasted content do not count;
+each message is detected on its own and the language with the most of the user's own words wins):
+the prompt names it
+   ("Write the whole summary in French, ..."), or asks for the user's language when detection is not
+   confident. The prompt has no fixed headings to translate: the summary is the user's stated facts,
+   one per line, then plain sentences. The `messages` table is untouched — the UI still shows the whole
    conversation.
 
    **What a compaction keeps** (`compaction_cutoff` in `runner.py`) starts from a **token budget**

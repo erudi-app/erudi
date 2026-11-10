@@ -25,6 +25,7 @@ from src.core.logging import logger
 from src.core.logutils import truncate_for_log
 from src.agents.curated_turns import CURATED_ERROR_EVENT, curated_trace_event
 from src.agents.kb_mode import plan_turn
+from src.agents.language import is_greeting, language_name, strip_foreign_scripts
 from src.agents.reasoning_effort import plan_reasoning_effort
 from src.agents.runner import (
     AgentRunner,
@@ -67,6 +68,12 @@ TRACE_MAX_BYTES = 32 * 1024
 # A title needs the head of the message, not its whole body; the prefill cost
 # otherwise doubles on a long first message.
 TITLE_QUESTION_MAX_CHARS = 2000
+
+# The stored name of a conversation with no title (a new one, a greeting, a
+# title that did not come out). One language-neutral value: the frontend
+# translates it at display time (``chat:conversation.untitled``), so the
+# stored name stays right when the interface language changes.
+DEFAULT_CONVERSATION_NAME = "New Conversation"
 
 
 def _ndjson(event: dict) -> str:
@@ -192,6 +199,19 @@ def _sanitize_title(raw: str, *, max_words: int = 6, max_chars: int = 48) -> str
     return text
 
 
+def _checked_title(raw: str, question: str) -> str:
+    """A generated title once cleaned and checked against the user's message:
+    sanitized, then stripped of the letters of any script the message does not
+    use. Stripping can leave punctuation behind ("« »", a leading hyphen), so
+    a changed title is trimmed and sanitized again, and "" (the caller keeps
+    the default name) is returned unless a letter or a digit remains."""
+    sanitized = _sanitize_title(raw)
+    stripped = strip_foreign_scripts(sanitized, question)
+    if stripped != sanitized:
+        stripped = _sanitize_title(re.sub(r"^[\W_]+|[\W_]+$", "", stripped))
+    return stripped if any(c.isalnum() for c in stripped) else ""
+
+
 class ConversationService:
     """Service for managing conversations and message processing."""
 
@@ -256,7 +276,7 @@ class ConversationService:
             max_tokens = resolve_sampling_defaults(llm).max_tokens
         return self.conversation_repo.create_conversation(
             llm_id=llm_id,
-            name="New Conversation",
+            name=DEFAULT_CONVERSATION_NAME,
             max_tokens=max_tokens,
             **values,
         )
@@ -744,11 +764,18 @@ class ConversationService:
                 f"keeping the default title",
                 exc_info=True,
             )
-            await run_in_threadpool(self._save_title, conversation_id, "New Conversation")
+            await run_in_threadpool(self._save_title, conversation_id, DEFAULT_CONVERSATION_NAME)
             return
 
         if not question or not question.strip():
-            await run_in_threadpool(self._save_title, conversation_id, "New Conversation")
+            await run_in_threadpool(self._save_title, conversation_id, DEFAULT_CONVERSATION_NAME)
+            return
+
+        if is_greeting(question):
+            # Nothing in a greeting to title: the neutral marker, and no model
+            # call (a small model invents a name out of nothing).
+            logger.info(f"Title generation: conversation {conversation_id} opens with a greeting")
+            await run_in_threadpool(self._save_title, conversation_id, DEFAULT_CONVERSATION_NAME)
             return
 
         prompt_text = self._build_title_prompt_text(question, llm.type)
@@ -756,6 +783,7 @@ class ConversationService:
         top_p = 0.9 if llm.type == "mistral" else 0.95
 
         generated_title = ""
+        completed = False
         try:
             async with contextlib.aclosing(
                 self.runner.astream_oneshot(
@@ -768,9 +796,18 @@ class ConversationService:
             ) as chunks:
                 async for chunk in chunks:
                     generated_title += chunk
-                    yield chunk
+            # The title is a dozen tokens: it is streamed once, after the
+            # checks, so what the sidebar shows is what is stored.
+            completed = True
+            if _checked_title(generated_title, question):
+                yield _checked_title(generated_title, question)
         finally:
-            final_title = _sanitize_title(generated_title) or "New Conversation"
+            # A generation that failed midway stores the default name: its
+            # partial text was never streamed, so it is not what the sidebar
+            # shows.
+            final_title = (
+                _checked_title(generated_title, question) if completed else ""
+            ) or DEFAULT_CONVERSATION_NAME
             duration_ms = (time.perf_counter() - start_s) * 1000
             logger.info(
                 f"Title generation completed for conversation {conversation_id}: "
@@ -881,6 +918,21 @@ class ConversationService:
     def _build_title_prompt_text(self, question: str, model_type: str) -> str:
         """Single merged user-message prompt for title generation (2–4 words)."""
         question = question[:TITLE_QUESTION_MAX_CHARS]
+        # The detected language is named outright; when detection is not
+        # confident only the generic same-language line stands, never a default.
+        language = language_name(question)
+        # The "French message" example only rides the generic line: next to a
+        # named language it would nudge every title toward French.
+        if language:
+            language_line = (
+                "Write the title in the same language as the user's message.\n"
+                f"Write the title in {language}.\n"
+            )
+        else:
+            language_line = (
+                "Write the title in the same language as the user's message "
+                "(a French message gets a French title).\n"
+            )
         if model_type == "mistral":
             return (
                 "You are a TITLE generator. Produce ONLY a very short title "
@@ -889,8 +941,7 @@ class ConversationService:
                 "no quotes; no emojis; no hashtags; no code; no trailing "
                 "punctuation; never answer the question; if empty/URL/noise => "
                 "output nothing.\n"
-                "Write the title in the same language as the user's message "
-                "(a French message gets a French title).\n"
+                f"{language_line}"
                 f"User message: {question}\n"
                 "Do not answer the question, only create a relevant title. "
                 "Do NOT add quotes around the title.\n"
@@ -907,8 +958,7 @@ class ConversationService:
             "no quotes, no hashtags, no emojis, no trailing filler words. "
             "Capitalize important words. The title shouldn't be a question.\n"
             "Do not answer the question, only create a relevant title.\n"
-            "Write the title in the same language as the user's message "
-            "(a French message gets a French title).\n"
+            f"{language_line}"
             "If the message is empty or meaningless, return nothing.\n"
             "Examples (user question -> title):\n"
             "give me pizza recipe -> Pizza Recipe\n"
