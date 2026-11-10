@@ -53,7 +53,9 @@ class KB_Service:
             llm_id: Specialized LLM ID (new_model_id in KBJob).
 
         Returns:
-            Dict with status, updated_at, and error_message.
+            Dict with status, updated_at, error_message and failed_files (the
+            names of the files of this job whose ingestion failed; the reason
+            is in the log and Diagnostics, never in the payload).
 
         Raises:
             ValueError: If KB job not found.
@@ -61,6 +63,10 @@ class KB_Service:
         kb_job = self.repo.get_kb_job_by_model_id(db, llm_id)
         if not kb_job:
             raise ValueError(f"KB job not found for LLM ID {llm_id}")
+
+        # Read before any cleanup: a failed creation deletes its KB, and the
+        # documents with it.
+        failed_files = self._failed_file_names(db, kb_job)
 
         # Cleanup failed jobs -- but ONLY failed creations. An update job
         # shares its new_model_id with base_model_id (see update_existing_kb);
@@ -76,7 +82,24 @@ class KB_Service:
             "status": kb_job.status,
             "status_updated_at": kb_job.updated_at,
             "error_message": kb_job.error_message if kb_job.status == "failed" else None,
+            "failed_files": failed_files,
         }
+
+    def _failed_file_names(self, db: Session, kb_job: KBJobModel) -> List[str]:
+        """Names of the files this job could not ingest (no column: derived).
+
+        The job's documents are the ones created from its start on; the failed
+        ones are those left in ``failed`` status. Nothing before the job ran
+        is counted: an earlier job's failure is not this one's.
+        """
+        if kb_job.kb_id is None or kb_job.created_at is None:
+            return []
+        return [
+            document.name
+            for document in self.repo.list_failed_documents_since(
+                db, kb_job.kb_id, kb_job.created_at
+            )
+        ]
 
     def _cleanup_failed_job(self, db: Session, llm_id: int, kb_job: KBJobModel) -> None:
         """Clean up database state after a failed KB job.
@@ -289,9 +312,17 @@ class KB_Service:
             return "failed"
 
         content_hash = hashlib.sha256(content).hexdigest()
-        if self.repo.get_document_by_hash(db, kb_id, content_hash):
+        existing = self.repo.get_document_by_hash(db, kb_id, content_hash)
+        if existing and existing.status != "failed":
             logger.info(f"KB {kb_id}: {path.name} already ingested (dedup), skipping")
             return "skipped"
+        if existing:
+            # A failed ingestion left this row (and maybe a few chunks, which
+            # follow the row through ON DELETE CASCADE). It must not block the
+            # same file for good: replace it, so the retry starts clean and its
+            # name is the one the job reports if it fails again.
+            logger.info(f"KB {kb_id}: {path.name} failed earlier, ingesting it again")
+            self.repo.delete_document(db, existing)
 
         document = self.repo.create_document(
             db,

@@ -17,6 +17,7 @@ Architecture:
     - Database session handling
 """
 
+from datetime import datetime
 from typing import Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -124,6 +125,32 @@ class KB_Repository:
                 KnowledgeDocument.content_hash_sha256 == content_hash_sha256,
             )
             .first()
+        )
+
+    def delete_document(self, db: Session, document: KnowledgeDocument) -> None:
+        """Delete one document row; its chunks follow through ON DELETE CASCADE."""
+        db.delete(document)
+        db.commit()
+        logger.info(f"Deleted KnowledgeDocument {document.id} ({document.name})")
+
+    def list_failed_documents_since(
+        self, db: Session, kb_id: int, since: datetime
+    ) -> list[KnowledgeDocument]:
+        """Documents of one KB whose ingestion failed, created at or after ``since``.
+
+        A KBJob has no column for its failures: the documents it created are
+        the ones stamped from the job's start on, so ``since`` is the job's
+        ``created_at``. Oldest first, the order the files were ingested.
+        """
+        return (
+            db.query(KnowledgeDocument)
+            .filter(
+                KnowledgeDocument.kb_id == kb_id,
+                KnowledgeDocument.status == "failed",
+                KnowledgeDocument.created_at >= since,
+            )
+            .order_by(KnowledgeDocument.id)
+            .all()
         )
 
     def create_document(

@@ -243,6 +243,74 @@ class TestAssistantLifecycle:
         assert status["status"] == "failed"
         assert status["error_message"] == "boom"
 
+    def _doc(self, service, db, kb, name, status, created_at=None):
+        doc = service.repo.create_document(
+            db, kb_id=kb.id, name=name, content_hash_sha256=name.ljust(64, "0"), size_bytes=1
+        )
+        service.repo.update_document_status(db, doc, status)
+        if created_at is not None:
+            doc.created_at = created_at
+            db.flush()
+        return doc
+
+    def test_status_names_the_files_that_failed_in_this_job(
+        self, test_db_session, mock_llm_with_kb
+    ):
+        from datetime import datetime, timedelta, timezone
+
+        llm, kb = mock_llm_with_kb
+        service = KB_Service()
+        old = datetime.now(timezone.utc) - timedelta(days=2)
+        # A failure left by an earlier job, and documents that did not fail.
+        self._doc(service, test_db_session, kb, "earlier-job.docx", "failed", created_at=old)
+        job = service.repo.create_kb_job(
+            db=test_db_session, base_model_id=llm.id, new_model_id=llm.id, kb_id=kb.id
+        )
+        self._doc(service, test_db_session, kb, "maintenance.docx", "failed")
+        self._doc(service, test_db_session, kb, "notes.txt", "active")
+        self._doc(service, test_db_session, kb, "blank.txt", "empty")
+        service.repo.update_kb_job_status(test_db_session, job, "completed")
+
+        status = service.get_kb_job_status(test_db_session, llm.id)
+
+        assert status["status"] == "completed"
+        assert status["failed_files"] == ["maintenance.docx"]
+
+    def test_status_has_no_failed_files_when_everything_was_indexed(
+        self, test_db_session, mock_llm_with_kb
+    ):
+        llm, kb = mock_llm_with_kb
+        service = KB_Service()
+        job = service.repo.create_kb_job(
+            db=test_db_session, base_model_id=llm.id, new_model_id=llm.id, kb_id=kb.id
+        )
+        self._doc(service, test_db_session, kb, "notes.txt", "active")
+        service.repo.update_kb_job_status(test_db_session, job, "completed")
+
+        assert service.get_kb_job_status(test_db_session, llm.id)["failed_files"] == []
+
+    def test_a_failed_creation_still_names_its_files_before_the_cleanup(
+        self, test_db_session, mock_llm
+    ):
+        service = KB_Service()
+        llm_id, job_id = service.create_kb_assistant(
+            db=test_db_session,
+            base_llm_id=mock_llm.id,
+            model_name="Doomed",
+            description="",
+            file_paths=[],
+        )
+        kb = service.repo.get_knowledge_base_by_id(
+            test_db_session, test_db_session.query(Llm).get(llm_id).kb_id
+        )
+        self._doc(service, test_db_session, kb, "maintenance.docx", "failed")
+        job = service.repo.get_kb_job_by_id(test_db_session, job_id)
+        service.repo.update_kb_job_status(test_db_session, job, "failed", "boom")
+
+        status = service.get_kb_job_status(test_db_session, llm_id)
+
+        assert status["failed_files"] == ["maintenance.docx"]
+
     def test_failed_update_job_does_not_delete_the_existing_assistant(
         self, test_db_session, mock_llm_with_kb
     ):
@@ -455,3 +523,54 @@ class TestIngestionPipeline:
             d.name: d.status for d in session.query(KnowledgeDocument).filter_by(kb_id=kb.id)
         }
         assert statuses == {"good.md": "active", "blank.txt": "empty"}
+
+    def test_a_failed_document_does_not_block_re_ingesting_the_same_file(
+        self, kb_store, real_db_session, tmp_path, pg_test_cluster, monkeypatch
+    ):
+        """The dedup by SHA-256 must not keep a `failed` row: once the cause is
+        fixed, dropping the same file again indexes it (#705). The failed row is
+        replaced, so the file is neither duplicated nor left half-recorded."""
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+
+        doc = tmp_path / "maintenance.md"
+        doc.write_text("# Maintenance\n\nLe groupe froid a été remplacé.", encoding="utf-8")
+
+        real_read = service.reader.read
+
+        def broken(path):
+            raise FileNotFoundError("default-styles.xml")
+
+        another = tmp_path / "other.md"
+        another.write_text("# Autre\n\nUn second fichier lisible.", encoding="utf-8")
+        monkeypatch.setattr(
+            service.reader, "read", lambda p: real_read(p) if p.name == "other.md" else broken(p)
+        )
+        service.process_and_index_documents(
+            db=session, kb_job_id=job.id, file_paths=[str(doc), str(another)]
+        )
+        session.expire_all()
+        failed = session.query(KnowledgeDocument).filter_by(kb_id=kb.id, name="maintenance.md")
+        assert [d.status for d in failed] == ["failed"]
+        failed_id = failed.one().id
+
+        # The cause is fixed: same bytes, same name, a new job.
+        monkeypatch.undo()
+        job2 = service.repo.create_kb_job(
+            db=session, base_model_id=None, new_model_id=None, kb_id=kb.id
+        )
+        session.commit()
+        service.process_and_index_documents(
+            db=session, kb_job_id=job2.id, file_paths=[str(doc)], is_update=True
+        )
+
+        session.expire_all()
+        assert service.repo.get_kb_job_by_id(session, job2.id).status == "completed"
+        rows = session.query(KnowledgeDocument).filter_by(kb_id=kb.id, name="maintenance.md").all()
+        assert [d.status for d in rows] == ["active"]
+        assert rows[0].id != failed_id
+        with psycopg.connect(pg_test_cluster.psycopg_url) as conn:
+            chunks = conn.execute(
+                "SELECT COUNT(*) FROM rag.kb_chunks WHERE document_id = %s", (rows[0].id,)
+            ).fetchone()[0]
+        assert chunks >= 1

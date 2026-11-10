@@ -41,7 +41,10 @@ Ingestion runs as a FastAPI background task, one file at a time
 `failed` and the run continues.
 
 1. **Hash and dedup.** The file bytes are SHA-256 hashed. A hash already present in this KB
-   (`knowledge_documents.content_hash_sha256`, unique per `kb_id`) is skipped as a duplicate.
+   (`knowledge_documents.content_hash_sha256`, unique per `kb_id`) is skipped as a duplicate,
+   unless its row is `failed`: a failed document never blocks its own file. The failed row is
+   deleted (its chunks follow, `ON DELETE CASCADE`) and the file goes through the pipeline again
+   as a new document.
 2. **Register the document.** A `KnowledgeDocument` row is created and committed before indexing —
    the vector store writes through its own connection and needs the row for its foreign key.
 3. **Extract.** `DocumentReader` routes by extension and returns an `ExtractedDocument` carrying
@@ -81,6 +84,10 @@ marked `empty`, never `active`.
 The KB job reports `completed` only when at least one file was indexed, or when every file was a
 duplicate of content already in the KB. A batch that indexed nothing new and had no duplicates fails
 with a message counting the failed, empty and pending-vision files.
+
+A job that completes with some files failed still reports `completed`; the status route names those
+files (see [Poll the job](#poll-the-job)) and the Knowledge Base page shows them instead of the plain
+success message. The reason stays in the log and in Diagnostics.
 
 ## Retrieval
 
@@ -216,11 +223,19 @@ curl http://127.0.0.1:27182/erudi/knowledge_base/108/status
 ```
 
 ```json
-{ "status": "running", "status_updated_at": "2026-09-03T09:12:44.310Z", "error_message": null }
+{
+  "status": "completed",
+  "status_updated_at": "2026-09-03T09:12:44.310Z",
+  "error_message": null,
+  "failed_files": ["maintenance.docx"]
+}
 ```
 
 `status` is `pending`, `running`, `completed` or `failed`; `error_message` is only populated on
-`failed`. Polling a **failed creation** also cleans up: the half-built assistant and its
+`failed`. `failed_files` lists the names of the files of this job whose ingestion failed (empty
+when none did): the documents of the job's KB left in the `failed` status that were created from
+the job's start on, so no earlier job's failure appears. The status carries no per-file reason.
+Polling a **failed creation** also cleans up: the half-built assistant and its
 `KnowledgeBase` are deleted (a failed *update* never deletes an assistant that already works).
 
 ### Deleting a Knowledge Base
