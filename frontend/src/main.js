@@ -15,7 +15,11 @@ const os = require("os");
 // Pure, unit-tested startup helpers (shared with the renderer).
 const { confirmBackendHealth } = require("./utils/backendHealth");
 const { classifyStderrLine } = require("./utils/backendStderr");
-const { shouldRetrySpawn } = require("./utils/backendRetry");
+const { isWaitedOutStartupError } = require("./utils/backendRetry");
+const {
+  createBackendSupervisor,
+  WAITING_PREVIOUS_SESSION_PHASE,
+} = require("./utils/backendSupervisor");
 const { buildBackendSpawnOptions, buildBackendEnv } = require("./utils/backendSpawn");
 const { gracefulShutdown } = require("./utils/backendShutdown");
 const { singleFlight } = require("./utils/singleFlight");
@@ -89,9 +93,6 @@ let shuttingDown = false;
 // renderer queries `backend:getInfo` on mount).
 let resolvedPort = null;
 let backendIsReady = false;
-// Transient failures (port contention) may auto-respawn; deterministic ones
-// fail fast and wait for a manual retry.
-const MAX_SPAWN_ATTEMPTS = 2;
 
 // Kill the backend process and its entire child tree.
 // On Windows, SIGTERM only kills the parent — llama-server.exe is left orphaned.
@@ -190,6 +191,20 @@ app.on("render-process-gone", (_event, _contents, details) => {
 });
 
 if (require("electron-squirrel-startup")) {
+  app.quit();
+}
+
+// One Erudi at a time. A second launch would spawn a second backend on the
+// same data folder while the first still runs (#706): it hands over to the
+// running instance instead, which brings its window forward, and quits before
+// it creates a window or spawns anything. The backend also refuses a data
+// folder another backend holds (DATA_DIR_IN_USE), for the backend still
+// finishing its exit after a quit. Packaged builds only: a dev run and the
+// installed app share the lock's key (the app name), so `npm start` would
+// otherwise quit while the installed app runs; dev does not spawn a backend.
+const hasSingleInstanceLock = !app.isPackaged || app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  log("Another Erudi instance is running; handing over to it and quitting");
   app.quit();
 }
 
@@ -338,9 +353,19 @@ const startRealBackend = () => {
     const tracker = createBackendStartTracker({
       log,
       logError,
-      onFail: (code) => {
+      // Waited out below (startBackendSupervised): not an ERROR per attempt.
+      quietCodes: new Set(["DATA_DIR_IN_USE"]),
+      onFail: (code, cause) => {
         if (capTimer) clearTimeout(capTimer);
-        reject(new Error(code));
+        // The code drives the supervisor; the backend's own words go on the
+        // error screen.
+        reject(Object.assign(new Error(code), { detail: cause }));
+      },
+      onAbandon: () => {
+        // Main stopped this child before it was ready (a Retry, a quit): no
+        // failure to record, and no safety cap firing later.
+        if (capTimer) clearTimeout(capTimer);
+        reject(new Error("BACKEND_STOPPED"));
       },
       onSucceed: () => {
         if (capTimer) clearTimeout(capTimer);
@@ -374,8 +399,17 @@ const startRealBackend = () => {
           continue; // ordinary (non-JSON) log line
         }
         if (!event || !event.event) continue;
-        // Forward every structured event to the renderer (starting/phase/ready/…).
-        if (mainWindow && !mainWindow.isDestroyed()) {
+        // Forward every structured event to the renderer (starting/phase/ready/…),
+        // except a startup_error main is waiting out (DATA_DIR_IN_USE): the
+        // supervisor sends a phase for it, and the error screen only if the
+        // wait runs out.
+        if (
+          mainWindow &&
+          !mainWindow.isDestroyed() &&
+          // Only the packaged supervisor waits it out; without it (dev), the
+          // error screen is the answer.
+          !(app.isPackaged && isWaitedOutStartupError(event))
+        ) {
           mainWindow.webContents.send("backend-event", event);
         }
         if (event.event === "starting" && event.port) {
@@ -460,42 +494,45 @@ const startRealBackend = () => {
   });
 };
 
-// Supervise a backend spawn: auto-respawn only transient failures (port
-// contention), fail fast + surface deterministic ones for a manual retry.
-async function startBackendSupervised(attempt = 0) {
-  try {
-    log(`Backend startup attempt ${attempt + 1}...`);
-    const { port } = await startRealBackend();
-    resolvedPort = port;
-    backendIsReady = true;
-    log(`Backend is ready on port ${port}.`);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("backend-event", { event: "backend_ready", port });
-    }
-  } catch (error) {
-    const code = (error && error.message) || "BACKEND_STARTUP_FAILED";
-    log(`Backend start attempt ${attempt + 1} failed: ${code}`);
-    if (shouldRetrySpawn(code, attempt, MAX_SPAWN_ATTEMPTS)) {
-      logWarn(`Transient backend start failure (${code}); respawning`);
-      requestStop(backendProcess);
-      killBackend(backendProcess);
-      backendProcess = null;
-      await new Promise((r) => setTimeout(r, 2000));
-      return startBackendSupervised(attempt + 1);
-    }
-    // The failure itself is already recorded (one ERROR, by startRealBackend's
-    // tracker, which knows the cause); this line only says it reached the user.
-    log(`Backend startup failed (${code}); surfacing to the user`);
-    if (mainWindow && !mainWindow.isDestroyed()) {
-      mainWindow.webContents.send("backend-event", {
-        event: "startup_error",
-        code,
-        message: (error && error.message) || code,
-        source: "startup",
-      });
-    }
+// Supervise the backend's start: respawn transient failures, wait out a data
+// folder the previous backend still holds, surface the rest. One loop at a
+// time (utils/backendSupervisor.js): a Retry supersedes the running loop and
+// a quit stands it down.
+function sendBackendEvent(event) {
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    mainWindow.webContents.send("backend-event", event);
   }
 }
+
+const backendSupervisor = createBackendSupervisor({
+  startBackend: startRealBackend,
+  stopBackend: () => {
+    requestStop(backendProcess);
+    killBackend(backendProcess);
+    backendProcess = null;
+  },
+  sleep: (ms) => new Promise((r) => setTimeout(r, ms)),
+  now: () => Date.now(),
+  isQuitting: () => shuttingDown,
+  log,
+  logWarn,
+  logError,
+  onReady: (port) => {
+    resolvedPort = port;
+    backendIsReady = true;
+    sendBackendEvent({ event: "backend_ready", port });
+  },
+  onWaiting: () => sendBackendEvent({ event: "phase", phase: WAITING_PREVIOUS_SESSION_PHASE }),
+  onFailed: (code, error) =>
+    sendBackendEvent({
+      event: "startup_error",
+      code,
+      message: (error && error.detail) || code,
+      source: "startup",
+    }),
+});
+
+const startBackendSupervised = () => backendSupervisor.start();
 
 // Create application menu with Help options
 const createApplicationMenu = () => {
@@ -1270,6 +1307,7 @@ function setupAutoUpdater() {
 app
   .whenReady()
   .then(async () => {
+    if (!hasSingleInstanceLock) return;
     log("App ready.");
 
     // Create application menu and window immediately — never block on backend startup.
@@ -1300,6 +1338,19 @@ app
   })
   .catch((error) => logError("Application start-up failed", error));
 
+app.on("second-instance", () => {
+  // Another launch was attempted: show the window that already exists (on
+  // macOS it may have been closed with the app still in the dock).
+  log("Another launch was attempted; focusing the existing window");
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  } else if (app.isReady()) {
+    createWindow();
+  }
+});
+
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0 && !mainWindow) {
     createWindow();
@@ -1322,9 +1373,12 @@ app.on("before-quit", (e) => {
   // else killBackend hard-kills the tree (#216). Deferring the quit once (via
   // preventDefault) is the only way to await this; the re-issued app.quit()
   // finds shuttingDown=true and this handler falls through.
-  if (!shuttingDown && backendProcess) {
+  // Quitting is marked on every quit, child or not: the supervisor clears
+  // the child during its respawn sleeps and must not respawn after a quit.
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (backendProcess) {
     e.preventDefault();
-    shuttingDown = true;
     log("Stopping backend process before quit...");
     requestStop(backendProcess);
     gracefulShutdown(backendProcess, { killFn: killBackend }).finally(() => {

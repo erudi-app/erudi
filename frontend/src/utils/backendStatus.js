@@ -15,6 +15,7 @@ import i18n from "../i18n";
 
 // Backend / main-process error code -> `errors:backend.codes.*` key.
 const MESSAGE_KEYS = {
+  DATA_DIR_IN_USE: "dataDirInUse",
   PORT_IN_USE: "portInUse",
   NO_PORT_AVAILABLE: "noPortAvailable",
   PORT_TIMEOUT: "portTimeout",

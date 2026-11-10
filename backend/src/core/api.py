@@ -87,6 +87,7 @@ from src.core.logging import logger
 from src.agents.checkpoint import open_checkpointer
 
 from src.domains.llms.endpoints import router as llms_router
+from src.domains.llms.services import stop_active_downloads
 from src.domains.arena.endpoints import router as arena_router
 from src.domains.conversations.endpoints import router as conversations_router
 from src.domains.hardware.endpoints import router as hardware_router
@@ -469,6 +470,13 @@ async def _start_services(app: FastAPI, _phase) -> None:
     app.state.wire_backfill_task.add_done_callback(_log_background_task_failure)
 
 
+# How long the shutdown waits for interrupted downloads before it stops the
+# database they write to. run.py already interrupted them when the shutdown
+# was requested and uvicorn waited for their tasks (a download is a request's
+# background task), so this is a second, short chance.
+DOWNLOAD_STOP_TIMEOUT_SECONDS = 3.0
+
+
 def _log_background_task_failure(task: "asyncio.Task") -> None:
     """Done callback for fire-and-forget tasks: log a death at ERROR.
 
@@ -529,9 +537,13 @@ async def lifespan(app: FastAPI):
         8. Start the cleanup background task (30s interval) and the memory
            pressure monitor (60s interval)
         9. **[YIELD]** → Application handles requests
-        10. Shutdown (reverse order): cleanup task → pressure monitor (awaited)
-            → pending prefix-cache reset drained → engine → checkpointer
-            → embedded PostgreSQL cluster last
+        10. Shutdown: active downloads interrupted and their tasks awaited
+            (bounded) → then, in reverse order: cleanup task → pressure
+            monitor (awaited) → pending prefix-cache reset drained → engine
+            → checkpointer → embedded PostgreSQL cluster last; finally
+            ``app.state.services_stopped`` (a ``threading.Event`` run.py
+            injects) is set, so the launcher bounds the process exit from
+            there
     """
     # Before yield comes the startup code
     logger.info("==== Starting up... ====")
@@ -558,18 +570,55 @@ async def lifespan(app: FastAPI):
         raise
     yield
     logger.info("==== Shutting down... ====")
-    wire_backfill_task = getattr(app.state, "wire_backfill_task", None)
-    if wire_backfill_task is not None and not wire_backfill_task.done():
-        wire_backfill_task.cancel()
-    await stop_watchdog()
-    config.LLM_Engine.stop_cleanup_task()
+    try:
+        await _stop_services(app)
+    finally:
+        # run.py bounds the process exit from here: whatever thread is still
+        # running (a transfer parked in a network read) is not worth waiting for.
+        services_stopped = getattr(app.state, "services_stopped", None)
+        if services_stopped is not None:
+            services_stopped.set()
+
+
+async def _stop_services(app: FastAPI) -> None:
+    """The shutdown half of :func:`lifespan`.
+
+    Each step is guarded: one that fails is logged (ERROR, with its
+    traceback) and the next ones still run, so the embedded PostgreSQL
+    cluster is stopped whatever came before it.
+    """
+
+    async def step(name: str, action) -> None:
+        try:
+            result = action()
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            logger.error(f"Shutdown step {name} failed: {exc}", exc_info=exc)
+
+    # Downloads FIRST: a download task writes its progress and its outcome to
+    # the database, and its transfer threads would otherwise hold the process
+    # until the model is fully transferred (#706). Interrupted, a download
+    # leaves its job row running and its partial files for the next start.
+    await step(
+        "stop_active_downloads", lambda: stop_active_downloads(DOWNLOAD_STOP_TIMEOUT_SECONDS)
+    )
+
+    def cancel_wire_backfill() -> None:
+        task = getattr(app.state, "wire_backfill_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    await step("cancel_wire_backfill", cancel_wire_backfill)
+    await step("stop_watchdog", stop_watchdog)
+    await step("stop_cleanup_task", lambda: config.LLM_Engine.stop_cleanup_task())
     # The monitor's sample in flight finishes first (it is shielded), and a
     # reset a torn-down turn left behind is drained: the child is never
     # stopped under a request still talking to it.
-    await config.LLM_Engine.stop_pressure_task()
-    await drain_pending_reset()
-    config.LLM_Engine.cleanup()
-    await app.state.checkpointer_cm.__aexit__(None, None, None)
-    close_kb_store()
+    await step("stop_pressure_task", lambda: config.LLM_Engine.stop_pressure_task())
+    await step("drain_pending_reset", drain_pending_reset)
+    await step("engine_cleanup", lambda: config.LLM_Engine.cleanup())
+    await step("close_checkpointer", lambda: app.state.checkpointer_cm.__aexit__(None, None, None))
+    await step("close_kb_store", close_kb_store)
     # Cluster stops LAST: every DB consumer above must be closed first.
-    stop_postgres(app.state.postgres)
+    await step("stop_postgres", lambda: stop_postgres(app.state.postgres))

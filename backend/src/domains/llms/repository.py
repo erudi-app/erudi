@@ -62,9 +62,11 @@ def remove_tree_reporting(path, attempts: int = 5, delay: float = 0.4) -> int:
     how a cancelled 1B download left 230 MB of temp_651 behind while the log
     said "deleted temp LLM 651".
 
-    Cancellation is only signalled, never awaited, so the downloader may still
-    hold handles for a moment. Retry briefly to let it notice and let go, then
-    report what survived instead of pretending it is gone.
+    The cancel endpoint deletes only once the transfer has stopped
+    (``DownloadTracker.hand_over_cleanup``), but another process (an
+    antivirus scan, an indexer) can still hold a handle for a moment. Retry
+    briefly to let it let go, then report what survived instead of pretending
+    it is gone.
     """
     path = str(path)
     for attempt in range(attempts):
@@ -404,6 +406,26 @@ class Download_Job_Repository:
         logger.info(f"Created download job {job.id}")
         return job
 
+    def mark_cancelled_if_active(
+        self, job_id: int, statuses: tuple = ("pending", "running")
+    ) -> int:
+        """Set the job ``cancelled`` if its status is still one of ``statuses``.
+
+        One conditional UPDATE, so a job that ended meanwhile (completed,
+        failed, cancelled by someone else) is never turned into a cancel; a
+        cancel that found no transfer passes ``("pending",)`` only, so a job
+        whose task claimed it meanwhile is not cancelled behind its transfer's
+        back. Returns the rows written (0 or 1). Does not commit.
+        """
+        return (
+            self.db.query(DownloadJobModel)
+            .filter(
+                DownloadJobModel.id == job_id,
+                DownloadJobModel.status.in_(list(statuses)),
+            )
+            .update({"status": "cancelled"}, synchronize_session=False)
+        )
+
     def update_status(
         self, job: DownloadJobModel, status: str, error_message: Optional[str] = None
     ) -> None:
@@ -622,14 +644,22 @@ def update_db_with_progress(job_tracker, job_id: int, model_id: int) -> None:
         # Loop until download completes or is cancelled
         while job_tracker.percent < 100.0:
             time.sleep(1)
-            # Exit cleanly if the job was cancelled (cancel endpoint handles DB cleanup)
+            # Exit cleanly once the job was stopped: the user's cancel (the
+            # cancel endpoint handles DB cleanup) or the backend's shutdown
+            # (the download joins this thread before the database stops).
             if not job_tracker.should_continue():
-                logger.info(f"Job {job_id} cancelled, stopping progress tracking")
+                logger.info(f"Job {job_id} stopped, ending progress tracking")
                 return
             dbj.total_bytes = job_tracker.total_bytes
             dbj.progress = job_tracker.percent
             dbj.total_time_elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
             dbj.time_left = job_tracker.eta_seconds or 0.0
+            # Checked again right before the write: a stop that landed while
+            # it was prepared must not reach a database being stopped.
+            if not job_tracker.should_continue():
+                session.rollback()
+                logger.info(f"Job {job_id} stopped, ending progress tracking")
+                return
             session.commit()
             logger.debug(f"Job {job_id}: {dbj.progress:.2f}% complete")
 
@@ -639,6 +669,16 @@ def update_db_with_progress(job_tracker, job_id: int, model_id: int) -> None:
         logger.info(f"Job {job_id} progress tracking finished")
 
     except Exception as e:
+        try:
+            stopped = not job_tracker.should_continue()
+        except Exception:
+            stopped = False  # the tracker itself is what failed: a real failure
+        if stopped:
+            # The job was stopped while a write was in flight: the shutdown
+            # stopped the database under it, or the cancel removed the row.
+            # Not a failed download; whoever stopped the job owns its row.
+            logger.info(f"Job {job_id} stopped during a progress write ({type(e).__name__})")
+            return
         logger.exception(f"Job {job_id} failed during progress tracking")
         try:
             dbj.status = "failed"

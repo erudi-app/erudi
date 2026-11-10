@@ -4,13 +4,13 @@
   "subtitle": "Preferencias que se aplican a toda la aplicación.",
   "webSearch": {
     "title": "Búsqueda web",
-    "description": "Define si la búsqueda web empieza activada o desactivada en las conversaciones nuevas, en cada modelo sin un valor guardado con /config global. Cada conversación conserva después su propio interruptor de búsqueda web en /config, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
+    "description": "Define si la búsqueda web empieza activada o desactivada en las conversaciones nuevas, en cada modelo sin valores predeterminados guardados. Cada conversación conserva después su propio interruptor de búsqueda web en sus ajustes, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
     "note": "Desactivada por defecto. Cuando un modelo compatible con herramientas decide buscar, la consulta buscada se envía a motores de búsqueda externos; nada más sale de tu equipo.",
     "toggleLabel": "Búsqueda web"
   },
   "reasoningEffort": {
     "title": "Esfuerzo de razonamiento predeterminado",
-    "description": "Define el esfuerzo de razonamiento inicial para las conversaciones nuevas, en cada modelo sin un nivel guardado con /config global. Cada conversación conserva después su propio nivel en /config y /effort, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
+    "description": "Define el esfuerzo de razonamiento inicial para las conversaciones nuevas, en cada modelo sin valores predeterminados guardados. Cada conversación conserva después su propio nivel en sus ajustes, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
     "note": "Medio por defecto. Los niveles más altos permiten que el modelo delibere más antes de responder; Ninguno le pide responder directamente.",
     "selectLabel": "Esfuerzo de razonamiento predeterminado",
     "levels": {
@@ -23,7 +23,7 @@
   },
   "compactionThreshold": {
     "title": "Umbral de compactación predeterminado",
-    "description": "Define el umbral de compactación inicial para las conversaciones nuevas, en cada modelo sin un umbral guardado con /config global: los mensajes más antiguos se resumen cuando una conversación llena esta parte de la ventana de contexto del modelo. Cada conversación conserva después su propio umbral en /config, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
+    "description": "Define el umbral de compactación inicial para las conversaciones nuevas, en cada modelo sin valores predeterminados guardados: los mensajes más antiguos se resumen cuando una conversación llena esta parte de la ventana de contexto del modelo. Cada conversación conserva después su propio umbral en sus ajustes, así que cambiar este ajuste nunca afecta a una conversación ya existente.",
     "note": "80 % por defecto. Más bajo: resume antes y con más frecuencia, lo que mantiene la conversación más corta. Más alto: conserva más de ella palabra por palabra y resume con menos frecuencia.",
     "selectLabel": "Umbral de compactación predeterminado"
   },

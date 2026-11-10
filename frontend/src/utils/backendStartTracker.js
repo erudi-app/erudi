@@ -47,9 +47,21 @@ export function exitFailureCode(code) {
  * @param {(message: string, error?: *) => void} io.logError - ERROR record.
  * @param {(code: string) => void} io.onFail - Called once, on the first failure.
  * @param {() => void} io.onSucceed - Called once, when the backend is confirmed.
+ * @param {() => void} [io.onAbandon] - Called once when main stopped the child
+ *   before it was confirmed (a Retry, a quit): the start settles quietly.
+ * @param {Set<string>} [io.quietCodes] - Codes main waits out by respawning
+ *   (DATA_DIR_IN_USE): each attempt is an unlevelled line, and main writes
+ *   the one ERROR if the wait runs out.
  * @returns {{fail: Function, succeed: Function, exited: Function, settled: () => boolean, succeeded: () => boolean}} The tracker.
  */
-export function createBackendStartTracker({ log, logError, onFail, onSucceed }) {
+export function createBackendStartTracker({
+  log,
+  logError,
+  onFail,
+  onSucceed,
+  quietCodes = new Set(),
+  onAbandon,
+}) {
   let settled = false;
   let succeeded = false;
 
@@ -64,8 +76,12 @@ export function createBackendStartTracker({ log, logError, onFail, onSucceed }) 
   const fail = (code, cause, error) => {
     if (settled) return;
     settled = true;
-    logError(`Backend start failed (${code}): ${cause}`, error);
-    onFail(code);
+    if (quietCodes.has(code)) {
+      log(`Backend start failed (${code}): ${cause}`);
+    } else {
+      logError(`Backend start failed (${code}): ${cause}`, error);
+    }
+    onFail(code, cause);
   };
 
   const succeed = () => {
@@ -85,6 +101,12 @@ export function createBackendStartTracker({ log, logError, onFail, onSucceed }) 
     const outcome = `Backend process exited with code ${code}, signal ${signal}`;
     if (stopRequested(proc)) {
       log(`${outcome} (stop requested)`);
+      if (!settled) {
+        // Main stopped it before it was ready: nothing failed, and the
+        // safety cap that fires later must find the start settled.
+        settled = true;
+        onAbandon?.();
+      }
       return;
     }
     if (!settled) {

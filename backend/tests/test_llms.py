@@ -984,10 +984,20 @@ class TestDownloadJob_Endpoints:
         )
         test_db_session.add(job)
         test_db_session.commit()
+        # A running job has its task's tracker registered; this transfer has
+        # already let go of its files, so the cancel does not wait.
+        from src.domains.llms import services as llm_services
 
-        response = client.post(f"/erudi/llms/downloads/{job.id}/cancel")
+        tracker = llm_services.DownloadTracker()
+        tracker.mark_stopped()
+        llm_services._register_tracker(job.id, tracker)
+        try:
+            response = client.post(f"/erudi/llms/downloads/{job.id}/cancel")
+        finally:
+            llm_services._unregister_tracker(job.id)
 
         assert response.status_code == status.HTTP_200_OK
+        assert tracker.cancelled
         mock_cleanup.assert_called_once()
 
     def test_cancel_download_completed(self, client, test_db_session):

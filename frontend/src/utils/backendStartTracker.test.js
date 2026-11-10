@@ -22,6 +22,49 @@ let onSucceed;
 
 const tracker = () => createBackendStartTracker({ log, logError, onFail, onSucceed });
 
+describe("a child main stopped before it was ready", () => {
+  it("settles quietly: no ERROR, no later safety-cap failure", () => {
+    const onAbandon = vi.fn();
+    const t = createBackendStartTracker({ log, logError, onFail, onSucceed, onAbandon });
+    const proc = {};
+    requestStop(proc);
+    t.exited(proc, null, "SIGTERM");
+    expect(onAbandon).toHaveBeenCalledTimes(1);
+    expect(t.settled()).toBe(true);
+    // The 330 s cap that fires later finds the start settled.
+    t.fail("PORT_TIMEOUT", "did not report ready within the 330s safety cap");
+    expect(logError).not.toHaveBeenCalled();
+    expect(onFail).not.toHaveBeenCalled();
+  });
+
+  it("hands the backend's own words to the supervisor with the code", () => {
+    const t = tracker();
+    t.fail("DATA_DIR_IN_USE", "backend reported startup_error: held by pid 12");
+    expect(onFail).toHaveBeenCalledWith(
+      "DATA_DIR_IN_USE",
+      "backend reported startup_error: held by pid 12"
+    );
+  });
+});
+
+describe("a code main waits out", () => {
+  it("is an unlevelled line, not an ERROR per attempt", () => {
+    const t = createBackendStartTracker({
+      log,
+      logError,
+      onFail,
+      onSucceed,
+      quietCodes: new Set(["DATA_DIR_IN_USE"]),
+    });
+    t.fail("DATA_DIR_IN_USE", "backend reported startup_error: folder held");
+    expect(logError).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "Backend start failed (DATA_DIR_IN_USE): backend reported startup_error: folder held"
+    );
+    expect(onFail).toHaveBeenCalledWith("DATA_DIR_IN_USE", expect.any(String));
+  });
+});
+
 beforeEach(() => {
   log = vi.fn();
   logError = vi.fn();
@@ -42,7 +85,7 @@ describe("one record per start failure", () => {
     expect(log).toHaveBeenCalledTimes(1);
     expect(log.mock.calls[0][0]).toMatch(/exited with code 1.*after the start failure/);
     expect(onFail).toHaveBeenCalledTimes(1);
-    expect(onFail).toHaveBeenCalledWith("CRASH_BEFORE_READY");
+    expect(onFail).toHaveBeenCalledWith("CRASH_BEFORE_READY", expect.any(String));
   });
 
   it("a spawn failure carries the error object and settles once", () => {
@@ -70,7 +113,7 @@ describe("one record per start failure", () => {
     expect(logError.mock.calls[0][0]).toMatch(
       /^Backend start failed \(BACKEND_NOT_FOUND\): Backend process exited with code 127/
     );
-    expect(onFail).toHaveBeenCalledWith("BACKEND_NOT_FOUND");
+    expect(onFail).toHaveBeenCalledWith("BACKEND_NOT_FOUND", expect.any(String));
   });
 
   it("maps exit statuses to the supervisor's codes", () => {

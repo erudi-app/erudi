@@ -100,7 +100,7 @@ class TestDownloadCompletionRecordsTheRealBytes:
             remote_model_link="org/model",
             temp_local_model_link=str(temp_dir),
             final_local_model_link=str(final_dir),
-            status="running",
+            status="pending",  # as _start_download creates it
         )
 
         class _Session:

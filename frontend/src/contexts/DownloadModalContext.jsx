@@ -32,6 +32,10 @@ const log = createLogger("DownloadModalContext");
 // FINALIZE_STALL_TICKS consecutive polls, the job is not coming back on its own.
 const POLL_INTERVAL_MS = 2000;
 const FINALIZE_STALL_TICKS = 90; // 90 x 2s = 3 minutes stuck at 100%
+// A refused cancel (the download was completing) resolves only once the job
+// has ended, so the engine switch never restarts the backend under a
+// download being installed; bounded by the same stall window.
+const COMPLETING_WAIT_MS = FINALIZE_STALL_TICKS * POLL_INTERVAL_MS;
 
 // The widget starts as a pill and opens by itself once the confirmation has
 // gone and the first poll is about to land.
@@ -48,6 +52,7 @@ const CANCELLED_DISMISS_MS = 2500;
 // `open` is absent rather than a silent no-op.
 export const DownloadModalContext = createContext({
   isDownloading: false,
+  isCompleting: false,
   cancelDownload: async () => {},
 });
 
@@ -59,6 +64,9 @@ export function DownloadModalProvider({ children }) {
   // dimming, bug-report icon). The widget outlives it: it stays mounted through
   // the terminal state until dismissed, which `isWidgetVisible` tracks.
   const [isDownloading, setIsDownloading] = useState(false);
+  // A cancel was refused because the download is being installed: the
+  // cancel waits for it to end (the engine switch says so meanwhile).
+  const [isCompleting, setIsCompleting] = useState(false);
   const [isWidgetVisible, setIsWidgetVisible] = useState(false);
   const [isCollapsed, setIsCollapsed] = useState(true);
   const [progress, setProgress] = useState(0);
@@ -185,6 +193,8 @@ export function DownloadModalProvider({ children }) {
               `Download job ${id} stuck at 100% in status "${data.status}" for ` +
                 `${FINALIZE_STALL_TICKS} polls; giving up on the status poll`
             );
+            // Concluded once: a later reply (a refused cancel's wait) is ignored.
+            activeJobRef.current = null;
             setIsDownloading(false);
             setStatus(DOWNLOAD_STALLED);
             setErrorMessage(downloadStalledMessage());
@@ -230,6 +240,8 @@ export function DownloadModalProvider({ children }) {
           return;
         }
         log.error(`Status check failed for download job ${id}; polling stopped`, err);
+        // Concluded once: the error is said once, whoever polls next.
+        activeJobRef.current = null;
         clearInterval(intervalRef.current);
         setIsDownloading(false);
         const errorMsg = t("downloads:errors.pollFailed");
@@ -243,7 +255,8 @@ export function DownloadModalProvider({ children }) {
 
   // POST the cancel for `id`. "cancelled" when acknowledged; "ended" when the
   // backend refuses because the job is no longer running (400 STATE_CONFLICT:
-  // already completed, failed or cancelled; 422 "Download ended - cannot be
+  // already completed, failed or cancelled; 409: the files are complete and
+  // the download is being installed; 422 "Download ended - cannot be
   // cancelled": the transfer finished between two polls); "failed" otherwise,
   // recorded here.
   const requestCancel = useCallback(
@@ -256,7 +269,7 @@ export function DownloadModalProvider({ children }) {
           log.log(`Download cancelled for job ${id}`);
           return "cancelled";
         }
-        if (response.status === 400 || response.status === 422) {
+        if (response.status === 400 || response.status === 409 || response.status === 422) {
           log.log(`Download job ${id} had already ended when the cancel arrived`);
           return "ended";
         }
@@ -368,13 +381,32 @@ export function DownloadModalProvider({ children }) {
 
     const outcome = await requestCancel(jobId);
     if (outcome === "ended") {
-      // Nothing was cancelled: the job ended on its own between two polls.
-      // Let its status conclude it (a completed model is counted and shown as
-      // such) rather than claim a cancel the backend refused.
-      await checkDownloadStatus(jobId);
+      // Nothing was cancelled: the job ended on its own between two polls, or
+      // it is being installed (409). Let its status conclude it (a completed
+      // model is counted and shown as such) rather than claim a cancel the
+      // backend refused, and return only once it has: the engine switch
+      // restarts the backend right after this resolves.
+      // This loop owns the polling meanwhile (the interval is stopped), and
+      // ends with the job: completed, failed, a declared stall, or a failed
+      // poll, each concluded once by checkDownloadStatus.
+      clearInterval(intervalRef.current);
+      setIsCompleting(true);
+      try {
+        const giveUpAt = Date.now() + COMPLETING_WAIT_MS;
+        await checkDownloadStatus(jobId);
+        while (activeJobRef.current === jobId && Date.now() < giveUpAt) {
+          await new Promise((resolve) => setTimeout(resolve, POLL_INTERVAL_MS));
+          if (activeJobRef.current === jobId) await checkDownloadStatus(jobId);
+        }
+      } finally {
+        setIsCompleting(false);
+      }
       return;
     }
 
+    // A status poll may already have concluded the job as cancelled while the
+    // cancel request waited for the transfer to stop: report it once.
+    if (activeJobRef.current !== jobId) return;
     // The backend drops the job on acknowledgement: one more status poll would
     // only be answered with a not-found warning in its log. Settle locally
     // right away -- and do the same when the cancel call itself failed, so the
@@ -400,6 +432,7 @@ export function DownloadModalProvider({ children }) {
       value={{
         open,
         isDownloading,
+        isCompleting,
         // The widget's Cancel, also used by the engine switch: the restart it
         // needs would otherwise kill the download mid-transfer.
         cancelDownload,

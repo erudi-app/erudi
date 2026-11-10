@@ -306,6 +306,180 @@ describe("DownloadModalContext user cancel", () => {
   });
 });
 
+describe("DownloadModalContext cancel refused while the download completes", () => {
+  it("shows no error and lets the status conclude it as installed", async () => {
+    let status = "running";
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status, progress: status === "running" ? 99 : 100, time_left: 0 }),
+    });
+    // The download is finalizing: the backend refuses the cancel (409).
+    cancelResponder = () => {
+      status = "completed";
+      return { ok: false, status: 409, statusText: "Conflict" };
+    };
+    renderProvider();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("OPEN"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("CONFIRM"));
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Cancel"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+
+  it("resolves the cancel only once the completing download has ended", async () => {
+    // The engine switch awaits the cancel and then restarts the backend: a
+    // refused cancel must not hand back while the download still finalizes.
+    let status = "running";
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status, progress: 100, time_left: 0 }),
+    });
+    cancelResponder = () => ({ ok: false, status: 409, statusText: "Conflict" });
+    renderProvider();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("OPEN"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("CONFIRM"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    let resolved = false;
+    let pending;
+    await act(async () => {
+      pending = seenContext.cancelDownload().then(() => {
+        resolved = true;
+      });
+      await vi.advanceTimersByTimeAsync(5000);
+    });
+    expect(resolved).toBe(false);
+
+    status = "completed";
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(3000);
+      await pending;
+    });
+    expect(resolved).toBe(true);
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe("DownloadModalContext wait after a refused cancel", () => {
+  const startAndRefuse = async () => {
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status: "running", progress: 100, time_left: 0 }),
+    });
+    cancelResponder = () => ({ ok: false, status: 409, statusText: "Conflict" });
+    renderProvider();
+    await act(async () => {
+      fireEvent.click(screen.getByText("OPEN"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("CONFIRM"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+  };
+
+  it("owns the polling while it waits and says it is waiting", async () => {
+    await startAndRefuse();
+    let pending;
+    await act(async () => {
+      pending = seenContext.cancelDownload();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    expect(seenContext.isCompleting).toBe(true);
+    const before = statusCalls().length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    // One poll every 2 s, not the interval's on top of the wait's.
+    expect(statusCalls().length - before).toBeLessThanOrEqual(5);
+
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status: "completed", progress: 100, time_left: 0 }),
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+      await pending;
+    });
+    expect(seenContext.isCompleting).toBe(false);
+  });
+
+  it("ends at the first failed poll with one error", async () => {
+    await startAndRefuse();
+    let pending;
+    await act(async () => {
+      pending = seenContext.cancelDownload();
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    // The backend is gone: every poll now fails.
+    statusResponder = () => {
+      throw new Error("connection refused");
+    };
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+      await pending;
+    });
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(seenContext.isCompleting).toBe(false);
+  });
+});
+
+describe("DownloadModalContext cancel concluded by a poll first", () => {
+  it("reports the cancel once when a poll sees it before the cancel answers", async () => {
+    // The cancel commits at once and then waits for the transfer to stop:
+    // a status poll meanwhile already reads `cancelled`.
+    let status = "running";
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status, progress: 10, time_left: 60 }),
+    });
+    let answerCancel;
+    cancelResponder = () => {
+      status = "cancelled";
+      return new Promise((resolve) => {
+        answerCancel = () => resolve({ ok: true });
+      });
+    };
+    renderProvider();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("OPEN"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("CONFIRM"));
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    let pending;
+    await act(async () => {
+      pending = seenContext.cancelDownload();
+      await vi.advanceTimersByTimeAsync(2000); // a poll reads cancelled
+    });
+    await act(async () => {
+      answerCancel();
+      await pending;
+    });
+
+    expect(onError).toHaveBeenCalledTimes(1);
+    expect(onError).toHaveBeenCalledWith(DOWNLOAD_CANCELLED);
+  });
+});
+
 // Switching the inference engine restarts the backend, which would kill a
 // running download and leave it "interrupted" at the next boot. The engine
 // switch cancels it first, through the same path as the widget's Cancel.

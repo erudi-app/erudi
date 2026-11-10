@@ -67,7 +67,7 @@ two files carry, without leaving the app:
   `erudi-backend.log`, and the errors this window caught itself — minus any
   `ERROR`/`CRITICAL` record that merely describes the environment rather than
   Erudi being wrong (a machine with no network, HuggingFace rate-limiting or
-  down, the user's disk or port — see `frontend/src/utils/bugCounter.js`'s
+  down, the user's disk, port or data folder — see `frontend/src/utils/bugCounter.js`'s
   `isEnvironmental`, applied once in `diagnosticsReport.js` so the list, the
   copied report and the badge below can never disagree). `WARNING` records are
   never filtered this way. Each remaining row shows its timestamp, level,
@@ -103,7 +103,7 @@ that crashed); main's lifecycle chatter carries no level and stays out.
 
 **An environmental `ERROR` never appears either.** A no-network HuggingFace
 download, a rate-limited or degraded HuggingFace API, a gated repository this
-install has no token for, the machine's disk or the app's port being taken by
+install has no token for, the machine's disk, the app's port or its data folder being taken by
 something else — none of these are Erudi getting something wrong, so none of
 them belong on a page whose whole point is nudging a real defect toward a
 report. The exclusion is one predicate, `isEnvironmental` in

@@ -18,6 +18,9 @@ CUDA, MLX, and CPU builds.
     and Electron logs.
 
 **Supported error codes:**
+    - DATA_DIR_IN_USE: Another backend holds the data folder's lock (checked
+      before anything touches the embedded cluster; the frontend respawns for
+      up to 30 s while the previous backend ends)
     - NO_PORT_AVAILABLE: Every candidate port in the scan range is busy
     - CRASH_BEFORE_READY: Backend thread exited before binding port
     - PORT_TIMEOUT: Server did not bind within the startup window
@@ -41,6 +44,15 @@ CUDA, MLX, and CPU builds.
     * Watch the parent process for death (SIGKILLed Electron main leaves no one to
       kill us, #224) and turn a reparenting into the same clean shutdown. Opt out
       with ERUDI_NO_PARENT_WATCHDOG=1 for deliberately detached runs (nohup/setsid).
+    * Hold an OS lock on the data folder for the life of the process, so two
+      backends never share one cluster (DATA_DIR_IN_USE).
+    * Bound the exit (#706): every shutdown path (SIGTERM/SIGINT, stdin EOF,
+      parent death) goes through request_shutdown, which interrupts the model
+      downloads at once; the launcher stops waiting for the server thread
+      EXIT_GRACE_SECONDS after the lifespan reported its services stopped (or
+      SHUTDOWN_HARD_LIMIT_SECONDS after the request), and an exit deadline ends
+      the process if a thread (a transfer parked in a network read) still holds
+      the interpreter's exit EXIT_GRACE_SECONDS later.
 
 **Usage:**
     Development:
@@ -110,6 +122,21 @@ PARENT_POLL_SECONDS = 2.0
 # (inference child terminated, embedded Postgres stopped) promptly. For a
 # desktop app a quit is a quit: nobody is reading a 10s-stale stream anyway.
 GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 10
+
+# Once the lifespan has stopped every service (embedded Postgres last), what
+# the process still runs is not worth waiting for: a model transfer parked in
+# a network read holds the server thread's loop and the interpreter's exit
+# (which joins executor threads) for as long as the transfer lasts (#706).
+# The wait for the server thread and the process exit are each bounded by it.
+EXIT_GRACE_SECONDS = 2.0
+# Outer bound from the shutdown request itself, for a lifespan shutdown that
+# never reports: with the data-folder lock, an immortal backend would keep
+# the next Erudi from starting.
+SHUTDOWN_HARD_LIMIT_SECONDS = 60.0
+
+# Held for the whole life of the process (see src/launcher/data_dir_lock.py);
+# the OS releases it when the process ends.
+_DATA_DIR_LOCK = None
 
 
 def log_startup_failure(code: str, message: str, exc: "BaseException | None" = None) -> None:
@@ -338,6 +365,128 @@ def kill_port_process(port: int) -> bool:
     return False
 
 
+def request_shutdown(server: "uvicorn.Server") -> None:
+    """Ask the backend to stop: the single entry of every shutdown path.
+
+    The model downloads are interrupted first, at once (#706): a download is
+    a request's background task, which uvicorn waits for (bounded by
+    GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS) before the lifespan shutdown runs, so
+    an uninterrupted transfer would hold the whole shutdown. Then uvicorn's
+    exit flag is set. Safe from a signal handler and from any thread.
+    """
+    try:
+        from src.domains.llms.services import interrupt_active_downloads
+
+        interrupt_active_downloads()
+    except Exception:
+        # Never gate the exit flag below: the lifespan interrupts the
+        # downloads again before it stops the database.
+        pass
+    server.should_exit = True
+
+
+def wait_for_server(
+    server: "uvicorn.Server",
+    server_thread: threading.Thread,
+    services_stopped: threading.Event,
+    *,
+    grace: float = EXIT_GRACE_SECONDS,
+    hard_limit: float = SHUTDOWN_HARD_LIMIT_SECONDS,
+    poll: float = 0.25,
+) -> None:
+    """Wait for the server thread; bounded only once a shutdown is under way.
+
+    Returns when the thread ended, ``grace`` seconds after the lifespan
+    reported its services stopped, or ``hard_limit`` seconds after the
+    shutdown was requested, whichever comes first. A running backend is never
+    cut short: both bounds start with the shutdown.
+    """
+    requested_at = None
+    stopped_at = None
+    while server_thread.is_alive():
+        server_thread.join(timeout=poll)
+        now = time.monotonic()
+        if requested_at is None and server.should_exit:
+            requested_at = now
+        if stopped_at is None and services_stopped.is_set():
+            stopped_at = now
+        if stopped_at is not None and now - stopped_at >= grace:
+            return
+        if requested_at is not None and now - requested_at >= hard_limit:
+            try:
+                from src.core.logging import logger
+
+                # The operation did not happen: the lifespan may not have
+                # stopped the database, and the next start then pays a crash
+                # recovery. A last resort, hence an ERROR.
+                logger.error(
+                    f"Shutdown not finished {hard_limit:g}s after it was requested; exiting "
+                    f"without it (the next start may run a database crash recovery)"
+                )
+            except Exception:
+                pass  # logging must never keep the process alive
+            return
+
+
+def arm_exit_deadline(grace: float = EXIT_GRACE_SECONDS, hard_exit=os._exit) -> threading.Thread:
+    """End the process ``grace`` seconds from now if it is still running.
+
+    Armed when ``main`` is about to return. The interpreter's exit joins every
+    non-daemon thread and every ``concurrent.futures`` worker; a model transfer
+    parked in a network read is one of them and would keep the process alive
+    until the transfer ends (#706). This daemon thread keeps running during
+    that join: if the exit has not completed in time it records which threads
+    still hold it, flushes the log and ends the process (exit code 0, the
+    shutdown itself is complete). An exit that completes in time ends this
+    thread with the process, unseen.
+    """
+
+    def _expire() -> None:
+        time.sleep(grace)
+        try:
+            import logging
+
+            from src.core.logging import logger
+
+            this = threading.current_thread()
+            held_by = sorted(
+                t.name
+                for t in threading.enumerate()
+                if t.is_alive() and t is not this and t is not threading.main_thread()
+            )
+            logger.warning(
+                f"Exit still held {grace:g}s after the shutdown by thread(s) "
+                f"{', '.join(held_by) or '(none)'}; ending the process"
+            )
+            logging.shutdown()
+        except Exception:
+            pass  # the exit below must happen whatever logging does
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass  # a closed stream must not keep the process alive
+        hard_exit(0)
+
+    thread = threading.Thread(target=_expire, name="exit-deadline", daemon=True)
+    thread.start()
+    return thread
+
+
+def finish_after_ready(
+    server: "uvicorn.Server", server_thread: threading.Thread, services_stopped: threading.Event
+) -> None:
+    """The launcher's life after ``ready``: wait for the shutdown, then leave.
+
+    The exit deadline is armed BEFORE the ``shutdown`` event is written: when
+    the parent was killed (#706) stdout is a broken pipe, and nothing written
+    to it may stand between the shutdown and a bounded exit.
+    """
+    wait_for_server(server, server_thread, services_stopped)
+    arm_exit_deadline()
+    emit_event({"event": "shutdown"})
+
+
 def run_server(server: "uvicorn.Server") -> None:
     """Run the uvicorn server in the current thread; surface unexpected failures.
 
@@ -493,8 +642,8 @@ def start_stdin_eof_watcher(server: "uvicorn.Server") -> threading.Thread:
 
             logger.info("Parent closed stdin; requesting graceful shutdown")
         except Exception:
-            pass  # logging must never gate the shutdown flag below
-        server.should_exit = True
+            pass  # logging must never gate the shutdown request below
+        request_shutdown(server)
 
     thread = threading.Thread(target=_watch, name="stdin-eof-watcher", daemon=True)
     thread.start()
@@ -585,8 +734,8 @@ def start_parent_watchdog(
 
                     logger.info("Parent process died; requesting graceful shutdown")
                 except Exception:
-                    pass  # logging must never gate the shutdown flag below
-                server.should_exit = True
+                    pass  # logging must never gate the shutdown request below
+                request_shutdown(server)
                 return
             time.sleep(poll_seconds)
 
@@ -639,6 +788,27 @@ def main() -> None:
         sys.exit(1)
     else:
         data_dir = runtime_paths.data_dir
+
+    # One backend per data folder, checked before anything touches it (the
+    # embedded cluster above all): a backend still exiting, or a second app,
+    # holds it. Held until the process ends; the OS releases it however the
+    # process ends. Expected right after a quit (the previous backend is still
+    # ending) and waited out by the frontend, which respawns for up to 30 s
+    # and records the failure itself if the folder stays taken: INFO here.
+    global _DATA_DIR_LOCK
+    from src.launcher.data_dir_lock import DataDirInUse, acquire_data_dir_lock
+
+    try:
+        _DATA_DIR_LOCK = acquire_data_dir_lock(data_dir)
+    except DataDirInUse as exc:
+        try:
+            from src.core.logging import logger
+
+            logger.info(f"startup_error DATA_DIR_IN_USE: {exc}")
+        except Exception:
+            print(f"startup_error DATA_DIR_IN_USE: {exc}", file=sys.stderr, flush=True)
+        emit_event({"event": "startup_error", "code": "DATA_DIR_IN_USE", "message": str(exc)})
+        sys.exit(1)
 
     # Windows-only: bind Postgres/llama-server's lifetime to this process at
     # the kernel level, before either is ever spawned. Unlike the parent-death
@@ -719,6 +889,10 @@ def main() -> None:
     # stream (same process). Absent (e.g. plain uvicorn in dev), the lifespan
     # simply skips phase emission.
     fastapi_app.state.emit_phase = emit_phase
+    # Set by the lifespan once every service is stopped: the exit is bounded
+    # from there (wait_for_server, arm_exit_deadline).
+    services_stopped = threading.Event()
+    fastapi_app.state.services_stopped = services_stopped
 
     server = uvicorn.Server(
         # access_log=False: uvicorn's unstructured per-request lines are
@@ -740,10 +914,11 @@ def main() -> None:
     )
 
     def _request_graceful_shutdown(signum: int, frame: object) -> None:
-        # Relay to uvicorn's exit flag: the server thread notices it, drains
-        # requests, runs the lifespan shutdown (checkpointer → embedded
-        # PostgreSQL), then run_server returns and the join below unblocks.
-        server.should_exit = True
+        # Relay to uvicorn's exit flag (downloads interrupted first): the
+        # server thread notices it, drains requests, runs the lifespan
+        # shutdown (checkpointer → embedded PostgreSQL), then run_server
+        # returns and the wait below unblocks.
+        request_shutdown(server)
 
     signal.signal(signal.SIGTERM, _request_graceful_shutdown)
     signal.signal(signal.SIGINT, _request_graceful_shutdown)
@@ -770,11 +945,7 @@ def main() -> None:
         while time.time() < deadline:
             if port_open(host, port):
                 emit_event({"event": "ready", "port": port})
-                server_thread.join(timeout=1.0)
-                while server_thread.is_alive():
-                    time.sleep(1.0)
-                    server_thread.join(timeout=1.0)
-                emit_event({"event": "shutdown"})
+                finish_after_ready(server, server_thread, services_stopped)
                 break
 
             if not server_thread.is_alive():

@@ -22,6 +22,13 @@ export function hasMissingWeights(model) {
   return Boolean(model) && model.weights_available === false;
 }
 
+// The installed models a conversation can run on: an orphaned KB assistant
+// (weights missing) is never offered. Shared by the Model popup and the
+// header's model picker (#704).
+export function offeredModels(models) {
+  return models.filter((model) => !hasMissingWeights(model));
+}
+
 // Name of the installed base model whose weights an assistant uses, derived by
 // matching `link` against the local list (the assistant's link is a copy of
 // its base's). Returns null when the base is gone (deleted -> orphan).

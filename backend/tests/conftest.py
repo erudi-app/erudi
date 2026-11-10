@@ -82,6 +82,16 @@ def _memory_observations_in_tmp(tmp_path, monkeypatch):
 
 
 @pytest.fixture(autouse=True)
+def _downloads_open(monkeypatch):
+    """A test that walks a real shutdown path (``run.request_shutdown``, the
+    lifespan) closes the download registry for the rest of the process, by
+    design; every test starts with it open again."""
+    from src.domains.llms import services
+
+    monkeypatch.setattr(services, "_downloads_closed", False)
+
+
+@pytest.fixture(autouse=True)
 def _no_real_cache_limit(request, monkeypatch):
     """Keep `run_mlx_vlm_server` from capping the test process's own MLX cache.
 
