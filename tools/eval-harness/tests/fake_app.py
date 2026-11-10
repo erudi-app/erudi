@@ -352,7 +352,8 @@ def make_handler(b: Backend):
             if (mm := m(r"/arena/(\d+)/query")) and method == "POST":
                 self.body()
                 b.ensure_inference(int(mm.group(1)))
-                self.stream("text/plain", self.slow(["Photosynthesis ", "turns light ", "into sugar."]))
+                answers = ["Photosynthesis ", "turns light ", "into sugar."]
+                self.stream("application/x-ndjson", self.slow(json.dumps({"t": "answer", "text": a}) + "\n" for a in answers))
                 b.last_used = time.monotonic()
                 return None
             return self.send_json(404, {"detail": f"no fake route for {method} {p}"})

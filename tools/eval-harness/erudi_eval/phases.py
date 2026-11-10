@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 from . import app_control, lifecycle, machine, workload as workload_mod
+from .api import parse_ndjson
 from .discovery import take_snapshot
 from .model_match import ModelMatchError, pick_installed
 from .platform_info import conditions, disk_allows_download, free_disk_bytes, system_info
@@ -499,10 +500,19 @@ def phase_arena(run: Run) -> dict:
     sent = time.monotonic()
     first = chars = None
     total_chars = 0
-    for t, chunk in run.api.stream_chunks(f"/arena/{model['id']}/query", {"question": ARENA_QUESTION}, read_timeout=run.cfg.turn_timeout):
-        if first is None and chunk.strip():
+    # NDJSON: `answer` events, and one `error` event for a failed turn. The
+    # first item of stream_lines is the request id, not a line of the body.
+    lines = run.api.stream_lines(f"/arena/{model['id']}/query", {"question": ARENA_QUESTION}, read_timeout=run.cfg.turn_timeout)
+    next(lines, None)
+    for t, event in parse_ndjson(lines):
+        if event.get("t") == "error":
+            raise PhaseFailed(f"arena turn failed: {str(event.get('text', ''))[:200]}")
+        if event.get("t") != "answer":
+            continue
+        text = str(event.get("text") or "")
+        if first is None and text.strip():
             first = t
-        total_chars += len(chunk)
+        total_chars += len(text)
         chars = t
     run.last_use_t = time.time()
     if first is None:

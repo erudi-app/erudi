@@ -137,6 +137,7 @@ def test_run_attach_against_fake_app(fake_app, tmp_path):
         assert phases[name]["status"] == "skipped" and "no CDP endpoint" in phases[name]["reason"]
     assert phases["model_ready"]["data"]["downloaded_by_harness"] is True
     assert phases["long_conversation_render"]["data"]["user_turns"] == 4
+    assert phases["arena"]["data"]["chars"] == len("Photosynthesis turns light into sugar.")  # answer text, not the NDJSON framing
     assert phases["quit"]["data"]["survivors"]["plus_30s"] == {}
 
     summary = json.loads((run_dir / "summary.json").read_text())

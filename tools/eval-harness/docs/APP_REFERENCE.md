@@ -58,7 +58,7 @@ Every response carries `X-Request-ID`; send your own `X-Request-ID: eval-<run>-<
 - `POST /conversations/{id}/query` body `{question, images?: [data-URL], attachments?: [local paths], temperature?, top_p?, custom_prompt?}` → NDJSON, one object per line with `t` ∈ `answer{text}`, `thinking{text}`, `tool_call{name,args}`, `tool_result{name,text}`, `memory_warning{used_fraction, conversation_bytes?, footprint_bytes?}`, `error{text, code?, raw?}`, `done`.
 - `POST /conversations/{id}/generate_title` (same body) → text/plain stream.
 - `GET /conversations/{id}`, `GET /conversations/{id}/fetch_messages`, `DELETE /conversations/{id}`.
-- `POST /arena/{llm_id}/query` body `{question, images?, attachments?, ...}` → text/plain stream (stateless).
+- `POST /arena/{llm_id}/query` body `{question, images?, attachments?, ...}` → NDJSON (stateless), one object per line with `t` ∈ `answer{text, curated_error?}`, `error{text, curated?, curated_error?, detail?, request_id?}`.
 - `GET /knowledge_base/embedding-model/status`, `POST /knowledge_base/embedding-model/download` → `{available, downloading, error}`.
 - `POST /knowledge_base/create` JSON `{paths: [absolute local paths], selectedModel: <base llm id>, modelName: <assistant name>, description?}` → `{msg, model_id}` (the new assistant's llm id); poll `GET /knowledge_base/{model_id}/status` → `{status: pending|running|completed|failed, status_updated_at, error_message}`. Same `selectedModel` with an existing KB = update. Duplicate `modelName` → 409.
 
