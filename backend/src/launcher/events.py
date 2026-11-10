@@ -31,6 +31,8 @@ correlated on a single timeline.
 from __future__ import annotations
 
 import json
+import os
+import sys
 from datetime import datetime, timezone
 
 
@@ -39,13 +41,42 @@ def _utc_timestamp() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
 
 
+_stdout_lost = False
+
+
 def emit_event(payload: dict) -> None:
     """Print a structured JSON lifecycle event (newline-delimited) to stdout.
 
     A ``ts`` field (UTC ISO-8601 ms, Z) is stamped on every event; the
     caller's payload is not mutated.
+
+    Never raises. When the parent is gone (killed, #706), stdout is a broken
+    pipe and the event has no reader: it is dropped, said once at INFO, and
+    stdout is pointed at the null device so the interpreter's own flush at
+    exit does not fail too. A lost parent is neither a crash nor an error:
+    the launcher must go on with its shutdown.
     """
-    print(json.dumps({**payload, "ts": _utc_timestamp()}), flush=True)
+    global _stdout_lost
+    if _stdout_lost:
+        return
+    try:
+        print(json.dumps({**payload, "ts": _utc_timestamp()}), flush=True)
+    except (OSError, ValueError):
+        # BrokenPipeError / EPIPE, or ValueError on a closed stream.
+        _stdout_lost = True
+        try:
+            sys.stdout = open(os.devnull, "w")
+        except OSError:
+            pass  # nothing else to point it at; the events are dropped anyway
+        try:
+            from src.core.logging import logger
+
+            logger.info(
+                f"stdout is gone (the parent closed it); dropping lifecycle events "
+                f"from {payload.get('event')!r} on"
+            )
+        except Exception:
+            pass  # logging must never turn a lost reader into a crash
 
 
 def emit_phase(phase: str) -> None:

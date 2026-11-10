@@ -19,7 +19,8 @@ CUDA, MLX, and CPU builds.
 
 **Supported error codes:**
     - DATA_DIR_IN_USE: Another backend holds the data folder's lock (checked
-      before anything touches the embedded cluster; the frontend retries it)
+      before anything touches the embedded cluster; the frontend respawns for
+      up to 30 s while the previous backend ends)
     - NO_PORT_AVAILABLE: Every candidate port in the scan range is busy
     - CRASH_BEFORE_READY: Backend thread exited before binding port
     - PORT_TIMEOUT: Server did not bind within the startup window
@@ -415,8 +416,12 @@ def wait_for_server(
             try:
                 from src.core.logging import logger
 
-                logger.warning(
-                    f"Shutdown not finished {hard_limit:g}s after it was requested; exiting anyway"
+                # The operation did not happen: the lifespan may not have
+                # stopped the database, and the next start then pays a crash
+                # recovery. A last resort, hence an ERROR.
+                logger.error(
+                    f"Shutdown not finished {hard_limit:g}s after it was requested; exiting "
+                    f"without it (the next start may run a database crash recovery)"
                 )
             except Exception:
                 pass  # logging must never keep the process alive
@@ -466,6 +471,20 @@ def arm_exit_deadline(grace: float = EXIT_GRACE_SECONDS, hard_exit=os._exit) -> 
     thread = threading.Thread(target=_expire, name="exit-deadline", daemon=True)
     thread.start()
     return thread
+
+
+def finish_after_ready(
+    server: "uvicorn.Server", server_thread: threading.Thread, services_stopped: threading.Event
+) -> None:
+    """The launcher's life after ``ready``: wait for the shutdown, then leave.
+
+    The exit deadline is armed BEFORE the ``shutdown`` event is written: when
+    the parent was killed (#706) stdout is a broken pipe, and nothing written
+    to it may stand between the shutdown and a bounded exit.
+    """
+    wait_for_server(server, server_thread, services_stopped)
+    arm_exit_deadline()
+    emit_event({"event": "shutdown"})
 
 
 def run_server(server: "uvicorn.Server") -> None:
@@ -773,8 +792,9 @@ def main() -> None:
     # One backend per data folder, checked before anything touches it (the
     # embedded cluster above all): a backend still exiting, or a second app,
     # holds it. Held until the process ends; the OS releases it however the
-    # process ends. Not an Erudi defect, so a WARNING: the frontend retries
-    # and says so on screen if the folder stays taken.
+    # process ends. Expected right after a quit (the previous backend is still
+    # ending) and waited out by the frontend, which respawns for up to 30 s
+    # and records the failure itself if the folder stays taken: INFO here.
     global _DATA_DIR_LOCK
     from src.launcher.data_dir_lock import DataDirInUse, acquire_data_dir_lock
 
@@ -784,9 +804,9 @@ def main() -> None:
         try:
             from src.core.logging import logger
 
-            logger.warning(f"startup_error DATA_DIR_IN_USE: {exc}")
+            logger.info(f"startup_error DATA_DIR_IN_USE: {exc}")
         except Exception:
-            print(f"[WARNING] startup_error DATA_DIR_IN_USE: {exc}", file=sys.stderr, flush=True)
+            print(f"startup_error DATA_DIR_IN_USE: {exc}", file=sys.stderr, flush=True)
         emit_event({"event": "startup_error", "code": "DATA_DIR_IN_USE", "message": str(exc)})
         sys.exit(1)
 
@@ -925,9 +945,7 @@ def main() -> None:
         while time.time() < deadline:
             if port_open(host, port):
                 emit_event({"event": "ready", "port": port})
-                wait_for_server(server, server_thread, services_stopped)
-                emit_event({"event": "shutdown"})
-                arm_exit_deadline()
+                finish_after_ready(server, server_thread, services_stopped)
                 break
 
             if not server_thread.is_alive():

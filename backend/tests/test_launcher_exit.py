@@ -203,3 +203,110 @@ def test_the_exit_deadline_ends_a_process_held_by_a_stuck_thread(tmp_path):
     assert elapsed < 10
     backend_log = (tmp_path / "instance" / "logs" / "backend.log").read_text(encoding="utf-8")
     assert "Exit still held" in backend_log
+
+
+class _BrokenStdout:
+    """stdout once the parent is gone: every write is a broken pipe."""
+
+    def write(self, _text):
+        raise BrokenPipeError(32, "Broken pipe")
+
+    def flush(self):
+        raise BrokenPipeError(32, "Broken pipe")
+
+
+@pytest.mark.unit
+def test_an_event_to_a_dead_parent_is_dropped_not_raised(monkeypatch):
+    from src.launcher import events
+
+    monkeypatch.setattr(sys, "stdout", _BrokenStdout())
+    monkeypatch.setattr(events, "_stdout_lost", False)
+
+    events.emit_event({"event": "shutdown"})  # must not raise
+    events.emit_event({"event": "shutdown"})
+
+
+@pytest.mark.unit
+def test_after_ready_the_exit_deadline_is_armed_before_anything_is_written(monkeypatch):
+    """#706 itself: the parent was SIGKILLed, so stdout is a broken pipe. The
+    deadline must be armed whatever writing the `shutdown` event does."""
+    from src.launcher import events
+
+    order: list[str] = []
+    monkeypatch.setattr(sys, "stdout", _BrokenStdout())
+    monkeypatch.setattr(events, "_stdout_lost", False)
+    monkeypatch.setattr(run, "arm_exit_deadline", lambda *a, **k: order.append("armed"))
+    real_emit = run.emit_event
+
+    def emit(payload):
+        order.append(payload["event"])
+        real_emit(payload)
+
+    monkeypatch.setattr(run, "emit_event", emit)
+    finished = threading.Thread(target=lambda: None)
+    finished.start()
+    finished.join()
+
+    run.finish_after_ready(SimpleNamespace(should_exit=True), finished, threading.Event())
+
+    assert order == ["armed", "shutdown"]
+
+
+# The backend's parent closed its end of the pipe (it was killed): an event
+# written afterwards must not crash the launcher.
+ORPHAN_EMIT_SOURCE = textwrap.dedent(
+    """
+    import sys
+    from src.launcher.events import emit_event
+
+    sys.stdin.readline()  # the parent closes our stdout, then says go
+    emit_event({"event": "shutdown"})
+    emit_event({"event": "shutdown"})
+    """
+)
+
+
+@pytest.mark.integration
+def test_an_event_written_after_the_parent_closed_the_pipe_is_no_crash(tmp_path):
+    err_path = tmp_path / "stderr.txt"
+    with open(err_path, "w") as err:
+        proc = subprocess.Popen(
+            [sys.executable, "-c", ORPHAN_EMIT_SOURCE],
+            cwd=BACKEND_DIR,
+            env={
+                **os.environ,
+                "PYTHONPATH": str(BACKEND_DIR),
+                "ERUDI_DATA_ROOT": str(tmp_path / "instance"),
+            },
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=err,
+            text=True,
+        )
+        proc.stdout.close()
+        proc.stdin.write("go\n")
+        proc.stdin.close()
+        assert proc.wait(30) == 0
+    assert "Traceback" not in err_path.read_text()
+
+
+@pytest.mark.unit
+def test_the_hard_limit_is_an_error(caplog):
+    """Cutting a shutdown short can leave the database unstopped: the next
+    start pays a crash recovery. The operation did not happen: ERROR."""
+    import logging
+
+    thread, release = _stuck_thread()
+    try:
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            run.wait_for_server(
+                SimpleNamespace(should_exit=True),
+                thread,
+                threading.Event(),
+                grace=30,
+                hard_limit=0.3,
+            )
+    finally:
+        release.set()
+    (record,) = [r for r in caplog.records if "Shutdown not finished" in r.getMessage()]
+    assert record.levelno == logging.ERROR
