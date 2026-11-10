@@ -198,8 +198,14 @@ def _sanitize_title(raw: str, *, max_words: int = 6, max_chars: int = 48) -> str
 def _checked_title(raw: str, question: str) -> str:
     """A generated title once cleaned and checked against the user's message:
     sanitized, then stripped of the letters of any script the message does not
-    use ("" when nothing is left, so the caller keeps the default name)."""
-    return strip_foreign_scripts(_sanitize_title(raw), question)
+    use. Stripping can leave punctuation behind ("« »", a leading hyphen), so
+    a changed title is trimmed and sanitized again, and "" (the caller keeps
+    the default name) is returned unless a letter or a digit remains."""
+    sanitized = _sanitize_title(raw)
+    stripped = strip_foreign_scripts(sanitized, question)
+    if stripped != sanitized:
+        stripped = _sanitize_title(re.sub(r"^[\W_]+|[\W_]+$", "", stripped))
+    return stripped if any(c.isalnum() for c in stripped) else ""
 
 
 class ConversationService:
@@ -767,6 +773,7 @@ class ConversationService:
         top_p = 0.9 if llm.type == "mistral" else 0.95
 
         generated_title = ""
+        completed = False
         try:
             async with contextlib.aclosing(
                 self.runner.astream_oneshot(
@@ -781,10 +788,16 @@ class ConversationService:
                     generated_title += chunk
             # The title is a dozen tokens: it is streamed once, after the
             # checks, so what the sidebar shows is what is stored.
+            completed = True
             if _checked_title(generated_title, question):
                 yield _checked_title(generated_title, question)
         finally:
-            final_title = _checked_title(generated_title, question) or DEFAULT_CONVERSATION_NAME
+            # A generation that failed midway stores the default name: its
+            # partial text was never streamed, so it is not what the sidebar
+            # shows.
+            final_title = (
+                _checked_title(generated_title, question) if completed else ""
+            ) or DEFAULT_CONVERSATION_NAME
             duration_ms = (time.perf_counter() - start_s) * 1000
             logger.info(
                 f"Title generation completed for conversation {conversation_id}: "
@@ -898,12 +911,18 @@ class ConversationService:
         # The detected language is named outright; when detection is not
         # confident only the generic same-language line stands, never a default.
         language = language_name(question)
-        language_line = (
-            "Write the title in the same language as the user's message "
-            "(a French message gets a French title).\n"
-        )
+        # The "French message" example only rides the generic line: next to a
+        # named language it would nudge every title toward French.
         if language:
-            language_line += f"Write the title in {language}.\n"
+            language_line = (
+                "Write the title in the same language as the user's message.\n"
+                f"Write the title in {language}.\n"
+            )
+        else:
+            language_line = (
+                "Write the title in the same language as the user's message "
+                "(a French message gets a French title).\n"
+            )
         if model_type == "mistral":
             return (
                 "You are a TITLE generator. Produce ONLY a very short title "

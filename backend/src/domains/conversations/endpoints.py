@@ -504,7 +504,7 @@ async def generate_title(
     """Stream AI-generated conversation title based on first message.
 
     Uses the loaded LLM to generate a concise title (1-5 words) summarizing
-    the conversation topic. Streams title token-by-token for real-time display.
+    the conversation topic. Streams the checked title once, when generation ends.
 
     Args:
         conversation_id: ID of the conversation to generate title for.

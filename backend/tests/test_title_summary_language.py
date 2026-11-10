@@ -149,7 +149,7 @@ class TestTitleStream:
     async def test_greeting_gets_the_neutral_marker_without_a_model_call(
         self, test_db_session, mock_llm, monkeypatch
     ):
-        # No scripted output: a model call would fail the scripted fake.
+        # A model call would store the scripted "Prénom Nom".
         streamed, stored = await self._run(
             test_db_session, mock_llm, monkeypatch, "Bonjour !", "Prénom Nom"
         )
@@ -217,3 +217,168 @@ class TestSummaryPromptLanguage:
         out = await middleware._summarize(None, [HumanMessage(content=FRENCH)], attempt="first")
         assert out
         assert "Write the whole summary in French" in str(seen["prompt"])
+
+
+ENGLISH_BIO = (
+    "John Smith was born in Chicago and studied physics at the university. "
+    "He worked for many years at a laboratory where he published several papers "
+    "about the properties of light and of the materials that carry it."
+)
+GERMAN_TEXT = "Der Vertrag endet am Ende des Monats, wenn keine Kuendigung eingeht."
+TRACEBACK = (
+    "Traceback (most recent call last):\n"
+    '  File "main.py", line 3, in <module>\n'
+    "    print(undefined_name)\nNameError: name 'undefined_name' is not defined"
+)
+
+
+class TestOwnWordsOnly:
+    """Pasted or attached content never decides the language (review item 1)."""
+
+    def test_attachment_block_is_ignored_in_a_summary(self):
+        message = HumanMessage(
+            content=f"[Attached file: bio.txt]\n{ENGLISH_BIO}\n[End of attached file]\n\n"
+            "Résume ce document en trois points."
+        )
+        prompt = runner_module.build_summary_prompt([message])
+        assert "Write the whole summary in French" in prompt
+
+    def test_a_pasted_block_after_the_instruction_is_ignored(self):
+        assert language_name("Résume ce texte : " + ENGLISH_BIO) in (None, "French")
+        assert language_name("Traduis en anglais : " + GERMAN_TEXT) in (None, "French")
+
+    def test_a_traceback_is_ignored_in_a_title(self):
+        assert language_name("Pourquoi cette erreur ?\n" + TRACEBACK) in (None, "French")
+
+    def test_fenced_code_urls_and_quotes_are_ignored(self):
+        fenced = "Pourquoi cette fonction échoue-t-elle ?\n```python\n" + ENGLISH_BIO + "\n```"
+        assert language_name(fenced) == "French"
+        url = "Que contient cette page https://en.wikipedia.org/wiki/The_English_Language ?"
+        assert language_name(url) == "French"
+        quoted = "Que penses-tu de ce passage ?\n> " + ENGLISH_BIO.replace(". ", ".\n> ")
+        assert language_name(quoted) in (None, "French")
+
+    def test_never_the_attachments_language_when_own_words_are_short(self):
+        short = "[Attached file: a.txt]\n" + ENGLISH_BIO + "\n[End of attached file]\n\nok"
+        assert language_name(short) is None
+
+    def test_summary_takes_the_majority_of_user_messages(self):
+        messages = [
+            HumanMessage(content=FRENCH),
+            HumanMessage(content="Et pour les algues, comment cela se passe-t-il exactement ?"),
+            HumanMessage(content="Thanks"),
+        ]
+        assert "Write the whole summary in French" in runner_module.build_summary_prompt(messages)
+
+    def test_one_long_english_attachment_does_not_outvote_french_messages(self):
+        messages = [
+            HumanMessage(content=FRENCH),
+            HumanMessage(
+                content=f"[Attached file: bio.txt]\n{ENGLISH_BIO * 3}\n[End of attached file]\n\n"
+                "Résume ce document en trois points."
+            ),
+        ]
+        assert "Write the whole summary in French" in runner_module.build_summary_prompt(messages)
+
+
+class TestGreetingFalsePositives:
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Hi, introduce yourself and explain quantum physics",
+            "Hello, who are you? Tell me about Paris",
+            "Hey, who are you voting for?",
+            "Hello there, who are you in Star Wars?",
+            "Bonjour ! Présente-toi et explique la photosynthèse",
+            "Salut, qui es-tu ? Résume ce PDF",
+        ],
+    )
+    def test_real_content_after_a_greeting_is_titled(self, text):
+        assert not is_greeting(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            "Bonjour ! Présente-toi en deux phrases.",
+            "Hi, introduce yourself briefly please",
+            "Hola, preséntate en dos frases por favor",
+            "Salut, qui es-tu ?",
+            "Hello, who are you?",
+            "Bonjour, présente-toi brièvement s'il te plaît",
+        ],
+    )
+    def test_short_introduction_requests_are_greetings(self, text):
+        assert is_greeting(text)
+
+
+class TestCheckedTitle:
+    @pytest.mark.parametrize(
+        "title,question,expected",
+        [
+            ("数学：基础", FRENCH, ""),
+            ("« 数学 »", FRENCH, ""),
+            ("Λ-Calcul Expliqué", FRENCH, "Λ-Calcul Expliqué"),
+            ("µ-Controller", FRENCH, "µ-Controller"),
+            ("Photosynthèse：简单", FRENCH, "Photosynthèse"),
+            ("«Photosynthèse»简单", FRENCH, "Photosynthèse"),
+        ],
+    )
+    def test_checked_title(self, title, question, expected):
+        from src.domains.conversations.services import _checked_title
+
+        assert _checked_title(title, question) == expected
+
+    @pytest.mark.parametrize(
+        "title,question,expected",
+        [
+            ("iPhone 截图方法", "如何在手机上截图？", "iPhone 截图方法"),
+            ("Docker 容器入门", "请介绍一下容器是什么", "Docker 容器入门"),
+            ("Пример Python", "Объясни мне как работает цикл в языке", "Пример Python"),
+            ("Pi π Explained", ENGLISH, "Pi π Explained"),
+        ],
+    )
+    def test_latin_and_lone_greek_letters_are_kept(self, title, question, expected):
+        assert strip_foreign_scripts(title, question) == expected
+
+    def test_a_greek_word_is_still_dropped_from_a_french_title(self):
+        assert strip_foreign_scripts("Photosynthèse φωτοσύνθεση", FRENCH) == "Photosynthèse"
+
+
+class TestTitleStreamFailure:
+    async def test_a_failure_mid_generation_stores_the_default_name(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        from src.agents import runner as agent_runner
+        from src.core import config
+        from tests.test_conversations import _FakeEngine
+
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+
+        async def _boom(self, **kwargs):
+            yield "Photosynthèse"
+            raise RuntimeError("model died")
+
+        monkeypatch.setattr(agent_runner.AgentRunner, "astream_oneshot", _boom)
+        service = ConversationService(test_db_session)
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.5, top_p=0.8, max_tokens=512
+        )
+        with pytest.raises(RuntimeError):
+            async for _ in service.generate_title_stream(conversation.id, FRENCH):
+                pass
+        assert (
+            service.conversation_repo.get_conversation_by_id(conversation.id).name
+            == "New Conversation"
+        )
+
+
+class TestTitlePromptExampleBias:
+    @pytest.mark.parametrize("model_type", ["mistral", "qwen"])
+    def test_the_french_example_sentence_is_dropped_when_a_language_is_named(
+        self, test_db_session, model_type
+    ):
+        service = ConversationService(test_db_session)
+        named = service._build_title_prompt_text(ENGLISH, model_type)
+        assert "a French message gets a French title" not in named
+        generic = service._build_title_prompt_text("ok", model_type)
+        assert "a French message gets a French title" in generic

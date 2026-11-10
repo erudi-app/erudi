@@ -118,19 +118,63 @@ LANGUAGE_NAMES = {
 _DETECTION_MAX_CHARS = 2000
 
 
+_ATTACHED_BLOCK_RE = re.compile(
+    r"\[Attached file: [^\]\n]*\].*?\[End of attached file\]", re.DOTALL
+)
+_FENCED_RE = re.compile(r"```.*?(?:```|\Z)", re.DOTALL)
+_INLINE_CODE_RE = re.compile(r"`[^`\n]*`")
+_URL_RE = re.compile(r"(?:https?://|www\.)\S+")
+_QUOTED_LINE_RE = re.compile(r"^[ \t]*>.*$", re.MULTILINE)
+# "Instruction : <pasted text>" -- the head is the user's, the rest is payload
+# once it is clearly longer than the head.
+_PAYLOAD_SPLIT_RE = re.compile(r"^(.{3,160}?(?:[:：]|\n))(.+)$", re.DOTALL)
+_PAYLOAD_FACTOR = 2
+
+
+def own_words(text: str) -> str:
+    """The user's own words in a message, without what they brought along.
+
+    An attached file's text sits inside the human message, and users paste
+    code, logs, quotes and links: none of it says what language the user
+    speaks. Removed: attachment blocks, fenced and inline code, URLs, quoted
+    lines, and a pasted payload following an instruction line ("Summarize
+    this text: <text>", a question followed by a traceback) once the payload
+    is clearly longer than the instruction.
+    """
+    text = _ATTACHED_BLOCK_RE.sub(" ", text or "")
+    text = _FENCED_RE.sub(" ", text)
+    text = _INLINE_CODE_RE.sub(" ", text)
+    text = _URL_RE.sub(" ", text)
+    text = _QUOTED_LINE_RE.sub(" ", text).strip()
+    split = _PAYLOAD_SPLIT_RE.match(text)
+    if split and len(split.group(2).strip()) > _PAYLOAD_FACTOR * len(split.group(1).strip()):
+        text = split.group(1)
+    return re.sub(r"\s+", " ", text).strip()
+
+
 def language_name(texts: "str | list[Optional[str]]") -> Optional[str]:
-    """English name of the language of the user's text(s), or None.
+    """English name of the language of the user's own words, or None.
 
     ``texts`` is one message (a title: the first message) or several (a
-    summary: the recent user messages, joined). None when detection is
-    unconfident or the language has no entry in ``LANGUAGE_NAMES``: the caller
-    then writes the generic "same language as the user's messages" line --
-    never a default language.
+    summary: the recent user messages). Each message is reduced to the user's
+    own words (``own_words``) and detected on its own; the language with the
+    most own-words characters wins, so one long pasted text cannot outvote the
+    user's sentences. None when no message is confident or the language has no
+    entry in ``LANGUAGE_NAMES``: the caller then writes the generic "same
+    language as the user's messages" line -- never a default language, never
+    the language of an attachment.
     """
-    if not isinstance(texts, str):
-        texts = "\n".join(t for t in texts if t)
-    code = detect_language(texts[-_DETECTION_MAX_CHARS:])
-    return LANGUAGE_NAMES.get(code) if code else None
+    if isinstance(texts, str):
+        texts = [texts]
+    weights: dict[str, int] = {}
+    for text in texts:
+        words = own_words(text or "")[-_DETECTION_MAX_CHARS:]
+        code = detect_language(words)
+        if code in LANGUAGE_NAMES:
+            weights[code] = weights.get(code, 0) + len(words)
+    if not weights:
+        return None
+    return LANGUAGE_NAMES[max(weights, key=weights.__getitem__)]
 
 
 # ---------------------------------------------------------------------------
@@ -234,8 +278,15 @@ def _alternation(phrases) -> "re.Pattern[str]":
 _GREETING_RE = _alternation(_GREETING_PHRASES)
 _SMALL_TALK_RE = _alternation(_SMALL_TALK_PHRASES)
 _INTRO_RE = _alternation(_INTRO_PHRASES)
-# Words a "present yourself" request may keep ("in two sentences").
-_INTRO_TAIL_MAX_WORDS = 4
+# The only words a "present yourself" request may keep around the request
+# ("in two sentences, please"): anything else is a real subject ("and explain
+# physics", "in Star Wars") and the message gets a title.
+_INTRO_TAIL_WORDS = frozenset(
+    "en in un une one a two three deux trois dos tres 1 2 3 phrase phrases sentence "
+    "sentences frase frases mot mots word words ligne lignes line lines brievement "
+    "briefly brevemente short shortly quickly rapidement please stp svp por favor sil "
+    "te vous plait pls moi me 请 一下 吧".split()
+)
 
 
 def is_greeting(text: str) -> bool:
@@ -256,8 +307,7 @@ def is_greeting(text: str) -> bool:
         return True
     if not _INTRO_RE.search(rest):
         return False
-    tail = _INTRO_RE.sub(" ", rest).split()
-    return len(tail) <= _INTRO_TAIL_MAX_WORDS
+    return all(word in _INTRO_TAIL_WORDS for word in _INTRO_RE.sub(" ", rest).split())
 
 
 # ---------------------------------------------------------------------------
@@ -304,7 +354,19 @@ def strip_foreign_scripts(title: str, source: str) -> str:
     leftover spaces are collapsed.
     """
     allowed = {_script(c) for c in source} - {None}
+    # Latin is always welcome: product and technical names ("iPhone",
+    # "Docker", "Python") appear in titles of every language.
+    allowed.add("LATIN")
     if allowed & {"HIRAGANA", "KATAKANA"}:
         allowed |= {"HIRAGANA", "KATAKANA", "CJK"}
-    kept = [c for c in title if (s := _script(c)) is None or s in allowed]
+    kept = []
+    for i, c in enumerate(title):
+        script = _script(c)
+        if script is None or script in allowed or c == "µ":
+            kept.append(c)
+        elif script == "GREEK" and "GREEK" not in {
+            _script(n) for n in title[max(i - 1, 0) : i] + title[i + 1 : i + 2]
+        }:
+            # A lone Greek letter is a symbol (pi, lambda), not a word.
+            kept.append(c)
     return re.sub(r"\s+", " ", "".join(kept)).strip()
