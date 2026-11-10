@@ -185,8 +185,7 @@ export default function LandingPage() {
 
   // Stable fetcher for both models lists, reusable outside the mount effect
   // (e.g. to silently refresh a stale catalog after a failed download start, #167).
-  const refreshCatalog = useCallback(async () => {
-    setModelsLoading(true);
+  const loadCatalog = useCallback(async () => {
     try {
       const localResponse = await tracedFetch(`${API_BASE_URL}/llms/local`);
       if (localResponse.ok) {
@@ -205,6 +204,13 @@ export default function LandingPage() {
     }
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
+
+  // The mount read starts with `modelsLoading` already true; only a later
+  // refresh has to raise it.
+  const refreshCatalog = useCallback(() => {
+    setModelsLoading(true);
+    return loadCatalog();
+  }, [loadCatalog]);
 
   useEffect(() => {
     const fetchWelcomePopupStatus = async () => {
@@ -250,9 +256,12 @@ export default function LandingPage() {
     fetchWelcomePopupStatus();
     fetchHardwareEvaluation();
     fetchMachineDetail();
-    refreshCatalog();
+    // loadCatalog sets state only once its requests have answered (the rule
+    // does not see the await): nothing is set while the effect runs.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    loadCatalog();
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [refreshCatalog]);
+  }, [loadCatalog]);
 
   const closeWelcome = () => {
     if (loading) {

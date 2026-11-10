@@ -41,7 +41,9 @@ export default function UpdatesCard() {
   const [currentVersion, setCurrentVersion] = useState(null);
   // Whether an updater exists at all: electron-updater is loaded in packaged
   // builds only, so in dev there is nothing to check against.
-  const [supported, setSupported] = useState(true);
+  // No bridge at all (a browser, a test) is not a failure: there is simply no
+  // updater on this side.
+  const [supported, setSupported] = useState(() => Boolean(window.updaterAPI?.getState));
   // {phase, version, percent, downloadedVersion}; phases: "idle" | "checking" |
   // "up-to-date" | "available" | "downloading" | "downloaded" | "error".
   const [updater, setUpdater] = useState(IDLE);
@@ -76,8 +78,6 @@ export default function UpdatesCard() {
       }
     };
 
-    // No bridge at all (a browser, a test) is not a failure: there is simply
-    // no updater on this side.
     if (window.updaterAPI?.getState) {
       window.updaterAPI
         .getState()
@@ -87,8 +87,6 @@ export default function UpdatesCard() {
           // degraded read, not a broken feature.
           log.warn("The app process did not answer the updater state request", error);
         });
-    } else {
-      setSupported(false);
     }
 
     window.diagnosticsAPI

@@ -1,4 +1,4 @@
-import React, { useEffect, useId, useState } from "react";
+import React, { useId, useState } from "react";
 import PropTypes from "prop-types";
 import { useTranslation } from "react-i18next";
 import ModalShell from "./ModalShell";
@@ -87,9 +87,17 @@ export default function ConfigPopup({ isOpen, onClose, settings, model }) {
 
   // The instructions are edited locally and saved on Save.
   const [instructions, setInstructions] = useState(values.custom_prompt ?? "");
-  useEffect(() => {
-    setInstructions(values.custom_prompt ?? "");
-  }, [values.custom_prompt, isOpen]);
+  // Re-read whenever the saved value changes or the popup opens or closes:
+  // adjusted while rendering, so no render shows the stale text.
+  const savedInstructions = values.custom_prompt ?? "";
+  const [seenInstructions, setSeenInstructions] = useState({
+    saved: savedInstructions,
+    isOpen,
+  });
+  if (seenInstructions.saved !== savedInstructions || seenInstructions.isOpen !== isOpen) {
+    setSeenInstructions({ saved: savedInstructions, isOpen });
+    setInstructions(savedInstructions);
+  }
 
   const webSearchReason = webSearchUnavailabilityReason(model);
   const webSearchHelp = webSearchReason

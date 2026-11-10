@@ -47,7 +47,9 @@ let seenContext;
 
 function Consumer() {
   const ctx = useDownloadModal();
-  seenContext = ctx;
+  React.useEffect(() => {
+    seenContext = ctx;
+  });
   return (
     <>
       <button onClick={() => ctx.open(currentModel, { onComplete, onError })}>OPEN</button>

@@ -14,7 +14,9 @@ const INFO_NOTICE_MS = 6000;
 export default function CommandNotice({ notice, onDismiss }) {
   const { t } = useTranslation();
   const onDismissRef = useRef(onDismiss);
-  onDismissRef.current = onDismiss;
+  useEffect(() => {
+    onDismissRef.current = onDismiss;
+  });
 
   useEffect(() => {
     if (notice?.tone !== "info") return undefined;

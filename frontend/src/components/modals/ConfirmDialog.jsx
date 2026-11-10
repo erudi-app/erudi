@@ -24,8 +24,8 @@ export default function ConfirmDialog({
   // render, and only a ref is read fresh by them.
   const confirmedRef = useRef(false);
   const openRef = useRef(isOpen);
-  openRef.current = isOpen;
   useEffect(() => {
+    openRef.current = isOpen;
     if (isOpen) confirmedRef.current = false;
   }, [isOpen]);
 
