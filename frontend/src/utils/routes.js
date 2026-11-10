@@ -10,3 +10,6 @@ export const SETTINGS_PATH = "/erudi/settings";
 
 /** Path to the diagnostics page (the bug button at the bottom of the rail). */
 export const DIAGNOSTICS_PATH = "/erudi/diagnostics";
+
+/** Path to the Models page: installed models, the catalog, and re-binding an orphaned assistant. */
+export const MODELS_PATH = "/erudi/models";

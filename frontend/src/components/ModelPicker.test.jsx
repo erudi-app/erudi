@@ -204,4 +204,12 @@ describe("ModelPicker", () => {
     );
     expect(document.activeElement).toBe(fallback.current);
   });
+
+  it("points to Models, not to a re-bind, when nothing can be offered", () => {
+    setup({ models: [MODELS[2]], modelName: "", attention: true, currentId: null });
+    fireEvent.click(screen.getByRole("button", { name: "Please select a model" }));
+    expect(
+      screen.getByText("No installed model can be used. Open Models to download one.")
+    ).toBeTruthy();
+  });
 });

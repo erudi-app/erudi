@@ -330,18 +330,15 @@ describe("a model whose weights are missing (#376)", () => {
     expect(within(dialog).getByRole("button", { name: /Alpha Model/ })).toBeTruthy();
   });
 
-  it("leaves nothing selected and the composer disabled when it is the only model", async () => {
-    models = [ORPHAN];
+  it("offers guidance instead of a composer when it is the only model (#690)", async () => {
+    models = [{ ...ORPHAN, kb_id: 3, is_attached_to_kb: true }];
     render(
       <MemoryRouter initialEntries={["/erudi/chat"]}>
         <ChatPage />
       </MemoryRouter>
     );
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Please select a model" }).textContent).toBe(
-        "Please select a model"
-      )
-    );
-    expect(composer().disabled).toBe(true);
+    expect(await screen.findByText(/was deleted/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Please select a model" })).toBeNull();
+    expect(screen.queryByRole("combobox")).toBeNull();
   });
 });
