@@ -402,7 +402,7 @@ non-functional behavior.
 - [ ] When **some** files fail but at least one ingests, then the job still completes for the good ones.
 - [ ] When ingestion **fails** (network/HTTP), then an error dialog shows the reason.
 - [ ] When the selected base model **already has a KB**, then submitting **updates** the existing KB with the new files instead of creating a new assistant.
-- [ ] *(not built yet: v1.3.0, #705 — record as not applicable)* When I add a `.docx` saved by **TextEdit** (no styles part) to a Knowledge Base in the **packaged** app, then it is indexed like a Word document. When any file of a batch fails, the end of the job names that file and the reason instead of a plain success; adding the same file again later indexes it (a failed file never blocks its own re-ingestion).
+- [ ] When I add a `.docx` saved by **TextEdit** (no styles part) to a Knowledge Base in the **packaged** app, then it is indexed like a Word document. When any file of a batch fails, the end of the job names that file, and points to Diagnostics for the reason, instead of a plain success; adding the same file again later indexes it (a failed file never blocks its own re-ingestion).
 
 **Embeddings run without the torch stack (footprint)**
 - [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When I create an assistant and ask a document question, then ingestion and retrieval work exactly as before — embeddings now come from a **dedicated child** (`llama-server --embeddings` on Windows/Linux, `mlx_vlm.server` on Apple Silicon), not from the in-process sentence-transformers stack.

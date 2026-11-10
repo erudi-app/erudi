@@ -17,6 +17,7 @@ Architecture:
     - Database session handling
 """
 
+from datetime import datetime
 from typing import Optional
 from sqlalchemy import func
 from sqlalchemy.orm import Session
@@ -126,6 +127,32 @@ class KB_Repository:
             .first()
         )
 
+    def delete_document(self, db: Session, document: KnowledgeDocument) -> None:
+        """Delete one document row; its chunks follow through ON DELETE CASCADE."""
+        db.delete(document)
+        db.commit()
+        logger.info(f"Deleted KnowledgeDocument {document.id} ({document.name})")
+
+    def list_failed_documents_since(
+        self, db: Session, kb_id: int, since: datetime
+    ) -> list[KnowledgeDocument]:
+        """Documents of one KB whose ingestion failed, created at or after ``since``.
+
+        A KBJob has no column for its failures: the documents it created are
+        the ones stamped from the job's start on, so ``since`` is the job's
+        ``created_at``. Oldest first, the order the files were ingested.
+        """
+        return (
+            db.query(KnowledgeDocument)
+            .filter(
+                KnowledgeDocument.kb_id == kb_id,
+                KnowledgeDocument.status == "failed",
+                KnowledgeDocument.created_at >= since,
+            )
+            .order_by(KnowledgeDocument.id)
+            .all()
+        )
+
     def create_document(
         self,
         db: Session,
@@ -134,6 +161,7 @@ class KB_Repository:
         name: str,
         content_hash_sha256: str,
         size_bytes: int,
+        status: str = "active",
     ) -> KnowledgeDocument:
         """Create a KnowledgeDocument row (status defaults to "active").
 
@@ -145,6 +173,7 @@ class KB_Repository:
             name=name,
             content_hash_sha256=content_hash_sha256,
             size_bytes=size_bytes,
+            status=status,
         )
         db.add(document)
         db.flush()
@@ -326,6 +355,14 @@ class KB_Repository:
             db.query(KBJobModel)
             .filter(KBJobModel.new_model_id == model_id)
             .order_by(KBJobModel.id.desc())
+            .first()
+        )
+
+    def get_unfinished_kb_job(self, db: Session, kb_id: int) -> Optional[KBJobModel]:
+        """The pending or running job of one KB, if any (one at a time per KB)."""
+        return (
+            db.query(KBJobModel)
+            .filter(KBJobModel.kb_id == kb_id, KBJobModel.status.in_(["pending", "running"]))
             .first()
         )
 

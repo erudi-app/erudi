@@ -18,12 +18,20 @@
       "title": "Tell your assistant what you would use it for!",
       "descriptionPlaceholder": "Write a description",
       "success": "Data attached to your Assistant successfully!",
+      "partialCreated_one": "The assistant was created, but {{count}} file could not be indexed: {{files}}. The reason is on the Diagnostics page.",
+      "partialCreated_other": "The assistant was created, but {{count}} files could not be indexed: {{files}}. The reason is on the Diagnostics page.",
+      "partialUpdated_one": "The knowledge base was updated, but {{count}} file could not be indexed: {{files}}. The reason is on the Diagnostics page.",
+      "partialUpdated_other": "The knowledge base was updated, but {{count}} files could not be indexed: {{files}}. The reason is on the Diagnostics page.",
+      "moreFiles_one": "and {{count}} more",
+      "moreFiles_other": "and {{count}} more",
       "create": "Create Assistant",
       "creating": "Creating Assistant..."
     },
     "errors": {
       "missingFields": "Please fill in all required fields",
-      "duplicateName": "A model named \"{{name}}\" already exists. Choose a different assistant name."
+      "duplicateName": "A model named \"{{name}}\" already exists. Choose a different assistant name.",
+      "failedFiles_one": "{{count}} file could not be indexed: {{files}}. The reason is on the Diagnostics page.",
+      "failedFiles_other": "{{count}} files could not be indexed: {{files}}. The reason is on the Diagnostics page."
     }
   },
   "confirm": {

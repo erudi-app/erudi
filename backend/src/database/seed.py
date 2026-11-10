@@ -1104,7 +1104,18 @@ class Job_Cleanup_Service:
                 logger.error(f"Error cleaning KB job {job.id}: {e}")
                 continue
 
-        if count > 0:
+        # A quit mid-file leaves its document `indexing`, without chunks. Make it
+        # `failed`: the dedup skips every other status, `failed` is the one that
+        # lets the same file be added again.
+        stranded = (
+            self.db.query(KnowledgeDocument).filter(KnowledgeDocument.status == "indexing").all()
+        )
+        for document in stranded:
+            document.status = "failed"
+        if stranded:
+            logger.info(f"Marked {len(stranded)} interrupted document(s) as failed")
+
+        if count > 0 or stranded:
             self.db.commit()
 
         return count

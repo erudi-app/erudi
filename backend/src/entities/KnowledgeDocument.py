@@ -8,6 +8,9 @@ table (langchain-postgres), keyed back here through a ``document_id`` metadata
 column.
 
 Statuses:
+    - ``indexing``: registered, chunks not stored yet. The row is committed
+      before indexing (the chunks' foreign key needs it), so this is what a
+      quit mid-file leaves behind; startup turns it into ``failed``.
     - ``active``: extracted, chunked, and indexed — retrievable.
     - ``empty``: extracted but produced zero indexable chunks (blank/whitespace
       file or a parser that yielded no text); nothing searchable was added.
@@ -22,7 +25,7 @@ from sqlalchemy.sql import func
 
 from src.database.core import Base
 
-ALLOWED_STATUSES = ("active", "empty", "failed", "pending_vision")
+ALLOWED_STATUSES = ("indexing", "active", "empty", "failed", "pending_vision")
 
 
 class KnowledgeDocument(Base):

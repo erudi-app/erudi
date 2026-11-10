@@ -125,6 +125,41 @@ describe("KnowledgeBaseContext creation success", () => {
     expect(val("creating")).toBe("false");
   });
 
+  it("hands the files that failed to onComplete, empty when none did", async () => {
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status: "completed", failed_files: ["maintenance.docx", "b.pdf"] }),
+    });
+    renderProvider();
+    await startAndPollOnce();
+    expect(onComplete).toHaveBeenCalledWith({ failedFiles: ["maintenance.docx", "b.pdf"] });
+
+    cleanup();
+    onComplete.mockReset();
+    statusResponder = () => ({ ok: true, json: async () => ({ status: "completed" }) });
+    renderProvider();
+    await startAndPollOnce();
+    expect(onComplete).toHaveBeenCalledWith({ failedFiles: [] });
+  });
+
+  it("hands the failed files to onError when the whole job failed", async () => {
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({
+        status: "failed",
+        error_message: "No searchable content could be indexed",
+        failed_files: ["maintenance.docx"],
+      }),
+    });
+    renderProvider();
+    await startAndPollOnce();
+
+    expect(onError).toHaveBeenCalledWith("No searchable content could be indexed", {
+      failedFiles: ["maintenance.docx"],
+    });
+    expect(onComplete).not.toHaveBeenCalled();
+  });
+
   it("hands off from isStarting to isCreating once the create call returns", async () => {
     statusResponder = () => ({ ok: true, json: async () => ({ status: "running" }) });
     renderProvider();
@@ -185,7 +220,7 @@ describe("KnowledgeBaseContext failure routing", () => {
 
     await startAndPollOnce();
 
-    expect(onError).toHaveBeenCalledWith("ingestion crashed");
+    expect(onError).toHaveBeenCalledWith("ingestion crashed", { failedFiles: [] });
     expect(onComplete).not.toHaveBeenCalled();
     expect(val("creating")).toBe("false");
   });
@@ -196,7 +231,9 @@ describe("KnowledgeBaseContext failure routing", () => {
 
     await startAndPollOnce();
 
-    expect(onError).toHaveBeenCalledWith("Assistant creation failed unexpectedly");
+    expect(onError).toHaveBeenCalledWith("Assistant creation failed unexpectedly", {
+      failedFiles: [],
+    });
   });
 
   it("surfaces a status poll error through onError and stops creating", async () => {

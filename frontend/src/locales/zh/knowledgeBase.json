@@ -18,12 +18,20 @@
       "title": "告诉助手您打算用它做什么！",
       "descriptionPlaceholder": "填写描述",
       "success": "数据已成功关联到您的助手！",
+      "partialCreated_one": "助手已创建，但有 {{count}} 个文件无法建立索引：{{files}}。原因请见“诊断信息”页面。",
+      "partialCreated_other": "助手已创建，但有 {{count}} 个文件无法建立索引：{{files}}。原因请见“诊断信息”页面。",
+      "partialUpdated_one": "知识库已更新，但有 {{count}} 个文件无法建立索引：{{files}}。原因请见“诊断信息”页面。",
+      "partialUpdated_other": "知识库已更新，但有 {{count}} 个文件无法建立索引：{{files}}。原因请见“诊断信息”页面。",
+      "moreFiles_one": "等另外 {{count}} 个",
+      "moreFiles_other": "等另外 {{count}} 个",
       "create": "创建助手",
       "creating": "正在创建助手..."
     },
     "errors": {
       "missingFields": "请填写所有必填项",
-      "duplicateName": "已存在名为“{{name}}”的模型。请为助手选择另一个名称。"
+      "duplicateName": "已存在名为“{{name}}”的模型。请为助手选择另一个名称。",
+      "failedFiles_one": "有 {{count}} 个文件无法建立索引：{{files}}。原因请见“诊断信息”页面。",
+      "failedFiles_other": "有 {{count}} 个文件无法建立索引：{{files}}。原因请见“诊断信息”页面。"
     }
   },
   "confirm": {

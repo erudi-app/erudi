@@ -51,7 +51,8 @@ export function KnowledgeBaseProvider({ children }) {
           setIsCreating(false);
           setShowSpinner(false);
           if (data.status === "completed") {
-            callbacksRef.current.onComplete?.();
+            // A job can complete with some files failed: name them to the page.
+            callbacksRef.current.onComplete?.({ failedFiles: data.failed_files ?? [] });
           } else {
             // The backend logged the traceback under this job; this side
             // records that the assistant the user asked for was not built.
@@ -61,7 +62,9 @@ export function KnowledgeBaseProvider({ children }) {
             const errorMsg =
               data.error_message || t("knowledgeBase:creation.errors.failedUnexpectedly");
             setErrorMessage(errorMsg);
-            callbacksRef.current.onError?.(errorMsg);
+            // The names ride along: when every file failed, they are the part
+            // of the story the message alone does not tell.
+            callbacksRef.current.onError?.(errorMsg, { failedFiles: data.failed_files ?? [] });
           }
         }
       } catch (err) {

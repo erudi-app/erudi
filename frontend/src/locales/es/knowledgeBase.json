@@ -18,12 +18,20 @@
       "title": "Indique a su asistente para qué lo va a usar",
       "descriptionPlaceholder": "Escribe una descripción",
       "success": "Datos adjuntados a su asistente correctamente",
+      "partialCreated_one": "El asistente se creó, pero {{count}} archivo no se pudo indexar: {{files}}. El motivo está en la página Diagnóstico.",
+      "partialCreated_other": "El asistente se creó, pero {{count}} archivos no se pudieron indexar: {{files}}. El motivo está en la página Diagnóstico.",
+      "partialUpdated_one": "La base de conocimientos se actualizó, pero {{count}} archivo no se pudo indexar: {{files}}. El motivo está en la página Diagnóstico.",
+      "partialUpdated_other": "La base de conocimientos se actualizó, pero {{count}} archivos no se pudieron indexar: {{files}}. El motivo está en la página Diagnóstico.",
+      "moreFiles_one": "y {{count}} más",
+      "moreFiles_other": "y {{count}} más",
       "create": "Crear asistente",
       "creating": "Creando asistente..."
     },
     "errors": {
       "missingFields": "Rellene todos los campos obligatorios",
-      "duplicateName": "Ya existe un modelo llamado \"{{name}}\". Elige otro nombre para el asistente."
+      "duplicateName": "Ya existe un modelo llamado \"{{name}}\". Elige otro nombre para el asistente.",
+      "failedFiles_one": "{{count}} archivo no se pudo indexar: {{files}}. El motivo está en la página Diagnóstico.",
+      "failedFiles_other": "{{count}} archivos no se pudieron indexar: {{files}}. El motivo está en la página Diagnóstico."
     }
   },
   "confirm": {
