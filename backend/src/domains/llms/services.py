@@ -164,9 +164,11 @@ def get_active_download_tracker(job_id: int) -> Optional["DownloadTracker"]:
 def track_download(job_id: int) -> "DownloadTracker":
     """Register a tracker for ``job_id`` and return it, for ``download_llm``.
 
-    The download task does this before it claims its job row: a cancel then
-    either finds the row still pending (and the claim fails) or finds the
-    tracker; it never falls between the two.
+    The download task does this before it claims its job row (``pending`` to
+    ``running``). A cancel that found no tracker writes ``cancelled`` over a
+    ``pending`` row only: then either the claim fails and the task stops, or
+    the claim won and the cancel's write matches nothing, and the cancel
+    looks again, finds this tracker and signals it (``cancel_download_job``).
     """
     tracker = DownloadTracker()
     _register_tracker(job_id, tracker)
@@ -1218,7 +1220,25 @@ def cancel_download_job(job_id: int, job_repo, llm_repo, db) -> dict:
 
     # Conditional: a job that ended since the check above (completed,
     # failed) is never turned into a cancel, and nothing of it is touched.
-    if not job_repo.mark_cancelled_if_active(job_id):
+    # With no tracker found, only a still-pending row is cancelled: a task
+    # that claimed the row meanwhile has registered its tracker first, which
+    # a second look finds and signals.
+    rows = job_repo.mark_cancelled_if_active(
+        job_id, ("pending", "running") if tracker is not None else ("pending",)
+    )
+    if not rows and tracker is None:
+        tracker = get_active_download_tracker(job_id)
+        if tracker is not None:
+            if not tracker.cancel():
+                db.rollback()
+                raise StateConflictException(
+                    f"Download job {job_id} is completing and can no longer be cancelled",
+                    status_code=409,
+                    detail={"reason": "completing", "job_id": job_id},
+                )
+            logger.info(f"Signaled cancellation for download job {job_id} (it started meanwhile)")
+            rows = job_repo.mark_cancelled_if_active(job_id)
+    if not rows:
         db.rollback()
         raise StateConflictException(
             "Cannot cancel a job that is already completed, failed, or cancelled"

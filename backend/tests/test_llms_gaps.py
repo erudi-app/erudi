@@ -468,7 +468,10 @@ class TestDownloadStatusCleanup:
         not 404 `MODEL_NOT_FOUND` / "LLM None" on the second poll.
         """
         llm = _add_llm(test_db_session, local=2)
-        job = _add_job(test_db_session, llm.id, status="running")
+        # No transfer runs in this test, so the job is the one a cancel with
+        # no tracker can take: still pending (a running row always has its
+        # task's tracker registered).
+        job = _add_job(test_db_session, llm.id, status="pending")
 
         with patch.object(Download_Job_Repository, "cleanup_job_files"):
             cancel_resp = client.post(f"/erudi/llms/downloads/{job.id}/cancel")

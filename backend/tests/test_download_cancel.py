@@ -329,8 +329,8 @@ class _RealDownload:
         real_mark_cancelled = getattr(repo, "mark_cancelled_if_active", None)
         flushed = self.flushed
 
-        def mark_cancelled_if_active(self, job_id):
-            rows = real_mark_cancelled(self, job_id)
+        def mark_cancelled_if_active(self, job_id, *args, **kwargs):
+            rows = real_mark_cancelled(self, job_id, *args, **kwargs)
             flushed.set()
             return rows
 
@@ -516,6 +516,75 @@ class TestCancelRacingTheDownloadTask:
         assert time.monotonic() - started < 5
         assert requested == []
         assert real_download.job().status == "cancelled"
+        assert _errors(caplog) == []
+
+    def test_a_cancel_that_found_no_tracker_still_stops_a_task_that_started_meanwhile(
+        self, real_download, monkeypatch, caplog
+    ):
+        """The cancel looks for a tracker and finds none; before it writes,
+        the task registers its tracker and claims the row (``running``). The
+        cancel must then signal that tracker, not cancel the row behind the
+        transfer's back (which would download the model into orphan files)."""
+        from src.domains.llms.repository import Download_Job_Repository, Llm_Repository
+
+        self_files = ["config.json"]
+        monkeypatch.setattr(llm_services, "HfApi", lambda token=None: _fake_api(self_files))
+        chunks: list[int] = []
+
+        class Fs:
+            def get_file(self, remote, dest, cb):
+                Path(dest).parent.mkdir(parents=True, exist_ok=True)
+                with open(dest, "wb") as handle:
+                    for i in range(200):
+                        time.sleep(0.05)
+                        handle.write(b"\x00")
+                        chunks.append(i)
+                        cb.relative_update(1)
+
+        monkeypatch.setattr(llm_services, "HfFileSystem", lambda token=None: Fs())
+        task = threading.Thread(
+            target=llm_endpoints._run_download_task,
+            args=(
+                "org/model",
+                real_download.llm_id,
+                str(real_download.temp_dir),
+                str(real_download.final_dir),
+                real_download.job_id,
+            ),
+        )
+        real_get_tracker = llm_services.get_active_download_tracker
+        looks = {"n": 0}
+
+        def get_tracker_while_the_task_starts(job_id):
+            looks["n"] += 1
+            if looks["n"] > 1:
+                return real_get_tracker(job_id)
+            # The cancel's first look: no transfer yet. The task starts now
+            # and claims its row before the cancel writes.
+            task.start()
+            deadline = time.monotonic() + 10
+            while real_download.job().status != "running":
+                assert time.monotonic() < deadline
+                time.sleep(0.02)
+            return None
+
+        monkeypatch.setattr(
+            llm_services, "get_active_download_tracker", get_tracker_while_the_task_starts
+        )
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            with real_download.Session() as db:
+                llm_services.cancel_download_job(
+                    real_download.job_id, Download_Job_Repository(db), Llm_Repository(db), db
+                )
+            task.join(20)
+
+        assert not task.is_alive()
+        # The transfer saw the cancel: it stopped long before its 200 chunks.
+        assert len(chunks) < 100
+        assert real_download.job().status == "cancelled"
+        assert not real_download.temp_dir.exists()
+        assert not real_download.final_dir.exists()
         assert _errors(caplog) == []
 
     def test_a_cancel_of_a_job_that_just_ended_is_refused_and_touches_nothing(

@@ -406,18 +406,22 @@ class Download_Job_Repository:
         logger.info(f"Created download job {job.id}")
         return job
 
-    def mark_cancelled_if_active(self, job_id: int) -> int:
-        """Set the job ``cancelled`` if it is still ``pending`` or ``running``.
+    def mark_cancelled_if_active(
+        self, job_id: int, statuses: tuple = ("pending", "running")
+    ) -> int:
+        """Set the job ``cancelled`` if its status is still one of ``statuses``.
 
         One conditional UPDATE, so a job that ended meanwhile (completed,
-        failed, cancelled by someone else) is never turned into a cancel.
-        Returns the rows written (0 or 1). Does not commit.
+        failed, cancelled by someone else) is never turned into a cancel; a
+        cancel that found no transfer passes ``("pending",)`` only, so a job
+        whose task claimed it meanwhile is not cancelled behind its transfer's
+        back. Returns the rows written (0 or 1). Does not commit.
         """
         return (
             self.db.query(DownloadJobModel)
             .filter(
                 DownloadJobModel.id == job_id,
-                DownloadJobModel.status.in_(["pending", "running"]),
+                DownloadJobModel.status.in_(list(statuses)),
             )
             .update({"status": "cancelled"}, synchronize_session=False)
         )

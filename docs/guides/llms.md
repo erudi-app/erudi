@@ -178,8 +178,12 @@ Once every file is transferred the download is being installed and a cancel is r
 with `409`: the job then ends `completed`, or `failed` if the integrity gate rejects the
 files. A cancel of a job that ended meanwhile is refused (`400`) and touches nothing. A
 cancel that lands before the download task started leaves the job `cancelled` and nothing
-is downloaded: the task claims its job only while it is still `pending`. A cancel logs
-nothing above INFO.
+is downloaded: the task registers its transfer, then claims its job only while it is still
+`pending`. A cancel that finds no transfer cancels a `pending` job only; if the task has
+claimed it meanwhile, the cancel finds its transfer and stops it like any other. A
+`running` job whose task is gone cannot be cancelled (`400`): the next start resolves it.
+A cancel logs nothing above INFO. While the engine switch waits for a download being
+installed, its control says so ("Waiting for the download to finish installing…").
 
 Quitting the app is not a cancel: the backend interrupts the download, leaves the job
 `running` and its partial files on disk, and the next start resolves them (the job ends
