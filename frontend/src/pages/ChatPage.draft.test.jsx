@@ -221,6 +221,30 @@ describe("the new-conversation page", () => {
     expect(createBody()).toEqual({ llm_id: 42 });
   });
 
+  it("the header's model name switches the draft's model like the Model button (#704)", async () => {
+    defaultsByModel[42] = resolved({
+      llm_id: 42,
+      reasoning_effort: { value: "low", source: "saved" },
+    });
+    await renderPage();
+    fireEvent.click(screen.getByRole("button", { name: /Alpha Model/ }));
+    fireEvent.click(screen.getByRole("option", { name: "Beta Model" }));
+    await waitFor(() => expect(header().textContent).toBe("You are chatting with Beta Model"));
+    await waitFor(() => expect(getMock).toHaveBeenCalledWith("/llms/42/conversation_defaults"));
+  });
+
+  it("the settings window's Save as defaults button saves the draft values", async () => {
+    putMock.mockResolvedValue(resolved());
+    await renderPage();
+    typeAndEnter("/config");
+    fireEvent.click(
+      await screen.findByRole("button", { name: "Save as defaults for Alpha Model" })
+    );
+    await screen.findByText("Saved as defaults for Alpha Model.");
+    expect(putMock).toHaveBeenCalledWith("/llms/7/conversation_defaults", expect.any(Object));
+    expect(createCalls()).toHaveLength(0);
+  });
+
   it("/config global saves the draft values for the picked model", async () => {
     putMock.mockResolvedValue(resolved());
     await renderPage();
@@ -314,7 +338,9 @@ describe("a model whose weights are missing (#376)", () => {
       </MemoryRouter>
     );
     await waitFor(() =>
-      expect(screen.getByRole("alert").textContent).toBe("Please select a model")
+      expect(screen.getByRole("button", { name: "Please select a model" }).textContent).toBe(
+        "Please select a model"
+      )
     );
     expect(composer().disabled).toBe(true);
   });

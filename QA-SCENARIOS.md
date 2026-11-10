@@ -51,7 +51,7 @@ non-functional behavior.
 ## Chat — `/erudi/chat`
 
 **Happy path**
-- [ ] *(not built yet: v1.3.0, #704 — record as not applicable)* When I open Chat with at least one local model, then the first model is auto-selected and the header reads "You are chatting with <model>"; the model name in the header, or the panel's **Model** button, changes it.
+- [ ] When I open Chat with at least one local model, then the first model is auto-selected and the header reads "You are chatting with <model>"; clicking the model name (a picker), or the panel's **Model** button, changes it.
 - [ ] When I type a prompt and press Enter, then it sends; Shift+Enter inserts a newline.
 - [ ] When I send a prompt, then a new conversation is created and I am taken to it, where the reply **streams token by token**.
 - [ ] When I adjust values through the header's **Config** or **Effort** before the first message, then the conversation is created with them and `/config` shows them once it opens.
@@ -239,7 +239,7 @@ non-functional behavior.
 - [ ] When web search is ON and I ask something the model already knows ("capital of France"), then it answers **directly with zero web calls**.
 - [ ] When web search is ON but the machine is **offline**, then the turn completes with the model relaying the honest tool text ("Error during Web Search: no internet connection") — no hang, no invented answer.
 - [ ] When the conversation's model is **not verified tool-capable**, then the Web search switch in `/config` is **disabled** (greyed, cannot be flipped) and its help explains why — one wording for a model that **can't** use tools, another for one whose tool support **hasn't been verified** yet. The model never receives the web tool either way.
-- [ ] When the Settings page describes the **Web Search** control, then it reads as the starting value for **new** conversations (each conversation keeps its own switch in `/config`) — not as a global switch.
+- [ ] When the Settings page describes the **Web Search** control, then it reads as the starting value for **new** conversations (each conversation keeps its own switch in its settings) — not as a global switch, and without any slash command name.
 - [ ] When I change the **global** web-search default in Settings, then existing conversations keep their own switch unchanged; only conversations created afterwards on models without saved defaults inherit the new default.
 
 **Multimodal / multi-turn**
@@ -265,7 +265,7 @@ non-functional behavior.
 - [ ] When generation **fails** or the connection **drops** mid-reply, then a red error message shows, its headline in the interface language, and any partial reply is kept.
 - [ ] When a **long conversation** on a **big model / small machine** reaches the point where the model needs more than two minutes just to read the history before writing its first word (e.g. a 9B model on a 16 GB laptop, a dozen long turns in), then the answer still arrives — the turn is no longer cut at exactly two minutes of silence. If it genuinely never starts, the red turn says the model did not start answering for a prompt of that size and suggests sending less, instead of a generic error.
 - [ ] When an answer contains a **markdown image pointing at a web address** (ask the model to reply with exactly `![logo](https://example.com/logo.png)`), then no picture is fetched or shown — at most a broken-image placeholder — because the window loads no remote images, so no site learns my address from an answer on screen.
-- [ ] When the conversation's assigned model was **deleted**, then the conversation survives with no model assigned: sending is **blocked**, the header shows a red "Please select a model" attention state, and **explicitly picking** an installed model via the header's **Model** button unblocks sending (no auto-fallback); opening `/context` or running `/compact` on it says to pick a model first and never assigns one.
+- [ ] When the conversation's assigned model was **deleted**, then the conversation survives with no model assigned: sending is **blocked**, the header shows a red "Please select a model" attention state, and **explicitly picking** an installed model, from the red text itself or via the panel's **Model** button, unblocks sending (no auto-fallback); opening `/context` or running `/compact` on it says to pick a model first and never assigns one.
 - [ ] When a model writes a **very long answer** (tens of thousands of characters, e.g. ask for a long detailed document), then after the answer ends and the conversation is **reloaded**, the answer is still there in full — what was shown is what was stored.
 - [ ] When I paste a **very long message** (several tens of thousands of characters), then it is accepted and handled by the honest overflow path — no ugly low-level `422` error; if it exceeds the window, the same honest "prompt size vs window" message applies.
 - [ ] When a turn fails with an unexpected error, then the red bubble's headline is in my interface language and a discreet **Details** control reveals the exact cause in one line, as the backend wrote it (not translated), with a request id — never a stack trace, and a file path shows as its file name only.
@@ -293,15 +293,15 @@ non-functional behavior.
 ## Session controls & slash commands — the chat composer
 
 **Header**
-- [ ] *(not built yet: v1.3.0, #704 — record as not applicable)* When I open a conversation, then the header reads "You are chatting with <model name>", where the model name is a picker (see the model-name picker line below); the panel keeps its **Model** button.
+- [ ] When I open a conversation, then the header reads "You are chatting with <model name>", where the model name is a picker (see the model-name picker line below); the panel keeps its **Model** button.
 - [ ] When I click the **settings icon** in the conversation header, then a panel opens with **one button per command** — Model, Config, Effort, Compact, Context — each opening that command's popup or panel, exactly as typing the command does.
-- [ ] *(not built yet: v1.3.0, #704 — record as not applicable)* When the conversation's model was deleted, then the model name in the header shows in red and opens the picker, the composer is blocked, and picking a model there unblocks sending.
+- [ ] When the conversation's model was deleted, then the model name in the header shows in red and opens the picker, the composer is blocked, and picking a model there unblocks sending.
 - [ ] When I open the **new-conversation page**, then it carries the same header and settings icon: the Model, Config and Effort buttons set the values the conversation will be created with, and Compact and Context are not offered (there is no conversation yet). The old inline settings block of that page is gone.
 - [ ] When I use the **Arena**, then its header is unchanged by this version (its own model pickers and sliders).
 - [ ] When I pick a model in an Arena panel, then that panel's creativity and diversity sliders start at the values saved for that model with `/config global`, else at its recommended values.
-- [ ] *(not built yet: v1.3.0, #704 — record as not applicable)* When I click the **model name** in the header, then a list of the installed models opens; picking one switches the conversation exactly as the panel's **Model** button does (that model's saved or recommended values applied at once). The picker works from the keyboard (focus, Enter or Space to open, arrows, Escape), is disabled while an answer is being written or a compaction runs, never lists a Knowledge Base assistant whose base model is gone, and the new-conversation page has the same picker. The panel keeps its **Model** button.
-- [ ] *(not built yet: v1.3.0, #704 — record as not applicable)* When no installed model can be offered (only an orphaned assistant), then the header's picker says how to get one (download a model, or re-bind the assistant) instead of an empty list.
-- [ ] *(not built yet: v1.3.0, #704 — record as not applicable)* When I open the header's settings panel and the Settings page, in each of the four interface languages, then no slash command name appears anywhere (no `/model`, `/config`, `/effort`…): buttons show their label only and Settings explains defaults in its own words. Slash commands remain a typing shortcut in the message box.
+- [ ] When I click the **model name** in the header, then a list of the installed models opens; picking one switches the conversation exactly as the panel's **Model** button does (that model's saved or recommended values applied at once). The picker works from the keyboard (focus, Enter or Space to open, arrows, Escape), is disabled while an answer is being written or a compaction runs, never lists a Knowledge Base assistant whose base model is gone, and the new-conversation page has the same picker. The panel keeps its **Model** button.
+- [ ] When no installed model can be offered (only an orphaned assistant), then the header's picker says how to get one (download a model, or re-bind the assistant) instead of an empty list.
+- [ ] When I open the header's settings panel and the Settings page, in each of the four interface languages, then no slash command name appears anywhere (no `/model`, `/config`, `/effort`…): buttons show their label only and Settings explains defaults in its own words. Slash commands remain a typing shortcut in the message box.
 
 **Typing a command**
 - [ ] When I type **`/`** at the start of the composer, then a styled **drop-up** lists the available commands (`/config`, `/context`, `/compact`, `/effort`, `/model`) with a one-line description each.
@@ -327,7 +327,7 @@ non-functional behavior.
 - [ ] When I save defaults for a knowledge-base assistant, then they belong to that assistant, not to its base model, and they survive a **Re-bind** of the assistant to another model.
 - [ ] When I create a new conversation on a model whose defaults I saved, then it opens with exactly those values; on a model without saved defaults, it opens with the Settings defaults (effort, web search, threshold), the model's recommended creativity and diversity, and empty custom instructions.
 - [ ] When I delete a model and download it again, then it starts without saved defaults (a fresh download is a new model for the app).
-- [ ] *(not built yet: v1.3.0, #704 — record as not applicable)* When I open the conversation's settings window, then a **Save as defaults for <model>** button at its bottom does exactly what `/config global` does (same values saved, same confirmation), so the model's defaults are reachable without typing a command.
+- [ ] When I open the conversation's settings window, then a **Save as defaults for <model>** button at its bottom does exactly what `/config global` does (same values saved, same confirmation), so the model's defaults are reachable without typing a command. The button is disabled while an answer is being written or a compaction runs. The new-conversation page's settings window has the same button, saving the draft's values for the selected model.
 
 **/effort**
 - [ ] When I run **/effort**, then a popup opens on the **5-notch slider** at the conversation's current effort; changing it is saved at once (survives a reload) and takes effect on the next turn.
