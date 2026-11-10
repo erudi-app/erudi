@@ -9,6 +9,9 @@ interface translates it at display, numbers formatted for its language.
 """
 
 import itertools
+import json
+import re
+from pathlib import Path
 from typing import Any, ClassVar
 
 import pytest
@@ -345,3 +348,22 @@ async def test_an_ordinary_answer_carries_no_curated_trace(monkeypatch):
         thread_id="c-plain",
     )
     assert _curated_events(events) == []
+
+
+# ===== Every kind has a sentence in every interface language =====
+
+_LOCALES = Path(__file__).resolve().parents[2] / "frontend" / "src" / "locales"
+
+
+@pytest.mark.parametrize("language", ["en", "fr", "es", "zh"])
+def test_every_kind_has_its_sentence_with_exactly_its_placeholders(language):
+    """A kind the interface has no key for shows its stored English line: a
+    hole here is a curated turn left untranslated. The placeholders must be the
+    template's own, or a number goes missing from the sentence."""
+    chat = json.loads((_LOCALES / language / "chat.json").read_text(encoding="utf-8"))
+    curated = chat["curated"]
+
+    assert set(curated) == set(CURATED_KINDS)
+    for kind, spec in CURATED_KINDS.items():
+        placeholders = set(re.findall(r"\{\{\s*(\w+)\s*\}\}", curated[kind]))
+        assert placeholders == set(spec.params), (language, kind)
