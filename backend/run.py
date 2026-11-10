@@ -18,6 +18,8 @@ CUDA, MLX, and CPU builds.
     and Electron logs.
 
 **Supported error codes:**
+    - DATA_DIR_IN_USE: Another backend holds the data folder's lock (checked
+      before anything touches the embedded cluster; the frontend retries it)
     - NO_PORT_AVAILABLE: Every candidate port in the scan range is busy
     - CRASH_BEFORE_READY: Backend thread exited before binding port
     - PORT_TIMEOUT: Server did not bind within the startup window
@@ -41,6 +43,8 @@ CUDA, MLX, and CPU builds.
     * Watch the parent process for death (SIGKILLed Electron main leaves no one to
       kill us, #224) and turn a reparenting into the same clean shutdown. Opt out
       with ERUDI_NO_PARENT_WATCHDOG=1 for deliberately detached runs (nohup/setsid).
+    * Hold an OS lock on the data folder for the life of the process, so two
+      backends never share one cluster (DATA_DIR_IN_USE).
     * Bound the exit (#706): every shutdown path (SIGTERM/SIGINT, stdin EOF,
       parent death) goes through request_shutdown, which interrupts the model
       downloads at once; the launcher stops waiting for the server thread
@@ -128,6 +132,10 @@ EXIT_GRACE_SECONDS = 2.0
 # never reports: with the data-folder lock, an immortal backend would keep
 # the next Erudi from starting.
 SHUTDOWN_HARD_LIMIT_SECONDS = 60.0
+
+# Held for the whole life of the process (see src/launcher/data_dir_lock.py);
+# the OS releases it when the process ends.
+_DATA_DIR_LOCK = None
 
 
 def log_startup_failure(code: str, message: str, exc: "BaseException | None" = None) -> None:
@@ -761,6 +769,26 @@ def main() -> None:
         sys.exit(1)
     else:
         data_dir = runtime_paths.data_dir
+
+    # One backend per data folder, checked before anything touches it (the
+    # embedded cluster above all): a backend still exiting, or a second app,
+    # holds it. Held until the process ends; the OS releases it however the
+    # process ends. Not an Erudi defect, so a WARNING: the frontend retries
+    # and says so on screen if the folder stays taken.
+    global _DATA_DIR_LOCK
+    from src.launcher.data_dir_lock import DataDirInUse, acquire_data_dir_lock
+
+    try:
+        _DATA_DIR_LOCK = acquire_data_dir_lock(data_dir)
+    except DataDirInUse as exc:
+        try:
+            from src.core.logging import logger
+
+            logger.warning(f"startup_error DATA_DIR_IN_USE: {exc}")
+        except Exception:
+            print(f"[WARNING] startup_error DATA_DIR_IN_USE: {exc}", file=sys.stderr, flush=True)
+        emit_event({"event": "startup_error", "code": "DATA_DIR_IN_USE", "message": str(exc)})
+        sys.exit(1)
 
     # Windows-only: bind Postgres/llama-server's lifetime to this process at
     # the kernel level, before either is ever spawned. Unlike the parent-death

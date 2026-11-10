@@ -210,6 +210,17 @@ describe("isEnvironmental", () => {
     ).toBe(true);
   });
 
+  it("matches the backend startup refused because another backend holds the data folder", () => {
+    // backend/run.py writes it at WARNING; main.js records the start failure
+    // at ERROR once its respawns are spent. Another app holding the folder is
+    // the machine's state, like a taken port.
+    expect(
+      isEnvironmental({
+        message: "Backend start failed (DATA_DIR_IN_USE): backend reported startup_error",
+      })
+    ).toBe(true);
+  });
+
   it("does not treat a sibling startup_error code as environmental", () => {
     // IMPORT_ERROR/DATA_PREP_ERROR/CRASH_BEFORE_READY/UNEXPECTED_ERROR/
     // POLLING_ERROR are internal failures, not the machine's fault.

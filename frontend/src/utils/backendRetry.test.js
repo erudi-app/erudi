@@ -12,6 +12,12 @@ describe("classifyStartupError", () => {
     expect(classifyStartupError("PORT_TIMEOUT")).toBe("transient");
   });
 
+  it("marks a data folder still held by an exiting backend transient", () => {
+    // A relaunch right after a quit can meet the previous backend finishing
+    // its exit (a few seconds at most): a respawn a moment later gets the lock.
+    expect(classifyStartupError("DATA_DIR_IN_USE")).toBe("transient");
+  });
+
   it("marks everything else deterministic", () => {
     for (const code of [
       "IMPORT_ERROR",

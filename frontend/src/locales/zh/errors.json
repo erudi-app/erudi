@@ -5,6 +5,11 @@
     "checkLogsAt": "请查看 {{path}} 中的日志并联系我们。",
     "checkLogs": "请查看后端日志并联系我们。",
     "codes": {
+      "dataDirInUse": {
+        "title": "Erudi 已在运行",
+        "detail": "另一个 Erudi 后端正在使用本应用的数据文件夹。",
+        "hint": "请关闭另一个 Erudi 窗口，等待几秒后重试。"
+      },
       "portInUse": {
         "title": "端口已被占用",
         "detail": "另一个进程正在使用 Erudi 本地服务器所需的端口。",

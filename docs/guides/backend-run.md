@@ -175,6 +175,7 @@ per-generation table is in [Hardware Detection](hardware.md).
 
 | Code | Meaning |
 |---|---|
+| `DATA_DIR_IN_USE` | another backend holds the data folder's lock (transient; the frontend retries) |
 | `NO_PORT_AVAILABLE` | every port in the 27182-27199 scan is busy (transient; the frontend retries) |
 | `CRASH_BEFORE_READY` | the server thread exited before binding a port |
 | `PORT_TIMEOUT` | the server did not bind within the startup window |
@@ -212,6 +213,18 @@ deadline: if a thread still holds the interpreter's exit `EXIT_GRACE_SECONDS` la
 exit joins every executor thread, and a transfer parked in a network read is one), the
 process logs which threads and ends. A shutdown that never reports is cut off
 `SHUTDOWN_HARD_LIMIT_SECONDS` (60 s) after the request.
+
+### One backend per data folder
+
+Before anything touches the data folder, the launcher takes an exclusive OS lock on
+`<data dir>/backend.lock` (`flock` on macOS and Linux, `msvcrt.locking` on Windows) and
+holds it for the life of the process. A second backend on the same folder stops with
+`DATA_DIR_IN_USE` before it starts the cluster. The lock is the operating system's, so it
+is released however the process ends, and a leftover file never blocks a start; the file
+only carries the holder's pid for the message. Instances started with their own
+`ERUDI_DATA_ROOT` (the integration tests, a QA run beside the app) each lock their own
+folder. The Electron app also holds a single-instance lock: a second launch brings the
+running window forward and quits.
 
 ## Usage
 

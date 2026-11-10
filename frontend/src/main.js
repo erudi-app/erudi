@@ -193,6 +193,18 @@ if (require("electron-squirrel-startup")) {
   app.quit();
 }
 
+// One Erudi at a time. A second launch would spawn a second backend on the
+// same data folder while the first still runs (#706): it hands over to the
+// running instance instead, which brings its window forward, and quits before
+// it creates a window or spawns anything. The backend also refuses a data
+// folder another backend holds (DATA_DIR_IN_USE), for the backend still
+// finishing its exit after a quit.
+const hasSingleInstanceLock = app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  log("Another Erudi instance is running; handing over to it and quitting");
+  app.quit();
+}
+
 function resolvePackagedBackendPath() {
   // On Windows PyInstaller produces backend.exe; on macOS/Linux just backend
   const exeSuffix = process.platform === "win32" ? ".exe" : "";
@@ -1270,6 +1282,7 @@ function setupAutoUpdater() {
 app
   .whenReady()
   .then(async () => {
+    if (!hasSingleInstanceLock) return;
     log("App ready.");
 
     // Create application menu and window immediately — never block on backend startup.
@@ -1299,6 +1312,19 @@ app
     startBackendSupervised();
   })
   .catch((error) => logError("Application start-up failed", error));
+
+app.on("second-instance", () => {
+  // Another launch was attempted: show the window that already exists (on
+  // macOS it may have been closed with the app still in the dock).
+  log("Another launch was attempted; focusing the existing window");
+  if (mainWindow && !mainWindow.isDestroyed()) {
+    if (mainWindow.isMinimized()) mainWindow.restore();
+    mainWindow.show();
+    mainWindow.focus();
+  } else if (app.isReady()) {
+    createWindow();
+  }
+});
 
 app.on("activate", () => {
   if (BrowserWindow.getAllWindows().length === 0 && !mainWindow) {

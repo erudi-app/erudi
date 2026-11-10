@@ -11,7 +11,10 @@
 
 // startup_error codes worth an automatic respawn. run.py already scans a port
 // range internally, so even these rarely need it — kept minimal on purpose.
-export const TRANSIENT_CODES = new Set(["NO_PORT_AVAILABLE", "PORT_TIMEOUT"]);
+// DATA_DIR_IN_USE: the data folder is still held by the previous backend,
+// which ends within a few seconds of a quit (backend/run.py bounds its exit),
+// so an immediate relaunch gets the folder on a respawn.
+export const TRANSIENT_CODES = new Set(["NO_PORT_AVAILABLE", "PORT_TIMEOUT", "DATA_DIR_IN_USE"]);
 
 /** "transient" (respawn may help) vs "deterministic" (respawn won't). */
 export function classifyStartupError(code) {

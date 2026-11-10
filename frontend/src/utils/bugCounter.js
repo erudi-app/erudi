@@ -189,6 +189,15 @@ const ENVIRONMENTAL_PATTERNS = [
     test: (message) => message.includes("no_port_available"),
   },
   {
+    name: "data_dir_in_use",
+    // backend/run.py: another backend holds the data folder's lock (a second
+    // app, or the previous backend still finishing its exit). run.py writes
+    // "startup_error DATA_DIR_IN_USE: ..." at WARNING; main.js writes "Backend
+    // start failed (DATA_DIR_IN_USE): ..." at ERROR once its respawns are
+    // spent. Like a taken port, it is the machine's state, not a defect.
+    test: (message) => message.includes("data_dir_in_use"),
+  },
+  {
     name: "hub_or_forge_unreachable",
     // No renderer code path fetches huggingface.co or github.com directly
     // today: HuggingFace downloads and metadata are proxied through the

@@ -5,6 +5,11 @@
     "checkLogsAt": "Consulte los registros en {{path}} y contáctenos.",
     "checkLogs": "Consulte los registros del backend y contáctenos.",
     "codes": {
+      "dataDirInUse": {
+        "title": "Erudi ya se está ejecutando",
+        "detail": "Otro backend de Erudi está usando la carpeta de datos de la aplicación.",
+        "hint": "Cierra la otra ventana de Erudi, espera unos segundos y vuelve a intentarlo."
+      },
       "portInUse": {
         "title": "Puerto ya en uso",
         "detail": "Otro proceso está usando el puerto que Erudi necesita para su servidor local.",

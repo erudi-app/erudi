@@ -5,6 +5,11 @@
     "checkLogsAt": "Consultez les logs dans {{path}} et contactez-nous.",
     "checkLogs": "Consultez les logs du backend et contactez-nous.",
     "codes": {
+      "dataDirInUse": {
+        "title": "Erudi est déjà en cours d'exécution",
+        "detail": "Un autre backend Erudi utilise le dossier de données de l'application.",
+        "hint": "Fermez l'autre fenêtre d'Erudi, patientez quelques secondes, puis réessayez."
+      },
       "portInUse": {
         "title": "Port déjà utilisé",
         "detail": "Un autre processus utilise le port dont Erudi a besoin pour son serveur local.",
