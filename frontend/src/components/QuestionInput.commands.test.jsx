@@ -140,6 +140,29 @@ describe("the drop-up", () => {
     expect(textarea().getAttribute("aria-activedescendant")).toBeNull();
   });
 
+  it("opens again when the same text is typed again after Escape (#690)", () => {
+    renderComposer();
+    type("/con");
+    key("Escape");
+    expect(screen.queryByRole("listbox")).toBeNull();
+    type("");
+    type("/con");
+    expect(screen.getByRole("listbox")).toBeTruthy();
+    key("Enter");
+    expect(onSend).not.toHaveBeenCalled();
+    expect(onCommand).toHaveBeenCalledTimes(1);
+  });
+
+  it("sends the text after Escape when it has not changed, by design", () => {
+    renderComposer();
+    type("/con");
+    key("Escape");
+    key("Enter");
+    expect(onSend).toHaveBeenCalledTimes(1);
+    expect(onSend.mock.calls[0][0]).toBe("/con");
+    expect(onCommand).not.toHaveBeenCalled();
+  });
+
   it("closes once a space follows a complete name", () => {
     renderComposer();
     type("/config");

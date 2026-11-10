@@ -315,7 +315,7 @@ non-functional behavior.
 - [ ] When I read the command names in another interface language, then the **names stay in English** (fixed identifiers); the drop-up descriptions, the popups and their help texts are translated.
 - [ ] When any command popup opens, then it carries a **subtitle** and a **`?` help icon** next to each field; the help shows on hover **and** on keyboard focus.
 - [ ] When a popup is open, then the keyboard stays inside it (Tab cycles through its fields), **Escape** closes it, and the focus returns to where it was before.
-- [ ] *(not built yet: v1.3.0, #690.11 — record as not applicable)* When I type `/con`, press **Escape**, erase and type exactly `/con` again, then the drop-up opens again. (Escape then Enter without changing the text sends it as a message, by design.)
+- [ ] When I type `/con`, press **Escape**, erase and type exactly `/con` again, then the drop-up opens again. (Escape then Enter without changing the text sends it as a message, by design.)
 
 **/config**
 - [ ] When I run **/config**, then one popup shows every adjustable value of the current conversation: reasoning effort as a **5-notch graduated slider** (None → Low → Medium → High → Xhigh), web search as a switch, creativity and diversity as sliders with their real bounds, the compaction threshold as a select (50 % to 90 % in steps of 5), and the custom instructions (the existing instructions editor). There is **no** "defaults for new conversations" section and **no Apply button**.

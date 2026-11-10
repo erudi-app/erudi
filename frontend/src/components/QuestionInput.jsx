@@ -193,6 +193,10 @@ export default function QuestionInput({
   };
 
   const updateValue = (next) => {
+    // Any edit reopens the drop-up: Escape only holds for the text it closed on.
+    if (next !== value) {
+      setDismissedFor(null);
+    }
     setValue(next);
     setHighlight(0);
   };
