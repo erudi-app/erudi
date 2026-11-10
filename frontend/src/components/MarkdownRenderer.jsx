@@ -1,4 +1,4 @@
-import React from "react";
+import React, { useMemo } from "react";
 import PropTypes from "prop-types";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
@@ -25,7 +25,14 @@ import "katex/dist/katex.min.css";
 // preceded by "<digit><space>$" ("2 $x$") — models pad their math
 // ("$ 3x+1 $") or write it without the leading dollar ("2x"), both of which
 // render (#303, #501).
-function remarkCurrencyGuard() {
+//
+// Math that arrives as \( ... \) is converted to "$ ... $" before parsing
+// (convertTexDelimiters), and the guard must not read such a "$" as currency:
+// "\(3x\)" becomes "$3x$" and "2 \(x\)" becomes "2 $x$", both of which it
+// would revert. The conversion reports where each converted opening "$" sits
+// in the converted text (`trusted`); the guard leaves those spans alone, and
+// still judges every "$" the model wrote itself.
+function remarkCurrencyGuard({ trusted = new Set() } = {}) {
   return (tree, file) => {
     const source = String(file);
     const revert = (node) => {
@@ -38,6 +45,9 @@ function remarkCurrencyGuard() {
           const original = source.slice(child.position.start.offset, child.position.end.offset);
           const start = child.position.start.offset;
           const preceding = source.slice(Math.max(0, start - 2), start);
+          if (trusted.has(child.position.start.offset)) {
+            return child;
+          }
           if (/^\$\d/.test(original) || /\d[ \u00A0\u202F]?$/.test(preceding)) {
             return { type: "text", value: original, position: child.position };
           }
@@ -47,6 +57,97 @@ function remarkCurrencyGuard() {
     };
     revert(tree);
   };
+}
+
+// A closing fence: the same character as the opening one, at least as long.
+const FENCE_OPEN = /^ {0,3}(`{3,}|~{3,})/;
+// An inline code span: a run of backticks, up to the next run of the same length.
+const INLINE_CODE = /(?<!`)(`+)(?!`)[\s\S]*?(?<!`)\1(?!`)/g;
+// \( ... \) stays on one paragraph; \[ ... \] may span lines. An opener
+// preceded by a backslash is TeX's own "\\" and is left alone.
+const TEX_DELIMITERS = /(?<!\\)\\\(((?:[^\n]|\n(?!\s*\n))+?)\\\)|(?<!\\)\\\[([\s\S]+?)\\\]/g;
+
+// Models such as Qwen2.5 write math between \( ... \) and \[ ... \]. Markdown
+// reads "\(" as an escaped parenthesis before remark-math sees it, so the
+// delimiters become "$ ... $" and "$$ ... $$" in the raw text, never inside a
+// fenced block or an inline code span. An unclosed delimiter (a streaming
+// answer cut mid-formula) matches nothing and stays text until it closes.
+// Returns the converted text and `trusted`, the offsets in it of the "$" that
+// open a converted inline span (see remarkCurrencyGuard).
+export function convertTexDelimiters(text) {
+  const trusted = new Set();
+  let out = "";
+
+  // `lastSegment`: no inline code follows this prose in its chunk.
+  const convertProse = (prose, lastSegment) => {
+    let last = 0;
+    for (const match of prose.matchAll(TEX_DELIMITERS)) {
+      out += prose.slice(last, match.index);
+      last = match.index + match[0].length;
+      if (match[1] !== undefined) {
+        trusted.add(out.length);
+        out += `$${match[1]}$`;
+      } else if (
+        /(^|\n)[ \t]*$/.test(out) &&
+        (/^[ \t]*\n/.test(prose.slice(last)) || (lastSegment && /^[ \t]*$/.test(prose.slice(last))))
+      ) {
+        // Alone on its lines: remark-math reads a block only when each "$$"
+        // has its own line, and only a block renders as a display formula.
+        out += `$$\n${match[2].trim()}\n$$`;
+      } else {
+        out += `$$${match[2]}$$`;
+      }
+    }
+    out += prose.slice(last);
+  };
+
+  const convertChunk = (prose) => {
+    let last = 0;
+    for (const match of prose.matchAll(INLINE_CODE)) {
+      convertProse(prose.slice(last, match.index), false);
+      out += match[0];
+      last = match.index + match[0].length;
+    }
+    convertProse(prose.slice(last), true);
+  };
+
+  // Walk the lines: a fenced block (an unclosed one runs to the end) is
+  // copied as is; the prose between fences is converted as one chunk, so a
+  // "\[" may span lines.
+  const lines = text.split("\n");
+  let prose = [];
+  let fence = null;
+  // `terminated`: a fence follows, so the chunk's last line ends in a newline.
+  const flushProse = (terminated) => {
+    if (prose.length > 0) {
+      convertChunk(prose.join("\n"));
+      if (terminated) {
+        out += "\n";
+      }
+      prose = [];
+    }
+  };
+  lines.forEach((line, i) => {
+    const eol = i < lines.length - 1 ? "\n" : "";
+    if (fence) {
+      out += line + eol;
+      const close = new RegExp(`^ {0,3}${fence[0]}{${fence.length},}[ \\t]*$`);
+      if (close.test(line)) {
+        fence = null;
+      }
+      return;
+    }
+    const open = FENCE_OPEN.exec(line);
+    if (open) {
+      flushProse(true);
+      fence = open[1];
+      out += line + eol;
+      return;
+    }
+    prose.push(line);
+  });
+  flushProse(false);
+  return { text: out, trusted };
 }
 
 MarkdownRenderer.propTypes = {
@@ -59,10 +160,15 @@ MarkdownRenderer.defaultProps = {
 };
 
 export default function MarkdownRenderer({ content }) {
+  const converted = useMemo(() => convertTexDelimiters(content || ""), [content]);
+  const remarkPlugins = useMemo(
+    () => [remarkGfm, remarkMath, [remarkCurrencyGuard, { trusted: converted.trusted }]],
+    [converted]
+  );
   return (
     <div className="prose prose-invert max-w-none whitespace-normal">
       <ReactMarkdown
-        remarkPlugins={[remarkGfm, remarkMath, remarkCurrencyGuard]}
+        remarkPlugins={remarkPlugins}
         rehypePlugins={[rehypeKatex]}
         // Do not allow raw HTML for safety in LLM outputs
         skipHtml
@@ -123,7 +229,7 @@ export default function MarkdownRenderer({ content }) {
           },
         }}
       >
-        {content || ""}
+        {converted.text}
       </ReactMarkdown>
     </div>
   );
