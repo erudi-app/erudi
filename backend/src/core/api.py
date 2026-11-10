@@ -87,6 +87,7 @@ from src.core.logging import logger
 from src.agents.checkpoint import open_checkpointer
 
 from src.domains.llms.endpoints import router as llms_router
+from src.domains.llms.services import stop_active_downloads
 from src.domains.arena.endpoints import router as arena_router
 from src.domains.conversations.endpoints import router as conversations_router
 from src.domains.hardware.endpoints import router as hardware_router
@@ -469,6 +470,13 @@ async def _start_services(app: FastAPI, _phase) -> None:
     app.state.wire_backfill_task.add_done_callback(_log_background_task_failure)
 
 
+# How long the shutdown waits for interrupted downloads before it stops the
+# database they write to. run.py already interrupted them when the shutdown
+# was requested and uvicorn waited for their tasks (a download is a request's
+# background task), so this is a second, short chance.
+DOWNLOAD_STOP_TIMEOUT_SECONDS = 3.0
+
+
 def _log_background_task_failure(task: "asyncio.Task") -> None:
     """Done callback for fire-and-forget tasks: log a death at ERROR.
 
@@ -529,9 +537,13 @@ async def lifespan(app: FastAPI):
         8. Start the cleanup background task (30s interval) and the memory
            pressure monitor (60s interval)
         9. **[YIELD]** → Application handles requests
-        10. Shutdown (reverse order): cleanup task → pressure monitor (awaited)
-            → pending prefix-cache reset drained → engine → checkpointer
-            → embedded PostgreSQL cluster last
+        10. Shutdown: active downloads interrupted and their tasks awaited
+            (bounded) → then, in reverse order: cleanup task → pressure
+            monitor (awaited) → pending prefix-cache reset drained → engine
+            → checkpointer → embedded PostgreSQL cluster last; finally
+            ``app.state.services_stopped`` (a ``threading.Event`` run.py
+            injects) is set, so the launcher bounds the process exit from
+            there
     """
     # Before yield comes the startup code
     logger.info("==== Starting up... ====")
@@ -558,6 +570,23 @@ async def lifespan(app: FastAPI):
         raise
     yield
     logger.info("==== Shutting down... ====")
+    try:
+        await _stop_services(app)
+    finally:
+        # run.py bounds the process exit from here: whatever thread is still
+        # running (a transfer parked in a network read) is not worth waiting for.
+        services_stopped = getattr(app.state, "services_stopped", None)
+        if services_stopped is not None:
+            services_stopped.set()
+
+
+async def _stop_services(app: FastAPI) -> None:
+    """The shutdown half of :func:`lifespan`."""
+    # Downloads FIRST: a download task writes its progress and its outcome to
+    # the database, and its transfer threads would otherwise hold the process
+    # until the model is fully transferred (#706). Interrupted, a download
+    # leaves its job row running and its partial files for the next start.
+    await stop_active_downloads(DOWNLOAD_STOP_TIMEOUT_SECONDS)
     wire_backfill_task = getattr(app.state, "wire_backfill_task", None)
     if wire_backfill_task is not None and not wire_backfill_task.done():
         wire_backfill_task.cancel()

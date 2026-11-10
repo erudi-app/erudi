@@ -41,6 +41,13 @@ CUDA, MLX, and CPU builds.
     * Watch the parent process for death (SIGKILLed Electron main leaves no one to
       kill us, #224) and turn a reparenting into the same clean shutdown. Opt out
       with ERUDI_NO_PARENT_WATCHDOG=1 for deliberately detached runs (nohup/setsid).
+    * Bound the exit (#706): every shutdown path (SIGTERM/SIGINT, stdin EOF,
+      parent death) goes through request_shutdown, which interrupts the model
+      downloads at once; the launcher stops waiting for the server thread
+      EXIT_GRACE_SECONDS after the lifespan reported its services stopped (or
+      SHUTDOWN_HARD_LIMIT_SECONDS after the request), and an exit deadline ends
+      the process if a thread (a transfer parked in a network read) still holds
+      the interpreter's exit EXIT_GRACE_SECONDS later.
 
 **Usage:**
     Development:
@@ -110,6 +117,17 @@ PARENT_POLL_SECONDS = 2.0
 # (inference child terminated, embedded Postgres stopped) promptly. For a
 # desktop app a quit is a quit: nobody is reading a 10s-stale stream anyway.
 GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS = 10
+
+# Once the lifespan has stopped every service (embedded Postgres last), what
+# the process still runs is not worth waiting for: a model transfer parked in
+# a network read holds the server thread's loop and the interpreter's exit
+# (which joins executor threads) for as long as the transfer lasts (#706).
+# The wait for the server thread and the process exit are each bounded by it.
+EXIT_GRACE_SECONDS = 2.0
+# Outer bound from the shutdown request itself, for a lifespan shutdown that
+# never reports: with the data-folder lock, an immortal backend would keep
+# the next Erudi from starting.
+SHUTDOWN_HARD_LIMIT_SECONDS = 60.0
 
 
 def log_startup_failure(code: str, message: str, exc: "BaseException | None" = None) -> None:
@@ -338,6 +356,110 @@ def kill_port_process(port: int) -> bool:
     return False
 
 
+def request_shutdown(server: "uvicorn.Server") -> None:
+    """Ask the backend to stop: the single entry of every shutdown path.
+
+    The model downloads are interrupted first, at once (#706): a download is
+    a request's background task, which uvicorn waits for (bounded by
+    GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS) before the lifespan shutdown runs, so
+    an uninterrupted transfer would hold the whole shutdown. Then uvicorn's
+    exit flag is set. Safe from a signal handler and from any thread.
+    """
+    try:
+        from src.domains.llms.services import interrupt_active_downloads
+
+        interrupt_active_downloads()
+    except Exception:
+        # Never gate the exit flag below: the lifespan interrupts the
+        # downloads again before it stops the database.
+        pass
+    server.should_exit = True
+
+
+def wait_for_server(
+    server: "uvicorn.Server",
+    server_thread: threading.Thread,
+    services_stopped: threading.Event,
+    *,
+    grace: float = EXIT_GRACE_SECONDS,
+    hard_limit: float = SHUTDOWN_HARD_LIMIT_SECONDS,
+    poll: float = 0.25,
+) -> None:
+    """Wait for the server thread; bounded only once a shutdown is under way.
+
+    Returns when the thread ended, ``grace`` seconds after the lifespan
+    reported its services stopped, or ``hard_limit`` seconds after the
+    shutdown was requested, whichever comes first. A running backend is never
+    cut short: both bounds start with the shutdown.
+    """
+    requested_at = None
+    stopped_at = None
+    while server_thread.is_alive():
+        server_thread.join(timeout=poll)
+        now = time.monotonic()
+        if requested_at is None and server.should_exit:
+            requested_at = now
+        if stopped_at is None and services_stopped.is_set():
+            stopped_at = now
+        if stopped_at is not None and now - stopped_at >= grace:
+            return
+        if requested_at is not None and now - requested_at >= hard_limit:
+            try:
+                from src.core.logging import logger
+
+                logger.warning(
+                    f"Shutdown not finished {hard_limit:g}s after it was requested; exiting anyway"
+                )
+            except Exception:
+                pass  # logging must never keep the process alive
+            return
+
+
+def arm_exit_deadline(grace: float = EXIT_GRACE_SECONDS, hard_exit=os._exit) -> threading.Thread:
+    """End the process ``grace`` seconds from now if it is still running.
+
+    Armed when ``main`` is about to return. The interpreter's exit joins every
+    non-daemon thread and every ``concurrent.futures`` worker; a model transfer
+    parked in a network read is one of them and would keep the process alive
+    until the transfer ends (#706). This daemon thread keeps running during
+    that join: if the exit has not completed in time it records which threads
+    still hold it, flushes the log and ends the process (exit code 0, the
+    shutdown itself is complete). An exit that completes in time ends this
+    thread with the process, unseen.
+    """
+
+    def _expire() -> None:
+        time.sleep(grace)
+        try:
+            import logging
+
+            from src.core.logging import logger
+
+            this = threading.current_thread()
+            held_by = sorted(
+                t.name
+                for t in threading.enumerate()
+                if t.is_alive() and t is not this and t is not threading.main_thread()
+            )
+            logger.warning(
+                f"Exit still held {grace:g}s after the shutdown by thread(s) "
+                f"{', '.join(held_by) or '(none)'}; ending the process"
+            )
+            logging.shutdown()
+        except Exception:
+            pass  # the exit below must happen whatever logging does
+        try:
+            sys.stdout.flush()
+            sys.stderr.flush()
+        except Exception:
+            pass  # a closed stream must not keep the process alive
+        hard_exit(0)
+
+    thread = threading.Thread(target=_expire, name="exit-deadline", daemon=True)
+    thread.start()
+    return thread
+
+
 def run_server(server: "uvicorn.Server") -> None:
     """Run the uvicorn server in the current thread; surface unexpected failures.
 
@@ -493,8 +615,8 @@ def start_stdin_eof_watcher(server: "uvicorn.Server") -> threading.Thread:
 
             logger.info("Parent closed stdin; requesting graceful shutdown")
         except Exception:
-            pass  # logging must never gate the shutdown flag below
-        server.should_exit = True
+            pass  # logging must never gate the shutdown request below
+        request_shutdown(server)
 
     thread = threading.Thread(target=_watch, name="stdin-eof-watcher", daemon=True)
     thread.start()
@@ -585,8 +707,8 @@ def start_parent_watchdog(
 
                     logger.info("Parent process died; requesting graceful shutdown")
                 except Exception:
-                    pass  # logging must never gate the shutdown flag below
-                server.should_exit = True
+                    pass  # logging must never gate the shutdown request below
+                request_shutdown(server)
                 return
             time.sleep(poll_seconds)
 
@@ -719,6 +841,10 @@ def main() -> None:
     # stream (same process). Absent (e.g. plain uvicorn in dev), the lifespan
     # simply skips phase emission.
     fastapi_app.state.emit_phase = emit_phase
+    # Set by the lifespan once every service is stopped: the exit is bounded
+    # from there (wait_for_server, arm_exit_deadline).
+    services_stopped = threading.Event()
+    fastapi_app.state.services_stopped = services_stopped
 
     server = uvicorn.Server(
         # access_log=False: uvicorn's unstructured per-request lines are
@@ -740,10 +866,11 @@ def main() -> None:
     )
 
     def _request_graceful_shutdown(signum: int, frame: object) -> None:
-        # Relay to uvicorn's exit flag: the server thread notices it, drains
-        # requests, runs the lifespan shutdown (checkpointer → embedded
-        # PostgreSQL), then run_server returns and the join below unblocks.
-        server.should_exit = True
+        # Relay to uvicorn's exit flag (downloads interrupted first): the
+        # server thread notices it, drains requests, runs the lifespan
+        # shutdown (checkpointer → embedded PostgreSQL), then run_server
+        # returns and the wait below unblocks.
+        request_shutdown(server)
 
     signal.signal(signal.SIGTERM, _request_graceful_shutdown)
     signal.signal(signal.SIGINT, _request_graceful_shutdown)
@@ -770,11 +897,9 @@ def main() -> None:
         while time.time() < deadline:
             if port_open(host, port):
                 emit_event({"event": "ready", "port": port})
-                server_thread.join(timeout=1.0)
-                while server_thread.is_alive():
-                    time.sleep(1.0)
-                    server_thread.join(timeout=1.0)
+                wait_for_server(server, server_thread, services_stopped)
                 emit_event({"event": "shutdown"})
+                arm_exit_deadline()
                 break
 
             if not server_thread.is_alive():

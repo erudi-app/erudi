@@ -197,9 +197,21 @@ database cluster. Two environment variables control the guards, both documented 
 | `ERUDI_NO_PARENT_WATCHDOG` | Set to `1` to disable the parent-process watchdog for a deliberately detached run. |
 
 The parent watchdog otherwise polls every couple of seconds. Whichever path triggers the
-stop (watchdog, SIGTERM relay, stdin EOF), uvicorn's wait for in-flight requests is
-bounded, then the lifespan shutdown runs: the inference child is terminated and the
-embedded PostgreSQL cluster is stopped.
+stop (watchdog, SIGTERM relay, stdin EOF), it goes through `request_shutdown`, which first
+interrupts every model download: each transfer stops at its next chunk. uvicorn's wait for
+in-flight requests is bounded (a download is a request's background task), then the
+lifespan shutdown runs: the downloads are interrupted again and their tasks awaited for a
+few seconds, the inference child is terminated and the embedded PostgreSQL cluster is
+stopped. An interrupted download writes nothing more: its job stays `running` and its
+partial files stay on disk, and the next start resolves both (a complete artifact is
+kept, anything else removed and the job recorded as interrupted by the shutdown).
+
+The exit itself is bounded. Once the lifespan has stopped its services, the launcher waits
+at most `EXIT_GRACE_SECONDS` (2 s) for the server thread, emits `shutdown`, and arms an exit
+deadline: if a thread still holds the interpreter's exit `EXIT_GRACE_SECONDS` later (the
+exit joins every executor thread, and a transfer parked in a network read is one), the
+process logs which threads and ends. A shutdown that never reports is cut off
+`SHUTDOWN_HARD_LIMIT_SECONDS` (60 s) after the request.
 
 ## Usage
 

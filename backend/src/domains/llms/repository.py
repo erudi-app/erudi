@@ -62,9 +62,11 @@ def remove_tree_reporting(path, attempts: int = 5, delay: float = 0.4) -> int:
     how a cancelled 1B download left 230 MB of temp_651 behind while the log
     said "deleted temp LLM 651".
 
-    Cancellation is only signalled, never awaited, so the downloader may still
-    hold handles for a moment. Retry briefly to let it notice and let go, then
-    report what survived instead of pretending it is gone.
+    The cancel endpoint deletes only once the transfer has stopped
+    (``DownloadTracker.hand_over_cleanup``), but another process (an
+    antivirus scan, an indexer) can still hold a handle for a moment. Retry
+    briefly to let it let go, then report what survived instead of pretending
+    it is gone.
     """
     path = str(path)
     for attempt in range(attempts):
@@ -622,9 +624,11 @@ def update_db_with_progress(job_tracker, job_id: int, model_id: int) -> None:
         # Loop until download completes or is cancelled
         while job_tracker.percent < 100.0:
             time.sleep(1)
-            # Exit cleanly if the job was cancelled (cancel endpoint handles DB cleanup)
+            # Exit cleanly once the job was stopped: the user's cancel (the
+            # cancel endpoint handles DB cleanup) or the backend's shutdown
+            # (the download joins this thread before the database stops).
             if not job_tracker.should_continue():
-                logger.info(f"Job {job_id} cancelled, stopping progress tracking")
+                logger.info(f"Job {job_id} stopped, ending progress tracking")
                 return
             dbj.total_bytes = job_tracker.total_bytes
             dbj.progress = job_tracker.percent

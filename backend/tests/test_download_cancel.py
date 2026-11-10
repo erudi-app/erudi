@@ -12,6 +12,9 @@ Four guarantees are pinned here:
   3. the endpoint's completion log reflects the real outcome;
   4. a cancel racing the download task leaves the job cancelled, with one
      INFO and no ERROR, on a real database (#661).
+
+The cancel endpoint deletes the files only once the transfer stopped (#690):
+see test_download_stop.py.
 """
 
 from __future__ import annotations
@@ -343,9 +346,13 @@ class _RealDownload:
             "(no weights file was found)"
         )
 
-    def cancel_now(self):
+    def cancel_now(self, *, from_the_transfer: bool = False):
         """The user's cancel, on its own session and thread; returns once
-        the endpoint has flushed ``cancelled`` (not committed yet)."""
+        the endpoint has flushed ``cancelled`` (not committed yet).
+
+        From inside the transfer, it returns once the tracker is flagged
+        instead: the endpoint writes only after the transfer has stopped
+        (#690), which this very thread has to reach first."""
         from src.domains.llms.repository import Download_Job_Repository, Llm_Repository
 
         def run():
@@ -361,6 +368,14 @@ class _RealDownload:
 
         self.canceller = threading.Thread(target=run)
         self.canceller.start()
+        if from_the_transfer:
+            tracker = llm_services.get_active_download_tracker(self.job_id)
+            deadline = time.monotonic() + 5
+            while tracker.should_continue():
+                assert time.monotonic() < deadline
+                time.sleep(0.01)
+            assert not self.flushed.is_set()
+            return
         assert self.flushed.wait(5)
 
     def hub_cancelled_mid_shard(self):
@@ -373,7 +388,7 @@ class _RealDownload:
                 Path(dest).parent.mkdir(parents=True, exist_ok=True)
                 Path(dest).write_bytes(b"\x00" * 16)
                 if remote.endswith(SHARDS[0]):
-                    harness.cancel_now()
+                    harness.cancel_now(from_the_transfer=True)
                 cb.relative_update(16)
 
         self.monkeypatch.setattr(llm_services, "HfFileSystem", lambda token=None: Fs())

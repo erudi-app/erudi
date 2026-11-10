@@ -169,7 +169,16 @@ curl -X POST http://127.0.0.1:27182/erudi/llms/downloads/123/cancel
 `status` is one of `pending`, `running`, `completed`, `failed`, `cancelled`. Polling a `failed` or
 `cancelled` job also cleans up: the placeholder row is deleted and the temporary files removed.
 `cancelled` is final: the download stops, says so in one INFO line, and never turns the job
-`failed`, even when the cancel lands while the download is finishing.
+`failed`, even when the cancel lands while the download is finishing. The transfer sees the
+cancel at its next chunk; the cancel deletes the partial files once every transfer of the
+job has stopped (Windows refuses to delete a file still open), waiting up to 10 seconds,
+and a transfer slower than that deletes them itself when it stops. A cancel logs nothing
+above INFO.
+
+Quitting the app is not a cancel: the backend interrupts the download, leaves the job
+`running` and its partial files on disk, and the next start resolves them (the job ends
+`failed` with "Download interrupted due to application shutdown" and the files are
+removed, unless the transfer had already completed).
 
 ## Searching
 
