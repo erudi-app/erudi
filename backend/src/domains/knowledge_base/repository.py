@@ -161,6 +161,7 @@ class KB_Repository:
         name: str,
         content_hash_sha256: str,
         size_bytes: int,
+        status: str = "active",
     ) -> KnowledgeDocument:
         """Create a KnowledgeDocument row (status defaults to "active").
 
@@ -172,6 +173,7 @@ class KB_Repository:
             name=name,
             content_hash_sha256=content_hash_sha256,
             size_bytes=size_bytes,
+            status=status,
         )
         db.add(document)
         db.flush()
@@ -353,6 +355,14 @@ class KB_Repository:
             db.query(KBJobModel)
             .filter(KBJobModel.new_model_id == model_id)
             .order_by(KBJobModel.id.desc())
+            .first()
+        )
+
+    def get_unfinished_kb_job(self, db: Session, kb_id: int) -> Optional[KBJobModel]:
+        """The pending or running job of one KB, if any (one at a time per KB)."""
+        return (
+            db.query(KBJobModel)
+            .filter(KBJobModel.kb_id == kb_id, KBJobModel.status.in_(["pending", "running"]))
             .first()
         )
 

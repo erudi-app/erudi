@@ -27,12 +27,20 @@ from typing import Any, Dict, List, Tuple
 
 from sqlalchemy.orm import Session
 
+from src.core.exceptions import StateConflictException
 from src.domains.knowledge_base.repository import KB_Repository
 from src.entities.KBJob import KBJobModel
 from src.ingestion.chunking import chunk_document
 from src.ingestion.reader import DocumentReader
 from src.ingestion.vector_store import add_kb_chunks
 from src.core.logging import logger
+
+
+# Names of the files a job could not even register (unreadable bytes, a row that
+# could not be created): no KnowledgeDocument exists for them, so the job keeps
+# them in memory, by job id, for the status route. Only the latest jobs are kept.
+_UNRECORDED_FAILURES: Dict[int, List[str]] = {}
+_UNRECORDED_JOBS_KEPT = 32
 
 
 class KB_Service:
@@ -90,16 +98,19 @@ class KB_Service:
 
         The job's documents are the ones created from its start on; the failed
         ones are those left in ``failed`` status. Nothing before the job ran
-        is counted: an earlier job's failure is not this one's.
+        is counted: an earlier job's failure is not this one's. Files that
+        failed before they had a row (unreadable, not registrable) come from
+        the job's in-memory list.
         """
-        if kb_job.kb_id is None or kb_job.created_at is None:
-            return []
-        return [
-            document.name
-            for document in self.repo.list_failed_documents_since(
-                db, kb_job.kb_id, kb_job.created_at
-            )
-        ]
+        names = list(_UNRECORDED_FAILURES.get(kb_job.id, []))
+        if kb_job.kb_id is not None and kb_job.created_at is not None:
+            names = [
+                document.name
+                for document in self.repo.list_failed_documents_since(
+                    db, kb_job.kb_id, kb_job.created_at
+                )
+            ] + names
+        return names
 
     def _cleanup_failed_job(self, db: Session, llm_id: int, kb_job: KBJobModel) -> None:
         """Clean up database state after a failed KB job.
@@ -211,6 +222,15 @@ class KB_Service:
         if not kb:
             raise ValueError(f"KB {base_llm.kb_id} not found for LLM {base_llm_id}")
 
+        # One job at a time per KB: two would both see the same failed row and
+        # race on the unique (kb_id, hash) constraint.
+        if self.repo.get_unfinished_kb_job(db, kb.id):
+            raise StateConflictException(
+                "This assistant's knowledge base is still being updated. "
+                "Wait for it to finish before adding more documents.",
+                status_code=409,
+            )
+
         # Create update job
         kb_job = self.repo.create_kb_job(
             db=db,
@@ -258,9 +278,13 @@ class KB_Service:
                 f"{len(file_paths)} file(s))"
             )
 
+            unrecorded = _UNRECORDED_FAILURES.setdefault(kb_job_id, [])
+            while len(_UNRECORDED_FAILURES) > _UNRECORDED_JOBS_KEPT:
+                del _UNRECORDED_FAILURES[next(iter(_UNRECORDED_FAILURES))]
+
             indexed, pending, skipped, empty, failed = 0, 0, 0, 0, 0
             for raw_path in file_paths:
-                outcome = self._ingest_one_file(db, kb.id, raw_path)
+                outcome = self._ingest_one_file(db, kb.id, raw_path, unrecorded)
                 if outcome == "indexed":
                     indexed += 1
                 elif outcome == "pending_vision":
@@ -299,9 +323,15 @@ class KB_Service:
             self._handle_indexing_error(db, kb_job_id, str(e))
             raise
 
-    def _ingest_one_file(self, db: Session, kb_id: int, raw_path: str) -> str:
+    def _ingest_one_file(
+        self, db: Session, kb_id: int, raw_path: str, unrecorded: List[str] | None = None
+    ) -> str:
         """Ingest one file; returns "indexed" | "pending_vision" | "skipped"
-        | "failed". Never raises — a broken file must not sink the batch."""
+        | "failed". Never raises — a broken file must not sink the batch.
+
+        ``unrecorded`` collects the names of the files that fail before they
+        have a document row, so the job can still name them."""
+        unrecorded = unrecorded if unrecorded is not None else []
         path = Path(raw_path)
         try:
             content = path.read_bytes()
@@ -309,31 +339,43 @@ class KB_Service:
             # One file skipped; the batch goes on (and fails as a whole only
             # when nothing at all could be indexed).
             logger.warning(f"KB {kb_id}: cannot read {path.name}, skipping it: {e}")
+            unrecorded.append(path.name)
             return "failed"
 
         content_hash = hashlib.sha256(content).hexdigest()
-        existing = self.repo.get_document_by_hash(db, kb_id, content_hash)
-        if existing and existing.status != "failed":
-            logger.info(f"KB {kb_id}: {path.name} already ingested (dedup), skipping")
-            return "skipped"
-        if existing:
-            # A failed ingestion left this row (and maybe a few chunks, which
-            # follow the row through ON DELETE CASCADE). It must not block the
-            # same file for good: replace it, so the retry starts clean and its
-            # name is the one the job reports if it fails again.
-            logger.info(f"KB {kb_id}: {path.name} failed earlier, ingesting it again")
-            self.repo.delete_document(db, existing)
+        try:
+            existing = self.repo.get_document_by_hash(db, kb_id, content_hash)
+            if existing and existing.status != "failed":
+                logger.info(f"KB {kb_id}: {path.name} already ingested (dedup), skipping")
+                return "skipped"
+            if existing:
+                # A failed ingestion left this row (and maybe a few chunks, which
+                # follow the row through ON DELETE CASCADE). It must not block the
+                # same file for good: replace it, so the retry starts clean and its
+                # name is the one the job reports if it fails again.
+                logger.info(f"KB {kb_id}: {path.name} failed earlier, ingesting it again")
+                self.repo.delete_document(db, existing)
 
-        document = self.repo.create_document(
-            db,
-            kb_id=kb_id,
-            name=path.name,
-            content_hash_sha256=content_hash,
-            size_bytes=len(content),
-        )
-        # Commit BEFORE indexing: the vector store writes through its own
-        # connection and the chunks' document_id FK must see this row.
-        db.commit()
+            # "indexing" until the chunks are stored: the row is committed first,
+            # so a quit in between must not leave an "active" row without chunks.
+            document = self.repo.create_document(
+                db,
+                kb_id=kb_id,
+                name=path.name,
+                content_hash_sha256=content_hash,
+                size_bytes=len(content),
+                status="indexing",
+            )
+            # Commit BEFORE indexing: the vector store writes through its own
+            # connection and the chunks' document_id FK must see this row.
+            db.commit()
+        except Exception as e:
+            # Replacing or registering the row failed (a concurrent insert on
+            # the unique hash, a database error): this file fails, the batch goes on.
+            db.rollback()
+            logger.error(f"KB {kb_id}: cannot register {path.name}: {e}", exc_info=True)
+            unrecorded.append(path.name)
+            return "failed"
 
         try:
             extracted = self.reader.read(path)
@@ -357,6 +399,7 @@ class KB_Service:
                 source_file=path.name,
                 chunks=chunks,
             )
+            self.repo.update_document_status(db, document, "active")
             logger.info(f"KB {kb_id}: {path.name} indexed ({len(chunks)} chunks)")
             return "indexed"
 

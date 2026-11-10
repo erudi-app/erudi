@@ -311,6 +311,40 @@ class TestAssistantLifecycle:
 
         assert status["failed_files"] == ["maintenance.docx"]
 
+    def test_update_is_refused_while_another_job_runs_on_the_same_kb(
+        self, test_db_session, mock_llm_with_kb
+    ):
+        """Two jobs on one KB would both see the same failed row and race on the
+        unique (kb_id, hash) constraint: the server refuses the second (409)."""
+        from src.core.exceptions import StateConflictException
+
+        llm, kb = mock_llm_with_kb
+        service = KB_Service()
+        service.update_existing_kb(db=test_db_session, base_llm_id=llm.id, file_paths=["/a.pdf"])
+
+        with pytest.raises(StateConflictException) as exc:
+            service.update_existing_kb(
+                db=test_db_session, base_llm_id=llm.id, file_paths=["/b.pdf"]
+            )
+        assert exc.value.status_code == 409
+
+    def test_update_is_accepted_once_the_previous_job_finished(
+        self, test_db_session, mock_llm_with_kb
+    ):
+        llm, kb = mock_llm_with_kb
+        service = KB_Service()
+        _, first = service.update_existing_kb(
+            db=test_db_session, base_llm_id=llm.id, file_paths=["/a.pdf"]
+        )
+        service.repo.update_kb_job_status(
+            test_db_session, service.repo.get_kb_job_by_id(test_db_session, first), "failed", "x"
+        )
+
+        _, second = service.update_existing_kb(
+            db=test_db_session, base_llm_id=llm.id, file_paths=["/b.pdf"]
+        )
+        assert second != first
+
     def test_failed_update_job_does_not_delete_the_existing_assistant(
         self, test_db_session, mock_llm_with_kb
     ):
@@ -574,3 +608,74 @@ class TestIngestionPipeline:
                 "SELECT COUNT(*) FROM rag.kb_chunks WHERE document_id = %s", (rows[0].id,)
             ).fetchone()[0]
         assert chunks >= 1
+
+    def test_an_unreadable_file_is_named_among_the_failed_files(
+        self, kb_store, real_db_session, tmp_path
+    ):
+        """A file whose bytes cannot be read creates no document row; the job
+        keeps its name in memory so the end of the job still names it."""
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        good = tmp_path / "ok.txt"
+        good.write_text("Texte parfaitement lisible.", encoding="utf-8")
+
+        service.process_and_index_documents(
+            db=session, kb_job_id=job.id, file_paths=[str(good), str(tmp_path / "ghost.txt")]
+        )
+
+        session.expire_all()
+        assert service._failed_file_names(
+            session, service.repo.get_kb_job_by_id(session, job.id)
+        ) == ["ghost.txt"]
+
+    def test_a_row_is_indexing_until_its_chunks_are_stored(
+        self, kb_store, real_db_session, tmp_path, monkeypatch
+    ):
+        """The row is committed before the chunks (FK), so it must not look
+        `active` until they are in: a crash in between leaves `indexing`."""
+        from src.domains.knowledge_base import services
+
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        doc = tmp_path / "notes.md"
+        doc.write_text("# Notes\n\nContenu à indexer.", encoding="utf-8")
+        seen = []
+        real_add = services.add_kb_chunks
+
+        def spy(**kwargs):
+            seen.append(
+                session.query(KnowledgeDocument).filter_by(id=kwargs["document_id"]).one().status
+            )
+            return real_add(**kwargs)
+
+        monkeypatch.setattr(services, "add_kb_chunks", spy)
+        service.process_and_index_documents(db=session, kb_job_id=job.id, file_paths=[str(doc)])
+
+        session.expire_all()
+        assert seen == ["indexing"]
+        assert session.query(KnowledgeDocument).filter_by(kb_id=kb.id).one().status == "active"
+
+    def test_a_failure_registering_a_file_does_not_escape_or_strand_the_job(
+        self, kb_store, real_db_session, tmp_path, monkeypatch
+    ):
+        """An IntegrityError while registering one file stays inside the
+        'never raises' contract: rolled back, the file counts as failed, and the
+        job ends instead of staying `running`."""
+        from sqlalchemy.exc import IntegrityError
+
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        doc = tmp_path / "maintenance.md"
+        doc.write_text("# Maintenance\n\nTexte.", encoding="utf-8")
+
+        def clash(*args, **kwargs):
+            raise IntegrityError("insert", {}, Exception("uq_knowledge_documents_kb_hash"))
+
+        monkeypatch.setattr(service.repo, "create_document", clash)
+        with pytest.raises(ValueError, match="No searchable content"):
+            service.process_and_index_documents(db=session, kb_job_id=job.id, file_paths=[str(doc)])
+
+        session.expire_all()
+        job_row = service.repo.get_kb_job_by_id(session, job.id)
+        assert job_row.status == "failed"
+        assert service._failed_file_names(session, job_row) == ["maintenance.md"]

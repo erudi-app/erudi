@@ -45,8 +45,10 @@ Ingestion runs as a FastAPI background task, one file at a time
    unless its row is `failed`: a failed document never blocks its own file. The failed row is
    deleted (its chunks follow, `ON DELETE CASCADE`) and the file goes through the pipeline again
    as a new document.
-2. **Register the document.** A `KnowledgeDocument` row is created and committed before indexing —
-   the vector store writes through its own connection and needs the row for its foreign key.
+2. **Register the document.** A `KnowledgeDocument` row is created in the `indexing` status and
+   committed before indexing — the vector store writes through its own connection and needs the row
+   for its foreign key. It becomes `active` once its chunks are stored. A failure while reading the
+   file or registering the row fails that file alone (rolled back, no row).
 3. **Extract.** `DocumentReader` routes by extension and returns an `ExtractedDocument` carrying
    Markdown (and per-page text for PDFs).
 4. **Clean, non-destructively.** Each extractor passes its text through
@@ -75,9 +77,11 @@ marked `empty`, never `active`.
 
 ### Document statuses
 
-`active` (indexed and retrievable), `empty` (no indexable content), `failed` (ingestion raised),
+`indexing` (registered, chunks not stored yet), `active` (indexed and retrievable), `empty` (no indexable content), `failed` (ingestion raised),
 `pending_vision` (image or scanned PDF, awaiting a future OCR/vision tier). Defined in
-`backend/src/entities/KnowledgeDocument.py`.
+`backend/src/entities/KnowledgeDocument.py`. A quit mid-file leaves its row `indexing`; the
+startup cleanup turns every such row into `failed` (and interrupted jobs into `failed`, see below),
+so the file can be added again.
 
 ### Job outcome
 
@@ -87,7 +91,9 @@ with a message counting the failed, empty and pending-vision files.
 
 A job that completes with some files failed still reports `completed`; the status route names those
 files (see [Poll the job](#poll-the-job)) and the Knowledge Base page shows them instead of the plain
-success message. The reason stays in the log and in Diagnostics.
+success message, worded differently for a created assistant and an updated one. A job that fails
+because nothing could be indexed shows the same names next to its error message. At most five names
+are listed, then "and N more". The reason stays in the log and in Diagnostics.
 
 ## Retrieval
 
@@ -216,6 +222,11 @@ Behaviour depends on `selectedModel`:
 - The base model **already has** a KB attached: the same route adds the new documents to the existing
   KB and `model_id` is that model's own id. The name is not read on this path.
 
+### One job at a time per KB
+
+Adding documents to an assistant whose KB still has a `pending` or `running` job is refused with
+**409** (`STATE_CONFLICT`): two jobs would race on the same documents.
+
 ### Poll the job
 
 ```bash
@@ -234,7 +245,9 @@ curl http://127.0.0.1:27182/erudi/knowledge_base/108/status
 `status` is `pending`, `running`, `completed` or `failed`; `error_message` is only populated on
 `failed`. `failed_files` lists the names of the files of this job whose ingestion failed (empty
 when none did): the documents of the job's KB left in the `failed` status that were created from
-the job's start on, so no earlier job's failure appears. The status carries no per-file reason.
+the job's start on, so no earlier job's failure appears, plus the files that failed before they had
+a row (unreadable, not registrable), which the running backend keeps in memory per job. The status
+carries no per-file reason. The names are also returned for a `failed` job.
 Polling a **failed creation** also cleans up: the half-built assistant and its
 `KnowledgeBase` are deleted (a failed *update* never deletes an assistant that already works).
 
