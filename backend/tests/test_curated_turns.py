@@ -73,7 +73,16 @@ async def _turn(monkeypatch, model, *, thread_id, saver=None, tools=None):
 
 
 def _curated_events(events):
-    return [e for e in events if e["t"] == "answer" and "curated_error" in e]
+    """The curated answer events, their ``curated_error`` reduced to kind and
+    params (its English ``text`` is pinned by the registry tests)."""
+    found = []
+    for e in events:
+        if e["t"] == "answer" and "curated_error" in e:
+            curated = e["curated_error"]
+            assert e["text"].endswith(curated["text"])
+            reduced = {"kind": curated["kind"], "params": curated["params"]}
+            found.append({**e, "curated_error": reduced})
+    return found
 
 
 def _last_thread_message(saver, thread_id):
@@ -159,6 +168,13 @@ def test_the_answer_event_carries_the_trace_beside_the_english_line():
         "curated_error": {
             "kind": "memory_overflow",
             "params": {"prompt_tokens": 13531, "context_tokens": 8584},
+            # The English line itself, without the sentinel: what the
+            # interface finds in the stored content and replaces (#690).
+            "text": (
+                "This conversation no longer fits what your machine's memory can "
+                "hold for this model (the request needs about 13531 tokens; memory allows 8584). "
+                "Start a new conversation, send less at once, or switch to a smaller model."
+            ),
         },
     }
 
@@ -166,7 +182,11 @@ def test_the_answer_event_carries_the_trace_beside_the_english_line():
 def test_an_empty_answer_line_is_not_flagged_as_a_failure():
     event = curated_answer("empty_answer_stop")
     assert "curated" not in event
-    assert event["curated_error"] == {"kind": "empty_answer_stop", "params": {}}
+    assert event["curated_error"] == {
+        "kind": "empty_answer_stop",
+        "params": {},
+        "text": event["text"],
+    }
 
 
 def test_a_kind_refuses_missing_or_unknown_params():
@@ -184,7 +204,9 @@ def test_the_trace_event_is_what_the_conversation_persists():
         "t": "curated_error",
         "kind": "prefill_timeout",
         "params": {"minutes": 5},
+        "text": event["curated_error"]["text"],
     }
+    assert event["text"] == f"{ERROR_SENTINEL} {event['curated_error']['text']}"
 
 
 # ===== Each curated turn of the runner writes its trace =====

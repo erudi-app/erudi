@@ -13,7 +13,7 @@ import MarkdownRenderer from "../components/MarkdownRenderer";
 import apiClient from "../services/api/client";
 import { createLogger } from "../utils/logger";
 import { baseName, getDisplayContent, isGenericFailure } from "../utils/messageContent";
-import { curatedErrorOf, curatedTurnText, withCuratedLine } from "../utils/curatedTurns";
+import { withCuratedTurn } from "../utils/curatedTurns";
 
 const log = createLogger("ArenaPage");
 
@@ -449,9 +449,7 @@ export default function ArenaPage() {
           // Shown as a conversation shows it: a curated turn's sentence in the
           // interface language, a generic failure's headline translated, the
           // sentinel as a cross.
-          const content = isUser
-            ? msg.content
-            : withCuratedLine(msg.content, curatedTurnText(curatedErrorOf(msg.trace)));
+          const content = isUser ? msg.content : withCuratedTurn(msg.content, msg.trace);
           const errorText = isError
             ? getDisplayContent(
                 content,

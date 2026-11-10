@@ -403,6 +403,7 @@ class TestArenaService:
         assert events[1]["curated_error"] == {
             "kind": "context_overflow",
             "params": {"prompt_tokens": 9030, "context_tokens": 8192},
+            "text": event["text"].removeprefix(f"{ERROR_SENTINEL} "),
         }
         assert events[1]["curated"] is True
 
@@ -428,7 +429,7 @@ class TestArenaService:
         assert answer == {
             "t": "answer",
             "text": event["text"],
-            "curated_error": {"kind": "empty_answer_stop", "params": {}},
+            "curated_error": {"kind": "empty_answer_stop", "params": {}, "text": event["text"]},
         }
 
 

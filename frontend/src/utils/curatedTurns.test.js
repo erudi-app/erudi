@@ -1,12 +1,14 @@
 import { describe, it, expect, afterEach } from "vitest";
 import i18n from "../i18n";
-import { curatedErrorOf, curatedTurnText, withCuratedLine } from "./curatedTurns";
+import { curatedTurnText, withCuratedTurn } from "./curatedTurns";
+import { curatedErrorOf } from "./traceEvents";
+import { ERROR_SENTINEL as SENTINEL } from "./messageContent";
 
 // #690.2: a curated turn is translated at display from the trace's
-// {"t":"curated_error","kind","params"}, numbers in the interface language's
-// format; a kind the interface does not know keeps the stored English line.
-
-const SENTINEL = "[ERROR_MESSAGE_SYSTEM]";
+// {"t":"curated_error","kind","params","text"}, numbers in the interface
+// language's format, replacing exactly the stored English line (`text`); a
+// kind the interface does not know, or a line not found, keeps the content as
+// stored.
 
 const memory = {
   t: "curated_error",
@@ -87,24 +89,57 @@ describe("curatedTurnText", () => {
   });
 });
 
-describe("withCuratedLine", () => {
-  const english = `${SENTINEL} This conversation no longer fits.`;
+describe("withCuratedTurn", () => {
+  const STOP_EN =
+    "The model finished its turn without writing an answer. Send a follow-up asking it to continue.";
+  const STOP_FR =
+    "Le modèle a terminé son tour sans écrire de réponse. Envoyez un message lui demandant de continuer.";
+  const LOOP_EN = "I couldn't reach a final answer for this request.";
+  const stop = [{ t: "curated_error", kind: "empty_answer_stop", params: {}, text: STOP_EN }];
+  const loop = [{ t: "curated_error", kind: "loop_limit", params: {}, text: LOOP_EN }];
+  const APOLOGY_EN =
+    "[ERROR_MESSAGE_SYSTEM] I apologize, but I encountered an error while generating a response. Please try asking your question again.";
 
-  it("replaces the stored red line, keeping what streamed above it", () => {
-    expect(withCuratedLine(`Half an answer\n\n${english}`, "Traduit.")).toBe(
-      `Half an answer\n\n${SENTINEL} Traduit.`
+  it("replaces the stored red line, keeping what streamed above it", async () => {
+    await i18n.changeLanguage("zh");
+    expect(withCuratedTurn(`Half an answer\n\n${SENTINEL} ${LOOP_EN}`, loop)).toBe(
+      `Half an answer\n\n${SENTINEL} 无法为此请求得出最终回答（模型一直在重试却没有进展）。请尝试换一种方式提问。`
     );
-    expect(withCuratedLine(english, "Traduit.")).toBe(`${SENTINEL} Traduit.`);
   });
 
-  it("replaces an empty-answer line, keeping the notices above it", () => {
-    expect(withCuratedLine("*A notice.*\n\nThe model finished its turn.", "Traduit.")).toBe(
-      "*A notice.*\n\nTraduit."
-    );
-    expect(withCuratedLine("The model finished its turn.", "Traduit.")).toBe("Traduit.");
+  it("replaces an empty-answer line below its notice", async () => {
+    await i18n.changeLanguage("fr");
+    expect(withCuratedTurn(`*A notice.*\n\n${STOP_EN}`, stop)).toBe(`*A notice.*\n\n${STOP_FR}`);
   });
 
-  it("leaves the content as stored without a translated line", () => {
-    expect(withCuratedLine(english, null)).toBe(english);
+  it.each([
+    ["the generic apology of a later failure", `\n\n${APOLOGY_EN}`],
+    [
+      "the line of a dropped stream",
+      `\n\n${SENTINEL} Connection interrupted while generating response.`,
+    ],
+    ["the Arena's request failure", "[Erreur]"],
+  ])("keeps %s that followed the line", async (_label, after) => {
+    await i18n.changeLanguage("fr");
+    expect(withCuratedTurn(`${STOP_EN}${after}`, stop)).toBe(`${STOP_FR}${after}`);
+  });
+
+  it("shows the content as stored when the line is not in it", async () => {
+    await i18n.changeLanguage("fr");
+    expect(withCuratedTurn("Something else entirely.", stop)).toBe("Something else entirely.");
+  });
+
+  it("shows the content as stored without a usable trace", async () => {
+    await i18n.changeLanguage("fr");
+    const stored = `${SENTINEL} ${LOOP_EN}`;
+    expect(withCuratedTurn(stored, null)).toBe(stored);
+    expect(withCuratedTurn(stored, [{ t: "curated_error", kind: "loop_limit", params: {} }])).toBe(
+      stored
+    );
+    expect(
+      withCuratedTurn(stored, [
+        { t: "curated_error", kind: "a_future_kind", params: {}, text: LOOP_EN },
+      ])
+    ).toBe(stored);
   });
 });

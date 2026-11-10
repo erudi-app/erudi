@@ -1,30 +1,22 @@
 import i18n from "../i18n";
 import { formatNumber } from "../i18n/format";
+import { curatedErrorOf } from "./traceEvents";
 
 // Curated turns (#690.2): the app's own sentence for a turn it could not
 // answer normally (a prompt that does not fit the window or the machine's
 // memory, a model that did not start answering in time or went silent, the
 // tool-loop limit, a turn that ended during reasoning).
 //
-// The backend stores the English line as the message content (the model reads
+// The backend stores the English line in the message content (the model reads
 // it back, and it is what a turn stored before this version shows) and carries
-// {"t":"curated_error","kind","params"} in the turn's trace (and on the live
-// `answer` or `error` event). The sentence shown is `chat:curated.<kind>` in
-// the interface language, the numbers formatted for it, translated at display:
-// it follows a language switch and a reload. The kinds live in
-// backend/src/agents/curated_turns.py (CURATED_KINDS); a kind this interface
-// has no key for keeps its stored English line.
+// {"t":"curated_error","kind","params","text"} in the turn's trace (and on the
+// live `answer` or `error` event), `text` being that English line. The
+// sentence shown is `chat:curated.<kind>` in the interface language, the
+// numbers formatted for it, translated at display: it follows a language
+// switch and a reload. The kinds live in backend/src/agents/curated_turns.py
+// (CURATED_KINDS); a kind this interface has no key for keeps its stored line.
 
-const SENTINEL = "[ERROR_MESSAGE_SYSTEM]";
 const KIND = /^[a-z][a-z0-9_]*$/;
-
-const isCuratedError = (e) =>
-  !!e && typeof e === "object" && e.t === "curated_error" && typeof e.kind === "string";
-
-/** The curated kind of a turn: {"t":"curated_error","kind","params"}, or null. */
-export function curatedErrorOf(trace) {
-  return (Array.isArray(trace) && trace.find(isCuratedError)) || null;
-}
 
 /**
  * The curated turn's sentence in the interface language, or null when there
@@ -49,26 +41,27 @@ export function curatedTurnText(curated) {
 }
 
 /**
- * The stored content with its curated line replaced by `line`.
+ * The stored content with its curated English line replaced by the sentence
+ * in the interface language.
  *
- * The curated line is always the end of the content: a failed turn's red line
- * starts at the sentinel, below whatever streamed before it; an empty-answer
- * line is the whole answer, below the notices streamed ahead of it (each
- * ending with a blank line). Without `line`, the content is returned as stored.
+ * Only that line is replaced: what streamed before it and whatever the same
+ * turn added after it (a later failure's red line, an interrupted stream's
+ * line, the Arena's request-failure marker) stay as they are. Without a
+ * curated kind, without a sentence for it, or when the line is not found, the
+ * content is returned as stored.
  *
  * @param {string} content - Raw message content as stored/streamed.
- * @param {string|null|undefined} line - The translated sentence.
+ * @param {Array|null|undefined} trace - The message's trace.
  * @returns {string}
  */
-export function withCuratedLine(content, line) {
+export function withCuratedTurn(content, trace) {
   const text = String(content || "");
-  if (!line) {
+  const curated = curatedErrorOf(trace);
+  const english = typeof curated?.text === "string" ? curated.text : "";
+  const line = english ? curatedTurnText(curated) : null;
+  const at = line ? text.lastIndexOf(english) : -1;
+  if (at < 0) {
     return text;
   }
-  const at = text.lastIndexOf(SENTINEL);
-  if (at >= 0) {
-    return `${text.slice(0, at)}${SENTINEL} ${line}`;
-  }
-  const cut = text.lastIndexOf("\n\n");
-  return `${cut >= 0 ? text.slice(0, cut + 2) : ""}${line}`;
+  return `${text.slice(0, at)}${line}${text.slice(at + english.length)}`;
 }

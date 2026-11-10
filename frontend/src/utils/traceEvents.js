@@ -46,6 +46,15 @@ export function errorDetailOf(trace) {
 
 const isCuratedError = (e) => isEvent(e) && e.t === "curated_error";
 
+/** The curated kind of a turn (#690):
+ * {"t":"curated_error","kind","params","text"}, or null. */
+export function curatedErrorOf(trace) {
+  return (
+    (Array.isArray(trace) && trace.find((e) => isCuratedError(e) && typeof e.kind === "string")) ||
+    null
+  );
+}
+
 /** What an error turn keeps of its trace: its compactions (checkpointed before
  * the model call failed), the cause of its failure and the kind of a curated
  * one, or nothing. */

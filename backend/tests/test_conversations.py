@@ -1364,10 +1364,7 @@ class TestConversationService:
         error = next(e for e in _parse_ndjson(result) if e["t"] == "error")
         assert error["text"] == event["text"]
         assert error["curated"] is True
-        assert error["curated_error"] == {
-            "kind": "memory_overflow",
-            "params": {"prompt_tokens": 13531, "context_tokens": 8584},
-        }
+        assert error["curated_error"] == event["curated_error"]
         messages = service.message_repo.get_messages_by_conversation(conversation.id)
         assert messages[1].content == event["text"]
         assert messages[1].trace == [
@@ -1375,6 +1372,7 @@ class TestConversationService:
                 "t": "curated_error",
                 "kind": "memory_overflow",
                 "params": {"prompt_tokens": 13531, "context_tokens": 8584},
+                "text": event["text"].removeprefix(f"{_SENTINEL} "),
             }
         ]
 
@@ -1408,12 +1406,17 @@ class TestConversationService:
         events = _parse_ndjson(result)
         assert not any(e["t"] == "error" for e in events)
         answer = next(e for e in events if e["t"] == "answer")
-        assert answer["curated_error"] == {"kind": "empty_answer_length", "params": {}}
+        assert answer["curated_error"] == event["curated_error"]
         messages = service.message_repo.get_messages_by_conversation(conversation.id)
         assert messages[1].content == event["text"]
         assert messages[1].trace == [
             {"t": "thinking", "text": "hm"},
-            {"t": "curated_error", "kind": "empty_answer_length", "params": {}},
+            {
+                "t": "curated_error",
+                "kind": "empty_answer_length",
+                "params": {},
+                "text": event["text"],
+            },
         ]
 
     async def test_a_failure_after_partial_text_ends_red_and_keeps_the_text(

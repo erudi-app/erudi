@@ -1,12 +1,18 @@
 import { errorDetailOf } from "./traceEvents";
 
 /**
+ * The wire sentinel the backend puts in front of a failed turn's red line
+ * (`ERROR_SENTINEL` in backend/src/agents/curated_turns.py). It stays in the
+ * stored content untranslated; the bubble shows it as a ❌.
+ */
+export const ERROR_SENTINEL = "[ERROR_MESSAGE_SYSTEM]";
+
+/**
  * The apology line the backend stores for an unexpected failure
  * (`ERROR_MESSAGE` in backend/src/agents/runner.py), sentinel included. It is
  * matched exactly: a curated turn never reads like it.
  */
-export const GENERIC_ERROR_LINE =
-  "[ERROR_MESSAGE_SYSTEM] I apologize, but I encountered an error while generating a response. Please try asking your question again.";
+export const GENERIC_ERROR_LINE = `${ERROR_SENTINEL} I apologize, but I encountered an error while generating a response. Please try asking your question again.`;
 
 /**
  * Whether a message is an unexpected failure (#615): its trace holds the
@@ -46,15 +52,15 @@ export function isGenericFailure(content, trace) {
  * @returns {string} The human-readable text, markers removed.
  */
 export function getDisplayContent(content, genericHeadline) {
-  if (content.includes("[ERROR_MESSAGE_SYSTEM]")) {
+  if (content.includes(ERROR_SENTINEL)) {
     // A generic failure is stored as the English apology; its headline is
     // translated here, at display time (#615), so it follows the interface
     // language live, after a reload and after a language switch.
     const shown =
       genericHeadline && content.endsWith(GENERIC_ERROR_LINE)
-        ? `${content.slice(0, -GENERIC_ERROR_LINE.length)}[ERROR_MESSAGE_SYSTEM] ${genericHeadline}`
+        ? `${content.slice(0, -GENERIC_ERROR_LINE.length)}${ERROR_SENTINEL} ${genericHeadline}`
         : content;
-    return shown.replace("[ERROR_MESSAGE_SYSTEM] ", "❌ ");
+    return shown.replace(`${ERROR_SENTINEL} `, "❌ ");
   }
   return content
     .replace(/\[image\]/g, "")

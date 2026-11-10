@@ -210,7 +210,7 @@ their contents through history forever.
 | `compaction` | `phase`; with `phase: "done"`: `summarized`, `reason`, `summary`, `summary_lost` | Earlier messages are summarized (see [compaction](#what-the-thread-shows-of-a-compaction)). `phase: "start"`: the summary call is about to run; never persisted. `phase: "done"`: the history was rewritten — `summarized` = the user messages and answers summarized (tool calls, tool results and the previous summary not counted), `reason` = `"memory"` (the computer's memory bounds the window) or `"length"`, `summary` = the summary text, `summary_lost: true` when no summary could be written (`summary` is then the previous summary the model keeps, possibly empty). Persisted in the turn's trace. Several per turn are possible: one before each model call that needs it |
 | `memory_reload` | `reason` (`"memory"`, `"idle"` or `"manual"`) | Why this turn reloads the model, which picks the renderer's copy. `reason: "memory"`: the memory brake unloaded the model (or, on the llama.cpp engines, restarted it with a smaller window) while the computer's memory was under pressure, and this turn reloads it or re-reads the conversation (see below). `reason: "idle"` (any engine): the model was unloaded after the Settings idle delay without use, and this turn reloads it; the copy names no duration. `reason: "manual"` (any engine): the user unloaded it with the header's Unload button ("You unloaded the model; reloading it…"). The idle and manual reasons only reach a conversation that already has messages (a new one shows its first-reply hint); a model switch never sends the event, and a turn announces at most one reload. Sent before anything else the model produces; never persisted |
 | `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one, by precedence: a brake notice, then `gpu_contention`, then `bound`. `reason: "pressure"`: the computer's memory is under pressure and the memory brake shrank the window, so the conversation will be summarized sooner. `reason: "pressure_external"`: the computer's memory is under pressure from other apps and this conversation uses little of it. `reason: "gpu_contention"` (the CUDA engine on Windows): another app is taking the graphics card's memory from the model, so answers are slower; sent at every turn end while it lasts, and the renderer polls `GET /hardware/gpu_contention/status` to drop the notice once it ends (see below). `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
-| `error` | `text`; optional `code`, `raw`, `detail`, `request_id`, `curated`, `curated_error` | The turn failed. `text` is the red message: the generic apology, or a curated sentence in English (a prompt that does not fit, a model that did not start answering in time or went silent mid-answer, the tool-loop limit). A generic failure carries `detail` (the cleaned cause, see [Errors](#when-a-turn-fails)) and `request_id`; a curated one carries `curated: true`, `curated_error` (`{"kind", "params"}`, what the renderer translates it from) and no detail. `code`/`raw` are the engine's typed cause (CUDA remedies). Text streamed before the failure stays in the answer; the error event follows it |
+| `error` | `text`; optional `code`, `raw`, `detail`, `request_id`, `curated`, `curated_error` | The turn failed. `text` is the red message: the generic apology, or a curated sentence in English (a prompt that does not fit, a model that did not start answering in time or went silent mid-answer, the tool-loop limit). A generic failure carries `detail` (the cleaned cause, see [Errors](#when-a-turn-fails)) and `request_id`; a curated one carries `curated: true`, `curated_error` (`{"kind", "params", "text"}`, what the renderer translates it from) and no detail. `code`/`raw` are the engine's typed cause (CUDA remedies). Text streamed before the failure stays in the answer; the error event follows it |
 | `done` | — | Terminal event, always sent, including after an `error` |
 
 `done` is also the refetch signal: the assistant message is committed to the database *before* it is
@@ -350,12 +350,16 @@ mid-answer, or hit the tool-loop limit, is a **curated turn**: one entry of `CUR
 The English line is what the database stores as the message content and what an older interface
 shows. The model reads back an English line too: the empty-answer line itself, and, for a red
 curated turn, the generic apology the runner closes the thread state with. The answer event (and
-the wire `error` event of a red one) carries `curated_error: {"kind", "params"}` beside the line,
-and the message's trace keeps it as `{"t": "curated_error", "kind", "params"}`, pinned like an
-`error_detail`. The renderer shows `chat:curated.<kind>` in the interface language, with the
-numbers formatted for it (`frontend/src/utils/curatedTurns.js`), live, after a reload and after a
-language switch. A message stored before curated turns carried their kind, or with a kind the
-interface has no key for, shows its stored English line. A new kind is one entry of
+the wire `error` event of a red one) carries `curated_error: {"kind", "params", "text"}` beside
+the line, `text` being the English line itself without the sentinel, and the message's trace keeps
+it as `{"t": "curated_error", "kind", "params", "text"}`, pinned like an `error_detail`. The
+renderer shows `chat:curated.<kind>` in the interface language, with the numbers formatted for it
+(`frontend/src/utils/curatedTurns.js`), live, after a reload and after a language switch, in
+place of exactly `text` in the content: what streamed before it and what the same turn added after
+it (the red line of a later failure, the line of an interrupted stream, the Arena's
+request-failure marker) stay as they are. A message stored before curated turns carried their
+kind, with a kind the interface has no key for, or whose content no longer holds `text`, shows as
+stored. A new kind is one entry of
 `CURATED_KINDS` and `chat:curated.<kind>` in the four locales.
 
 An Arena panel shows them the same way: `POST /erudi/arena/{llm_id}/query` streams NDJSON

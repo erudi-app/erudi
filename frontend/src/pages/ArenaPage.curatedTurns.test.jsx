@@ -82,6 +82,7 @@ describe("an Arena panel", () => {
         curated_error: {
           kind: "context_overflow",
           params: { prompt_tokens: 9030, context_tokens: 8192 },
+          text: WINDOW_EN,
         },
       }
     );
@@ -98,11 +99,37 @@ describe("an Arena panel", () => {
     await sendWith({
       t: "answer",
       text: STOP_EN,
-      curated_error: { kind: "empty_answer_stop", params: {} },
+      curated_error: { kind: "empty_answer_stop", params: {}, text: STOP_EN },
     });
 
     const answers = await screen.findAllByText(STOP_ZH);
     expect(answers[0].dataset.testid).toBe("answer");
+  });
+
+  it("keeps the request-failure marker that followed an empty-answer line", async () => {
+    await i18n.changeLanguage("zh");
+    // One reader per panel: the line arrives, then the connection drops.
+    tracedFetchMock.mockImplementation(async () => {
+      const read = vi.fn();
+      read.mockResolvedValueOnce({
+        done: false,
+        value: encoder.encode(
+          `${JSON.stringify({
+            t: "answer",
+            text: STOP_EN,
+            curated_error: { kind: "empty_answer_stop", params: {}, text: STOP_EN },
+          })}\n`
+        ),
+      });
+      read.mockRejectedValueOnce(new Error("socket reset"));
+      return { ok: true, body: { getReader: () => ({ read }) } };
+    });
+    apiClient.get.mockResolvedValue([{ id: 1, name: "m1", supports_vision: false }]);
+    render(<ArenaPage />);
+    fireEvent.click(await screen.findByText("SEND"));
+
+    const bubbles = await screen.findAllByText(`${STOP_ZH}${i18n.t("arena:panel.error")}`);
+    expect(bubbles).toHaveLength(2);
   });
 
   it("shows a generic failure with its translated headline", async () => {

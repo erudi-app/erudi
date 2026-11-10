@@ -15,13 +15,15 @@ Each kind is one entry of ``CURATED_KINDS``:
 * whether it is a failed turn (red, behind ``ERROR_SENTINEL``) or a normal
   answer line (the empty-answer kinds, whose reasoning trace is kept).
 
-The answer event of a curated turn carries ``curated_error: {kind, params}``
-next to the English line; the conversation service persists it in the
-message's trace as ``{"t": "curated_error", "kind", "params"}`` and the
-interface translates the turn at display from ``chat:curated.<kind>`` in its
-language, the numbers formatted for it. Adding a kind is one entry here and
-``chat:curated.<kind>`` in the four locales; a kind the interface does not
-know shows its stored English line.
+The answer event of a curated turn carries ``curated_error: {kind, params,
+text}`` next to the English line (``text`` is that line without the sentinel);
+the conversation service persists it in the message's trace as
+``{"t": "curated_error", "kind", "params", "text"}`` and the interface
+translates the turn at display from ``chat:curated.<kind>`` in its language,
+the numbers formatted for it, replacing exactly ``text`` in the stored content
+(whatever came after it in the same turn, a failure or an interrupted stream,
+stays). Adding a kind is one entry here and ``chat:curated.<kind>`` in the four
+locales; a kind the interface does not know shows its stored English line.
 """
 
 from __future__ import annotations
@@ -119,12 +121,15 @@ def _checked_params(kind: str, params: dict) -> dict:
     return dict(params)
 
 
+def _english_line(kind: str, params: dict) -> str:
+    return CURATED_KINDS[kind].template.format(**_checked_params(kind, params))
+
+
 def curated_text(kind: str, **params: int) -> str:
     """The English line of ``kind`` with its numbers, sentinel-prefixed for a
     failed turn."""
-    spec = CURATED_KINDS[kind]
-    text = spec.template.format(**_checked_params(kind, params))
-    return f"{ERROR_SENTINEL} {text}" if spec.error else text
+    text = _english_line(kind, params)
+    return f"{ERROR_SENTINEL} {text}" if CURATED_KINDS[kind].error else text
 
 
 def curated_answer(kind: str, **params: int) -> dict:
@@ -138,7 +143,11 @@ def curated_answer(kind: str, **params: int) -> dict:
     event: dict = {
         "t": "answer",
         "text": curated_text(kind, **params),
-        CURATED_ERROR_EVENT: {"kind": kind, "params": _checked_params(kind, params)},
+        CURATED_ERROR_EVENT: {
+            "kind": kind,
+            "params": _checked_params(kind, params),
+            "text": _english_line(kind, params),
+        },
     }
     if spec.error:
         event["curated"] = True
@@ -151,4 +160,5 @@ def curated_trace_event(curated_error: dict) -> dict:
         "t": CURATED_ERROR_EVENT,
         "kind": curated_error["kind"],
         "params": dict(curated_error.get("params") or {}),
+        "text": curated_error["text"],
     }

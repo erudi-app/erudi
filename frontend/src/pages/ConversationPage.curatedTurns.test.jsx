@@ -70,10 +70,18 @@ const STOP_FR =
 const LOOP_ZH = "无法为此请求得出最终回答（模型一直在重试却没有进展）。请尝试换一种方式提问。";
 const CHILD_DEATH = "mlx_vlm.server child is dead (pid 61112, port 27300, exit code -9)";
 
+const LOOP_EN = "I couldn't reach a final answer for this request.";
+const APOLOGY_FR =
+  "Je suis désolé, une erreur est survenue lors de la génération de la réponse. Veuillez reposer votre question.";
+
+// The trace carries the stored English line itself (`text`): only that line
+// is replaced at display.
 const memoryKind = {
   kind: "memory_overflow",
   params: { prompt_tokens: 13531, context_tokens: 8584 },
+  text: MEMORY_EN,
 };
+const stopKind = { kind: "empty_answer_stop", params: {}, text: STOP_EN };
 
 const conversationDetail = {
   id: 7,
@@ -200,11 +208,7 @@ describe("an empty-answer line, live", () => {
         query: () =>
           streamOf(
             { t: "thinking", text: "hmm" },
-            {
-              t: "answer",
-              text: STOP_EN,
-              curated_error: { kind: "empty_answer_stop", params: {} },
-            },
+            { t: "answer", text: STOP_EN, curated_error: stopKind },
             { t: "done" }
           ),
       })
@@ -214,6 +218,49 @@ describe("an empty-answer line, live", () => {
     fireEvent.click(screen.getByText("SEND"));
 
     expect((await screen.findByTestId("answer")).textContent).toBe(STOP_FR);
+  });
+
+  it("keeps a failure that followed it in the same turn", async () => {
+    await i18n.changeLanguage("fr");
+    tracedFetchMock.mockImplementation(
+      routeFetch({
+        query: () =>
+          streamOf(
+            { t: "answer", text: STOP_EN, curated_error: stopKind },
+            { t: "error", text: GENERIC_ERROR_LINE, detail: "boom", request_id: "be-1" },
+            { t: "done" }
+          ),
+      })
+    );
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+
+    const bubble = await screen.findByText(/Le modèle a terminé son tour/);
+    expect(bubble.textContent).toBe(`${STOP_FR}\n\n❌ ${APOLOGY_FR}`);
+  });
+
+  it("keeps the line of a stream dropped after it", async () => {
+    await i18n.changeLanguage("fr");
+    const read = vi.fn();
+    read.mockResolvedValueOnce({
+      done: false,
+      value: encoder.encode(
+        `${JSON.stringify({ t: "answer", text: STOP_EN, curated_error: stopKind })}\n`
+      ),
+    });
+    read.mockRejectedValueOnce(new Error("socket reset"));
+    tracedFetchMock.mockImplementation(
+      routeFetch({ query: () => ({ ok: true, body: { getReader: () => ({ read }) } }) })
+    );
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+
+    const bubble = await screen.findByText(/Le modèle a terminé son tour/);
+    expect(bubble.textContent).toBe(
+      `${STOP_FR}\n\n❌ Connexion interrompue pendant la génération de la réponse.`
+    );
   });
 });
 
@@ -234,8 +281,8 @@ describe("a curated turn, reloaded", () => {
   it("translates a kind without numbers", async () => {
     await i18n.changeLanguage("zh");
     await reloadWith(
-      turn(`${SENTINEL} I couldn't reach a final answer for this request.`, [
-        { t: "curated_error", kind: "loop_limit", params: {} },
+      turn(`${SENTINEL} ${LOOP_EN}`, [
+        { t: "curated_error", kind: "loop_limit", params: {}, text: LOOP_EN },
       ])
     );
 
@@ -247,11 +294,33 @@ describe("a curated turn, reloaded", () => {
     await reloadWith(
       turn(`*A notice.*\n\n${STOP_EN}`, [
         { t: "thinking", text: "hmm" },
-        { t: "curated_error", kind: "empty_answer_stop", params: {} },
+        { t: "curated_error", ...stopKind },
       ])
     );
 
     expect((await screen.findByTestId("answer")).textContent).toBe(`*A notice.*\n\n${STOP_FR}`);
+  });
+
+  it("translates an empty-answer line and keeps the failure stored after it", async () => {
+    await i18n.changeLanguage("fr");
+    await reloadWith(
+      turn(`${STOP_EN}\n\n${GENERIC_ERROR_LINE}`, [
+        { t: "curated_error", ...stopKind },
+        { t: "error_detail", text: "boom", request_id: "be-1" },
+      ])
+    );
+
+    const bubble = await screen.findByText(/Le modèle a terminé son tour/);
+    expect(bubble.textContent).toBe(`${STOP_FR}\n\n❌ ${APOLOGY_FR}`);
+  });
+
+  it("shows the content as stored when its line is not in it", async () => {
+    await i18n.changeLanguage("fr");
+    await reloadWith(
+      turn(`${SENTINEL} Another sentence.`, [{ t: "curated_error", ...memoryKind }])
+    );
+
+    expect(await screen.findByText("❌ Another sentence.")).toBeTruthy();
   });
 
   it("shows a turn stored before this version as stored", async () => {
@@ -265,7 +334,12 @@ describe("a curated turn, reloaded", () => {
     await i18n.changeLanguage("fr");
     await reloadWith(
       turn(`${SENTINEL} A sentence from a newer version.`, [
-        { t: "curated_error", kind: "a_future_kind", params: {} },
+        {
+          t: "curated_error",
+          kind: "a_future_kind",
+          params: {},
+          text: "A sentence from a newer version.",
+        },
       ])
     );
 
