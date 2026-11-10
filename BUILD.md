@@ -394,8 +394,8 @@ file above the floor. The smoke's macOS leg runs both scripts too.
 python-docx opens its default parts (styles, settings, header, footer, comments)
 through `<docx/parts>/../templates/`, which a `.docx` saved without a styles part
 (TextEdit) reaches. PyInstaller keeps the `docx.parts` modules in the PYZ archive
-only, so `docx/parts/` would not exist on disk and macOS could not resolve the
-`..`. Both backend specs collect `docx` as `pyz+py`
+only, so `docx/parts/` would not exist on disk: macOS and Linux cannot resolve
+the `..` (ENOENT), and only Windows normalises it lexically. Both backend specs collect `docx` as `pyz+py`
 (`module_collection_mode`), and `scripts/ci/check_docx_default_parts.py
 backend/dist`, run by the release build and by the smoke on every leg right after
 PyInstaller, fails when a frozen `docx/templates` has no `docx/parts` beside it.

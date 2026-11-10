@@ -9,7 +9,8 @@ footer, comments) as ``<docx/parts>/../templates/<name>``. A ``.docx`` saved
 without a styles part (TextEdit does) reaches it. In a PyInstaller bundle the
 modules of ``docx.parts`` live in the PYZ archive, so unless the spec collects
 ``docx`` as sources too, ``docx/parts/`` is not a directory and the OS cannot
-resolve the ``..``: macOS answers ENOENT and ingestion of the file fails (#705).
+resolve the ``..``: macOS and Linux answer ENOENT and ingestion of the file fails
+(#705); only Windows normalises ``..`` lexically.
 
 The check walks <dir>, finds every ``docx/templates`` directory and requires
 that the five default parts are there and that the sibling ``docx/parts`` is a

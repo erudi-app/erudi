@@ -252,7 +252,8 @@ def test_specs_collect_docx_as_pyz_and_source_files():
     # through os.path.join(<docx/parts dir>, "..", "templates", ...). A `.docx`
     # saved without a styles part (TextEdit) reaches that path. In the frozen
     # app docx/parts/ is not a directory (its modules live in the PYZ), so the
-    # OS cannot resolve the `..` on macOS and the read fails with ENOENT (#705).
+    # OS cannot resolve the `..` on macOS or Linux (only Windows normalises it
+    # lexically) and the read fails with ENOENT (#705).
     # "pyz+py" also writes the sources, which makes docx/parts/ exist on disk.
     # backend-cpu.spec executes backend.spec in its own namespace, so the three
     # specs carry the one option as long as the two Analysis calls do.

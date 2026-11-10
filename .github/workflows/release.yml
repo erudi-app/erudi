@@ -177,9 +177,10 @@ jobs:
 
       # python-docx reads its default parts through <docx/parts>/../templates/;
       # a bundle without docx/parts/ on disk cannot open a .docx saved without
-      # a styles part (TextEdit), and the failure is an ENOENT on macOS only
-      # when a user drops such a file (#705). Checked on every leg: it only
-      # walks the frozen tree.
+      # a styles part (TextEdit): macOS and Linux fail with ENOENT, only
+      # Windows normalises the `..` lexically, and it surfaces when a user
+      # drops such a file (#705). Checked on every leg: it only walks the
+      # frozen tree.
       - name: Check the frozen backend ships python-docx's default parts
         run: python scripts/ci/check_docx_default_parts.py backend/dist
 
