@@ -15,7 +15,12 @@ const os = require("os");
 // Pure, unit-tested startup helpers (shared with the renderer).
 const { confirmBackendHealth } = require("./utils/backendHealth");
 const { classifyStderrLine } = require("./utils/backendStderr");
-const { shouldRetrySpawn } = require("./utils/backendRetry");
+const {
+  DATA_DIR_RETRY_MS,
+  DATA_DIR_WAIT_MS,
+  shouldRetrySpawn,
+  shouldWaitForDataDir,
+} = require("./utils/backendRetry");
 const { buildBackendSpawnOptions, buildBackendEnv } = require("./utils/backendSpawn");
 const { gracefulShutdown } = require("./utils/backendShutdown");
 const { singleFlight } = require("./utils/singleFlight");
@@ -92,6 +97,9 @@ let backendIsReady = false;
 // Transient failures (port contention) may auto-respawn; deterministic ones
 // fail fast and wait for a manual retry.
 const MAX_SPAWN_ATTEMPTS = 2;
+// When the current wait for a data folder still held by the previous backend
+// began (DATA_DIR_IN_USE), null when not waiting.
+let dataDirWaitSince = null;
 
 // Kill the backend process and its entire child tree.
 // On Windows, SIGTERM only kills the parent — llama-server.exe is left orphaned.
@@ -198,8 +206,10 @@ if (require("electron-squirrel-startup")) {
 // running instance instead, which brings its window forward, and quits before
 // it creates a window or spawns anything. The backend also refuses a data
 // folder another backend holds (DATA_DIR_IN_USE), for the backend still
-// finishing its exit after a quit.
-const hasSingleInstanceLock = app.requestSingleInstanceLock();
+// finishing its exit after a quit. Packaged builds only: a dev run and the
+// installed app share the lock's key (the app name), so `npm start` would
+// otherwise quit while the installed app runs; dev does not spawn a backend.
+const hasSingleInstanceLock = !app.isPackaged || app.requestSingleInstanceLock();
 if (!hasSingleInstanceLock) {
   log("Another Erudi instance is running; handing over to it and quitting");
   app.quit();
@@ -350,6 +360,8 @@ const startRealBackend = () => {
     const tracker = createBackendStartTracker({
       log,
       logError,
+      // Waited out below (startBackendSupervised): not an ERROR per attempt.
+      quietCodes: new Set(["DATA_DIR_IN_USE"]),
       onFail: (code) => {
         if (capTimer) clearTimeout(capTimer);
         reject(new Error(code));
@@ -478,6 +490,7 @@ async function startBackendSupervised(attempt = 0) {
   try {
     log(`Backend startup attempt ${attempt + 1}...`);
     const { port } = await startRealBackend();
+    dataDirWaitSince = null;
     resolvedPort = port;
     backendIsReady = true;
     log(`Backend is ready on port ${port}.`);
@@ -487,6 +500,25 @@ async function startBackendSupervised(attempt = 0) {
   } catch (error) {
     const code = (error && error.message) || "BACKEND_STARTUP_FAILED";
     log(`Backend start attempt ${attempt + 1} failed: ${code}`);
+    if (code === "DATA_DIR_IN_USE") {
+      // The previous backend is still ending (a quit followed by a quick
+      // relaunch): respawn until it lets go of the data folder.
+      if (dataDirWaitSince === null) {
+        dataDirWaitSince = Date.now();
+        log("The data folder is still held by the previous backend; waiting for it to exit");
+      }
+      if (shouldWaitForDataDir(code, Date.now() - dataDirWaitSince)) {
+        requestStop(backendProcess);
+        killBackend(backendProcess);
+        backendProcess = null;
+        await new Promise((r) => setTimeout(r, DATA_DIR_RETRY_MS));
+        return startBackendSupervised(attempt);
+      }
+      dataDirWaitSince = null;
+      logError(
+        `Backend start failed (DATA_DIR_IN_USE): the data folder stayed held for ${DATA_DIR_WAIT_MS / 1000}s`
+      );
+    }
     if (shouldRetrySpawn(code, attempt, MAX_SPAWN_ATTEMPTS)) {
       logWarn(`Transient backend start failure (${code}); respawning`);
       requestStop(backendProcess);

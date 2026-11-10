@@ -190,11 +190,12 @@ const ENVIRONMENTAL_PATTERNS = [
   },
   {
     name: "data_dir_in_use",
-    // backend/run.py: another backend holds the data folder's lock (a second
-    // app, or the previous backend still finishing its exit). run.py writes
-    // "startup_error DATA_DIR_IN_USE: ..." at WARNING; main.js writes "Backend
-    // start failed (DATA_DIR_IN_USE): ..." at ERROR once its respawns are
-    // spent. Like a taken port, it is the machine's state, not a defect.
+    // backend/run.py: another backend holds the data folder's lock (the
+    // previous backend still finishing its exit). run.py writes it at INFO
+    // and main.js respawns for up to 30 s; main.js writes "Backend start
+    // failed (DATA_DIR_IN_USE): the data folder stayed held for 30s" at ERROR
+    // once that wait runs out. Like a taken port, it is the machine's state,
+    // not a defect.
     test: (message) => message.includes("data_dir_in_use"),
   },
   {

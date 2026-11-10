@@ -47,9 +47,18 @@ export function exitFailureCode(code) {
  * @param {(message: string, error?: *) => void} io.logError - ERROR record.
  * @param {(code: string) => void} io.onFail - Called once, on the first failure.
  * @param {() => void} io.onSucceed - Called once, when the backend is confirmed.
+ * @param {Set<string>} [io.quietCodes] - Codes main waits out by respawning
+ *   (DATA_DIR_IN_USE): each attempt is an unlevelled line, and main writes
+ *   the one ERROR if the wait runs out.
  * @returns {{fail: Function, succeed: Function, exited: Function, settled: () => boolean, succeeded: () => boolean}} The tracker.
  */
-export function createBackendStartTracker({ log, logError, onFail, onSucceed }) {
+export function createBackendStartTracker({
+  log,
+  logError,
+  onFail,
+  onSucceed,
+  quietCodes = new Set(),
+}) {
   let settled = false;
   let succeeded = false;
 
@@ -64,7 +73,11 @@ export function createBackendStartTracker({ log, logError, onFail, onSucceed }) 
   const fail = (code, cause, error) => {
     if (settled) return;
     settled = true;
-    logError(`Backend start failed (${code}): ${cause}`, error);
+    if (quietCodes.has(code)) {
+      log(`Backend start failed (${code}): ${cause}`);
+    } else {
+      logError(`Backend start failed (${code}): ${cause}`, error);
+    }
     onFail(code);
   };
 

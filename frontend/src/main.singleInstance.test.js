@@ -16,7 +16,11 @@ const source = readFileSync(fileURLToPath(new URL("./main.js", import.meta.url))
 
 describe("single instance", () => {
   it("takes the single-instance lock and quits when another instance holds it", () => {
-    expect(source).toMatch(/const hasSingleInstanceLock = app\.requestSingleInstanceLock\(\);/);
+    // Packaged only: dev and the installed app share the lock's key, so
+    // `npm start` would quit while the installed app runs.
+    expect(source).toMatch(
+      /const hasSingleInstanceLock = !app\.isPackaged \|\| app\.requestSingleInstanceLock\(\);/
+    );
     expect(source).toMatch(/if \(!hasSingleInstanceLock\) \{[^}]*app\.quit\(\);/s);
   });
 
@@ -26,6 +30,11 @@ describe("single instance", () => {
     expect(handler[0]).toMatch(/mainWindow\.restore\(\)/);
     expect(handler[0]).toMatch(/mainWindow\.focus\(\)/);
     expect(handler[0]).toMatch(/createWindow\(\)/);
+  });
+
+  it("waits for a data folder the previous backend still holds", () => {
+    expect(source).toMatch(/quietCodes: new Set\(\["DATA_DIR_IN_USE"\]\)/);
+    expect(source).toMatch(/shouldWaitForDataDir\(code, Date\.now\(\) - dataDirWaitSince\)/);
   });
 
   it("never starts a window or a backend without the lock", () => {

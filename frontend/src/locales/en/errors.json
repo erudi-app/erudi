@@ -6,9 +6,9 @@
     "checkLogs": "Check the backend logs and contact us.",
     "codes": {
       "dataDirInUse": {
-        "title": "Erudi is already running",
-        "detail": "Another Erudi backend is using this app's data folder.",
-        "hint": "Close the other Erudi window, wait a few seconds, then retry."
+        "title": "The previous session is still closing",
+        "detail": "Erudi's previous session is still closing and holds its data folder.",
+        "hint": "Wait a few seconds, then retry."
       },
       "portInUse": {
         "title": "Port already in use",

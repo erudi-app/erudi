@@ -22,6 +22,24 @@ let onSucceed;
 
 const tracker = () => createBackendStartTracker({ log, logError, onFail, onSucceed });
 
+describe("a code main waits out", () => {
+  it("is an unlevelled line, not an ERROR per attempt", () => {
+    const t = createBackendStartTracker({
+      log,
+      logError,
+      onFail,
+      onSucceed,
+      quietCodes: new Set(["DATA_DIR_IN_USE"]),
+    });
+    t.fail("DATA_DIR_IN_USE", "backend reported startup_error: folder held");
+    expect(logError).not.toHaveBeenCalled();
+    expect(log).toHaveBeenCalledWith(
+      "Backend start failed (DATA_DIR_IN_USE): backend reported startup_error: folder held"
+    );
+    expect(onFail).toHaveBeenCalledWith("DATA_DIR_IN_USE");
+  });
+});
+
 beforeEach(() => {
   log = vi.fn();
   logError = vi.fn();

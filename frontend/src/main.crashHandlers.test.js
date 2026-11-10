@@ -64,7 +64,14 @@ describe("main-process crash handlers", () => {
     expect(supervisor).toMatch(
       /log\(`Backend startup failed \(\$\{code\}\); surfacing to the user`\)/
     );
-    expect(supervisor).not.toMatch(/logError\(/);
+    // One exception: DATA_DIR_IN_USE is waited out (a respawn every 2 s for
+    // up to 30 s), so the tracker writes each attempt unlevelled
+    // (quietCodes) and the supervisor writes the one ERROR when the wait
+    // runs out.
+    const errorWrites = supervisor.match(/logError\(\s*`[^`]*`/g) || [];
+    expect(errorWrites).toEqual([
+      "logError(\n        `Backend start failed (DATA_DIR_IN_USE): the data folder stayed held for ${DATA_DIR_WAIT_MS / 1000}s`",
+    ]);
   });
 
   it("keeps the requested-stop state on the child process, never in a global", () => {

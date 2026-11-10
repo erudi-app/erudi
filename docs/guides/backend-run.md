@@ -175,7 +175,7 @@ per-generation table is in [Hardware Detection](hardware.md).
 
 | Code | Meaning |
 |---|---|
-| `DATA_DIR_IN_USE` | another backend holds the data folder's lock (transient; the frontend retries) |
+| `DATA_DIR_IN_USE` | another backend holds the data folder's lock (the frontend respawns for up to 30 s while the previous backend ends) |
 | `NO_PORT_AVAILABLE` | every port in the 27182-27199 scan is busy (transient; the frontend retries) |
 | `CRASH_BEFORE_READY` | the server thread exited before binding a port |
 | `PORT_TIMEOUT` | the server did not bind within the startup window |
@@ -211,8 +211,13 @@ The exit itself is bounded. Once the lifespan has stopped its services, the laun
 at most `EXIT_GRACE_SECONDS` (2 s) for the server thread, emits `shutdown`, and arms an exit
 deadline: if a thread still holds the interpreter's exit `EXIT_GRACE_SECONDS` later (the
 exit joins every executor thread, and a transfer parked in a network read is one), the
-process logs which threads and ends. A shutdown that never reports is cut off
-`SHUTDOWN_HARD_LIMIT_SECONDS` (60 s) after the request.
+process logs which threads and ends. The exit deadline is armed before the `shutdown`
+event is written: when the parent was killed, stdout is a broken pipe, and an event with
+no reader is dropped (said once at INFO), never an error. A shutdown that never reports is
+cut off `SHUTDOWN_HARD_LIMIT_SECONDS` (60 s) after the request, logged at ERROR: that last
+resort can leave the database unstopped, and the next start then runs a crash recovery.
+Each step of the lifespan shutdown is guarded, so a step that fails is logged (ERROR, with
+its traceback) and the next ones, the PostgreSQL stop above all, still run.
 
 ### One backend per data folder
 
@@ -223,8 +228,15 @@ holds it for the life of the process. A second backend on the same folder stops 
 is released however the process ends, and a leftover file never blocks a start; the file
 only carries the holder's pid for the message. Instances started with their own
 `ERUDI_DATA_ROOT` (the integration tests, a QA run beside the app) each lock their own
-folder. The Electron app also holds a single-instance lock: a second launch brings the
-running window forward and quits.
+folder. A packaged Electron app also holds a single-instance lock: a second launch brings
+the running window forward and quits. A dev run (`npm start`) does not take it, since it
+shares the lock's key with an installed Erudi and spawns no backend of its own.
+
+Right after a quit the previous backend can still hold the folder for a while (up to about
+20 s with a request to drain). The Electron main process waits it out: on
+`DATA_DIR_IN_USE` it respawns the backend every 2 s for up to 30 s, and only then shows
+the error screen ("The previous session is still closing"). The backend writes the refusal
+at INFO; main writes one ERROR if the wait runs out.
 
 ## Usage
 

@@ -1,6 +1,9 @@
 import { describe, it, expect } from "vitest";
 import {
   classifyStartupError,
+  DATA_DIR_RETRY_MS,
+  DATA_DIR_WAIT_MS,
+  shouldWaitForDataDir,
   shouldRetrySpawn,
   healthConfirmBackoffMs,
   HEALTH_CONFIRM_BACKOFF_MS,
@@ -12,10 +15,10 @@ describe("classifyStartupError", () => {
     expect(classifyStartupError("PORT_TIMEOUT")).toBe("transient");
   });
 
-  it("marks a data folder still held by an exiting backend transient", () => {
-    // A relaunch right after a quit can meet the previous backend finishing
-    // its exit (a few seconds at most): a respawn a moment later gets the lock.
-    expect(classifyStartupError("DATA_DIR_IN_USE")).toBe("transient");
+  it("leaves a data folder held by the previous backend to its own wait", () => {
+    // Not one of the two quick respawns: the previous backend can take
+    // ~20 s to exit (uvicorn's drain, the download wait, its own stops).
+    expect(classifyStartupError("DATA_DIR_IN_USE")).toBe("deterministic");
   });
 
   it("marks everything else deterministic", () => {
@@ -41,6 +44,21 @@ describe("shouldRetrySpawn", () => {
   it("never respawns deterministic failures (fail fast, manual retry)", () => {
     expect(shouldRetrySpawn("IMPORT_ERROR", 0)).toBe(false);
     expect(shouldRetrySpawn("CRASH_BEFORE_READY", 0)).toBe(false);
+  });
+});
+
+describe("shouldWaitForDataDir", () => {
+  it("keeps respawning for about 30 s while the previous backend holds the folder", () => {
+    expect(DATA_DIR_WAIT_MS).toBe(30000);
+    expect(DATA_DIR_RETRY_MS).toBe(2000);
+    expect(shouldWaitForDataDir("DATA_DIR_IN_USE", 0)).toBe(true);
+    expect(shouldWaitForDataDir("DATA_DIR_IN_USE", 29999)).toBe(true);
+    expect(shouldWaitForDataDir("DATA_DIR_IN_USE", 30000)).toBe(false);
+  });
+
+  it("never waits on any other code", () => {
+    expect(shouldWaitForDataDir("NO_PORT_AVAILABLE", 0)).toBe(false);
+    expect(shouldWaitForDataDir("CRASH_BEFORE_READY", 0)).toBe(false);
   });
 });
 
