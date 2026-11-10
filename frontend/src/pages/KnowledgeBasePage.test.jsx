@@ -388,7 +388,9 @@ describe("KnowledgeBasePage assistant creation", () => {
 
     expect(screen.queryByText("Data attached to your Assistant successfully!")).toBeNull();
     expect(
-      screen.getByText(/2 files could not be indexed: maintenance\.docx, notes\.rtf/)
+      screen.getByText(
+        /The assistant was created, but 2 files could not be indexed: maintenance\.docx, notes\.rtf\. The reason is on the Diagnostics page\./
+      )
     ).toBeTruthy();
 
     // The message is not on a timer: the user reads it, then dismisses it.
@@ -414,6 +416,60 @@ describe("KnowledgeBasePage assistant creation", () => {
     act(() => openKB.mock.calls[0][1].onComplete({ failedFiles: ["maintenance.docx"] }));
 
     expect(screen.getByText(/1 file could not be indexed: maintenance\.docx/)).toBeTruthy();
+  });
+
+  it("words an update differently from a creation", async () => {
+    modelsResponder = () => [{ id: 5, name: "picked-name", is_attached_to_kb: true, kb_id: 1 }];
+    render(<KnowledgeBasePage />);
+    await waitFor(() => expect(screen.getByTestId("lib-count").textContent).toBe("1"));
+    fireEvent.click(screen.getByText("PICK_MODEL"));
+    fireEvent.click(screen.getByText("SET_NAME"));
+    fireEvent.click(screen.getByText("DROP_FILES"));
+    fireEvent.click(screen.getByText("Create Assistant"));
+
+    act(() => openKB.mock.calls[0][1].onComplete({ failedFiles: ["maintenance.docx"] }));
+
+    expect(
+      screen.getByText(/The knowledge base was updated, but 1 file could not be indexed/)
+    ).toBeTruthy();
+  });
+
+  it("lists at most five failed files, then how many more", async () => {
+    render(<KnowledgeBasePage />);
+    await act(async () => {});
+    fireEvent.click(screen.getByText("PICK_MODEL"));
+    fireEvent.click(screen.getByText("SET_NAME"));
+    fireEvent.click(screen.getByText("DROP_FILES"));
+    fireEvent.click(screen.getByText("Create Assistant"));
+
+    const names = ["a.docx", "b.docx", "c.docx", "d.docx", "e.docx", "f.docx", "g.docx"];
+    act(() => openKB.mock.calls[0][1].onComplete({ failedFiles: names }));
+
+    expect(
+      screen.getByText(/a\.docx, b\.docx, c\.docx, d\.docx, e\.docx and 2 more\./)
+    ).toBeTruthy();
+    expect(screen.queryByText(/f\.docx/)).toBeNull();
+  });
+
+  it("names the failed files next to the error when the whole job failed", async () => {
+    render(<KnowledgeBasePage />);
+    fireEvent.click(screen.getByText("PICK_MODEL"));
+    fireEvent.click(screen.getByText("SET_NAME"));
+    fireEvent.click(screen.getByText("DROP_FILES"));
+    fireEvent.click(screen.getByText("Create Assistant"));
+
+    act(() =>
+      openKB.mock.calls[0][1].onError("No searchable content could be indexed", {
+        failedFiles: ["maintenance.docx"],
+      })
+    );
+
+    expect(await screen.findByText(/No searchable content could be indexed/)).toBeTruthy();
+    expect(
+      screen.getByText(
+        /1 file could not be indexed: maintenance\.docx\. The reason is on the Diagnostics page\./
+      )
+    ).toBeTruthy();
   });
 
   it("clears the staged file list the DragDropArea owns, and the submitted name, on reset", async () => {

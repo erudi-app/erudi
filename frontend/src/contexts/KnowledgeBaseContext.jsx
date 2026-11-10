@@ -115,7 +115,9 @@ export function KnowledgeBaseProvider({ children }) {
             const errorMsg =
               data.error_message || t("knowledgeBase:creation.errors.failedUnexpectedly");
             setErrorMessage(errorMsg);
-            callbacksRef.current.onError?.(errorMsg);
+            // The names ride along: when every file failed, they are the part
+            // of the story the message alone does not tell.
+            callbacksRef.current.onError?.(errorMsg, { failedFiles: data.failed_files ?? [] });
           }
         }
       } catch (err) {

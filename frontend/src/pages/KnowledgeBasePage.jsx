@@ -26,6 +26,7 @@ export default function KnowledgeBasePage() {
   const [errorMessage, setErrorMessage] = useState("");
   const [isValidated, setIsValidated] = useState(false);
   const [failedFiles, setFailedFiles] = useState([]); // names, from the finished job
+  const [wasUpdate, setWasUpdate] = useState(false); // the finished job updated an assistant
 
   // Inference rating readout. The state holds a status code plus the raw
   // backend values; the displayed placeholders ("fetching…", "N/A", …) are
@@ -99,6 +100,14 @@ export default function KnowledgeBasePage() {
     }
   };
 
+  // At most five names, then how many more: a long list would bury the message.
+  const MAX_LISTED_FILES = 5;
+  const listFailedFiles = (names) => {
+    const shown = names.slice(0, MAX_LISTED_FILES).join(", ");
+    const more = names.length - MAX_LISTED_FILES;
+    return more > 0 ? `${shown} ${t("knowledgeBase:page.form.moreFiles", { count: more })}` : shown;
+  };
+
   const resetForm = () => {
     setIsValidated(false);
     setFailedFiles([]);
@@ -165,6 +174,7 @@ export default function KnowledgeBasePage() {
       onComplete: ({ failedFiles = [] } = {}) => {
         log.log("Knowledge base assistant created successfully");
         setFailedFiles(failedFiles);
+        setWasUpdate(isUpdate);
         setIsValidated(true);
         // Reset form after a delay. A message naming failed files stays until
         // the user dismisses it: three seconds is not enough to read it.
@@ -172,7 +182,15 @@ export default function KnowledgeBasePage() {
       },
       // UI only: the context wrote the record (it knows the job and the
       // backend's message); a second ERROR here would show one failure twice.
-      onError: (error) => setErrorMessage(error),
+      onError: (error, { failedFiles = [] } = {}) =>
+        setErrorMessage(
+          failedFiles.length > 0
+            ? `${error}\n${t("knowledgeBase:page.errors.failedFiles", {
+                count: failedFiles.length,
+                files: listFailedFiles(failedFiles),
+              })}`
+            : error
+        ),
     });
   };
 
@@ -412,10 +430,15 @@ export default function KnowledgeBasePage() {
                     {failedFiles.length > 0 ? (
                       <>
                         <div className="text-amber-400 text-sm">
-                          {t("knowledgeBase:page.form.partialSuccess", {
-                            count: failedFiles.length,
-                            files: failedFiles.join(", "),
-                          })}
+                          {t(
+                            wasUpdate
+                              ? "knowledgeBase:page.form.partialUpdated"
+                              : "knowledgeBase:page.form.partialCreated",
+                            {
+                              count: failedFiles.length,
+                              files: listFailedFiles(failedFiles),
+                            }
+                          )}
                         </div>
                         <button
                           className="mt-3 py-1 px-5 rounded-full border border-emerald-500 text-emerald-400 hover:bg-emerald-500/10 transition text-sm"

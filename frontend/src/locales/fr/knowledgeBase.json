@@ -18,14 +18,20 @@
       "title": "Dites à votre assistant à quoi vous allez l'utiliser !",
       "descriptionPlaceholder": "Rédigez une description",
       "success": "Données attachées à votre assistant avec succès !",
-      "partialSuccess_one": "Les connaissances ont été mises à jour, mais {{count}} fichier n'a pas pu être indexé : {{files}}. Les détails sont dans la page Diagnostic.",
-      "partialSuccess_other": "Les connaissances ont été mises à jour, mais {{count}} fichiers n'ont pas pu être indexés : {{files}}. Les détails sont dans la page Diagnostic.",
+      "partialCreated_one": "L'assistant a été créé, mais {{count}} fichier n'a pas pu être indexé : {{files}}. La raison est dans la page Diagnostic.",
+      "partialCreated_other": "L'assistant a été créé, mais {{count}} fichiers n'ont pas pu être indexés : {{files}}. La raison est dans la page Diagnostic.",
+      "partialUpdated_one": "La base de connaissances a été mise à jour, mais {{count}} fichier n'a pas pu être indexé : {{files}}. La raison est dans la page Diagnostic.",
+      "partialUpdated_other": "La base de connaissances a été mise à jour, mais {{count}} fichiers n'ont pas pu être indexés : {{files}}. La raison est dans la page Diagnostic.",
+      "moreFiles_one": "et {{count}} autre",
+      "moreFiles_other": "et {{count}} autres",
       "create": "Créer l'assistant",
       "creating": "Création de l'assistant..."
     },
     "errors": {
       "missingFields": "Veuillez remplir tous les champs obligatoires",
-      "duplicateName": "Un modèle nommé « {{name}} » existe déjà. Choisissez un autre nom d'assistant."
+      "duplicateName": "Un modèle nommé « {{name}} » existe déjà. Choisissez un autre nom d'assistant.",
+      "failedFiles_one": "{{count}} fichier n'a pas pu être indexé : {{files}}. La raison est dans la page Diagnostic.",
+      "failedFiles_other": "{{count}} fichiers n'ont pas pu être indexés : {{files}}. La raison est dans la page Diagnostic."
     }
   },
   "confirm": {
