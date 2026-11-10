@@ -163,7 +163,7 @@
   },
   "message": {
     "firstReplyHint": "La primera respuesta puede tardar un poco más mientras el modelo se carga en memoria...",
-    "memoryReload": "Se liberó memoria en su equipo; recargando el modelo para retomar la conversación…",
+    "memoryReload": "Se liberó memoria en tu equipo; recargando el modelo para retomar la conversación…",
     "idleReload": "El modelo se liberó de la memoria al no usarse; recargándolo para retomar la conversación…",
     "manualReload": "Liberaste el modelo; recargándolo…",
     "compacting": "Resumiendo los mensajes anteriores para hacer espacio…",
@@ -291,9 +291,9 @@
     "empty_answer_stop": "El modelo terminó su turno sin escribir una respuesta. Envía un mensaje pidiéndole que continúe."
   },
   "memoryWarning": {
-    "bound": "La memoria de su equipo limita esta conversación: el modelo y esta conversación ocupan juntos alrededor de {{size}}, casi todo el espacio que permite la memoria. Inicie una nueva conversación, envíe menos a la vez o cambie a un modelo más pequeño.",
-    "pressure": "La memoria de su equipo está bajo presión: esta conversación se resumirá antes para mantener la fluidez.",
-    "pressureExternal": "La memoria de su equipo está bajo presión por otras aplicaciones; esta conversación usa poca.",
-    "gpuContention": "Otra aplicación está ocupando la memoria de su tarjeta gráfica: las respuestas son más lentas hasta que libere parte de ella. No se pierde nada."
+    "bound": "La memoria de tu equipo limita esta conversación: el modelo y esta conversación ocupan juntos alrededor de {{size}}, casi todo el espacio que permite la memoria. Inicia una nueva conversación, envía menos a la vez o cambia a un modelo más pequeño.",
+    "pressure": "La memoria de tu equipo está bajo presión: esta conversación se resumirá antes para mantener la fluidez.",
+    "pressureExternal": "La memoria de tu equipo está bajo presión por otras aplicaciones; esta conversación usa poca.",
+    "gpuContention": "Otra aplicación está ocupando la memoria de tu tarjeta gráfica: las respuestas son más lentas hasta que esa aplicación libere parte de ella. No se pierde nada."
   }
 }
