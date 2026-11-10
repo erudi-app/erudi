@@ -18,6 +18,8 @@
       "title": "Indique a su asistente para qué lo va a usar",
       "descriptionPlaceholder": "Escribe una descripción",
       "success": "Datos adjuntados a su asistente correctamente",
+      "partialSuccess_one": "Los conocimientos se actualizaron, pero {{count}} archivo no se pudo indexar: {{files}}. Los detalles están en la página Diagnóstico.",
+      "partialSuccess_other": "Los conocimientos se actualizaron, pero {{count}} archivos no se pudieron indexar: {{files}}. Los detalles están en la página Diagnóstico.",
       "create": "Crear asistente",
       "creating": "Creando asistente..."
     },

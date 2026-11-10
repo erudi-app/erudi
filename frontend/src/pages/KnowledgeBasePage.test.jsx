@@ -374,6 +374,48 @@ describe("KnowledgeBasePage assistant creation", () => {
     expect(screen.getByPlaceholderText("Write a description").value).toBe("");
   });
 
+  it("names the files that failed instead of a plain success, and waits for the user", async () => {
+    vi.useFakeTimers();
+    render(<KnowledgeBasePage />);
+    await act(async () => {});
+    fireEvent.click(screen.getByText("PICK_MODEL"));
+    fireEvent.click(screen.getByText("SET_NAME"));
+    fireEvent.click(screen.getByText("DROP_FILES"));
+    fireEvent.click(screen.getByText("Create Assistant"));
+
+    const opts = openKB.mock.calls[0][1];
+    act(() => opts.onComplete({ failedFiles: ["maintenance.docx", "notes.rtf"] }));
+
+    expect(screen.queryByText("Data attached to your Assistant successfully!")).toBeNull();
+    expect(
+      screen.getByText(/2 files could not be indexed: maintenance\.docx, notes\.rtf/)
+    ).toBeTruthy();
+
+    // The message is not on a timer: the user reads it, then dismisses it.
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(10000);
+    });
+    expect(screen.getByText(/maintenance\.docx/)).toBeTruthy();
+
+    fireEvent.click(screen.getByText("Done"));
+    expect(screen.getByText("Create Assistant")).toBeTruthy();
+    expect(screen.getByTestId("lib-name").textContent).toBe("");
+  });
+
+  it("says one file in the singular", async () => {
+    vi.useFakeTimers();
+    render(<KnowledgeBasePage />);
+    await act(async () => {});
+    fireEvent.click(screen.getByText("PICK_MODEL"));
+    fireEvent.click(screen.getByText("SET_NAME"));
+    fireEvent.click(screen.getByText("DROP_FILES"));
+    fireEvent.click(screen.getByText("Create Assistant"));
+
+    act(() => openKB.mock.calls[0][1].onComplete({ failedFiles: ["maintenance.docx"] }));
+
+    expect(screen.getByText(/1 file could not be indexed: maintenance\.docx/)).toBeTruthy();
+  });
+
   it("clears the staged file list the DragDropArea owns, and the submitted name, on reset", async () => {
     vi.useFakeTimers();
     render(<KnowledgeBasePage />);

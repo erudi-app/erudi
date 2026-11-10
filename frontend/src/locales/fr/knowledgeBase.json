@@ -18,6 +18,8 @@
       "title": "Dites à votre assistant à quoi vous allez l'utiliser !",
       "descriptionPlaceholder": "Rédigez une description",
       "success": "Données attachées à votre assistant avec succès !",
+      "partialSuccess_one": "Les connaissances ont été mises à jour, mais {{count}} fichier n'a pas pu être indexé : {{files}}. Les détails sont dans la page Diagnostic.",
+      "partialSuccess_other": "Les connaissances ont été mises à jour, mais {{count}} fichiers n'ont pas pu être indexés : {{files}}. Les détails sont dans la page Diagnostic.",
       "create": "Créer l'assistant",
       "creating": "Création de l'assistant..."
     },

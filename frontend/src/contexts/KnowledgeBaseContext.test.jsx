@@ -125,6 +125,23 @@ describe("KnowledgeBaseContext creation success", () => {
     expect(val("creating")).toBe("false");
   });
 
+  it("hands the files that failed to onComplete, empty when none did", async () => {
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status: "completed", failed_files: ["maintenance.docx", "b.pdf"] }),
+    });
+    renderProvider();
+    await startAndPollOnce();
+    expect(onComplete).toHaveBeenCalledWith({ failedFiles: ["maintenance.docx", "b.pdf"] });
+
+    cleanup();
+    onComplete.mockReset();
+    statusResponder = () => ({ ok: true, json: async () => ({ status: "completed" }) });
+    renderProvider();
+    await startAndPollOnce();
+    expect(onComplete).toHaveBeenCalledWith({ failedFiles: [] });
+  });
+
   it("hands off from isStarting to isCreating once the create call returns", async () => {
     statusResponder = () => ({ ok: true, json: async () => ({ status: "running" }) });
     renderProvider();

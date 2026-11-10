@@ -104,7 +104,8 @@ export function KnowledgeBaseProvider({ children }) {
           setIsCreating(false);
           setShowSpinner(false);
           if (data.status === "completed") {
-            callbacksRef.current.onComplete?.();
+            // A job can complete with some files failed: name them to the page.
+            callbacksRef.current.onComplete?.({ failedFiles: data.failed_files ?? [] });
           } else {
             // The backend logged the traceback under this job; this side
             // records that the assistant the user asked for was not built.

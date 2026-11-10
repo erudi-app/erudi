@@ -18,6 +18,8 @@
       "title": "Tell your assistant what you would use it for!",
       "descriptionPlaceholder": "Write a description",
       "success": "Data attached to your Assistant successfully!",
+      "partialSuccess_one": "The knowledge was updated, but {{count}} file could not be indexed: {{files}}. Details are on the Diagnostics page.",
+      "partialSuccess_other": "The knowledge was updated, but {{count}} files could not be indexed: {{files}}. Details are on the Diagnostics page.",
       "create": "Create Assistant",
       "creating": "Creating Assistant..."
     },

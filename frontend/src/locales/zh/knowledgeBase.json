@@ -18,6 +18,8 @@
       "title": "告诉助手您打算用它做什么！",
       "descriptionPlaceholder": "填写描述",
       "success": "数据已成功关联到您的助手！",
+      "partialSuccess_one": "知识库已更新，但有 {{count}} 个文件无法建立索引：{{files}}。详情请见“诊断信息”页面。",
+      "partialSuccess_other": "知识库已更新，但有 {{count}} 个文件无法建立索引：{{files}}。详情请见“诊断信息”页面。",
       "create": "创建助手",
       "creating": "正在创建助手..."
     },
