@@ -63,5 +63,6 @@
     "doneBody": "El modelo de embeddings se descargó correctamente. La Base de conocimiento está lista para usarse.",
     "errorTitle": "La descarga falló",
     "errorBody": "No se pudo descargar el modelo de embeddings. Comprueba tu conexión e inténtalo de nuevo."
-  }
+  },
+  "waitingForInstall": "Esperando a que termine de instalarse la descarga…"
 }

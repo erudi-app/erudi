@@ -63,5 +63,6 @@
     "doneBody": "嵌入模型已成功下载。知识库已可以使用。",
     "errorTitle": "下载失败",
     "errorBody": "无法下载嵌入模型。请检查网络连接后重试。"
-  }
+  },
+  "waitingForInstall": "正在等待下载完成安装…"
 }

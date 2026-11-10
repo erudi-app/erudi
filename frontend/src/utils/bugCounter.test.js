@@ -210,6 +210,17 @@ describe("isEnvironmental", () => {
     ).toBe(true);
   });
 
+  it("matches the backend startup refused because another backend holds the data folder", () => {
+    // main.js records the start failure at ERROR once its 30 s wait runs
+    // out. A backend still holding the folder is the machine's state, like a
+    // taken port.
+    expect(
+      isEnvironmental({
+        message: "Backend start failed (DATA_DIR_IN_USE): the data folder stayed held for 30s",
+      })
+    ).toBe(true);
+  });
+
   it("does not treat a sibling startup_error code as environmental", () => {
     // IMPORT_ERROR/DATA_PREP_ERROR/CRASH_BEFORE_READY/UNEXPECTED_ERROR/
     // POLLING_ERROR are internal failures, not the machine's fault.

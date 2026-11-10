@@ -26,6 +26,14 @@ describe("describeBackendError", () => {
     }
   });
 
+  it("explains a data folder held by another Erudi backend in its own words", () => {
+    const d = describeBackendError({ event: "startup_error", code: "DATA_DIR_IN_USE" });
+    const unknown = describeBackendError({ event: "startup_error", code: "WAT_IS_THIS" });
+    expect(d.title).toBeTruthy();
+    expect(d.title).not.toBe(unknown.title);
+    expect(d.hint).not.toBe(unknown.hint);
+  });
+
   it("falls back to a generic descriptor for an unknown code", () => {
     const d = describeBackendError({ event: "startup_error", code: "WAT_IS_THIS" });
     expect(d.code).toBe("WAT_IS_THIS");
