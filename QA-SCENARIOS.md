@@ -33,7 +33,7 @@ non-functional behavior.
 - [ ] When a model is **gated** (from a Hugging Face search hit), then the card shows a "gated" tag.
 - [ ] When I browse the **bundled catalog**, then no card links to a gated repository at all — Erudi downloads anonymously, so a gated link would 401 whoever clicked it *(gated repos are dropped at snapshot time, not flagged)*.
 - [ ] When a model is **under ~4B parameters**, then its card — catalog, explore and installed alike — carries the note that tool use, knowledge-base search and multi-step reasoning are unreliable below ~4B; a 7B or unknown-size card carries no such note.
-- [ ] When I view a model card, then it shows the model's **publication date** (when the publisher released it); a model with no readable date simply shows none (not a broken or wrong date).
+- [ ] *(not built yet: v1.3.0, #561 — record as not applicable)* When I view a model card, then it shows **Published <month year>** (when the publisher released it); nothing when the date is unknown (not a broken or wrong date).
 - [ ] When a category carousel has more than 4 models, then a "See all" control expands it to a grid (and back).
 - [ ] When I apply a **size filter** or **"Fits my machine"** and nothing matches, then I see "No models match these filters. Widen the size range or turn off 'Fits my machine'."
 - [ ] When there are no base models at all, then the browse area shows "No base models available" (not a crash).
@@ -51,12 +51,12 @@ non-functional behavior.
 ## Chat — `/erudi/chat`
 
 **Happy path**
-- [ ] When I open Chat with at least one local model, then the first model is auto-selected and the header reads "You are chatting with <model>"; the header's **Model** button changes it.
+- [ ] *(not built yet: v1.3.0, #704 — record as not applicable)* When I open Chat with at least one local model, then the first model is auto-selected and the header reads "You are chatting with <model>"; the model name in the header, or the panel's **Model** button, changes it.
 - [ ] When I type a prompt and press Enter, then it sends; Shift+Enter inserts a newline.
 - [ ] When I send a prompt, then a new conversation is created and I am taken to it, where the reply **streams token by token**.
 - [ ] When I adjust values through the header's **Config** or **Effort** before the first message, then the conversation is created with them and `/config` shows them once it opens.
 - [ ] When I run `/config global` on the new-conversation page, then the values are saved as the defaults for the selected model, as in a conversation.
-- [ ] *(not built yet: ephemeral chats, #428 — record as not applicable)* When I turn on the **ephemeral** toggle before starting a conversation, then it opens with a visible **ephemeral badge** marking that it will not be kept.
+- [ ] *(not built yet: v1.3.0, #428 — record as not applicable)* When I switch on the **ephemeral** toggle on the new-conversation page (off by default), then the conversation opens with a visible **ephemeral badge** reading "not kept in your history".
 
 **Per-model sampling defaults**
 - [ ] When I select a model whose publisher ships sampling values, then Creativity / Diversity start at the values saved for it with `/config global`, else at **that model's** values rather than a global 0.2 / 0.95 (Qwen3 starts at 0.6 / 0.95, Qwen2.5 at 0.7 / 0.8).
@@ -77,6 +77,7 @@ non-functional behavior.
 - [ ] When I attach image(s) on a **vision-capable** model (button, paste, or drag-and-drop) and send, then thumbnails show (up to 4) and the images are used in the answer.
 - [ ] When the **selected model is NOT vision-capable**, then the image **attach button is not shown at all** (vision-only affordance) and pasting/dropping an image is ignored; if an image still reaches the backend it is stripped, so the answer is plain text (never broken).
 - [ ] When I try to attach a **5th** image, then it is rejected (cap of 4) and the attach button is disabled at 4.
+- [ ] *(not built yet: v1.3.0 — record as not applicable)* When an oversized or non-image file is passed as an image to the message box, then it is refused with a clear message and nothing crashes.
 - [ ] When I drop a **non-image** file, then it is refused with "This format is not supported." and nothing is attached.
 - [ ] When the input is **empty or whitespace** only, then the send button is disabled.
 - [ ] When the model is loading on the first reply, then a "First response may take a bit longer while loading the model into memory…" hint shows.
@@ -84,18 +85,22 @@ non-functional behavior.
 - [ ] When a model download **completes while I am sitting on Chat**, then the model list refreshes by itself and the composer unlocks — I don't have to navigate away and back.
 - [ ] When I open Chat via `?model=<name|id>`, then that model is pre-selected (else the first model stays).
 - [ ] When the **backend is unreachable**, then an error dialog "Failed to load models: …" shows.
+- [ ] When I have **no model at all**, then the Chat page shows the message of the "zero local models" line above.
+- [ ] *(not built yet: v1.3.0, #690.10 — record as not applicable)* When the only installed entries are Knowledge Base assistants whose base model was deleted, then the Chat page shows a guided empty state (download a model, or re-bind the assistant to an installed one) instead of a red "Please select a model" with nothing to select.
+- [ ] When at least one model can be selected, then it is auto-selected and the composer works.
 
 ## Conversation — `/erudi/conversations/:id`
 
 **Happy path**
 - [ ] When I open an existing conversation, then its **full history** renders in order (my messages right, assistant left as markdown) and the model/settings populate.
 - [ ] When I send a follow-up, then a user bubble appears immediately and the assistant reply streams live; both are saved.
-- [ ] When I send the first message of a new conversation, then a short (2–4 word) **title** appears in the sidebar, free of any reasoning fragments, ideally in the conversation's language.
+- [ ] *(not built yet: v1.3.0, #525 — record as not applicable)* When I send the first message of a new conversation, then a short (2–4 word) **title** appears in the sidebar, free of any reasoning fragments, in the conversation's language.
 - [ ] When I send the first message of a new conversation, then the **title appears in the sidebar before the first answer starts streaming** (the title request runs first, then the chat), and the answer still arrives if the title fails.
 - [ ] When I send a second message in a new conversation on a `llama-server` engine (Windows, Linux), then it starts answering **much faster than the first one did** (the first message paid the whole prefill; the second reuses the first one's prefix; the title is requested before the first answer, so it never evicts that prefix).
 - [ ] When I go back to an older conversation after working in another one, then its first answer is slower (the history is re-read once, expected), and the following ones are fast again.
 - [ ] *(Windows, Linux)* When I open and answer several distinct long conversations in turn, then the memory of the `llama-server` child stays flat instead of growing with each conversation (one slot, no prompt cache: `-np 1 --cache-ram 0` in the process arguments).
 - [ ] When I reload the page, then the full text history re-renders from the database.
+- [ ] *(not built yet: v1.3.0, #690.9 — record as not applicable)* When the model writes math as `\( … \)` or `\[ … \]` (Qwen2.5's default), then it renders like `$ … $` and `$$ … $$`: inline `\(3x\)`, "2 \(x\)" and a display formula all render, including a `\[` spanning several lines; a currency amount such as "212,75 $" stays literal, and so does "I have $5 and $10"; an unclosed `\(` while streaming does not break the page; and the same delimiters inside a code block stay as written.
 
 **Reasoning / thinking models**
 - [ ] When a thinking model (e.g. Qwen3) generates, then its reasoning streams into a **collapsible "Reasoning" strip** above the answer — never into the answer bubble itself, and **no thinking marker** (`<think>`, `</think>`, channel tags) ever appears as literal text anywhere.
@@ -134,7 +139,7 @@ non-functional behavior.
 - [ ] When I load a model whose full window **fits** my machine, then the allocated window equals the model's window — no gratuitous reduction.
 - [ ] When I load a model whose full window **cannot fit** (a 128k-context model on a 16 GB machine), then the model still loads, the allocated window shown is smaller than the model's, and `backend.log` carries the engine's own `context size reduced from X to Y` line *(llama.cpp `--fit`)*.
 - [ ] When a conversation grows, then it goes **far past the old 4096-token limit** before anything is compacted (the window is the model's, not a fixed constant).
-- [ ] When a single turn is **larger than the window itself** (a huge attached document), then the turn fails with an honest message naming the prompt size and the window and suggesting what to do — nothing is silently truncated, no answer is invented.
+- [ ] *(not built yet: v1.3.0, #690.3 — record as not applicable)* When a single turn is **larger than the window itself** (a huge attached document), then the turn is refused with an honest, translated message saying this message alone is too long for the model's window (not the conversation; no longer "this conversation no longer fits…") and suggesting what to do — nothing is silently truncated, no answer is invented.
 - [ ] *(Apple Silicon)* When the same oversized turn is sent on MLX, then it is **refused cleanly before generation** with the same honest treatment — never accepted into minutes of silent gibberish.
 - [ ] *(Windows, Linux)* When `ERUDI_CTX` is set in the environment, then the llama.cpp window is pinned to exactly that value (dev/QA escape hatch) and the engine log says the user's value was respected. *(Apple Silicon: the MLX engine does not read it; the window is sized as usual.)*
 - [ ] When the app boots **offline** on a fresh install (catalog seeded from the bundled snapshot), then model info cards already show context windows — the values shipped with the snapshot.
@@ -149,7 +154,7 @@ non-functional behavior.
 - [ ] *(Apple Silicon)* When the machine's memory bounds the model's window (`Window bounded by memory` in `backend.log` at load) and, even after compacting to the kept budget, the next request would fill **85 % of the working window**, then — and only then — an **amber notice** appears in the conversation quoting the memory the model and the conversation take together. For a memory-bound model it shows as soon as the projected next request reaches 85 % of the memory ceiling (the `ceiling=` value of that line); only a model that alone fills the budget (`ceiling=` zero or negative, e.g. an 8 GB Mac with a large model) gets it from the first turn. Record, per model and machine, the turn where it first appears.
 - [ ] *(Apple Silicon)* When the **model's own window** binds (no `Window bounded by memory` line at load), then no amber notice ever appears, even as the model runs close to the memory budget — memory is not what limits that conversation *(intended: the notice says memory limits the conversation, not how full the memory budget is in bytes; a model whose trained window fits the budget can run close to 100 % of it with no notice)*.
 - [ ] *(Apple Silicon)* When a model is bounded by memory, then its **model-info card** shows the bound as the window allocated on this machine (the value of `bound=` in the `Window bounded by memory` line), not the model's trained window.
-- [ ] *(Apple Silicon)* When I paste in one message more than a memory-bound model can hold, then the turn is refused before generation with the memory message — "no longer fits what your machine's memory can hold for this model", naming the request size and what memory allows — instead of the machine starting to swap, and the model is **not** reloaded (same inference child; no new `Spawned mlx_vlm.server child` line).
+- [ ] *(not built yet: v1.3.0, #690.3 — record as not applicable)* *(Apple Silicon)* When I paste in one message more than a memory-bound model can hold, then the turn is refused before generation with a memory message saying this message alone is too large for what the machine's memory can hold for this model (not the conversation; no longer "this conversation no longer fits…"), naming the request size and what memory allows — instead of the machine starting to swap, and the model is **not** reloaded (same inference child; no new `Spawned mlx_vlm.server child` line).
 - [ ] *(Apple Silicon)* When a long answer is done (a prompt of several thousand tokens) and I then send a short message in **another** conversation (its first turn resets the prefix cache), then the `mlx_vlm.server` process's memory in Activity Monitor drops back close to its size right after the model loaded (record both numbers), and `logs/mlx-child-<port>.log` shows `MLX buffer cache limit set to 0 bytes`. Record the long prompt's time to first token and its tokens per second: they are as fast as before the bound.
 - [ ] *(Apple Silicon)* When a memory-bound conversation goes on for several turns while the Mac is not under memory pressure, then the bound holds on every turn without any reload of the model — one `Window bounded by memory` line per load, one inference child for the whole conversation.
 - [ ] *(Apple Silicon)* When the memory bound cannot be applied at load (`Memory bound of the window not applied`, `Base footprint unknown` or `Base footprint unreadable` in `backend.log`), then the model still loads and answers, keeps the window it was spawned with, and no amber memory notice appears for it.
@@ -208,6 +213,12 @@ non-functional behavior.
 - [ ] *(CPU engine, QA seam)* With `ERUDI_FORCE_MEMORY_PRESSURE=warning` on a calm machine, when I send a turn of a long conversation and then leave the app idle for two minutes, then I see the `pressure` notice, one `action=shrink` line, then one `action=respawn` line at the first idle sample past two minutes, and nothing more; with `critical`, the next turn boundary restarts the model and two idle samples later it is unloaded.
 - [ ] *(Linux)* Before the scenarios above, record `cat /proc/pressure/memory` as a normal user, `uname -r` (4.20 or later), `grep CONFIG_PSI /boot/config-$(uname -r)`, and `cat /sys/fs/cgroup$(cut -d: -f3 /proc/self/cgroup)/memory.max` (`max` on a desktop: the system PSI is used); under `stress-ng --vm 4 --vm-bytes 85% -t 180`, record `watch -n1 cat /proc/pressure/memory` and `grep -E "pswpout|pgmajfault" /proc/vmstat`, and for the loaded child `grep -E "Anonymous|Swap" /proc/<pid>/smaps_rollup` — the brake's thresholds are calibrated from these.
 - [ ] *(Windows)* Before the scenarios above, in a non-admin PowerShell record `typeperf "\Memory\Pages Output/sec" -sc 5` (it must answer without elevation, on a non-English Windows too), `Get-CimInstance Win32_OperatingSystem | Select TotalVirtualMemorySize,FreeVirtualMemory`, `Get-CimInstance Win32_PageFileSetting` (no page file: the commit tiers run hot at rest — check the 85 / 93 % tiers stay calm then), and `(Get-Process -Id <llama-server pid>).PrivateMemorySize64` before and after a working-set trim (it must not drop).
+- [ ] *(not built yet: v1.3.0, #690.3 — record as not applicable)* When I send a message that cannot fit the window **on its own**, then the turn is refused at once with an honest, translated message saying this message alone is too long for the model's window (not the conversation), and **no compaction runs first** (no `Conversation compacted` line, the history is unchanged).
+- [ ] *(not built yet: v1.3.0, #690.12 — record as not applicable)* When an automatic compaction produces a summary that cannot stand for what it replaces (far too short for the messages it covers, or a copy of the last message), then the summary is **rejected and the history kept**: the turn goes ahead if it still fits the allocated window, otherwise it is refused with a clear message, and automatic compaction pauses for a few messages instead of retrying on every turn. With `/compact`, the same rejection shows an error and leaves the history untouched. Covered by unit tests (record the test run); on a packaged build the observable signs are a `summary rejected` line in backend.log, no separator, and never the "were dropped" separator.
+- [ ] *(not built yet: v1.3.0, #659 — record as not applicable)* When a long message is **starred**, then later turns carry only its beginning (about 500 tokens per starred message, 2,000 in total), and the star's documentation says so; a short starred message is still recalled word for word. Star a 100,000-character answer on a model with an 8k window: the following turns answer normally (no overflow); after /compact, a fact at the start of the starred message is recalled and one at its end is not.
+- [ ] *(not built yet: v1.3.0, #690.4 — record as not applicable)* When a conversation held in French (or Spanish, Chinese) is compacted, then the summary shown under **Show summary** is written in that language, headings included.
+- [ ] *(not built yet: v1.3.0, #525 — record as not applicable)* When the first message of a conversation is a plain greeting, then the automatic title is neutral rather than invented (no "Prénom Nom"), and a French question never gets an English or mixed-script title; checked by hand on a Mistral model too.
+- [ ] *(not built yet: v1.3.0, #690.7 — record as not applicable)* *(Apple Silicon, warning pressure with heavy swap)* When a memory release cannot reach the inference process (`Prefix cache barrier failed (ReadTimeout)`), then the model is unloaded at rest instead (`action=unload`), and my next message shows the usual reload notice. Record NOT REPRODUCED if no ReadTimeout occurs.
 
 **Knowledge-Base / agentic behavior**
 - [ ] When the model has a KB attached and is **tool-capable (agentic)**, then on a document question the model **calls the KB search tool itself** before answering, and the answer references the source.
@@ -219,6 +230,7 @@ non-functional behavior.
 - [ ] When a follow-up returns to a **topic searched earlier in the conversation**, then the model runs a **fresh search** rather than answering from its memory of old excerpts (old tool results are placeholder-stripped from context) — it must not claim "not in the documents" without having just searched.
 - [ ] When ONE question spans **two subjects living in two different documents** ("what is the drone's payload, and how many remote days are allowed?"), then the answer grounds **both** facts — neither half is dropped or answered from world knowledge *(multi-subject coverage)*.
 - [ ] When I inspect any agentic answer, then **no raw tool markup** (`<tool_call>`, JSON arguments, function-call syntax) appears in the answer bubble or in the persisted history; the search call and its excerpts appear only inside the reasoning strip.
+- [ ] *(not built yet: v1.3.0, #707 — record as not applicable)* When I use a Knowledge Base assistant on Qwen3 4B, then for every question of the fixed question set named in that change, with web search on: `Tool invoked: search_knowledge_base` precedes any `web_search`, and the answer comes from the documents (never "not in the documents" without having searched them). With web search off: no regression.
 
 **Web search**
 - [ ] When I create a new conversation, then its **Web search** switch (in `/config`) starts at the value saved for its model with `/config global`, else at the global Settings-page default at creation time.
@@ -246,9 +258,9 @@ non-functional behavior.
 - [ ] When I remove a chip before sending, then that file is not attached.
 
 **Edge cases & errors**
-- [ ] When I hover a message, then copy and star controls appear; a starred message stays starred after reload and is fed back as context on later turns.
+- [ ] *(not built yet: v1.3.0, #659 — record as not applicable)* When I hover a message, then copy and star controls appear; a starred message stays starred after reload and is fed back as context on later turns (its beginning only).
 - [ ] When I delete the conversation I'm viewing, then it's removed and I'm redirected to `/erudi/chat`; deleting a different one keeps me in place.
-- [ ] *(not built yet: ephemeral chats, #428 — record as not applicable)* When a conversation is **ephemeral** and I leave it (navigate away, open another conversation, or quit), then it is **purged from the database and the checkpointer** on the way out — reopening its URL finds nothing, and nothing about it survives a relaunch.
+- [ ] *(not built yet: v1.3.0, #428 — record as not applicable)* When a conversation is **ephemeral** and I leave it (navigate away, open another conversation, or quit), then it is deleted without confirmation and an answer still being written is abandoned; it is not in the history after a relaunch (killed mid-conversation included); logs may still hold its text.
 - [ ] When I quit and relaunch and reopen the conversation, then its full history is intact.
 - [ ] When generation **fails** or the connection **drops** mid-reply, then a red error message shows, its headline in the interface language, and any partial reply is kept.
 - [ ] When a **long conversation** on a **big model / small machine** reaches the point where the model needs more than two minutes just to read the history before writing its first word (e.g. a 9B model on a 16 GB laptop, a dozen long turns in), then the answer still arrives — the turn is no longer cut at exactly two minutes of silence. If it genuinely never starts, the red turn says the model did not start answering for a prompt of that size and suggests sending less, instead of a generic error.
@@ -262,12 +274,15 @@ non-functional behavior.
 - [ ] *(covered by the error-detail sanitizer's unit tests; no packaged recipe — record the test run)* When a failure's cause contains a web address with a user name and password, a `--api-key` value or a bearer token, then **Details** shows it masked.
 - [ ] When I copy the request id from **Details** and open Diagnostics, then the matching entry carries the same request id with the full technical record.
 - [ ] When a turn ends with a curated message (the prompt does not fit the window or this computer's memory, the model did not start answering in time, the tool-loop limit), then it reads as today, without **Details**, and it is **not** counted as a bug (no bug badge, no Diagnostics error for it).
-- [ ] *(Apple Silicon)* When a model that is too tight for the machine hits a **GPU out-of-memory** during a tool-call turn, then the turn ends with an **honest message** that the model is too large for this machine's memory — never a silent crash, a red generic error, or minutes of gibberish.
 - [ ] When I start conversations in **different languages**, then each **title** is in the language of my message — an English prompt gets an English title, not a French one (no language bias in the title generator).
+- [ ] *(not built yet: v1.3.0, #690.1, #690.2 — record as not applicable)* When the inference process stops during an answer (`kill -9` on `mlx_vlm.server`, or end `llama-server.exe` in Task Manager), then **Details** names that cause (the inference process stopped), not a transport symptom such as `ReadError` or "peer closed connection"; and every curated turn message (prompt too large for memory or for the window, no first token in time, tool-loop limit) is in the interface language, numbers in its format. Messages stored before this version stay as they were.
+- [ ] *(not built yet: v1.3.0, #504 — record as not applicable)* *(Apple Silicon)* When a model that is too tight for the machine runs out of GPU memory (Metal error), including during a tool-call turn, then the turn ends with an **honest message**, in the interface language, that the model is probably too large for this computer's memory — never a silent crash, a red generic error, or minutes of gibberish.
+- [ ] *(not built yet: v1.3.0, #504 — record as not applicable)* *(Apple Silicon)* On the #504 question, record memory over time with the Knowledge Base detached and attached; no out-of-memory means #504 closes.
+- [ ] *(not built yet: v1.3.0, #428 — record as not applicable)* When an **ephemeral** conversation had images pasted into it, then leaving it deletes those images from the `pasted-images` folder too (never a file I picked from my disk); deleting a regular conversation also removes its pasted images.
 
 **Long-conversation rendering (renderer)**
 - [ ] *(not built yet: renderer virtualization, #618 — record as not applicable)* When I scroll a **very long conversation** (hundreds of turns), then scrolling stays smooth and renderer memory does not balloon — the thread is virtualized.
-- [ ] *(not built yet: #618 — record as not applicable)* When a reply is **streaming**, then only the streaming bubble updates per token — the rest of the thread does not re-render, and the stream stays fluid even on a long conversation.
+- [ ] *(not built yet: v1.3.0, #618 — record as not applicable)* When a reply is **streaming**, then only the streaming bubble updates per token — the rest of the thread does not re-render, and the stream stays fluid even on a long conversation.
 - [ ] *(not built yet: #618 — record as not applicable)* When I use browser **find (Cmd/Ctrl+F)**, **select-all**, or **copy** across a long conversation, then it works across the whole conversation, not only the on-screen part.
 - [ ] When a new turn arrives at the bottom, then the view **auto-follows** to it as before, and I can scroll up without being yanked back down mid-read.
 - [ ] When I have scrolled up into a long history and **send** a message, then the view jumps to the bottom, shows my message and follows the answer as it streams.
@@ -278,12 +293,15 @@ non-functional behavior.
 ## Session controls & slash commands — the chat composer
 
 **Header**
-- [ ] When I open a conversation, then the header reads a static **"You are chatting with <model name>"** — there is no model dropdown in the header any more.
+- [ ] *(not built yet: v1.3.0, #704 — record as not applicable)* When I open a conversation, then the header reads "You are chatting with <model name>", where the model name is a picker (see the model-name picker line below); the panel keeps its **Model** button.
 - [ ] When I click the **settings icon** in the conversation header, then a panel opens with **one button per command** — Model, Config, Effort, Compact, Context — each opening that command's popup or panel, exactly as typing the command does.
-- [ ] When the conversation's model was deleted, then the header shows the red "Please select a model" attention state and the **Model** button in its panel still works although the composer is blocked; picking a model there unblocks sending.
+- [ ] *(not built yet: v1.3.0, #704 — record as not applicable)* When the conversation's model was deleted, then the model name in the header shows in red and opens the picker, the composer is blocked, and picking a model there unblocks sending.
 - [ ] When I open the **new-conversation page**, then it carries the same header and settings icon: the Model, Config and Effort buttons set the values the conversation will be created with, and Compact and Context are not offered (there is no conversation yet). The old inline settings block of that page is gone.
 - [ ] When I use the **Arena**, then its header is unchanged by this version (its own model pickers and sliders).
 - [ ] When I pick a model in an Arena panel, then that panel's creativity and diversity sliders start at the values saved for that model with `/config global`, else at its recommended values.
+- [ ] *(not built yet: v1.3.0, #704 — record as not applicable)* When I click the **model name** in the header, then a list of the installed models opens; picking one switches the conversation exactly as the panel's **Model** button does (that model's saved or recommended values applied at once). The picker works from the keyboard (focus, Enter or Space to open, arrows, Escape), is disabled while an answer is being written or a compaction runs, never lists a Knowledge Base assistant whose base model is gone, and the new-conversation page has the same picker. The panel keeps its **Model** button.
+- [ ] *(not built yet: v1.3.0, #704 — record as not applicable)* When no installed model can be offered (only an orphaned assistant), then the header's picker says how to get one (download a model, or re-bind the assistant) instead of an empty list.
+- [ ] *(not built yet: v1.3.0, #704 — record as not applicable)* When I open the header's settings panel and the Settings page, in each of the four interface languages, then no slash command name appears anywhere (no `/model`, `/config`, `/effort`…): buttons show their label only and Settings explains defaults in its own words. Slash commands remain a typing shortcut in the message box.
 
 **Typing a command**
 - [ ] When I type **`/`** at the start of the composer, then a styled **drop-up** lists the available commands (`/config`, `/context`, `/compact`, `/effort`, `/model`) with a one-line description each.
@@ -297,6 +315,7 @@ non-functional behavior.
 - [ ] When I read the command names in another interface language, then the **names stay in English** (fixed identifiers); the drop-up descriptions, the popups and their help texts are translated.
 - [ ] When any command popup opens, then it carries a **subtitle** and a **`?` help icon** next to each field; the help shows on hover **and** on keyboard focus.
 - [ ] When a popup is open, then the keyboard stays inside it (Tab cycles through its fields), **Escape** closes it, and the focus returns to where it was before.
+- [ ] *(not built yet: v1.3.0, #690.11 — record as not applicable)* When I type `/con`, press **Escape**, erase and type exactly `/con` again, then the drop-up opens again. (Escape then Enter without changing the text sends it as a message, by design.)
 
 **/config**
 - [ ] When I run **/config**, then one popup shows every adjustable value of the current conversation: reasoning effort as a **5-notch graduated slider** (None → Low → Medium → High → Xhigh), web search as a switch, creativity and diversity as sliders with their real bounds, the compaction threshold as a select (50 % to 90 % in steps of 5), and the custom instructions (the existing instructions editor). There is **no** "defaults for new conversations" section and **no Apply button**.
@@ -308,6 +327,7 @@ non-functional behavior.
 - [ ] When I save defaults for a knowledge-base assistant, then they belong to that assistant, not to its base model, and they survive a **Re-bind** of the assistant to another model.
 - [ ] When I create a new conversation on a model whose defaults I saved, then it opens with exactly those values; on a model without saved defaults, it opens with the Settings defaults (effort, web search, threshold), the model's recommended creativity and diversity, and empty custom instructions.
 - [ ] When I delete a model and download it again, then it starts without saved defaults (a fresh download is a new model for the app).
+- [ ] *(not built yet: v1.3.0, #704 — record as not applicable)* When I open the conversation's settings window, then a **Save as defaults for <model>** button at its bottom does exactly what `/config global` does (same values saved, same confirmation), so the model's defaults are reachable without typing a command.
 
 **/effort**
 - [ ] When I run **/effort**, then a popup opens on the **5-notch slider** at the conversation's current effort; changing it is saved at once (survives a reload) and takes effect on the next turn.
@@ -331,7 +351,8 @@ non-functional behavior.
 **/context**
 - [ ] When I run **/context**, then a panel renders the conversation's context usage as a **grid of small blocks** colored by category, with a legend giving each category's token count and percentage — the free space as empty blocks and the auto-compaction reserve marked distinctly.
 - [ ] When I read the legend, then the categories are **system prompt, tools, messages, summary, free space, auto-compaction reserve**, each with tokens and percent; the summary appears only when the conversation was compacted.
-- [ ] When the model is loaded and the machine reduced its window, then the panel shows the **allocated** window with a short note that the model supports more but this computer's memory bounds it — never a smaller-than-the-card number left unexplained.
+- [ ] *(not built yet: v1.3.0, #690.13 — record as not applicable)* When the model is loaded and the window is below what the model supports, then the panel shows the **allocated** window with a short note saying why: this computer's memory bounds it, or Erudi's conservative estimate of the model's memory needs does (next line) — never a smaller-than-the-card number left unexplained.
+- [ ] *(not built yet: v1.3.0, #690.13 — record as not applicable)* *(CUDA engine, CPU engine)* When the window is cut below the trained one by Erudi's conservative estimate (Gemma 3 4B on CUDA loads at about 72,000 of 131,072 tokens; same case on the processor engine), then `/context` says the window is cut by a conservative estimate of the model's memory needs, not by this computer's memory, and no amber memory notice appears.
 - [ ] When the model is not loaded, then the panel shows the model's trained window and says the window this computer allows is known once the model is loaded; opening **/context** never loads the model.
 - [ ] When the conversation is with a knowledge-base assistant that searches on every question, then the panel counts its knowledge-base instructions and says the counts leave out the excerpts a question retrieves; with an assistant that searches through a tool, the excerpts of earlier searches count only as the short placeholder that replaces them in each request.
 - [ ] When I read the counts, then they are presented as **estimates** and the percentages are of the window the conversation works with (the allocated window, or less when memory bounds it; the trained window when the model is not loaded); the blocks add up to that window: what the next request would use, the free space left below the compaction threshold, and the auto-compaction reserve above it.
@@ -366,7 +387,7 @@ non-functional behavior.
 ## Knowledge Base / Create Assistant — `/erudi/attach_knowledge_base`
 
 **Happy path**
-- [ ] When I open the screen for the **first time** (embedding model not yet installed), then a dialog offers to download the embedding model (multilingual-e5-small) once; accepting downloads it and confirms "the Knowledge Base is ready to use"; declining ("Not now") returns to the Models page and the offer returns on the next visit.
+- [ ] *(Apple Silicon)* When I open the screen for the **first time** (embedding model not yet installed), then a dialog offers to download the embedding model (multilingual-e5-small) once; accepting downloads it and confirms "the Knowledge Base is ready to use"; declining ("Not now") returns to the Models page and the offer returns on the next visit.
 - [ ] When I open the screen, then I see the KB description, a chat-capabilities rating (my machine's inference label/score), the local-model library, a name field, and a drag-and-drop area.
 - [ ] When I select a base model, type a name, add supported files (`.pdf`/`.txt`/`.docx`/`.xlsx`/`.csv`/`.md`), and click "Create Assistant" + confirm, then a spinner polls progress.
 - [ ] When ingestion completes, then "Data attached to your Assistant successfully!" shows and the form resets.
@@ -381,15 +402,20 @@ non-functional behavior.
 - [ ] When **some** files fail but at least one ingests, then the job still completes for the good ones.
 - [ ] When ingestion **fails** (network/HTTP), then an error dialog shows the reason.
 - [ ] When the selected base model **already has a KB**, then submitting **updates** the existing KB with the new files instead of creating a new assistant.
+- [ ] *(not built yet: v1.3.0, #705 — record as not applicable)* When I add a `.docx` saved by **TextEdit** (no styles part) to a Knowledge Base in the **packaged** app, then it is indexed like a Word document. When any file of a batch fails, the end of the job names that file and the reason instead of a plain success; adding the same file again later indexes it (a failed file never blocks its own re-ingestion).
 
 **Embeddings run without the torch stack (footprint)**
-- [ ] *(not built yet: embeddings outside the backend, #594 — record as not applicable)* When I create an assistant and ask a document question, then ingestion and retrieval work exactly as before — embeddings now come from a **dedicated child** (`llama-server --embeddings` on Windows/Linux, `mlx_vlm.server` on Apple Silicon), not from the in-process sentence-transformers stack.
-- [ ] *(not built yet: embeddings outside the backend, #594 — record as not applicable)* When retrieval is compared to the previous version on the **same KB** (golden questions), then answers ground on the same passages — no regression from the engine swap.
-- [ ] *(not built yet: embeddings outside the backend, #594 — record as not applicable)* When the embedding child has been **idle**, then it is unloaded to free memory, and the next KB operation transparently reloads it. *(The Settings idle delay governs the chat model only, not this one.)*
-- [ ] *(not built yet: embeddings outside the backend, #594 — record as not applicable)* When I inspect the installed app, then on Windows/Linux the **torch/transformers tree is gone**, and on Apple Silicon torch/sklearn/sentence-transformers are gone (transformers stays as an mlx-vlm dependency) — with no loss of KB function.
-- [ ] *(not built yet: embeddings outside the backend, #594 — record as not applicable)* *(Apple Silicon)* When the KB embeds, then the app serves `intfloat/multilingual-e5-small` **as-is** through mlx_vlm — vectors match the previous output, so **no reindex** is needed.
-- [ ] *(not built yet: embeddings outside the backend, #594 — record as not applicable)* *(Windows/Linux)* When the KB embeds, then the app serves the **published GGUF (F16)** through `llama-server --embeddings` — 384-dim, mean-pooled, L2-normalized, with the `query:`/`passage:` prefixes applied.
-- [ ] *(not built yet: embeddings outside the backend, #594 — record as not applicable)* When chunking counts tokens, then it uses the pure `tokenizers` package (no HF `transformers`) and produces the same chunk boundaries as before.
+- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When I create an assistant and ask a document question, then ingestion and retrieval work exactly as before — embeddings now come from a **dedicated child** (`llama-server --embeddings` on Windows/Linux, `mlx_vlm.server` on Apple Silicon), not from the in-process sentence-transformers stack.
+- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When retrieval is compared to the previous version on the **same KB** (golden questions), then answers ground on the same passages — no regression from the engine swap.
+- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When the embedding child has been **idle**, then it is unloaded after 5 minutes unused (no setting), and the next KB operation transparently reloads it.
+- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When I inspect the installed app, then on Windows/Linux the **torch/transformers tree is gone**, and on Apple Silicon torch/sklearn/sentence-transformers are gone (transformers stays as an mlx-vlm dependency) — with no loss of KB function.
+- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* *(Apple Silicon)* When the KB embeds, then the app serves `intfloat/multilingual-e5-small` **as-is** through mlx_vlm — vectors match the previous output, so **no reindex** is needed.
+- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* *(Windows/Linux)* When the KB embeds, then the app serves the **GGUF shipped in the installer** through `llama-server --embeddings` — 384-dim, mean-pooled, L2-normalized, with the `query:`/`passage:` prefixes applied.
+- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When chunking counts tokens, then it uses the pure `tokenizers` package (no HF `transformers`) and produces the same chunk boundaries as before. (ships even if the embedding move is cut)
+- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* *(Windows/Linux)* When I open Knowledge Base on a fresh install while offline, then no download is offered and an assistant can be created at once.
+- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When existing Knowledge Bases are re-embedded at first start (only if the shipped vectors differ), then they stay usable meanwhile and the log says when it is done.
+- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When a conversation with a Knowledge Base opens, then the embedder starts ahead; the first Knowledge Base use after a start is at most 1-2 s slower.
+- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* *(Windows)* When I install 1.3.0 over 1.2.0, then the install succeeds and leaves no torch tree.
 
 ## Settings — `/erudi/settings`
 
@@ -498,7 +524,7 @@ the card only appears where the setting does something.*
 
 **Diagnostics page**
 - [ ] When I open Diagnostics (the bug icon in the left rail) with the backend running, then the page shows my Erudi version, operating system, inference engine, CPU/GPU, the model in memory (or none), the backend's Python version and the database state — no log-file paths are listed on screen, and there is no text preview of the report.
-- [ ] When the backend has recorded warnings or errors, then they are listed newest last with their timestamp, level, source and request id, and an identical error repeated many times appears **once** with a repeat count.
+- [ ] *(not built yet: v1.3.0, #534 — record as not applicable)* When the backend has recorded warnings or errors, then they are listed newest last with their timestamp, level, source and request id, and an identical error repeated many times appears **once** with a repeat count.
 - [ ] When a recorded error merely describes the environment (no network, HuggingFace rate-limited or down, a gated repository with no token, the disk or the app's own port taken) rather than Erudi being wrong, then it does **not** appear in the list and is **not** in the copied report — the same exclusion the bug icon's badge uses, applied once so the two can never disagree. A `WARNING` is never excluded this way.
 - [ ] When I read the recent-errors list, then no ordinary activity line appears — only `WARNING` and above.
 - [ ] When there is at least one recent error, then a one-line hint says to paste the report into the bug form's Logs field, and a single **Copy the full report** button appears alongside **Report on GitHub** and the contact link, all headed **Report a problem**.
@@ -514,8 +540,8 @@ the card only appears where the setting does something.*
 - [ ] When something the app itself gets wrong happens silently (not offline, not a service outage) — for example the backend returns a real 500 — then a small badge appears on the bug icon showing **1**; opening Diagnostics lists that error and the badge disappears, with no popup, toast or sound at any point.
 - [ ] When I trigger a **Hugging Face download while offline**, then the download modal still tells me it failed, but the failure appears on **neither** the Diagnostics page's recent-errors list **nor** the copied report **nor** the bug icon's badge — an unreachable network is not counted as a defect anywhere.
 - [ ] When more than nine new errors accumulate before I next open Diagnostics, then the badge reads **9+** rather than the exact count.
-- [ ] When the recent-errors list would show the **same error on consecutive rows**, then they collapse into a single row with a repeat count — no run of identical lines slips through.
-- [ ] When I **update or reinstall** the app, then Diagnostics shows only the **current install's** recent history — stale entries from a previous install are not carried over as if they were current.
+- [ ] *(not built yet: v1.3.0, #534 — record as not applicable)* When the recent-errors list would show the **same error on consecutive rows**, then they collapse into a single row with a repeat count — no run of identical lines slips through.
+- [ ] *(not built yet: v1.3.0, #576 — record as not applicable)* When I open Diagnostics after updating from an older version, then it lists only records of the version now running; older history stays in the log files; a reinstall of the same version keeps them.
 
 ## Shared chrome (sidebar, connection, downloads)
 
@@ -523,7 +549,8 @@ the card only appears where the setting does something.*
 - [ ] When I click the bug icon, then the Diagnostics page opens (the web contact page is offered from inside that page, not by the icon).
 - [ ] When a download is in progress, then the bug icon is hidden; navigation stays enabled and the progress widget follows me across screens.
 - [ ] When I navigate to an unknown route, then I am redirected to the Models screen.
-- [ ] When I type in the **conversation search** field in the sidebar, then the conversation list filters by **title and content** as I type (a light ILIKE match, no index, no semantic search), with matched snippets highlighted; clearing the field restores the full list.
+- [ ] *(not built yet: v1.3.0, #429 — record as not applicable)* When I type in the **conversation search** field in the sidebar, then the history list turns into the conversations whose title or message text matches; text that appears only in a reasoning block finds nothing; clearing the field restores the list.
+- [ ] *(not built yet: v1.3.0, #430 — record as not applicable)* When I export a conversation (from its history row, or from the conversation header), then the save dialog lets me choose where, and the Markdown file holds the messages in order, with compactions marked; errors and the model's reasoning are left out.
 
 ## Security — localhost hardening
 
@@ -574,7 +601,7 @@ the card only appears where the setting does something.*
 - [ ] When the backend dies **after** load, then API calls fail per-screen with a visible error.
 - [ ] When the interface throws an **uncaught error** while rendering, then the window shows a recoverable screen (title, explanation, **Reload**, the report block) instead of going white, the error is in `erudi-backend.log` under `renderer:uncaught`, and it is listed on the Diagnostics page.
 - [ ] When something fails **repeatedly** — a poll that keeps rejecting, a render loop — then the log gains **one** entry with a repeat count, not thousands of identical lines, and the app stays responsive.
-- [ ] When the app boots, then the embedded PostgreSQL comes up tuned for a **single desktop user** (modest shared_buffers / max_connections / WAL rather than server defaults), and an existing data folder from a **previous version** still boots and migrates without loss.
+- [ ] *(not built yet: v1.3.0, #620 — record as not applicable)* When the app boots, then backend.log at boot shows the server settings passed at start (shared_buffers, max_connections computed from the pools), and an existing data folder from a **previous version** still boots and migrates without loss.
 
 **Graphics card Erudi cannot use**
 
@@ -608,6 +635,7 @@ say which hardware was missing. The rest run on any machine.*
 - [ ] When I **force-kill** the app and relaunch, then it recovers (stale DB locks pruned) and interrupted download/KB jobs are marked failed and cleaned up.
 - [ ] When I close the window on **macOS**, then the app keeps running; on **Windows/Linux**, closing the last window quits and stops the backend.
 - [ ] When I use Help → **"Clear All Data"** and confirm, then the backend stops, the data directory is deleted, and the app quits.
+- [ ] *(not built yet: v1.3.0, #676 — record as not applicable)* When I use **Clear All Data** on macOS, Windows or Linux, then everything Erudi stored is gone: the data folder of that platform, the logs (they hold conversation text) and the interface's own storage, so the next start is a first run; on Windows, log files still open at that moment do not stop the clearing. **Open data folder** opens that same folder on every platform.
 
 **Shutdown & orphans**
 - [ ] When I **hard-kill the app process** (Activity Monitor "Force Quit" / Task Manager "End task") rather than quitting cleanly, then the **backend stops by itself within a few seconds** — it does not survive holding port 27182 (parent-death watchdog).
@@ -617,11 +645,15 @@ say which hardware was missing. The rest run on any machine.*
 - [ ] When I launch Erudi a second time while it runs, then no second window or backend appears: the running window comes to the front. When I quit and relaunch at once (during a download too), then the app starts normally; if the previous backend is still finishing its exit, the start retries by itself and does not show **Erudi is already running**.
 - [ ] When I relaunch after any of the above, then the app boots normally and my conversations, models and knowledge bases are intact.
 - [ ] *(Windows)* When I shut Windows down with the app open, then start the app, quit it normally and start it again, then the **second** start runs no crash recovery: the database's own log (`%LOCALAPPDATA%\erudi\backend\prod\data\postgres\log`) shows no new `database system was not properly shut down`, `backend.log` has no `Postgres crash recovery finished` for it, the app is ready in seconds, and the first quit logs no `pgserver's handle count did not allow a clean stop` either (the start before it pruned the dead backend's entry: `Pruned pgserver handle pids`).
+- [ ] *(not built yet: v1.3.0, #706 — record as not applicable)* When the app is killed (`kill -9` on Electron, or End task on Windows) **during a model download**, then there is no backend process within 10 seconds and no AdminShutdown ERROR, on all three systems; relaunching inside that window waits or shows a clear message that Erudi is already running on this data folder (translated), and the process list never shows a second backend; the partial download is cleaned at the next start.
+- [ ] *(not built yet: v1.3.0, #706 — record as not applicable)* When I launch Erudi a second time while it is running, then the running window is focused.
+- [ ] *(not built yet: v1.3.0, #690.14 — record as not applicable)* When the embedded database needed a crash recovery at start, then `backend.log` carries only this start's postmaster lines, not the database log's whole history (no stale "not properly shut down" lines from earlier days).
 
 **Interrupted downloads**
 - [ ] When a download **completes** but the app is killed before the job row is finalized, then on relaunch the model is **kept and marked installed** — it is never silently deleted (a multi-GB artifact must survive; if it *is* deleted, that is a data-loss regression).
 - [ ] When a download is **genuinely truncated** and the app is killed, then on relaunch the incomplete files are removed and the log states the path and the size reclaimed (deletion is never silent).
 - [ ] When a download finishes and I stay on the screen, then the progress widget resolves and the UI **never stays stuck at 100%** — if finalization wedges, the poll gives up after a few minutes, the sidebar and contact icon come back, and the message says the files were saved (not "Download failed", which would push me to re-download gigabytes I already have).
+- [ ] *(not built yet: v1.3.0, #690.8 — record as not applicable)* When I cancel a slow download on Windows, then its partial files are gone once the transfer has stopped (nothing left in `models\temp_*`), and the cancel records nothing in Diagnostics.
 
 **Windows regression gate — run these FIRST on any Windows candidate**
 
@@ -632,7 +664,7 @@ froze every off-main-thread native import. If either of these hangs, stop the
 pass and report — the candidate is not shippable.*
 
 - [ ] When I download a **GGUF model** on Windows and send my **first chat turn**, then the answer streams within the usual model-load time — it never hangs indefinitely.
-- [ ] When I open **Knowledge Base** on a fresh Windows install and click Download on the embedding gate, then the embedding model downloads to completion — the UI never sits on "Downloading the embedding model…" forever.
+- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* *(Windows)* When I open **Knowledge Base** on a fresh Windows install, then the embedding model is already there: no download is offered, the Knowledge Base is usable at once, and the UI never shows "Downloading the embedding model…".
 - [ ] When either of those runs, then the backend keeps answering other requests throughout (the app is not wedged as a whole).
 
 **Tool-call gate (llama.cpp backends) — run on every candidate**
@@ -660,7 +692,8 @@ tool path explicitly — a working chat proves nothing about it.*
 - [ ] *(verified at the next real update)* When an update was downloaded but never installed and I then install a later version by hand, then the popup does not show the older notes (version and link only).
 - [ ] When the notes are not available (a manual install, or a release without notes), then the popup shows the version and a **Read the release notes** link that opens the release page in the browser only when clicked.
 - [ ] When I first launch this version over an earlier one, then the popup says **Updated to** this version, with the link, and explains that downloading and installing updates are now separate choices in Settings, both off.
-- [ ] When I launch a fresh install, or *(macOS, Windows)* the app after **Clear all data** (no conversation and no downloaded model), then no update popup appears and the welcome dialog shows as usual.
+- [ ] When I launch a fresh install (no conversation and no downloaded model), then no update popup appears and the welcome dialog shows as usual.
+- [ ] *(not built yet: v1.3.0, #676 — record as not applicable)* When I launch the app after **Clear all data** (no conversation and no downloaded model), on any system including Linux, then no update popup appears and the welcome dialog shows as usual.
 - [ ] *(verified at the next real update)* When I run an older version than the last one I ran, then no update popup appears.
 - [ ] *(QA setup)* Lines marked *verified at the next real update* need a newer published release: on this version's draft, record them as covered by the updater policy's unit tests (one run per platform, attached to the pass) and run them on the first real update from this version to the next one. On macOS, record every update line NOT RUN while no notarized macOS build exists.
 - [ ] When a release is still a **draft**, then my installed build is **not** offered that update.
@@ -668,6 +701,7 @@ tool path explicitly — a working chat proves nothing about it.*
 - [ ] *(verified at the next real update)* When I dismiss the update banner, then it does not come back for that version until the next launch (the periodic check does not re-raise it), and the **Update Erudi** card in Settings still knows the update is there and offers **Download** or **Install now**, whichever applies.
 - [ ] When I do a **fresh install**, then the Welcome dialog shows once, the catalog seeds instantly from the bundled snapshot (then refreshes in the background), and the machine readout renders (even if hardware profiling falls back).
 - [ ] When the app quits, then the backend and its inference child processes are stopped (none left orphaned).
+- [ ] *(not built yet: v1.3.0, #708 — record as not applicable)* *(Windows)* When I run a **freshly published** installer on a machine with Smart App Control on, then Windows runs it at the first try, and in the install folder `Get-ChildItem -Recurse -Include *.exe,*.dll,*.pyd | Get-AuthenticodeSignature | ? Status -ne Valid` returns nothing (installer, `Erudi.exe`, `backend.exe`, bundled `.pyd`/`.dll` and `llama-server.exe` all validly signed); a signed version installs over the unsigned v1.2.0, and *(verified at the next real update)* over itself through the updater. Smart App Control needs a machine with it on: record **NOT RUN** when no machine has it on.
 
 ---
 
