@@ -245,9 +245,11 @@ def _run_download_task(
 
     The whole body, finalization included, runs inside
     ``download_task_running``: the lifespan interrupts the downloads and waits
-    for their tasks (bounded) before it stops the database they write to.
+    for their tasks (bounded) before it stops the database they write to. Its
+    exit unregisters the job's tracker, which stays registered through the
+    finalization so that a cancel meanwhile is refused (409).
     """
-    with download_task_running():
+    with download_task_running(job_id):
         _run_download(model_link, model_id, temp_save_dir, final_save_dir, job_id)
 
 
@@ -258,14 +260,17 @@ def _run_download(
     (which spawns its own progress updater), and mark failed on error. Module-level
     so both the by-id and by-link download routes share one implementation.
 
-    A cancel is the cancel endpoint's: it flags the transfer's tracker, flushes
-    ``cancelled`` and commits only after its cleanup, so until then this session
-    reads ``running`` (READ COMMITTED). The task therefore takes the cancel from
-    ``download_llm`` itself (``DownloadCancelled``), and ``completed`` or
-    ``failed`` is written only over a row that is not ``cancelled``
-    (``_write_job_unless_cancelled``). A cancel that stopped the transfer and
-    then failed (rolled back) leaves the row ``running``: the task records the
-    cancel itself.
+    A cancel is the cancel endpoint's: it flags the transfer's tracker,
+    commits ``cancelled`` and the placeholder's deletion at once, and deletes
+    the files once the transfer has stopped. The task takes the cancel from
+    ``download_llm`` itself (``DownloadCancelled``), and its own write of
+    ``cancelled`` then finds the row already cancelled. Once the files are
+    complete the download is finalizing and the endpoint refuses the cancel,
+    so ``completed`` is not raced by one; ``completed`` or ``failed`` is
+    still written only over a row that is not ``cancelled``
+    (``_write_job_unless_cancelled``), for a cancel that found no tracker. A
+    cancel that stopped the transfer and then failed (rolled back) leaves the
+    row ``running``: the task records the cancel itself.
 
     A download the shutdown interrupted (``DownloadInterrupted``) writes
     nothing: the database is stopping, and the row left ``running`` is what

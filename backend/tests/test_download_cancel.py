@@ -301,6 +301,10 @@ class _RealDownload:
             s.commit()
             self.llm_id, self.job_id = llm.id, job.id
         self.gate_calls: list[str] = []
+        # Runs in the transfer, right after the cancel: the transfer has not
+        # seen it yet (that happens at its next chunk).
+        self.on_cancelled = None
+        self.transfer_errors: list[BaseException] = []
         self.flushed = threading.Event()
         self.canceller = None
         self.cancel_errors: list[Exception] = []
@@ -346,13 +350,10 @@ class _RealDownload:
             "(no weights file was found)"
         )
 
-    def cancel_now(self, *, from_the_transfer: bool = False):
+    def cancel_now(self):
         """The user's cancel, on its own session and thread; returns once
-        the endpoint has flushed ``cancelled`` (not committed yet).
-
-        From inside the transfer, it returns once the tracker is flagged
-        instead: the endpoint writes only after the transfer has stopped
-        (#690), which this very thread has to reach first."""
+        the endpoint has flushed ``cancelled`` (not committed yet). The
+        endpoint writes at once, before it waits for the transfer to stop."""
         from src.domains.llms.repository import Download_Job_Repository, Llm_Repository
 
         def run():
@@ -368,14 +369,6 @@ class _RealDownload:
 
         self.canceller = threading.Thread(target=run)
         self.canceller.start()
-        if from_the_transfer:
-            tracker = llm_services.get_active_download_tracker(self.job_id)
-            deadline = time.monotonic() + 5
-            while tracker.should_continue():
-                assert time.monotonic() < deadline
-                time.sleep(0.01)
-            assert not self.flushed.is_set()
-            return
         assert self.flushed.wait(5)
 
     def hub_cancelled_mid_shard(self):
@@ -388,7 +381,15 @@ class _RealDownload:
                 Path(dest).parent.mkdir(parents=True, exist_ok=True)
                 Path(dest).write_bytes(b"\x00" * 16)
                 if remote.endswith(SHARDS[0]):
-                    harness.cancel_now(from_the_transfer=True)
+                    try:
+                        harness.cancel_now()
+                        if harness.on_cancelled is not None:
+                            harness.on_cancelled()
+                    except BaseException as exc:
+                        # A cancelled job ends as cancelled whatever its
+                        # threads raised: keep the harness's own failures.
+                        harness.transfer_errors.append(exc)
+                        raise
                 cb.relative_update(16)
 
         self.monkeypatch.setattr(llm_services, "HfFileSystem", lambda token=None: Fs())
@@ -398,8 +399,9 @@ class _RealDownload:
             "org/model", self.llm_id, str(self.temp_dir), str(self.final_dir), self.job_id
         )
         if self.canceller is not None:
-            self.canceller.join(5)
+            self.canceller.join(15)
             assert not self.canceller.is_alive()
+        assert self.transfer_errors == []
 
     def job(self):
         with self.Session() as s:
@@ -453,6 +455,50 @@ class TestCancelRacingTheDownloadTask:
             if f"Download job {real_download.job_id} was cancelled" in r.getMessage()
         ]
         assert said == [logging.INFO]
+
+    def test_a_status_poll_during_the_cancel_finds_nothing_to_clean(
+        self, real_download, monkeypatch, caplog
+    ):
+        """The frontend keeps polling while the cancel request waits for the
+        transfer to stop: the poll must not run a second cleanup (two rmtree,
+        two DELETEs of the model row in opposite lock orders)."""
+        from src.domains.llms.repository import Download_Job_Repository, Llm_Repository
+
+        poll_cleanups: list[int] = []
+        polled: list[bool] = []
+        real_cleanup = llm_repo_mod.Download_Job_Repository.cleanup_job_files
+
+        def poll():
+            # Wait for the cancel's commit, then poll as the frontend would.
+            deadline = time.monotonic() + 5
+            while real_download.job().status != "cancelled":
+                assert time.monotonic() < deadline
+                time.sleep(0.02)
+            with real_download.Session() as db:
+                calls_before = len(poll_cleanups)
+
+                def counting(self, job):
+                    poll_cleanups.append(job.id)
+                    real_cleanup(self, job)
+
+                monkeypatch.setattr(Download_Job_Repository, "cleanup_job_files", counting)
+                llm_endpoints.get_download_status_by_jobId(
+                    real_download.job_id, Llm_Repository(db), Download_Job_Repository(db), db
+                )
+                monkeypatch.setattr(Download_Job_Repository, "cleanup_job_files", real_cleanup)
+                assert len(poll_cleanups) == calls_before
+            polled.append(True)
+
+        real_download.on_cancelled = poll
+        real_download.hub_cancelled_mid_shard()
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            real_download.run()
+
+        assert polled == [True]
+        assert poll_cleanups == []
+        assert real_download.job().status == "cancelled"
+        assert _errors(caplog) == []
 
     def test_a_failure_while_a_cancel_is_in_flight_never_overwrites_it(
         self, real_download, monkeypatch, caplog

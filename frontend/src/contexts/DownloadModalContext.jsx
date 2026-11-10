@@ -243,7 +243,8 @@ export function DownloadModalProvider({ children }) {
 
   // POST the cancel for `id`. "cancelled" when acknowledged; "ended" when the
   // backend refuses because the job is no longer running (400 STATE_CONFLICT:
-  // already completed, failed or cancelled; 422 "Download ended - cannot be
+  // already completed, failed or cancelled; 409: the files are complete and
+  // the download is being installed; 422 "Download ended - cannot be
   // cancelled": the transfer finished between two polls); "failed" otherwise,
   // recorded here.
   const requestCancel = useCallback(
@@ -256,7 +257,7 @@ export function DownloadModalProvider({ children }) {
           log.log(`Download cancelled for job ${id}`);
           return "cancelled";
         }
-        if (response.status === 400 || response.status === 422) {
+        if (response.status === 400 || response.status === 409 || response.status === 422) {
           log.log(`Download job ${id} had already ended when the cancel arrived`);
           return "ended";
         }

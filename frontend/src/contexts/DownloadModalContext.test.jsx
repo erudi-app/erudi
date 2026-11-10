@@ -304,6 +304,40 @@ describe("DownloadModalContext user cancel", () => {
   });
 });
 
+describe("DownloadModalContext cancel refused while the download completes", () => {
+  it("shows no error and lets the status conclude it as installed", async () => {
+    let status = "running";
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status, progress: status === "running" ? 99 : 100, time_left: 0 }),
+    });
+    // The download is finalizing: the backend refuses the cancel (409).
+    cancelResponder = () => {
+      status = "completed";
+      return { ok: false, status: 409, statusText: "Conflict" };
+    };
+    renderProvider();
+
+    await act(async () => {
+      fireEvent.click(screen.getByText("OPEN"));
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByText("CONFIRM"));
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+    await act(async () => {
+      fireEvent.click(screen.getByLabelText("Cancel"));
+      await vi.advanceTimersByTimeAsync(0);
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(2000);
+    });
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(onComplete).toHaveBeenCalledTimes(1);
+  });
+});
+
 // Switching the inference engine restarts the backend, which would kill a
 // running download and leave it "interrupted" at the next boot. The engine
 // switch cancels it first, through the same path as the widget's Cancel.

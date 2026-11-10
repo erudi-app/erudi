@@ -213,9 +213,17 @@ class _CancelHarness:
         self.job_repo.cleanup_job_files.side_effect = self._cleanup
         self.llm_repo = MagicMock()
         self.llm_repo.get_by_id.return_value = SimpleNamespace(id=7, local=2)
+        self.llm_repo.delete.side_effect = lambda llm: self.events.append("delete llm")
         self.db = MagicMock()
+        self.committed_at: float | None = None
+        self.db.commit.side_effect = self._commit
         self.result: dict | None = None
+        self.error: Exception | None = None
         self.thread: threading.Thread | None = None
+
+    def _commit(self):
+        self.events.append("commit")
+        self.committed_at = time.time()
 
     def _cleanup(self, job):
         self.events.append("cleanup")
@@ -223,9 +231,12 @@ class _CancelHarness:
 
     def cancel_in_background(self):
         def run():
-            self.result = llm_services.cancel_download_job(
-                self.job.id, self.job_repo, self.llm_repo, self.db
-            )
+            try:
+                self.result = llm_services.cancel_download_job(
+                    self.job.id, self.job_repo, self.llm_repo, self.db
+                )
+            except Exception as exc:  # the endpoint's refusal, inspected by the test
+                self.error = exc
 
         self.thread = threading.Thread(target=run)
         self.thread.start()
@@ -263,7 +274,11 @@ class TestCancelDeletesOnceTheTransferStopped:
                 )
             await asyncio.to_thread(harness.join)
 
-        assert harness.events == ["cleanup"]
+        # The cancel is committed (job cancelled, placeholder model gone) at
+        # once, before the transfer stopped: a status poll meanwhile finds
+        # nothing left to clean, and the task's own write finds nothing to do.
+        assert harness.events == ["delete llm", "commit", "cleanup"]
+        assert harness.committed_at < fs.closed_at
         cleanup_record = next(r for r in caplog.records if "Cleaning up files" in r.getMessage())
         # The file was closed before the cleanup started (Windows refuses otherwise).
         assert fs.closed_at is not None and fs.closed_at <= cleanup_record.created + 0.001
@@ -301,7 +316,7 @@ class TestCancelDeletesOnceTheTransferStopped:
 
         # The endpoint answered without touching the files; the download
         # removed them once its transfer had stopped.
-        assert harness.events == []
+        assert harness.events == ["delete llm", "commit"]
         assert harness.result["status"] == "cancelled"
         assert not harness.temp_dir.exists()
         assert not harness.final_dir.exists()
@@ -314,9 +329,100 @@ class TestCancelDeletesOnceTheTransferStopped:
         with caplog.at_level(logging.INFO, logger="erudi"):
             llm_services.cancel_download_job(53, harness.job_repo, harness.llm_repo, harness.db)
 
-        assert harness.events == ["cleanup"]
+        assert harness.events == ["delete llm", "commit", "cleanup"]
         assert not harness.temp_dir.exists()
         assert _warnings(caplog) == []
+
+
+@pytest.mark.unit
+class TestNoCancelOnceFinalizing:
+    def test_a_finalizing_tracker_refuses_every_stop(self):
+        tracker = _tracker(16)
+        assert tracker.begin_finalizing()
+        assert tracker.cancel() is False
+        tracker.interrupt()
+        tracker.fail()
+        assert tracker.should_continue()
+
+    def test_a_stopped_tracker_cannot_start_finalizing(self):
+        tracker = _tracker(16)
+        assert tracker.cancel() is True
+        assert not tracker.begin_finalizing()
+
+    def test_the_endpoint_refuses_a_cancel_once_the_download_is_completing(self, tmp_path):
+        from src.core.exceptions import StateConflictException
+
+        harness = _CancelHarness(tmp_path, job_id=54)
+        tracker = _tracker(16)
+        llm_services._register_tracker(54, tracker)
+        assert tracker.begin_finalizing()
+
+        with pytest.raises(StateConflictException) as refused:
+            llm_services.cancel_download_job(54, harness.job_repo, harness.llm_repo, harness.db)
+
+        assert refused.value.status_code == 409
+        assert harness.events == []
+        harness.job_repo.update_status.assert_not_called()
+
+    def test_a_cancel_during_the_finish_leaves_the_model_installed(self, monkeypatch, tmp_path):
+        """The cancel lands while the task finalizes (integrity gate, size,
+        ``local=1``): it is refused, the download completes, nothing failed."""
+        from src.core.exceptions import StateConflictException
+
+        _mlx_engine(monkeypatch)
+        monkeypatch.setattr(llm_services, "HfApi", lambda token=None: _fake_api(["model.bin"]))
+        fs = _ChunkedFs(chunk_seconds=0.0, chunks=1)
+        monkeypatch.setattr(llm_services, "HfFileSystem", lambda token=None: fs)
+        harness = _CancelHarness(tmp_path, job_id=55)
+        job = SimpleNamespace(status="pending", error_message=None, progress=0.0)
+        llm = SimpleNamespace(link=str(harness.final_dir), model_metadata=None, local=2)
+        session = MagicMock()
+        session.query.side_effect = lambda model: FakeDownloadQuery(model, job, llm)
+        monkeypatch.setattr(llm_endpoints, "SessionLocal", lambda: session)
+        monkeypatch.setattr(llm_endpoints, "measure_dir_size_bytes", lambda p: 0)
+        for name in ("detect_supports_tools", "detect_wire_tools", "detect_supports_vision"):
+            monkeypatch.setattr(llm_repo_mod, name, lambda p: None)
+        monkeypatch.setattr(llm_endpoints, "_capture_hints_for_download", lambda *a: None)
+        refusals: list[Exception] = []
+
+        def gate(path):
+            try:
+                llm_services.cancel_download_job(55, harness.job_repo, harness.llm_repo, harness.db)
+            except StateConflictException as exc:
+                refusals.append(exc)
+
+        monkeypatch.setattr(config.LLM_Engine, "validate_local_artifact", gate, raising=False)
+
+        llm_endpoints._run_download_task(
+            "org/model", 7, str(harness.temp_dir), str(harness.final_dir), job_id=55
+        )
+
+        assert len(refusals) == 1
+        assert job.status == "completed"
+        assert llm.local == 1
+        assert harness.final_dir.exists()
+        assert llm_services.get_active_download_tracker(55) is None
+
+    async def test_the_finish_does_not_wait_for_an_eta_tick(self, monkeypatch, tmp_path):
+        monkeypatch.setattr(
+            config,
+            "LLM_Engine",
+            SimpleNamespace(is_runnable=lambda link: True, USES_GGUF=False, FORMAT_TAG="mlx"),
+        )
+        monkeypatch.setattr(llm_services, "update_db_with_progress", lambda *a, **k: None)
+        monkeypatch.setattr(llm_services, "HfApi", lambda token=None: _fake_api(["model.bin"]))
+        fs = _ChunkedFs(chunk_seconds=0.0, chunks=1)
+        monkeypatch.setattr(llm_services, "HfFileSystem", lambda token=None: fs)
+
+        started = time.monotonic()
+        await llm_services.download_llm(
+            model_link="org/model",
+            model_id=7,
+            temp_save_dir=str(tmp_path / "temp_7"),
+            final_save_dir=str(tmp_path / "7"),
+        )
+        # The ETA monitor ticks every 5 s; the finish must not wait for one.
+        assert time.monotonic() - started < 2
 
 
 # =====================================================================
@@ -552,3 +658,113 @@ class TestLifespanStopsDownloadsFirst:
 
         assert app.state.services_stopped.is_set()
         assert order[-1] == "stop_postgres"
+
+    async def test_a_failing_step_never_keeps_postgres_running(self, monkeypatch, caplog):
+        order: list[str] = []
+        self._arm(monkeypatch, order)
+
+        async def broken(timeout):
+            raise RuntimeError("download registry exploded")
+
+        monkeypatch.setattr(api, "stop_active_downloads", broken)
+
+        def broken_kb_close(*_a, **_k):
+            raise RuntimeError("kb store exploded")
+
+        monkeypatch.setattr(api, "close_kb_store", broken_kb_close)
+        app = FastAPI()
+        app.state.services_stopped = threading.Event()
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            async with api.lifespan(app):
+                pass
+
+        assert order == ["stop_postgres"]
+        assert app.state.services_stopped.is_set()
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 2
+        assert all(r.exc_info for r in errors)
+
+
+@pytest.mark.unit
+class TestQuietOutcomes:
+    def test_no_removal_success_is_claimed_after_a_failed_removal(
+        self, monkeypatch, tmp_path, caplog
+    ):
+        leftover = tmp_path / "temp_7"
+        leftover.mkdir()
+        monkeypatch.setattr(llm_services, "remove_tree_reporting", lambda path: 1024)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            llm_services._remove_cancelled_files(7, leftover)
+
+        messages = [r.getMessage() for r in caplog.records]
+        assert any("Could not remove" in m for m in messages)
+        assert not any("Removed the files" in m for m in messages)
+
+
+class _WriterJob:
+    """A job row for the progress writer, whose commit can be made to wait."""
+
+    def __init__(self):
+        self.total_bytes = 0
+        self.progress = 0.0
+        self.total_time_elapsed = 0.0
+        self.time_left = 0.0
+        self.status = "running"
+
+
+@pytest.mark.unit
+class TestProgressWriterAfterAStop:
+    def _session(self, monkeypatch, commit):
+        job = _WriterJob()
+        session = MagicMock()
+        session.query.return_value.get.side_effect = [job, SimpleNamespace(id=7)]
+        session.commit.side_effect = commit
+        monkeypatch.setattr(llm_repo_mod, "SessionLocal", lambda: session)
+        monkeypatch.setattr(llm_repo_mod.time, "sleep", lambda s: None)
+        return job, session
+
+    def test_a_stopped_job_is_never_committed(self, monkeypatch):
+        tracker = _tracker(100)
+        tracker.update(10)
+        commits: list[int] = []
+
+        def commit():
+            commits.append(1)
+            tracker.interrupt()  # the stop lands while a write is prepared
+
+        job, session = self._session(monkeypatch, commit)
+        real_should_continue = tracker.should_continue
+        checks = {"n": 0}
+
+        def should_continue():
+            # Running at the loop's check, stopped right before the commit.
+            checks["n"] += 1
+            if checks["n"] == 2:
+                tracker.interrupt()
+            return real_should_continue()
+
+        tracker.should_continue = should_continue
+        llm_repo_mod.update_db_with_progress(tracker, 9, 7)
+
+        assert commits == []
+
+    def test_a_commit_failing_after_a_stop_is_no_error(self, monkeypatch, caplog):
+        """The database stopped under a commit already in flight: the job was
+        stopped, so this is the shutdown, not a failed download."""
+        tracker = _tracker(100)
+        tracker.update(10)
+
+        def commit():
+            tracker.interrupt()
+            raise RuntimeError("terminating connection due to administrator command")
+
+        job, session = self._session(monkeypatch, commit)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            llm_repo_mod.update_db_with_progress(tracker, 9, 7)
+
+        assert [r for r in caplog.records if r.levelno >= logging.WARNING] == []
+        assert job.status == "running"
+        session.delete.assert_not_called()

@@ -55,6 +55,7 @@ import threading
 import shutil
 import asyncio
 from contextlib import contextmanager
+from types import SimpleNamespace
 from pathlib import Path, PurePosixPath, PureWindowsPath
 from threading import Lock
 from typing import NamedTuple, Optional, List, Tuple, Union
@@ -161,12 +162,13 @@ def get_active_download_tracker(job_id: int) -> Optional["DownloadTracker"]:
 
 
 @contextmanager
-def download_task_running():
+def download_task_running(job_id: Optional[int] = None):
     """Mark a download task as running for as long as the block runs.
 
     ``_run_download_task`` wraps its whole body in it, finalization included,
     so ``stop_active_downloads`` waits for the task's last database write and
-    not only for its transfer.
+    not only for its transfer. On the way out it unregisters the job's
+    tracker, which a finalizing download leaves registered.
     """
     done = threading.Event()
     with _trackers_lock:
@@ -174,6 +176,8 @@ def download_task_running():
     try:
         yield
     finally:
+        if job_id is not None:
+            _unregister_tracker(job_id)
         done.set()
         with _trackers_lock:
             _running_downloads.discard(done)
@@ -508,6 +512,9 @@ class DownloadTracker:
         # user), "interrupted" (the backend is stopping) or "failed" (a
         # sibling shard failed). None while the download runs.
         self._stop_reason: Optional[str] = None
+        # Set once the files are complete and being promoted: from then on the
+        # download ends as installed and no stop is taken any more.
+        self._finalizing: bool = False
         # Set by the download side once none of its transfers runs any more.
         self._stopped = threading.Event()
         self._cleanup_handed_over: bool = False
@@ -534,14 +541,21 @@ class DownloadTracker:
             return 0.0
         return (self.downloaded_bytes / self.total_bytes) * 100
 
-    def _stop(self, reason: str) -> None:
+    def _stop(self, reason: str) -> bool:
         with self._lock:
+            if self._finalizing:
+                return False
             if self._stop_reason is None:
                 self._stop_reason = reason
+            return True
 
-    def cancel(self) -> None:
-        """Signal the user's cancellation (thread-safe)."""
-        self._stop("cancelled")
+    def cancel(self) -> bool:
+        """Signal the user's cancellation (thread-safe).
+
+        False when the download is already finalizing (``begin_finalizing``):
+        the cancel is refused and the download ends as installed.
+        """
+        return self._stop("cancelled")
 
     def interrupt(self) -> None:
         """Signal that the backend is stopping (thread-safe)."""
@@ -550,6 +564,12 @@ class DownloadTracker:
     def fail(self) -> None:
         """Stop the other transfers of a job one of whose files failed."""
         self._stop("failed")
+
+    @property
+    def finalizing(self) -> bool:
+        """True once the download is promoting its files (no stop taken)."""
+        with self._lock:
+            return self._finalizing
 
     @property
     def cancelled(self) -> bool:
@@ -567,6 +587,20 @@ class DownloadTracker:
         """Return False once a stop was signalled, True otherwise (thread-safe)."""
         with self._lock:
             return self._stop_reason is None
+
+    def begin_finalizing(self) -> bool:
+        """Every file is transferred: from now on, refuse every stop.
+
+        False when a stop was signalled first (the caller then ends the
+        download as stopped). True: the files are promoted and the job
+        finalized, and a cancel arriving meanwhile is refused (409) rather
+        than deleting a model the download task is about to mark installed.
+        """
+        with self._lock:
+            if self._stop_reason is not None:
+                return False
+            self._finalizing = True
+            return True
 
     def mark_stopped(self) -> bool:
         """The download side: none of this job's transfers runs any more.
@@ -1012,10 +1046,16 @@ async def download_llm(
             eta_task.cancel()
             raise
 
-        # Cancel landed between the last chunk and here: same outcome, no finalization.
-        if not job.should_continue():
+        # From here on the download ends as installed: a cancel is refused
+        # (409) instead of deleting files the task is about to finalize. A
+        # stop that landed between the last chunk and here wins: same
+        # outcome as a stop during the transfer, no finalization.
+        if not job.begin_finalizing():
             eta_task.cancel()
             raise DownloadCancelled("download cancelled after the transfer")
+        # The ETA means nothing any more; its monitor sleeps 5 s per tick and
+        # must not hold the finish for it.
+        eta_task.cancel()
 
         # Everything is a pre-built quant: move files straight to the final dir
         logger.info("Moving downloaded files to final location")
@@ -1026,8 +1066,10 @@ async def download_llm(
             shutil.rmtree(final_save_dir, ignore_errors=True)
         shutil.move(temp_save_dir, final_save_dir)
 
-        # Wait for ETA monitor to finish
-        await eta_task
+        try:
+            await eta_task
+        except asyncio.CancelledError:
+            pass  # cancelled just above, on purpose
         logger.info("Download complete")
 
         return temp_save_dir
@@ -1056,7 +1098,11 @@ async def download_llm(
             )
         raise
     finally:
-        if job_id is not None:
+        # A finalizing download stays registered until its task has finished
+        # finalizing (``download_task_running`` unregisters it), so a cancel
+        # meanwhile is refused instead of finding no transfer and deleting
+        # the model being installed.
+        if job_id is not None and not job.finalizing:
             _unregister_tracker(job_id)
         # Every transfer has ended here (each one was awaited). A stopped job's
         # progress writer goes too, before anyone deletes the files or stops
@@ -1075,25 +1121,34 @@ def _remove_cancelled_files(job_id: Optional[int], *paths) -> None:
     transfer outlived its wait (``DownloadTracker.hand_over_cleanup``). No file
     is open any more, so what still cannot be removed is reported.
     """
+    all_removed = True
     for path in paths:
         if not path or not os.path.exists(str(path)):
             continue
         left = remove_tree_reporting(path)
         if left:
+            all_removed = False
             logger.warning(
                 f"Could not remove {path} of cancelled download job {job_id} "
                 f"({left} bytes still on disk; startup cleanup will reclaim it)"
             )
-    logger.info(f"Removed the files of cancelled download job {job_id} once its transfer stopped")
+    if all_removed:
+        logger.info(
+            f"Removed the files of cancelled download job {job_id} once its transfer stopped"
+        )
 
 
 def cancel_download_job(job_id: int, job_repo, llm_repo, db) -> dict:
     """Cancel an active download job, signal the tracker, and clean up partial files.
 
-    The files are deleted once the transfer has stopped (at most
-    ``CANCEL_STOP_WAIT_SECONDS`` of waiting); a transfer still running after
-    that deletes them itself when it stops. A cancel is the user's choice,
-    not a failure: nothing here is logged above ``INFO``.
+    The cancel is committed at once (job ``cancelled``, placeholder model
+    deleted), so a status poll meanwhile finds nothing left to clean and the
+    download task's own write finds nothing to do. The files are deleted once
+    the transfer has stopped (at most ``CANCEL_STOP_WAIT_SECONDS`` of
+    waiting); a transfer still running after that deletes them itself when it
+    stops. A download already finalizing refuses the cancel (409): it ends
+    installed. A cancel is the user's choice, not a failure: nothing here is
+    logged above ``INFO``.
 
     Args:
         job_id: ID of the download job to cancel.
@@ -1108,7 +1163,8 @@ def cancel_download_job(job_id: int, job_repo, llm_repo, db) -> dict:
         DownloadJobNotFoundException: no job with this id.
         ModelNotFoundException: the job's model row is gone.
         InvalidInputException: the job is not in a cancellable state.
-        StateConflictException: the transfer already finished.
+        StateConflictException: the job already ended (400), or the download
+            is finalizing and ends installed (409).
     """
     job = job_repo.get_by_id(job_id)
     if not job:
@@ -1124,30 +1180,43 @@ def cancel_download_job(job_id: int, job_repo, llm_repo, db) -> dict:
     if llm.local != 2:
         raise InvalidInputException("Download ended - cannot be cancelled, please delete the model")
 
-    # Signal the running download to stop, then let its transfer release the
-    # files before deleting them: Windows refuses to delete a file still open,
-    # and the transfer only sees the flag at its next chunk (#690).
     tracker = get_active_download_tracker(job_id)
-    files_handed_over = False
-    if tracker:
-        tracker.cancel()
+    if tracker is not None and not tracker.cancel():
+        raise StateConflictException(
+            f"Download job {job_id} is completing and can no longer be cancelled",
+            status_code=409,
+            detail={"reason": "completing", "job_id": job_id},
+        )
+    if tracker is not None:
         logger.info(f"Signaled cancellation for download job {job_id}")
-        if not tracker.hand_over_cleanup(CANCEL_STOP_WAIT_SECONDS):
-            files_handed_over = True
+    else:
+        # Not started yet, or the transfer already ended: nothing to wait for.
+        logger.info(f"No transfer running for download job {job_id}; cleaning up")
+    # The paths, read now: the rows change below.
+    files = SimpleNamespace(
+        id=job.id,
+        local_model_id=job.local_model_id,
+        temp_local_model_link=job.temp_local_model_link,
+        final_local_model_link=job.final_local_model_link,
+    )
+
+    try:
+        # Commit first: the job reads cancelled and the placeholder model is
+        # gone before anything waits.
+        job_repo.update_status(job, "cancelled")
+        llm_repo.delete(llm)
+        db.commit()
+    finally:
+        # Then the files, committed or not, once the transfer has released
+        # them: Windows refuses to delete a file still open, and the
+        # transfer only sees the flag at its next chunk (#690).
+        if tracker is not None and not tracker.hand_over_cleanup(CANCEL_STOP_WAIT_SECONDS):
             logger.info(
                 f"Download job {job_id} is still stopping after {CANCEL_STOP_WAIT_SECONDS:g}s; "
                 f"its files are removed once the transfer has stopped"
             )
-    else:
-        # Not started yet, or the transfer already ended: nothing to wait for.
-        logger.info(f"No transfer running for download job {job_id}; cleaning up")
-
-    # Clean up files and remove the pending LLM entry
-    job_repo.update_status(job, "cancelled")
-    if not files_handed_over:
-        job_repo.cleanup_job_files(job)
-    llm_repo.delete(llm)
-    db.commit()
+        else:
+            job_repo.cleanup_job_files(files)
 
     logger.info(f"Cancelled download job {job_id} and deleted temp LLM {llm.id}")
     return {"message": "Download cancellation initiated", "job_id": job_id, "status": "cancelled"}

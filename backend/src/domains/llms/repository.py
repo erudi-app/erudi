@@ -634,6 +634,12 @@ def update_db_with_progress(job_tracker, job_id: int, model_id: int) -> None:
             dbj.progress = job_tracker.percent
             dbj.total_time_elapsed = (datetime.now(timezone.utc) - start_time).total_seconds()
             dbj.time_left = job_tracker.eta_seconds or 0.0
+            # Checked again right before the write: a stop that landed while
+            # it was prepared must not reach a database being stopped.
+            if not job_tracker.should_continue():
+                session.rollback()
+                logger.info(f"Job {job_id} stopped, ending progress tracking")
+                return
             session.commit()
             logger.debug(f"Job {job_id}: {dbj.progress:.2f}% complete")
 
@@ -643,6 +649,16 @@ def update_db_with_progress(job_tracker, job_id: int, model_id: int) -> None:
         logger.info(f"Job {job_id} progress tracking finished")
 
     except Exception as e:
+        try:
+            stopped = not job_tracker.should_continue()
+        except Exception:
+            stopped = False  # the tracker itself is what failed: a real failure
+        if stopped:
+            # The job was stopped while a write was in flight: the shutdown
+            # stopped the database under it, or the cancel removed the row.
+            # Not a failed download; whoever stopped the job owns its row.
+            logger.info(f"Job {job_id} stopped during a progress write ({type(e).__name__})")
+            return
         logger.exception(f"Job {job_id} failed during progress tracking")
         try:
             dbj.status = "failed"

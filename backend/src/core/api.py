@@ -581,24 +581,44 @@ async def lifespan(app: FastAPI):
 
 
 async def _stop_services(app: FastAPI) -> None:
-    """The shutdown half of :func:`lifespan`."""
+    """The shutdown half of :func:`lifespan`.
+
+    Each step is guarded: one that fails is logged (ERROR, with its
+    traceback) and the next ones still run, so the embedded PostgreSQL
+    cluster is stopped whatever came before it.
+    """
+
+    async def step(name: str, action) -> None:
+        try:
+            result = action()
+            if asyncio.iscoroutine(result):
+                await result
+        except Exception as exc:
+            logger.error(f"Shutdown step {name} failed: {exc}", exc_info=exc)
+
     # Downloads FIRST: a download task writes its progress and its outcome to
     # the database, and its transfer threads would otherwise hold the process
     # until the model is fully transferred (#706). Interrupted, a download
     # leaves its job row running and its partial files for the next start.
-    await stop_active_downloads(DOWNLOAD_STOP_TIMEOUT_SECONDS)
-    wire_backfill_task = getattr(app.state, "wire_backfill_task", None)
-    if wire_backfill_task is not None and not wire_backfill_task.done():
-        wire_backfill_task.cancel()
-    await stop_watchdog()
-    config.LLM_Engine.stop_cleanup_task()
+    await step(
+        "stop_active_downloads", lambda: stop_active_downloads(DOWNLOAD_STOP_TIMEOUT_SECONDS)
+    )
+
+    def cancel_wire_backfill() -> None:
+        task = getattr(app.state, "wire_backfill_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    await step("cancel_wire_backfill", cancel_wire_backfill)
+    await step("stop_watchdog", stop_watchdog)
+    await step("stop_cleanup_task", lambda: config.LLM_Engine.stop_cleanup_task())
     # The monitor's sample in flight finishes first (it is shielded), and a
     # reset a torn-down turn left behind is drained: the child is never
     # stopped under a request still talking to it.
-    await config.LLM_Engine.stop_pressure_task()
-    await drain_pending_reset()
-    config.LLM_Engine.cleanup()
-    await app.state.checkpointer_cm.__aexit__(None, None, None)
-    close_kb_store()
+    await step("stop_pressure_task", lambda: config.LLM_Engine.stop_pressure_task())
+    await step("drain_pending_reset", drain_pending_reset)
+    await step("engine_cleanup", lambda: config.LLM_Engine.cleanup())
+    await step("close_checkpointer", lambda: app.state.checkpointer_cm.__aexit__(None, None, None))
+    await step("close_kb_store", close_kb_store)
     # Cluster stops LAST: every DB consumer above must be closed first.
-    stop_postgres(app.state.postgres)
+    await step("stop_postgres", lambda: stop_postgres(app.state.postgres))
