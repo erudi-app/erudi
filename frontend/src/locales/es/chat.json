@@ -134,7 +134,7 @@
   "modelPicker": {
     "listLabel": "Modelos instalados",
     "current": "Actual",
-    "empty": "No se puede usar ningún modelo instalado. Abre Modelos para descargar uno, o vuelve a vincular el asistente a otro modelo en Base de conocimiento."
+    "empty": "No se puede usar ningún modelo instalado. Abre Modelos para descargar uno."
   },
   "composer": {
     "placeholder": "Haz una pregunta…",
@@ -259,9 +259,8 @@
   "empty": {
     "noModels": "No se encontraron modelos locales. Añade modelos locales para continuar.",
     "orphansTitle": "Tus asistentes no tienen un modelo con el que responder",
-    "orphansBody": "Se eliminó el modelo base de todos los asistentes de Knowledge Base instalados. Descarga un modelo y vuelve a vincular cada asistente a él desde su tarjeta en Modelos.",
-    "orphansDownload": "Descargar un modelo",
-    "orphansRebind": "Volver a vincular el asistente"
+    "orphansBody": "Se eliminó el modelo base de todos los asistentes de Knowledge Base instalados. Descarga un modelo: podrás chatear con él y volver a vincular cada asistente a él desde su tarjeta en Modelos.",
+    "orphansDownload": "Descargar un modelo"
   },
   "languageNote": {
     "title": "Nota sobre el idioma",

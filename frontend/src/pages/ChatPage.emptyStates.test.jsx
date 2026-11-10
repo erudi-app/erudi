@@ -74,18 +74,29 @@ describe("ChatPage empty states (#690)", () => {
     expect(screen.queryByRole("button", { name: "Please select a model" })).toBeNull();
     expect(screen.queryByTestId("composer")).toBeNull();
     expect(screen.getByRole("button", { name: "Download a model" })).toBeTruthy();
-    expect(screen.getByRole("button", { name: "Re-bind the assistant" })).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Re-bind the assistant" })).toBeNull();
   });
 
-  it.each(["Download a model", "Re-bind the assistant"])(
-    "%s opens the Models page",
-    async (name) => {
-      useModels([ORPHAN]);
-      render(tree());
-      fireEvent.click(await screen.findByRole("button", { name }));
-      expect(await screen.findByText("models page")).toBeTruthy();
-    }
-  );
+  it("falls back to the no-models text when a plain model lost its weights", async () => {
+    useModels([{ id: 5, name: "Gone Model", weights_available: false }]);
+    render(tree());
+    expect(await screen.findByText(/No current local models found/)).toBeTruthy();
+    expect(screen.queryByText(/was deleted/)).toBeNull();
+    expect(screen.queryByRole("button", { name: "Please select a model" })).toBeNull();
+  });
+
+  it("falls back to the no-models text when a plain model and an assistant both lack weights", async () => {
+    useModels([ORPHAN, { id: 5, name: "Gone Model", weights_available: false }]);
+    render(tree());
+    expect(await screen.findByText(/No current local models found/)).toBeTruthy();
+  });
+
+  it("opens the Models page from the download button", async () => {
+    useModels([ORPHAN]);
+    render(tree());
+    fireEvent.click(await screen.findByRole("button", { name: "Download a model" }));
+    expect(await screen.findByText("models page")).toBeTruthy();
+  });
 
   it("shows today's page when a model is selectable", async () => {
     useModels([ORPHAN, HEALTHY]);

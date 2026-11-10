@@ -331,7 +331,7 @@ describe("a model whose weights are missing (#376)", () => {
   });
 
   it("offers guidance instead of a composer when it is the only model (#690)", async () => {
-    models = [ORPHAN];
+    models = [{ ...ORPHAN, kb_id: 3, is_attached_to_kb: true }];
     render(
       <MemoryRouter initialEntries={["/erudi/chat"]}>
         <ChatPage />

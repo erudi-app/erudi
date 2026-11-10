@@ -18,7 +18,7 @@ import { useDownloadModal } from "../contexts/DownloadModalContext";
 import { createLogger } from "../utils/logger";
 import { conversationPath, MODELS_PATH } from "../utils/routes";
 import { canAttachImages } from "../utils/modelCapabilities";
-import { hasMissingWeights, offeredModels } from "../utils/modelWeights";
+import { hasMissingWeights, isKbAssistant, offeredModels } from "../utils/modelWeights";
 import { COMMAND_SCOPES, commandsFor, commandsOutside } from "../utils/slashCommands";
 import useConversationSettings, { DRAFT } from "../shared/hooks/useConversationSettings";
 import CommandNotice from "../components/CommandNotice";
@@ -181,9 +181,11 @@ export default function ChatPage() {
   }, [searchParams, models]);
 
   const llm = models.find((m) => m.name === selectedModel);
-  // Installed, but none can answer: every entry is a KB assistant whose base
-  // model was deleted.
-  const onlyOrphans = models.length > 0 && offeredModels(models).length === 0;
+  // Installed, but none can answer. When every entry is a KB assistant, their
+  // base model was deleted (a plain model that lost its folder is not that
+  // story, so it gets the no-models text).
+  const nothingOffered = offeredModels(models).length === 0;
+  const onlyOrphans = models.length > 0 && nothingOffered && models.every(isKbAssistant);
 
   // The draft follows the picked model: its defaults are read, and a switch
   // brings the new model's values (the /model rule).
@@ -293,7 +295,7 @@ export default function ChatPage() {
       {/* zone centrale */}
       <main className="flex-1 bg-[#071b18] flex items-center justify-center relative overflow-hidden py-12 px-8">
         {/* Nothing to chat with: no model at all, or only orphaned assistants */}
-        {models.length === 0 || onlyOrphans ? (
+        {nothingOffered ? (
           <GradientBox className="w-[700px] max-w-full">
             {onlyOrphans ? (
               <div className="text-white text-center py-10 space-y-6">
@@ -306,13 +308,6 @@ export default function ChatPage() {
                     onClick={() => navigate(MODELS_PATH)}
                   >
                     {t("chat:empty.orphansDownload")}
-                  </button>
-                  <button
-                    type="button"
-                    className="px-4 py-2 rounded-lg font-semibold bg-white/10 hover:bg-white/20 text-white transition-colors"
-                    onClick={() => navigate(MODELS_PATH)}
-                  >
-                    {t("chat:empty.orphansRebind")}
                   </button>
                 </div>
               </div>
