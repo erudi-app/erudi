@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState } from "react";
 import apiClient from "../../services/api/client";
 import { createLogger } from "../../utils/logger";
 import { defaultsFor } from "../../utils/samplingDefaults";
@@ -121,7 +121,16 @@ export default function useConversationSettings(conversationId) {
   const valuesRef = useRef(EMPTY);
   const loadedRef = useRef(false);
   const idRef = useRef(conversationId);
-  idRef.current = conversationId;
+  // Updated in the layout phase: after the commit and before any effect or
+  // handler of this render (the children's included) can read it. The
+  // synchronous mirrors start over with the id, in the same step: a child's
+  // cleanup in this commit (a closing popup blurring its editor) must never
+  // read the previous conversation's values under the new id.
+  useLayoutEffect(() => {
+    idRef.current = conversationId;
+    valuesRef.current = EMPTY;
+    loadedRef.current = false;
+  }, [conversationId]);
 
   // Conversation: the bookkeeping per conversation id, the save sequence,
   // the save chain per conversation id, the pending slider save and its timer.
@@ -269,18 +278,27 @@ export default function useConversationSettings(conversationId) {
 
   // A new conversation (or the page leaving it): the slider save still pending
   // goes to the conversation it was made in, then the state starts over.
-  useEffect(() => {
-    valuesRef.current = EMPTY;
+  //
+  // The state starts over while rendering, so no render shows the previous
+  // conversation's values under the new id; the mirrors and the bookkeeping
+  // start over in the effect.
+  const [seenConversationId, setSeenConversationId] = useState(conversationId);
+  if (seenConversationId !== conversationId) {
+    setSeenConversationId(conversationId);
     setValues(EMPTY);
-    markLoaded(false);
-    clearFailure();
+    setLoaded(false);
+    setSaveFailed(false);
+  }
+
+  useEffect(() => {
+    clearTimeout(failedTimerRef.current);
     touchedRef.current = new Map();
     unreadRef.current = new Set();
     modelRef.current = null;
     requestRef.current += 1;
     pendingRequestRef.current = Promise.resolve();
     return () => sendPendingSampling();
-  }, [conversationId, sendPendingSampling, markLoaded, clearFailure]);
+  }, [conversationId, sendPendingSampling]);
 
   useEffect(() => () => clearTimeout(failedTimerRef.current), []);
 
