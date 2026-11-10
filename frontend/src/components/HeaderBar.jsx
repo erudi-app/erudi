@@ -61,12 +61,12 @@ export default function HeaderBar({
   // Sync internal state with props when they change: adjusted while rendering,
   // so the new value shows without an extra committed render.
   const [seenTemperature, setSeenTemperature] = useState(initialTemperature);
-  if (seenTemperature !== initialTemperature) {
+  if (!Object.is(seenTemperature, initialTemperature)) {
     setSeenTemperature(initialTemperature);
     setTemperature(initialTemperature);
   }
   const [seenTopP, setSeenTopP] = useState(initialTopP);
-  if (seenTopP !== initialTopP) {
+  if (!Object.is(seenTopP, initialTopP)) {
     setSeenTopP(initialTopP);
     setTopP(initialTopP);
   }

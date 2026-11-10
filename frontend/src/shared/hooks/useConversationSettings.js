@@ -122,9 +122,14 @@ export default function useConversationSettings(conversationId) {
   const loadedRef = useRef(false);
   const idRef = useRef(conversationId);
   // Updated in the layout phase: after the commit and before any effect or
-  // handler of this render (the children's included) can read it.
+  // handler of this render (the children's included) can read it. The
+  // synchronous mirrors start over with the id, in the same step: a child's
+  // cleanup in this commit (a closing popup blurring its editor) must never
+  // read the previous conversation's values under the new id.
   useLayoutEffect(() => {
     idRef.current = conversationId;
+    valuesRef.current = EMPTY;
+    loadedRef.current = false;
   }, [conversationId]);
 
   // Conversation: the bookkeeping per conversation id, the save sequence,
@@ -286,8 +291,6 @@ export default function useConversationSettings(conversationId) {
   }
 
   useEffect(() => {
-    valuesRef.current = EMPTY;
-    loadedRef.current = false;
     clearTimeout(failedTimerRef.current);
     touchedRef.current = new Map();
     unreadRef.current = new Set();
