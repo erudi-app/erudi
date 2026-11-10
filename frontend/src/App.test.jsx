@@ -105,6 +105,18 @@ describe("App readiness", () => {
     expect(screen.getByText("The previous session is still closing…")).toBeTruthy();
   });
 
+  it("drops the waiting line as soon as the new backend starts", async () => {
+    render(<App />);
+    await act(async () => {
+      emit({ event: "phase", phase: "waiting_previous_session" });
+    });
+    await act(async () => {
+      emit({ event: "starting", port: 8791, first_run: false });
+    });
+    expect(screen.queryByText("The previous session is still closing…")).toBeNull();
+    expect(screen.getByText("Starting Erudi…")).toBeTruthy();
+  });
+
   it("re-spawns the backend when Retry is clicked", async () => {
     render(<App />);
     await act(async () => {

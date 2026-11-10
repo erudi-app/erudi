@@ -284,6 +284,12 @@ export default function SettingsPage() {
             />
           )}
 
+          {engineSwitch.waitingForDownload && (
+            <p role="status" className="text-[12px] text-[var(--ink-dim)] -mt-2 px-1">
+              {t("downloads:waitingForInstall")}
+            </p>
+          )}
+
           <EngineSwitchConfirmation
             isOpen={engineSwitch.confirming}
             onConfirm={engineSwitch.confirm}

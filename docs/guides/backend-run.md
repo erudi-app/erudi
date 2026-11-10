@@ -238,7 +238,12 @@ Right after a quit the previous backend can still hold the folder for a while (u
 `DATA_DIR_IN_USE` it respawns the backend every 2 s for up to 30 s. Meanwhile it does not
 forward that `startup_error` to the window; it sends a `phase` event,
 `waiting_previous_session`, and the loader says the previous session is still closing.
-Only when the wait runs out does the error screen show. The backend writes the refusal at
+The `starting` event of the next backend clears that line. Only when the wait runs out
+does the error screen show ("The previous session did not close", with the backend's own
+message: which pid holds which folder); without the packaged supervisor (a dev run) the
+code goes straight to the error screen. A child main stops itself before it is ready (a
+Retry, a quit) settles its start quietly: no ERROR, and no safety-cap failure later. A
+quit is marked whether or not a backend runs, so no respawn follows it. The backend writes the refusal at
 INFO; main writes one ERROR if the wait runs out. One supervision loop runs at a time
 (`frontend/src/utils/backendSupervisor.js`): a Retry supersedes the running loop, and a
 quit stands it down before any respawn.

@@ -355,9 +355,17 @@ const startRealBackend = () => {
       logError,
       // Waited out below (startBackendSupervised): not an ERROR per attempt.
       quietCodes: new Set(["DATA_DIR_IN_USE"]),
-      onFail: (code) => {
+      onFail: (code, cause) => {
         if (capTimer) clearTimeout(capTimer);
-        reject(new Error(code));
+        // The code drives the supervisor; the backend's own words go on the
+        // error screen.
+        reject(Object.assign(new Error(code), { detail: cause }));
+      },
+      onAbandon: () => {
+        // Main stopped this child before it was ready (a Retry, a quit): no
+        // failure to record, and no safety cap firing later.
+        if (capTimer) clearTimeout(capTimer);
+        reject(new Error("BACKEND_STOPPED"));
       },
       onSucceed: () => {
         if (capTimer) clearTimeout(capTimer);
@@ -395,7 +403,13 @@ const startRealBackend = () => {
         // except a startup_error main is waiting out (DATA_DIR_IN_USE): the
         // supervisor sends a phase for it, and the error screen only if the
         // wait runs out.
-        if (mainWindow && !mainWindow.isDestroyed() && !isWaitedOutStartupError(event)) {
+        if (
+          mainWindow &&
+          !mainWindow.isDestroyed() &&
+          // Only the packaged supervisor waits it out; without it (dev), the
+          // error screen is the answer.
+          !(app.isPackaged && isWaitedOutStartupError(event))
+        ) {
           mainWindow.webContents.send("backend-event", event);
         }
         if (event.event === "starting" && event.port) {
@@ -513,7 +527,7 @@ const backendSupervisor = createBackendSupervisor({
     sendBackendEvent({
       event: "startup_error",
       code,
-      message: (error && error.message) || code,
+      message: (error && error.detail) || code,
       source: "startup",
     }),
 });
@@ -1359,9 +1373,12 @@ app.on("before-quit", (e) => {
   // else killBackend hard-kills the tree (#216). Deferring the quit once (via
   // preventDefault) is the only way to await this; the re-issued app.quit()
   // finds shuttingDown=true and this handler falls through.
-  if (!shuttingDown && backendProcess) {
+  // Quitting is marked on every quit, child or not: the supervisor clears
+  // the child during its respawn sleeps and must not respawn after a quit.
+  if (shuttingDown) return;
+  shuttingDown = true;
+  if (backendProcess) {
     e.preventDefault();
-    shuttingDown = true;
     log("Stopping backend process before quit...");
     requestStop(backendProcess);
     gracefulShutdown(backendProcess, { killFn: killBackend }).finally(() => {

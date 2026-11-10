@@ -6,9 +6,9 @@
     "checkLogs": "Check the backend logs and contact us.",
     "codes": {
       "dataDirInUse": {
-        "title": "The previous session is still closing",
-        "detail": "Erudi's previous session is still closing and holds its data folder.",
-        "hint": "Wait a few seconds, then retry."
+        "title": "The previous session did not close",
+        "detail": "Erudi's previous session still holds its data folder after 30 seconds.",
+        "hint": "Wait a moment, then retry. If it keeps happening, restart your computer."
       },
       "portInUse": {
         "title": "Port already in use",

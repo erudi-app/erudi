@@ -141,6 +141,17 @@ describe("one loop at a time", () => {
   });
 });
 
+describe("a child main stopped on purpose", () => {
+  it("stands the loop down without surfacing an error", async () => {
+    const run = supervisor().start();
+    await flush();
+    starts.pending[0].reject(new Error("BACKEND_STOPPED"));
+    await run;
+    expect(starts.startBackend).toHaveBeenCalledTimes(1);
+    expect(io.onFailed).not.toHaveBeenCalled();
+  });
+});
+
 describe("other failures", () => {
   it("respawns a transient code twice, then surfaces it", async () => {
     const run = supervisor().start();

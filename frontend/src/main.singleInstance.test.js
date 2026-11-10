@@ -44,8 +44,29 @@ describe("single instance", () => {
   it("never shows the error screen for a code it is waiting out", () => {
     // Each attempt's startup_error DATA_DIR_IN_USE stays in main; the window
     // gets a phase saying the previous session is closing instead.
-    expect(source).toMatch(/!isWaitedOutStartupError\(event\)/);
+    expect(source).toMatch(/!\(app\.isPackaged && isWaitedOutStartupError\(event\)\)/);
     expect(source).toMatch(/phase: WAITING_PREVIOUS_SESSION_PHASE/);
+  });
+
+  it("marks the app as quitting on every quit, child or not", () => {
+    // The supervisor clears the child during its 2 s sleeps: a quit then must
+    // still stand it down.
+    expect(source).toMatch(
+      /app\.on\("before-quit", \(e\) => \{\s*(\/\/[^\n]*\n\s*)*if \(shuttingDown\) return;\s*shuttingDown = true;/
+    );
+  });
+
+  it("forwards a waited-out code when no supervisor waits for it (dev)", () => {
+    expect(source).toMatch(/app\.isPackaged && isWaitedOutStartupError\(event\)/);
+  });
+
+  it("settles a start quietly when main stopped the child itself", () => {
+    expect(source).toMatch(/onAbandon: \(\) => \{/);
+    expect(source).toMatch(/new Error\("BACKEND_STOPPED"\)/);
+  });
+
+  it("puts the backend's own words on the error screen", () => {
+    expect(source).toMatch(/message: \(error && error\.detail\) \|\| code/);
   });
 
   it("never starts a window or a backend without the lock", () => {

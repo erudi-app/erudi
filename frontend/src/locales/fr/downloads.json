@@ -63,5 +63,6 @@
     "doneBody": "Le modèle d'embedding a été téléchargé avec succès. La Base de connaissances est prête à l'emploi.",
     "errorTitle": "Échec du téléchargement",
     "errorBody": "Le modèle d'embedding n'a pas pu être téléchargé. Vérifiez votre connexion et réessayez."
-  }
+  },
+  "waitingForInstall": "En attente de la fin de l'installation du téléchargement…"
 }

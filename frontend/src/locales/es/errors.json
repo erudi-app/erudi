@@ -6,9 +6,9 @@
     "checkLogs": "Consulte los registros del backend y contáctenos.",
     "codes": {
       "dataDirInUse": {
-        "title": "La sesión anterior aún se está cerrando",
-        "detail": "La sesión anterior de Erudi aún se está cerrando y ocupa su carpeta de datos.",
-        "hint": "Espera unos segundos y vuelve a intentarlo."
+        "title": "La sesión anterior no se cerró",
+        "detail": "La sesión anterior de Erudi sigue ocupando su carpeta de datos después de 30 segundos.",
+        "hint": "Espera un momento y vuelve a intentarlo. Si vuelve a ocurrir, reinicia el ordenador."
       },
       "portInUse": {
         "title": "Puerto ya en uso",

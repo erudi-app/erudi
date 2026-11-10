@@ -38,7 +38,7 @@ const log = createLogger("EngineSwitch");
  * `"restarted"`.
  */
 export function useEngineSwitch({ persist, settled } = {}) {
-  const { isDownloading, cancelDownload } = useDownloadModal();
+  const { isDownloading, isCompleting, cancelDownload } = useDownloadModal();
   const [pending, setPending] = useState(false);
   const [confirmingNext, setConfirmingNext] = useState(null);
   const latestSettled = useRef(settled);
@@ -163,6 +163,9 @@ export function useEngineSwitch({ persist, settled } = {}) {
 
   return {
     pending,
+    // The switch waits for a download being installed (its cancel was
+    // refused): the UI says so instead of a bare spinner.
+    waitingForDownload: Boolean(isCompleting),
     confirming: confirmingNext !== null,
     requestSwitch,
     confirm,

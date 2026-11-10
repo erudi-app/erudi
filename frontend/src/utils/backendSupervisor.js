@@ -66,7 +66,9 @@ export function createBackendSupervisor({
     } catch (error) {
       const code = (error && error.message) || "BACKEND_STARTUP_FAILED";
       log(`Backend start attempt ${attempt + 1} failed: ${code}`);
-      if (standsDown(gen)) {
+      if (standsDown(gen) || code === "BACKEND_STOPPED") {
+        // Superseded, quitting, or main stopped this child itself: whoever
+        // did owns what happens next.
         log(`Backend start loop superseded or app quitting; not respawning after ${code}`);
         return;
       }
