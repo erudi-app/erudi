@@ -577,7 +577,6 @@ async def test_the_next_turn_on_a_tool_carrying_graph_after_a_compaction(monkeyp
             thread_id="g1",
             summarize=True,
             tools=[calculator],
-            emit_events=True,
             compaction_threshold=80,
         )
     ]

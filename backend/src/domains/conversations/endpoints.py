@@ -559,8 +559,8 @@ async def query_and_respond(
         service: Injected conversation service.
 
     Returns:
-        StreamingResponse: AI response stream (text/plain), sent token-by-token
-            for real-time display in frontend.
+        StreamingResponse: NDJSON event stream (application/x-ndjson), one event
+            per line as the turn produces it, for real-time display in frontend.
 
     Example:
         ::
@@ -581,7 +581,8 @@ async def query_and_respond(
     """Query the conversation and get a streaming response."""
     # NDJSON (#90): one JSON event per line (answer / thinking / tool_call /
     # tool_result / error / done). The renderer splits the body on newlines and
-    # parses each line. generate_title and arena keep the plain-text protocol.
+    # parses each line. The arena streams NDJSON too; generate_title keeps the
+    # plain-text protocol.
     return StreamingResponse(
         service.query_and_respond_stream(conversation_id, payload),
         media_type="application/x-ndjson",

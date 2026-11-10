@@ -70,7 +70,6 @@ async def _turn(monkeypatch, model, *, thread_id, saver=None, tools=None):
             params=_PARAMS,
             thread_id=thread_id,
             tools=tools,
-            emit_events=True,
         )
     ]
 

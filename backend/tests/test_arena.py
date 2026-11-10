@@ -388,6 +388,8 @@ class TestArenaService:
         async def fake_stream(**kwargs):
             yield {"t": "answer", "text": "Partial "}
             yield {"t": "thinking", "text": "not for the Arena"}
+            # Nor the reload state: the Arena wire carries answers and errors only.
+            yield {"t": "memory_reload", "reason": "memory"}
             yield dict(event)
 
         monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)

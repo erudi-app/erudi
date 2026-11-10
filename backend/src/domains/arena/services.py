@@ -234,7 +234,6 @@ class ArenaService:
                 context=plan.context,
                 supports_vision=supports_vision,
                 effort_plan=effort_plan,
-                emit_events=True,
             )
         ) as events:
             async for event in events:

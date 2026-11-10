@@ -707,11 +707,8 @@ def _plan_spy(captured):
 
 
 async def _stub_stream(**kwargs):
-    # Honors the runner contract: event dicts with emit_events, str otherwise.
-    if kwargs.get("emit_events"):
-        yield {"t": "answer", "text": "ok"}
-    else:
-        yield "ok"
+    # Honors the runner contract: event dicts.
+    yield {"t": "answer", "text": "ok"}
 
 
 def _stream_spy(captured):

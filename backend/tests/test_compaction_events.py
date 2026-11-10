@@ -385,7 +385,6 @@ async def test_thinking_tool_calls_and_answers_keep_their_order(monkeypatch):
             summarize=True,
             compaction_threshold=80,
             tools=[calculator],
-            emit_events=True,
         )
     ]
 
@@ -441,8 +440,7 @@ async def test_an_arena_projection_carries_only_answer_text(monkeypatch):
         )
     ]
 
-    assert all(isinstance(t, str) for t in out)
-    assert "".join(out) == "the answer"
+    assert "".join(e["text"] for e in out if e["t"] == "answer") == "the answer"
 
 
 class _ReloadEngine(_WindowEngine):

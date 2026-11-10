@@ -637,7 +637,6 @@ class ConversationService:
                     # default, #609); a lowered
                     # one compacts on this very turn.
                     compaction_threshold=conversation.compaction_threshold,
-                    emit_events=True,
                     announce_idle_reload=has_turns,
                 )
             ) as events:

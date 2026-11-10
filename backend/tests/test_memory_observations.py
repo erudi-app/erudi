@@ -783,7 +783,7 @@ async def test_every_conversation_and_arena_turn_is_measured(monkeypatch, statef
         )
     ]
 
-    assert "answer" in "".join(texts)
+    assert "answer" in "".join(e["text"] for e in texts if e["t"] == "answer")
     assert events == [("begin",), ("end", "token", False)]
     assert len([kw for kw in built if kw.get("record_usage")]) == 1
 

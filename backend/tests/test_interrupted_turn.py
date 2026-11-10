@@ -226,7 +226,7 @@ async def test_the_arena_writes_nothing(monkeypatch):
     from tests.test_prefix_cache_turns import _PARAMS, _Llm
 
     gen = AgentRunner().astream_text(
-        llm=_Llm(), user_message="hi", system_prompt="s", params=_PARAMS, emit_events=True
+        llm=_Llm(), user_message="hi", system_prompt="s", params=_PARAMS
     )
     while (await gen.__anext__()).get("t") != "answer":
         pass

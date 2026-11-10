@@ -136,7 +136,6 @@ async def _failure(monkeypatch, exc, thread_id):
             system_prompt="s",
             params=_PARAMS,
             thread_id=thread_id,
-            emit_events=True,
         )
     ]
     return [e for e in events if e["t"] == "answer"][-1]

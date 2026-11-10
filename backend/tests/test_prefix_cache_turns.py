@@ -164,7 +164,6 @@ def _stream(runner, *, thread_id="1", summarize=True, question="hi"):
         params=_PARAMS,
         thread_id=thread_id,
         summarize=summarize,
-        emit_events=True,
         compaction_threshold=80,
     )
 
@@ -200,7 +199,7 @@ async def test_the_arena_claims_the_arena(monkeypatch):
         )
     ]
 
-    assert "".join(out) == "duel"
+    assert "".join(e["text"] for e in out if e["t"] == "answer") == "duel"
     assert _names("claim-start") == [("claim-start", "arena")]
 
 

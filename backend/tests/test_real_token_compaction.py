@@ -588,7 +588,6 @@ async def test_the_runner_hands_the_kb_text_to_the_client_and_reads_no_checkpoin
             summarize=True,
             kb_context_block="EXCERPTS",
             kb_language_line="Answer in English.",
-            emit_events=True,
             compaction_threshold=80,
         )
     ]
@@ -760,7 +759,6 @@ async def test_the_runner_projects_without_the_kb_block_of_the_turn_just_answere
             summarize=True,
             kb_context_block="EXCERPTS " * 100,
             kb_language_line="Answer in English.",
-            emit_events=True,
             compaction_threshold=80,
         )
     ]

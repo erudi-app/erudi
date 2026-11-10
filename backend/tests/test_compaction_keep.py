@@ -1149,7 +1149,6 @@ async def _turn(runner, thread_id, question="next question"):
             params=_PARAMS,
             thread_id=thread_id,
             summarize=True,
-            emit_events=True,
             compaction_threshold=80,
         )
     ]

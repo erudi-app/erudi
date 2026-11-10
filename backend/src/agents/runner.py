@@ -3,16 +3,10 @@
 One ``create_agent`` per turn. The turn is captured as STRUCTURED EVENTS (#90):
 ``_astream_events`` yields dicts — ``{"t":"answer",...}``, ``{"t":"thinking",...}``,
 ``{"t":"tool_call",...}``, ``{"t":"tool_result",...}`` — so thinking and tool
-activity are surfaced instead of dropped. ``astream_text`` is a thin projection
-over those events with two modes selected by ``emit_events``:
-
-  - ``emit_events=True`` (conversations, arena): yields the event dicts
-    unchanged; the conversation service frames them as NDJSON and persists a
-    replayable trace, the arena service frames its ``answer`` events (and the
-    ``error`` of a failed turn) as NDJSON.
-  - ``emit_events=False`` (the default): yields ONLY answer text as ``str``,
-    dropping thinking + tool events. Reasoning stays hidden there because the
-    same splitter strips inline ``<think>`` before the text is yielded.
+activity are surfaced instead of dropped. ``astream_text`` yields them as they
+come: the conversation service frames them as NDJSON and persists a replayable
+trace, the arena service frames its ``answer`` events (and the ``error`` of a
+failed turn) as NDJSON.
 
   - Conversation: ``thread_id`` set + ``summarize=True`` + a checkpointer →
     history is restored from the checkpointer (only the new message is sent),
@@ -1796,8 +1790,8 @@ class AgentRunner:
     """Streams an agent turn as structured events. Shared by conversation and arena.
 
     ``_astream_events`` is the single capture loop (answer / thinking / tool_call /
-    tool_result); ``astream_text`` projects it to either event dicts or plain
-    answer text via ``emit_events`` (see the module docstring). Pass a
+    tool_result); ``astream_text`` hands its events to the caller (see the module
+    docstring). Pass a
     ``checkpointer`` (the app-wide ``AsyncPostgresSaver``) for stateful
     conversations; arena constructs it with ``checkpointer=None``.
     """
@@ -1821,19 +1815,16 @@ class AgentRunner:
         supports_vision: Optional[bool] = None,
         effort_plan: Optional[EffortPlan] = None,
         compaction_threshold: Optional[int] = None,
-        emit_events: bool = False,
         announce_idle_reload: bool = False,
-    ) -> AsyncIterator:
-        """Project the turn's event stream (:meth:`_astream_events`).
+    ) -> AsyncIterator[dict]:
+        """The turn's event stream (:meth:`_astream_events`), closed with its
+        consumer.
 
-        ``emit_events=True`` yields the event dicts unchanged (conversations frame
-        them as NDJSON, the arena its answer events). ``emit_events=False`` (the
-        default) yields ONLY answer text as ``str`` -- thinking and tool events are
-        dropped and inline ``<think>`` is stripped. Error paths ride an ``answer``
-        event carrying the ERROR sentinel string, so in str mode the sentinel is
-        yielded as text (the conversation and arena services map it to an
-        ``error`` event on the wire; DB persistence unchanged). A curated turn's
-        answer event also carries ``curated_error`` (``src.agents.curated_turns``).
+        The conversation service frames the events as NDJSON, the arena its
+        ``answer`` events. Error paths ride an ``answer`` event carrying the
+        ERROR sentinel string, which both services map to an ``error`` event on
+        the wire (DB persistence unchanged). A curated turn's answer event also
+        carries ``curated_error`` (``src.agents.curated_turns``).
 
         ``compaction_threshold`` is the conversation's compaction threshold
         (#607, a whole percent): required with ``summarize=True``, where it
@@ -1869,10 +1860,7 @@ class AgentRunner:
             )
         ) as events:
             async for event in events:
-                if emit_events:
-                    yield event
-                elif event["t"] == "answer":
-                    yield event["text"]
+                yield event
 
     async def _astream_events(
         self,
@@ -1908,7 +1896,8 @@ class AgentRunner:
         each one saying what actually happened. Callers map it: the
         conversation service turns a sentinel-prefixed answer into an ``error``
         wire event while still accumulating the sentinel STRING for persistence
-        (DB behavior unchanged per #225-D4); arena yields it as plain text.
+        (DB behavior unchanged per #225-D4); the arena service frames it as an
+        ``error`` event too.
         """
         if summarize and compaction_threshold is None:
             # A caller contract, not a turn failure: a compacting turn must
