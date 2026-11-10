@@ -86,7 +86,7 @@ non-functional behavior.
 - [ ] When I open Chat via `?model=<name|id>`, then that model is pre-selected (else the first model stays).
 - [ ] When the **backend is unreachable**, then an error dialog "Failed to load models: …" shows.
 - [ ] When I have **no model at all**, then the Chat page shows the message of the "zero local models" line above.
-- [ ] *(not built yet: v1.3.0, #690.10 — record as not applicable)* When the only installed entries are Knowledge Base assistants whose base model was deleted, then the Chat page shows a guided empty state (download a model, or re-bind the assistant to an installed one) instead of a red "Please select a model" with nothing to select.
+- [ ] When the only installed entries are Knowledge Base assistants whose base model was deleted, then the Chat page shows a guided empty state (no composer; one button that opens Models to download a model, which can then be used or have the assistants re-bound to it) instead of a red "Please select a model" with nothing to select.
 - [ ] When at least one model can be selected, then it is auto-selected and the composer works.
 
 ## Conversation — `/erudi/conversations/:id`
@@ -100,7 +100,7 @@ non-functional behavior.
 - [ ] When I go back to an older conversation after working in another one, then its first answer is slower (the history is re-read once, expected), and the following ones are fast again.
 - [ ] *(Windows, Linux)* When I open and answer several distinct long conversations in turn, then the memory of the `llama-server` child stays flat instead of growing with each conversation (one slot, no prompt cache: `-np 1 --cache-ram 0` in the process arguments).
 - [ ] When I reload the page, then the full text history re-renders from the database.
-- [ ] *(not built yet: v1.3.0, #690.9 — record as not applicable)* When the model writes math as `\( … \)` or `\[ … \]` (Qwen2.5's default), then it renders like `$ … $` and `$$ … $$`: inline `\(3x\)`, "2 \(x\)" and a display formula all render, including a `\[` spanning several lines; a currency amount such as "212,75 $" stays literal, and so does "I have $5 and $10"; an unclosed `\(` while streaming does not break the page; and the same delimiters inside a code block stay as written.
+- [ ] When the model writes math as `\( … \)` or `\[ … \]` (Qwen2.5's default), then it renders like `$ … $` and `$$ … $$`: inline `\(3x\)`, "2 \(x\)" and a display formula all render, including a `\[` spanning several lines; a currency amount such as "212,75 $" stays literal, and so does "I have $5 and $10"; an unclosed `\(` while streaming does not break the page; and the same delimiters inside a code block stay as written.
 
 **Reasoning / thinking models**
 - [ ] When a thinking model (e.g. Qwen3) generates, then its reasoning streams into a **collapsible "Reasoning" strip** above the answer — never into the answer bubble itself, and **no thinking marker** (`<think>`, `</think>`, channel tags) ever appears as literal text anywhere.
@@ -315,7 +315,7 @@ non-functional behavior.
 - [ ] When I read the command names in another interface language, then the **names stay in English** (fixed identifiers); the drop-up descriptions, the popups and their help texts are translated.
 - [ ] When any command popup opens, then it carries a **subtitle** and a **`?` help icon** next to each field; the help shows on hover **and** on keyboard focus.
 - [ ] When a popup is open, then the keyboard stays inside it (Tab cycles through its fields), **Escape** closes it, and the focus returns to where it was before.
-- [ ] *(not built yet: v1.3.0, #690.11 — record as not applicable)* When I type `/con`, press **Escape**, erase and type exactly `/con` again, then the drop-up opens again. (Escape then Enter without changing the text sends it as a message, by design.)
+- [ ] When I type `/con`, press **Escape**, erase and type exactly `/con` again, then the drop-up opens again. (Escape then Enter without changing the text sends it as a message, by design.)
 
 **/config**
 - [ ] When I run **/config**, then one popup shows every adjustable value of the current conversation: reasoning effort as a **5-notch graduated slider** (None → Low → Medium → High → Xhigh), web search as a switch, creativity and diversity as sliders with their real bounds, the compaction threshold as a select (50 % to 90 % in steps of 5), and the custom instructions (the existing instructions editor). There is **no** "defaults for new conversations" section and **no Apply button**.
@@ -402,7 +402,7 @@ non-functional behavior.
 - [ ] When **some** files fail but at least one ingests, then the job still completes for the good ones.
 - [ ] When ingestion **fails** (network/HTTP), then an error dialog shows the reason.
 - [ ] When the selected base model **already has a KB**, then submitting **updates** the existing KB with the new files instead of creating a new assistant.
-- [ ] *(not built yet: v1.3.0, #705 — record as not applicable)* When I add a `.docx` saved by **TextEdit** (no styles part) to a Knowledge Base in the **packaged** app, then it is indexed like a Word document. When any file of a batch fails, the end of the job names that file and the reason instead of a plain success; adding the same file again later indexes it (a failed file never blocks its own re-ingestion).
+- [ ] When I add a `.docx` saved by **TextEdit** (no styles part) to a Knowledge Base in the **packaged** app, then it is indexed like a Word document. When any file of a batch fails, the end of the job names that file, and points to Diagnostics for the reason, instead of a plain success; adding the same file again later indexes it (a failed file never blocks its own re-ingestion).
 
 **Embeddings run without the torch stack (footprint)**
 - [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When I create an assistant and ask a document question, then ingestion and retrieval work exactly as before — embeddings now come from a **dedicated child** (`llama-server --embeddings` on Windows/Linux, `mlx_vlm.server` on Apple Silicon), not from the in-process sentence-transformers stack.

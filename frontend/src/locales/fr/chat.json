@@ -134,7 +134,7 @@
   "modelPicker": {
     "listLabel": "Modèles installés",
     "current": "Actuel",
-    "empty": "Aucun modèle installé n'est utilisable. Ouvrez Modèles pour en télécharger un, ou rattachez l'assistant à un autre modèle dans Base de connaissances."
+    "empty": "Aucun modèle installé n'est utilisable. Ouvrez Modèles pour en télécharger un."
   },
   "composer": {
     "placeholder": "Posez une question…",
@@ -257,7 +257,10 @@
     "confirmBody": "Il sera installé localement sur votre système."
   },
   "empty": {
-    "noModels": "Aucun modèle local trouvé. Ajoutez des modèles locaux pour continuer."
+    "noModels": "Aucun modèle local trouvé. Ajoutez des modèles locaux pour continuer.",
+    "orphansTitle": "Vos assistants n'ont pas de modèle pour répondre",
+    "orphansBody": "Le modèle de base de chaque assistant Knowledge Base installé a été supprimé. Téléchargez un modèle : vous pourrez discuter avec lui et y rattacher chaque assistant depuis sa carte dans Modèles.",
+    "orphansDownload": "Télécharger un modèle"
   },
   "languageNote": {
     "title": "Remarque sur la langue",

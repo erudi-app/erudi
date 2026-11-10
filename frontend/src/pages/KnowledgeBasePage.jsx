@@ -25,6 +25,8 @@ export default function KnowledgeBasePage() {
   const navigate = useNavigate();
   const [errorMessage, setErrorMessage] = useState("");
   const [isValidated, setIsValidated] = useState(false);
+  const [failedFiles, setFailedFiles] = useState([]); // names, from the finished job
+  const [wasUpdate, setWasUpdate] = useState(false); // the finished job updated an assistant
 
   // Inference rating readout. The state holds a status code plus the raw
   // backend values; the displayed placeholders ("fetching…", "N/A", …) are
@@ -98,6 +100,26 @@ export default function KnowledgeBasePage() {
     }
   };
 
+  // At most five names, then how many more: a long list would bury the message.
+  const MAX_LISTED_FILES = 5;
+  const listFailedFiles = (names) => {
+    const shown = names.slice(0, MAX_LISTED_FILES).join(", ");
+    const more = names.length - MAX_LISTED_FILES;
+    return more > 0 ? `${shown} ${t("knowledgeBase:page.form.moreFiles", { count: more })}` : shown;
+  };
+
+  const resetForm = () => {
+    setIsValidated(false);
+    setFailedFiles([]);
+    setPaths([]);
+    setModelName("");
+    setDescription("");
+    // The staged file list lives inside DragDropArea, so clearing the
+    // parent state is not enough: bump the key to remount it, otherwise
+    // the form keeps showing files it no longer holds.
+    setFormResetKey((k) => k + 1);
+  };
+
   const submitTrainForm = async () => {
     log.log("Submitting knowledge base form", {
       selectedModel,
@@ -149,24 +171,26 @@ export default function KnowledgeBasePage() {
     };
 
     openKnowledgeBase(task, {
-      onComplete: () => {
+      onComplete: ({ failedFiles = [] } = {}) => {
         log.log("Knowledge base assistant created successfully");
+        setFailedFiles(failedFiles);
+        setWasUpdate(isUpdate);
         setIsValidated(true);
-        // Reset form after a delay
-        setTimeout(() => {
-          setIsValidated(false);
-          setPaths([]);
-          setModelName("");
-          setDescription("");
-          // The staged file list lives inside DragDropArea, so clearing the
-          // parent state is not enough: bump the key to remount it, otherwise
-          // the form keeps showing files it no longer holds.
-          setFormResetKey((k) => k + 1);
-        }, 3000);
+        // Reset form after a delay. A message naming failed files stays until
+        // the user dismisses it: three seconds is not enough to read it.
+        if (failedFiles.length === 0) setTimeout(resetForm, 3000);
       },
       // UI only: the context wrote the record (it knows the job and the
       // backend's message); a second ERROR here would show one failure twice.
-      onError: (error) => setErrorMessage(error),
+      onError: (error, { failedFiles = [] } = {}) =>
+        setErrorMessage(
+          failedFiles.length > 0
+            ? `${error}\n${t("knowledgeBase:page.errors.failedFiles", {
+                count: failedFiles.length,
+                files: listFailedFiles(failedFiles),
+              })}`
+            : error
+        ),
     });
   };
 
@@ -415,10 +439,34 @@ export default function KnowledgeBasePage() {
               <div className="flex flex-col items-center gap-3 flex-shrink-0">
                 {isValidated ? (
                   <div className="w-full text-center">
-                    <div className="text-emerald-400 text-sm">
-                      {t("knowledgeBase:page.form.success")}
-                    </div>
-                    <div className="inline-flex items-center gap-2 py-3"></div>
+                    {failedFiles.length > 0 ? (
+                      <>
+                        <div className="text-amber-400 text-sm">
+                          {t(
+                            wasUpdate
+                              ? "knowledgeBase:page.form.partialUpdated"
+                              : "knowledgeBase:page.form.partialCreated",
+                            {
+                              count: failedFiles.length,
+                              files: listFailedFiles(failedFiles),
+                            }
+                          )}
+                        </div>
+                        <button
+                          className="mt-3 py-1 px-5 rounded-full border border-emerald-500 text-emerald-400 hover:bg-emerald-500/10 transition text-sm"
+                          onClick={resetForm}
+                        >
+                          {t("common:actions.done")}
+                        </button>
+                      </>
+                    ) : (
+                      <>
+                        <div className="text-emerald-400 text-sm">
+                          {t("knowledgeBase:page.form.success")}
+                        </div>
+                        <div className="inline-flex items-center gap-2 py-3"></div>
+                      </>
+                    )}
                   </div>
                 ) : (
                   <button

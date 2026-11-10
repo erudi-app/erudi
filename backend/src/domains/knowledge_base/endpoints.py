@@ -58,7 +58,7 @@ def get_kb_job_status(llm_id: int, db: Session = Depends(get_db)):
         db: Database session.
 
     Returns:
-        dict: status, status_updated_at, error_message
+        dict: status, status_updated_at, error_message, failed_files
 
     Raises:
         KnowledgeBaseNotFoundException: If KB job not found.

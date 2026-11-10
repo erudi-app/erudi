@@ -134,7 +134,7 @@
   "modelPicker": {
     "listLabel": "Installed models",
     "current": "Current",
-    "empty": "No installed model can be used. Open Models to download one, or re-bind the assistant to another model in Knowledge Base."
+    "empty": "No installed model can be used. Open Models to download one."
   },
   "composer": {
     "placeholder": "Ask a question…",
@@ -257,7 +257,10 @@
     "confirmBody": "It will be installed locally on your system."
   },
   "empty": {
-    "noModels": "No current local models found, please add local models to proceed."
+    "noModels": "No current local models found, please add local models to proceed.",
+    "orphansTitle": "Your assistants have no model to run on",
+    "orphansBody": "The base model of every installed Knowledge Base assistant was deleted. Download a model: you can chat with it, and re-bind each assistant to it from its card in Models.",
+    "orphansDownload": "Download a model"
   },
   "languageNote": {
     "title": "Note on Language",

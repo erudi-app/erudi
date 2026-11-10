@@ -16,9 +16,9 @@ import { API_BASE_URL } from "../config/api.js";
 import apiClient, { tracedFetch } from "../services/api/client";
 import { useDownloadModal } from "../contexts/DownloadModalContext";
 import { createLogger } from "../utils/logger";
-import { conversationPath } from "../utils/routes";
+import { conversationPath, MODELS_PATH } from "../utils/routes";
 import { canAttachImages } from "../utils/modelCapabilities";
-import { hasMissingWeights } from "../utils/modelWeights";
+import { hasMissingWeights, isKbAssistant, offeredModels } from "../utils/modelWeights";
 import { COMMAND_SCOPES, commandsFor, commandsOutside } from "../utils/slashCommands";
 import useConversationSettings, { DRAFT } from "../shared/hooks/useConversationSettings";
 import CommandNotice from "../components/CommandNotice";
@@ -85,7 +85,8 @@ export default function ChatPage() {
     apiClient
       .get("/llms/local")
       .then((data) => {
-        if (Array.isArray(data) && data.length > 0) {
+        // An empty list is an answer too: the last models are gone.
+        if (Array.isArray(data)) {
           setModels(data);
           // Keep the user's current selection on refreshes while it is still
           // selectable; otherwise default to the first model whose weights
@@ -180,6 +181,11 @@ export default function ChatPage() {
   }, [searchParams, models]);
 
   const llm = models.find((m) => m.name === selectedModel);
+  // Installed, but none can answer. When every entry is a KB assistant, their
+  // base model was deleted (a plain model that lost its folder is not that
+  // story, so it gets the no-models text).
+  const nothingOffered = offeredModels(models).length === 0;
+  const onlyOrphans = models.length > 0 && nothingOffered && models.every(isKbAssistant);
 
   // The draft follows the picked model: its defaults are read, and a switch
   // brings the new model's values (the /model rule).
@@ -288,10 +294,26 @@ export default function ChatPage() {
 
       {/* zone centrale */}
       <main className="flex-1 bg-[#071b18] flex items-center justify-center relative overflow-hidden py-12 px-8">
-        {/* Si aucun modèle local */}
-        {models.length === 0 ? (
+        {/* Nothing to chat with: no model at all, or only orphaned assistants */}
+        {nothingOffered ? (
           <GradientBox className="w-[700px] max-w-full">
-            <div className="text-white text-center py-10">{t("chat:empty.noModels")}</div>
+            {onlyOrphans ? (
+              <div className="text-white text-center py-10 space-y-6">
+                <h2 className="text-xl font-semibold">{t("chat:empty.orphansTitle")}</h2>
+                <p className="text-white/80">{t("chat:empty.orphansBody")}</p>
+                <div className="flex justify-center gap-3">
+                  <button
+                    type="button"
+                    className="px-4 py-2 rounded-lg font-semibold bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 transition-colors"
+                    onClick={() => navigate(MODELS_PATH)}
+                  >
+                    {t("chat:empty.orphansDownload")}
+                  </button>
+                </div>
+              </div>
+            ) : (
+              <div className="text-white text-center py-10">{t("chat:empty.noModels")}</div>
+            )}
             {/* Language Warning */}
             <div className="flex justify-center px-2 pb-1">
               <div className="w-[700px] max-w-full">

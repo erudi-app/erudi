@@ -707,6 +707,36 @@ class TestJobCleanup:
         assert test_db_session.query(Llm).filter(Llm.id == llm.id).count() == 1
         assert test_db_session.query(KnowledgeBase).filter(KnowledgeBase.id == kb.id).count() == 1
 
+    def test_kb_cleanup_turns_documents_left_indexing_into_failed(
+        self, test_db_session, mock_llm_with_kb
+    ):
+        """A quit mid-file leaves a row `indexing` with no chunks. `failed` is
+        what lets the file be added again (dedup skips every other status)."""
+        from src.entities.KnowledgeDocument import KnowledgeDocument
+
+        llm, kb = mock_llm_with_kb
+        self._kb_job(test_db_session, llm.id, llm.id, kb.id)
+        for name, status in (("cut.docx", "indexing"), ("done.txt", "active")):
+            test_db_session.add(
+                KnowledgeDocument(
+                    kb_id=kb.id,
+                    name=name,
+                    content_hash_sha256=name.ljust(64, "0"),
+                    size_bytes=1,
+                    status=status,
+                )
+            )
+        test_db_session.flush()
+
+        Job_Cleanup_Service(test_db_session)._cleanup_kb_jobs()
+
+        statuses = {
+            d.name: d.status
+            for d in test_db_session.query(KnowledgeDocument).filter_by(kb_id=kb.id)
+        }
+        assert statuses["cut.docx"] == "failed"
+        assert statuses["done.txt"] == "active"
+
     def test_orphaned_models_cleanup(self, test_db_session, monkeypatch, tmp_path):
         models_dir = tmp_path / "models"
         models_dir.mkdir()

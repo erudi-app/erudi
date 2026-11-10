@@ -87,19 +87,13 @@ describe("ChatPage picker and a weights-missing assistant (#376)", () => {
     expect(screen.getByTestId("composer").getAttribute("data-disabled")).toBe("false");
   });
 
-  it("leaves nothing selected and the composer disabled when the orphan is the only model", async () => {
+  it("shows the guided empty state, no composer, when the orphan is the only model (#690)", async () => {
     useModels([ORPHAN]);
     renderAt();
 
-    await waitFor(() =>
-      expect(screen.getByRole("button", { name: "Please select a model" }).textContent).toBe(
-        "Please select a model"
-      )
-    );
-    expect(screen.queryByTitle("Nimbus Assistant")).toBeNull();
-    expect(screen.getByTestId("composer").getAttribute("data-disabled")).toBe("true");
-    const dialog = await openModelCommand();
-    expect(within(dialog).getByText("No installed model can be used right now.")).toBeTruthy();
+    expect(await screen.findByText(/was deleted/)).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "Please select a model" })).toBeNull();
+    expect(screen.queryByTestId("composer")).toBeNull();
   });
 
   it("ignores a ?model= deep link that points at the orphan", async () => {
