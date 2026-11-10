@@ -1,7 +1,7 @@
 // @vitest-environment jsdom
 import React from "react";
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
-import { render, screen, cleanup, fireEvent } from "@testing-library/react";
+import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
 
 // #690.2: an Arena panel shows a curated turn the way a conversation does --
 // the sentence in the interface language, from the kind and the numbers the
@@ -130,6 +130,32 @@ describe("an Arena panel", () => {
 
     const bubbles = await screen.findAllByText(`${STOP_ZH}${i18n.t("arena:panel.error")}`);
     expect(bubbles).toHaveLength(2);
+  });
+
+  it("shows what one network read carried at once, and ends the run with it", async () => {
+    // 40 answer events in a single read: the panel must not type them out one
+    // per tick (20 per second), which also held the run open for two seconds.
+    const words = Array.from({ length: 40 }, (_, i) => `w${i} `);
+    const body = words.map((text) => `${JSON.stringify({ t: "answer", text })}\n`).join("");
+    tracedFetchMock.mockImplementation(async () => {
+      const queue = [
+        { done: false, value: encoder.encode(body) },
+        { done: true, value: undefined },
+      ];
+      return { ok: true, body: { getReader: () => ({ read: async () => queue.shift() }) } };
+    });
+    apiClient.get.mockResolvedValue([{ id: 1, name: "m1", supports_vision: false }]);
+    render(<ArenaPage />);
+    fireEvent.click(await screen.findByText("SEND"));
+
+    const answers = await screen.findAllByText(words.join("").trim(), {}, { timeout: 400 });
+    expect(answers).toHaveLength(2);
+    await waitFor(
+      () => expect(screen.queryByRole("button", { name: "Stop generation" })).toBeNull(),
+      {
+        timeout: 400,
+      }
+    );
   });
 
   it("shows a generic failure with its translated headline", async () => {

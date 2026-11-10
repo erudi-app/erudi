@@ -244,10 +244,16 @@ export default function ArenaPage() {
         prev.map((p) => {
           const buf = buffersRef.current[p.id];
           if (buf?.length) {
-            const nextTok = buf.shift();
+            let nextTok = buf.shift();
+            // Answer text: everything queued since the last tick shows at
+            // once (a network read can carry dozens of events, and a tool
+            // turn's final answer arrives in one burst); an event ends the
+            // turn.
+            while (typeof nextTok === "string" && typeof buf[0] === "string") {
+              nextTok += buf.shift();
+            }
             const msgs = [...p.messages];
             const last = msgs[msgs.length - 1];
-            // A string is answer text (typed out); an event ends the turn.
             msgs[msgs.length - 1] =
               typeof nextTok === "string"
                 ? { ...last, content: last.content + nextTok }
