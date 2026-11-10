@@ -111,7 +111,7 @@ class TestChildDeathRecord:
         _Engine._model = {"proc": _DeadProc(), "port": 19000}
         try:
             with patch.object(_Engine, "_read_child_output", classmethod(lambda cls, p: "tail")):
-                report = _Engine.child_crash_report()
+                report = _Engine.child_death().report
             assert report is not None
             assert "exit code 139" in report
             assert "tail" in report
@@ -125,10 +125,10 @@ class TestChildDeathRecord:
 
         _Live._model = {"proc": _DeadProc()}
         try:
-            assert _Live.child_crash_report() is None
+            assert _Live.child_death() is None
         finally:
             _Live._model = None
-        assert _Engine.child_crash_report() is None  # no model loaded
+        assert _Engine.child_death() is None  # no model loaded
 
 
 # ============ The output drainer does not die quietly ============

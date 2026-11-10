@@ -477,13 +477,16 @@ When the inference process died during the answer (`kill -9` on `mlx_vlm.server`
 ended from Task Manager or a crash), the stream breaks with an HTTP transport error (`peer closed
 connection without sending complete message body`, a bare `ReadError` on Windows), which is only
 the symptom. The cause is then the engine's own account of the death,
-`BaseChatServerEngine.child_death_cause()`: for example `mlx_vlm.server child is dead (pid 61112,
-port 27300, exit code -9)`, cleaned the same way. The liveness check is the engine's (the
-`multiprocessing.Process` of MLX, the `Popen` handle of llama-server); after a transport error the
-runner looks again for up to a second (`CHILD_DEATH_GRACE_S`), because the connection can drop
-before the process handle reports the exit. A child still running after that is not the cause, and
-the exception's leaf is shown. The backend log's record of the failure carries the same line,
-followed by the child's last output.
+`BaseChatServerEngine.child_death()`: its `cause`, for example `mlx_vlm.server child is dead (pid
+61112, port 27300, exit code -9)`, cleaned the same way. The liveness check is the engine's (the
+`multiprocessing.Process` of MLX, the `Popen` handle of llama-server), read once for both the
+record and Details: the `ERROR` record `Agent streaming failed: llm=…` ends with that line and the
+child's last output, and is written before anything waits. When that read found the child still
+running and the failure is a transport error, the runner looks again for up to a second
+(`CHILD_DEATH_GRACE_S`), for Details only, because the connection can drop before the process
+handle reports the exit; a death seen then is the Details leaf, and the record, already written,
+does not name it. A child still running after that is not the cause, and the exception's leaf is
+shown.
 
 It is built where the exception is caught (agent construction, agent streaming, the conversation
 service's last-resort handler), sent on the `error` event with the request id (`X-Request-ID`, the

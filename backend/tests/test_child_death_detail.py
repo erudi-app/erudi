@@ -8,6 +8,7 @@ knows the real cause -- the child is dead, with its pid, port and exit code --
 and that is the leaf the failed turn's Details shows.
 """
 
+import logging
 from typing import ClassVar
 
 import httpx
@@ -17,6 +18,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from src.agents import runner as runner_module
 from src.agents.runner import ERROR_MESSAGE, AgentRunner, GenParams
 from src.core import config
+from src.engines.base_chat_server_engine import ChildDeath
 from src.engines.base_engine import BaseEngine
 from src.engines.cpu_engine import CPU_Engine
 from src.engines.cuda_engine import CUDA_Engine
@@ -114,12 +116,8 @@ def engine_with(monkeypatch):
 
         class _Turn(BaseEngine):
             @classmethod
-            def child_death_cause(cls):
-                return loaded.child_death_cause()
-
-            @classmethod
-            def child_crash_report(cls):
-                return loaded.child_crash_report()
+            def child_death(cls):
+                return loaded.child_death()
 
         monkeypatch.setattr(config, "LLM_Engine", _Turn)
         return loaded
@@ -151,7 +149,7 @@ def test_mlx_names_a_killed_child():
     class _Loaded(MLX_Engine):
         _model = {"proc": _DeadMpProcess(), "port": 27300}
 
-    assert _Loaded.child_death_cause() == (
+    assert _Loaded.child_death().cause == (
         "mlx_vlm.server child is dead (pid 61112, port 27300, exit code -9)"
     )
 
@@ -163,7 +161,7 @@ def test_llama_cpp_names_an_ended_child(engine_cls):
     class _Loaded(engine_cls):
         _model = {"proc": proc, "port": 27200}
 
-    assert _Loaded.child_death_cause() == (
+    assert _Loaded.child_death().cause == (
         "llama-server child is dead (pid 4120, port 27200, exit code 1)"
     )
 
@@ -175,8 +173,8 @@ def test_a_running_child_or_no_model_names_nothing():
     class _Unloaded(CPU_Engine):
         _model = None
 
-    assert _Running.child_death_cause() is None
-    assert _Unloaded.child_death_cause() is None
+    assert _Running.child_death() is None
+    assert _Unloaded.child_death() is None
 
 
 def test_the_crash_report_still_carries_the_cause_and_the_tail(monkeypatch):
@@ -184,7 +182,7 @@ def test_the_crash_report_still_carries_the_cause_and_the_tail(monkeypatch):
         _model = {"proc": _DeadMpProcess(), "port": 27300}
 
     monkeypatch.setattr(_Loaded, "_read_child_output", classmethod(lambda cls, p: "last lines"))
-    report = _Loaded.child_crash_report()
+    report = _Loaded.child_death().report
     assert report.startswith("mlx_vlm.server child is dead (pid 61112, port 27300, exit code -9)")
     assert report.endswith("last lines")
 
@@ -249,3 +247,75 @@ async def test_an_engine_without_a_child_keeps_the_exception_leaf(monkeypatch):
     failure = await _failure(monkeypatch, _transport_error("connection reset"), "d-bare")
 
     assert failure["detail"] == "connection reset"
+
+
+# ===== One record, written first; one observation for the log and Details =====
+
+
+def _scripted_engine(monkeypatch, deaths, order):
+    """The turn's engine answers ``child_death()`` from ``deaths`` in turn
+    (None once they run out) and notes each read in ``order``."""
+    script = iter(deaths)
+
+    class _Turn(BaseEngine):
+        @classmethod
+        def child_death(cls):
+            order.append("probe")
+            return next(script, None)
+
+    monkeypatch.setattr(config, "LLM_Engine", _Turn)
+
+
+class _Order(logging.Handler):
+    def __init__(self, order):
+        super().__init__(level=logging.ERROR)
+        self.order = order
+        self.messages = []
+
+    def emit(self, record):
+        if "Agent streaming failed" in record.getMessage():
+            self.order.append("log")
+            self.messages.append(record.getMessage())
+
+
+async def test_the_failure_is_recorded_before_waiting_for_the_child(monkeypatch):
+    """A client gone during the wait must not lose the record: the ERROR is
+    written at once; only the Details leaf waits for the death to show."""
+    monkeypatch.setattr(runner_module, "CHILD_DEATH_POLL_S", 0.001)
+    order: list = []
+    late = ChildDeath(
+        cause="llama-server child is dead (pid 9, port 27200, exit code 1)", report="r"
+    )
+    _scripted_engine(monkeypatch, [None, None, late], order)
+    handler = _Order(order)
+    logging.getLogger("erudi").addHandler(handler)
+    try:
+        failure = await _failure(monkeypatch, _transport_error(""), "d-order")
+    finally:
+        logging.getLogger("erudi").removeHandler(handler)
+
+    assert order[:2] == ["probe", "log"]
+    assert order.count("log") == 1
+    assert failure["detail"] == late.cause
+
+
+async def test_the_log_and_details_read_the_same_observation(monkeypatch):
+    order: list = []
+    first = ChildDeath(
+        cause="mlx_vlm.server child is dead (pid 1, port 27300, exit code -9)", report="FIRST tail"
+    )
+    second = ChildDeath(
+        cause="mlx_vlm.server child is dead (pid 2, port 27301, exit code -6)", report="SECOND tail"
+    )
+    _scripted_engine(monkeypatch, [first, second], order)
+    handler = _Order(order)
+    logging.getLogger("erudi").addHandler(handler)
+    try:
+        failure = await _failure(monkeypatch, _transport_error("peer closed"), "d-once")
+    finally:
+        logging.getLogger("erudi").removeHandler(handler)
+
+    assert order == ["probe", "log"]
+    (message,) = handler.messages
+    assert message.endswith("; FIRST tail")
+    assert failure["detail"] == first.cause

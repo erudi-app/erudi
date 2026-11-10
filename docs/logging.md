@@ -172,8 +172,9 @@ report, without anyone having to find the file.
 
 A child of either kind that dies during an answer is also what the failed turn's
 **Details** names: `<server> child is dead (pid …, port …, exit code …)`, the
-first line of that record, instead of the HTTP error the broken connection
-raised (see [When a turn fails](guides/conversations.md#when-a-turn-fails)).
+line that follows `Agent streaming failed: llm=…` in that record (ahead of the
+child's last output), instead of the HTTP error the broken connection raised
+(see [When a turn fails](guides/conversations.md#when-a-turn-fails)).
 
 ## What the libraries say
 

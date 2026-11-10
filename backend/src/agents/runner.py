@@ -1573,7 +1573,7 @@ def _generic_failure_detail(exc: BaseException, child_death: Optional[str] = Non
     leaf cause and the id of the failing request, so the interface can show
     both under the red message and the matching Diagnostics entry is findable.
     Built where the exception is caught. When the inference child died
-    (``child_death``, from ``_child_death_cause``), that is the cause: the
+    (``child_death``, a ``ChildDeath`` cause), that is the cause: the
     exception is only the transport symptom of the death (#690)."""
     detail = clean_detail(child_death) if child_death else error_detail(exc)
     return {"detail": detail, "request_id": get_request_id()}
@@ -1699,43 +1699,40 @@ def _is_transport_failure(exc: BaseException) -> bool:
     return any(isinstance(e, httpx.TransportError) for e in exception_chain(exc))
 
 
-async def _child_death_cause(engine, exc: BaseException) -> Optional[str]:
-    """``mlx_vlm.server child is dead (pid ..., port ..., exit code ...)`` when
-    the engine's inference child died, else None.
-
-    A transport failure waits up to ``CHILD_DEATH_GRACE_S`` for the death to
-    become visible; any other failure is answered at once.
-    """
-    probe = getattr(engine, "child_death_cause", None)
+def _observe_child_death(engine) -> Any:
+    """The engine's inference child's death (``ChildDeath``: ``cause`` and
+    ``report``), read once, or None when it runs, when nothing is loaded or
+    when the engine has no child."""
+    probe = getattr(engine, "child_death", None)
     if probe is None:
         return None
-
-    def _read() -> Optional[str]:
-        try:
-            return probe()
-        except Exception:  # a diagnostic must never mask the failure it describes
-            return None
-
-    cause = _read()
-    if cause is not None or not _is_transport_failure(exc):
-        return cause
-    deadline = time.monotonic() + CHILD_DEATH_GRACE_S
-    while cause is None and time.monotonic() < deadline:
-        await asyncio.sleep(CHILD_DEATH_POLL_S)
-        cause = _read()
-    return cause
-
-
-def _child_crash_suffix(engine) -> str:
-    """`; llama-server child is dead (...)` when the engine's child died, else ""."""
-    report = getattr(engine, "child_crash_report", None)
-    if report is None:
-        return ""
     try:
-        text = report()
+        return probe()
     except Exception:  # a diagnostic must never mask the failure it describes
-        return ""
-    return f"; {text}" if text else ""
+        return None
+
+
+async def _await_child_death(engine, exc: BaseException) -> Any:
+    """The death the failure's record did not see yet, for the Details leaf.
+
+    After a transport failure the connection can drop before the process
+    handle reports the exit: look again for up to ``CHILD_DEATH_GRACE_S``. Any
+    other failure is answered at once (None).
+    """
+    if not _is_transport_failure(exc):
+        return None
+    death = None
+    deadline = time.monotonic() + CHILD_DEATH_GRACE_S
+    while death is None and time.monotonic() < deadline:
+        await asyncio.sleep(CHILD_DEATH_POLL_S)
+        death = _observe_child_death(engine)
+    return death
+
+
+def _child_crash_suffix(death: Any) -> str:
+    """`; llama-server child is dead (...). <last output>` for an observed
+    death (``_observe_child_death``), else ""."""
+    return f"; {death.report}" if death is not None else ""
 
 
 @dataclass(frozen=True)
@@ -2516,15 +2513,20 @@ class AgentRunner:
                         else:
                             # A stream that breaks because the inference child died shows
                             # up here as a connection error; the engine knows the exit
-                            # code and the child's last lines, so ask it. The death is
-                            # also the cause the turn's Details shows (#690), read
-                            # first so the record and the turn agree.
-                            child_death = await _child_death_cause(engine, exc)
+                            # code and the child's last lines, so ask it, once: the
+                            # record and the turn's Details (#690) read the same
+                            # observation. The record is written before anything
+                            # waits, so a client gone meanwhile cannot lose it; only
+                            # the Details leaf waits for a death not visible yet.
+                            death = _observe_child_death(engine)
                             logger.exception(
                                 f"Agent streaming failed: llm={getattr(llm, 'id', '?')} "
                                 f"({getattr(llm, 'name', '?')}), thread_id={thread_id}"
-                                f"{_child_crash_suffix(engine)}"
+                                f"{_child_crash_suffix(death)}"
                             )
+                            if death is None:
+                                death = await _await_child_death(engine, exc)
+                            child_death = death.cause if death is not None else None
                             if stateful:
                                 await self._repair_alternation(agent, run_config)
                             # Parity with the pre-#297 live stream: text buffered before the
@@ -2647,7 +2649,7 @@ class AgentRunner:
                     logger.warning(
                         f"One-shot streaming failed: llm={getattr(llm, 'id', '?')} "
                         f"({getattr(llm, 'name', '?')}); using the default"
-                        f"{_child_crash_suffix(engine)}",
+                        f"{_child_crash_suffix(_observe_child_death(engine))}",
                         exc_info=True,
                     )
                     return
