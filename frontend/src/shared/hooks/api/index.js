@@ -113,9 +113,10 @@ export function useConversations() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
 
-  const refetch = useCallback(async () => {
+  // The first read starts with `loading` already true; only a later refetch
+  // has to raise it.
+  const load = useCallback(async () => {
     try {
-      setLoading(true);
       const data = await apiClient.get("/conversations/");
       setConversations(Array.isArray(data) ? data : []);
       setError(null);
@@ -127,9 +128,17 @@ export function useConversations() {
     }
   }, []);
 
+  const refetch = useCallback(() => {
+    setLoading(true);
+    return load();
+  }, [load]);
+
   useEffect(() => {
-    refetch();
-  }, [refetch]);
+    // load sets state only once the request has answered (the rule does not
+    // see the await): nothing is set while the effect runs.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    load();
+  }, [load]);
 
   return { conversations, loading, error, refetch };
 }
@@ -157,9 +166,10 @@ export function useAppStartupInfo() {
   const [error, setError] = useState(null);
   const [refetchesAfterReady, setRefetchesAfterReady] = useState(0);
 
-  const refetch = useCallback(async () => {
+  // The first read starts with `loading` already true; only a later refetch
+  // has to raise it.
+  const load = useCallback(async () => {
     try {
-      setLoading(true);
       const data = await apiClient.get("/hardware/app_startup");
       setStartupInfo(data);
       setError(null);
@@ -171,9 +181,17 @@ export function useAppStartupInfo() {
     }
   }, []);
 
+  const refetch = useCallback(() => {
+    setLoading(true);
+    return load();
+  }, [load]);
+
   useEffect(() => {
-    refetch();
-  }, [refetch]);
+    // load sets state only once the request has answered (the rule does not
+    // see the await): nothing is set while the effect runs.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    load();
+  }, [load]);
 
   useEffect(() => {
     const subscribe = window.backendAPI?.onBackendEvent;

@@ -145,24 +145,37 @@ export default function ChatPage() {
   // backend is a number while the URL value is a string, so compare through
   // String(). Match the id first, then the decoded name. An unknown reference
   // keeps the default selection (first local model).
+  const modelParam = searchParams.get("model");
+  const modelFromParam =
+    modelParam && models.length > 0
+      ? (models.find((model) => String(model.id) === modelParam) ??
+        models.find((model) => model.name === modelParam))
+      : undefined;
+  const modelFromParamUsable = modelFromParam && !hasMissingWeights(modelFromParam);
+
+  // Applied while rendering each time the parameter or the models list
+  // changes (the models list arriving included, #211 lesson), so the pick
+  // shows without an extra committed render.
+  const [seenParamInputs, setSeenParamInputs] = useState({ searchParams: null, models: null });
+  if (seenParamInputs.searchParams !== searchParams || seenParamInputs.models !== models) {
+    setSeenParamInputs({ searchParams, models });
+    if (modelFromParamUsable) setSelectedModel(modelFromParam.name);
+  }
+
   useEffect(() => {
-    const modelParam = searchParams.get("model");
     if (!modelParam || models.length === 0) return;
 
-    const foundModel =
-      models.find((model) => String(model.id) === modelParam) ??
-      models.find((model) => model.name === modelParam);
-
-    if (foundModel && hasMissingWeights(foundModel)) {
+    if (modelFromParam && !modelFromParamUsable) {
       // A deep link to an orphaned assistant (#376) keeps the default pick.
       log.warn("Model from URL parameter has no weights on disk:", modelParam);
-    } else if (foundModel) {
-      log.log("Setting model from URL parameter:", foundModel);
-      setSelectedModel(foundModel.name);
+    } else if (modelFromParam) {
+      log.log("Setting model from URL parameter:", modelFromParam);
     } else {
       log.warn("Model not found for URL parameter:", modelParam);
     }
-  }, [searchParams, models]); // Re-run when the models list arrives (#211 lesson)
+    // The inputs of the lookup are the trigger: the URL parameter and the models list.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams, models]);
 
   const llm = models.find((m) => m.name === selectedModel);
 

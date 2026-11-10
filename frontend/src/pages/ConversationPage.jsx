@@ -1,4 +1,11 @@
-import React, { useEffect, useState, useCallback, useRef, useSyncExternalStore } from "react";
+import React, {
+  useEffect,
+  useLayoutEffect,
+  useState,
+  useCallback,
+  useRef,
+  useSyncExternalStore,
+} from "react";
 import { useParams, useNavigate, useLocation } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import Sidebar from "../components/Sidebar";
@@ -268,7 +275,10 @@ export default function ConversationPage() {
   // The conversation on screen now, for an answer that lands later; null once
   // the page is gone.
   const idRef = useRef(id);
-  idRef.current = id;
+  // In the layout phase: after the commit, before any effect of it reads it.
+  useLayoutEffect(() => {
+    idRef.current = id;
+  }, [id]);
   useEffect(() => {
     idRef.current = id;
     return () => {
@@ -278,13 +288,21 @@ export default function ConversationPage() {
 
   // A memory warning is about ONE conversation on THIS machine right now:
   // switching conversations must never show conversation A's warning over B.
-  useEffect(() => {
+  // The state starts over while rendering, so no render shows the previous
+  // conversation's warning or notice under the new id; the usage epoch moves
+  // in the effect.
+  const [seenConversationId, setSeenConversationId] = useState(id);
+  if (seenConversationId !== id) {
+    setSeenConversationId(id);
     setMemoryWarning(null);
     setOpenCommand(null);
     setLoadFailed(false);
     setCommandNotice(null);
-    clearContextPanels();
-  }, [id, clearContextPanels]);
+    setContextPanels([]);
+  }
+  useEffect(() => {
+    contextEpochRef.current += 1;
+  }, [id]);
   // A ref, not state: the scroll handler updates it on every scroll event, and
   // reading it from the auto-scroll effect must NOT re-run that effect. As state
   // it did (the effect depended on it), so toggling it near the bottom snapped
@@ -303,7 +321,9 @@ export default function ConversationPage() {
   // would cascade into the loadConversationData useEffect and overwrite
   // in-flight streaming state with stale DB data.
   const messagesLengthRef = useRef(0);
-  messagesLengthRef.current = messages.length;
+  useLayoutEffect(() => {
+    messagesLengthRef.current = messages.length;
+  }, [messages.length]);
   const isStreamingRef = useRef(false);
 
   // The `gpu_contention` notice says another app is taking the graphics card
@@ -1045,7 +1065,9 @@ export default function ConversationPage() {
   // the page and came back) re-reads the conversation when it ends, so its
   // separator shows.
   const rereadRef = useRef(fetchMessagesAndConversations);
-  rereadRef.current = fetchMessagesAndConversations;
+  useLayoutEffect(() => {
+    rereadRef.current = fetchMessagesAndConversations;
+  });
   useEffect(() => {
     return subscribeCompacting((conversationId) => {
       if (

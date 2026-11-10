@@ -23,7 +23,6 @@ export default function ConfigGlobalPopup({ isOpen, onClose, settings, model }) 
   const modelName = model?.name ?? "";
 
   const save = useCallback(async () => {
-    setStatus("saving");
     try {
       await saveAsDefaults();
       setStatus("saved");
@@ -33,7 +32,17 @@ export default function ConfigGlobalPopup({ isOpen, onClose, settings, model }) 
     }
   }, [saveAsDefaults, model?.id]);
 
+  // Each opening starts on "saving": set while rendering, before the save runs.
+  const [wasOpen, setWasOpen] = useState(false);
+  if (wasOpen !== isOpen) {
+    setWasOpen(isOpen);
+    if (isOpen) setStatus("saving");
+  }
+
   useEffect(() => {
+    // save sets state only once the request has answered (the rule does not
+    // see the await); "saving" was set while rendering, above.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     if (isOpen) save();
     // Saved once per opening: a re-render of the page must not save again.
     // eslint-disable-next-line react-hooks/exhaustive-deps

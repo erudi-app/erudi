@@ -53,7 +53,9 @@ export default function ModalShell({
   // heading, a label or the padding leaves the focus on the panel or on the
   // page body, and Escape and the Tab trap must still work from there.
   const onCloseRef = useRef(onClose);
-  onCloseRef.current = onClose;
+  useEffect(() => {
+    onCloseRef.current = onClose;
+  });
   useEffect(() => {
     if (!isOpen) return undefined;
     const handleKeyDown = (e) => {

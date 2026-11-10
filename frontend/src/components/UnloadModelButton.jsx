@@ -59,10 +59,15 @@ export default function UnloadModelButton({ refreshKey }) {
     };
   }, []);
 
-  useEffect(() => {
-    // Something changed (a turn started or ended, the model changed): a
-    // refusal shown earlier no longer describes the engine.
+  // Something changed (a turn started or ended, the model changed): a refusal
+  // shown earlier no longer describes the engine.
+  const [seenRefreshKey, setSeenRefreshKey] = useState(refreshKey);
+  if (seenRefreshKey !== refreshKey) {
+    setSeenRefreshKey(refreshKey);
     setRefusal(null);
+  }
+
+  useEffect(() => {
     refresh();
   }, [refresh, refreshKey]);
 
