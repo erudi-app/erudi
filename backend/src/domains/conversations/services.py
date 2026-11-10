@@ -23,6 +23,7 @@ from fastapi.concurrency import run_in_threadpool
 from src.core.error_detail import error_detail
 from src.core.logging import logger
 from src.core.logutils import truncate_for_log
+from src.agents.curated_turns import CURATED_ERROR_EVENT, curated_trace_event
 from src.agents.kb_mode import plan_turn
 from src.agents.reasoning_effort import plan_reasoning_effort
 from src.agents.runner import (
@@ -87,10 +88,12 @@ def build_stream_error_event(answer_event: dict) -> dict:
     ``src.engines.cuda_compatibility.CUDA_FAILURE_CODES``) and ``raw`` (the
     child's captured output, shown in the copyable block of the decision
     dialog). Both are omitted for every other failure, so the untyped path
-    keeps exactly the shape it had.
+    keeps exactly the shape it had. A curated turn carries ``curated_error``
+    (its kind and numbers, ``src.agents.curated_turns``), from which the
+    renderer translates it. Shared by the conversation and the Arena streams.
     """
     error_event: dict = {"t": "error", "text": answer_event["text"]}
-    for key in ("code", "raw", "detail", "request_id"):
+    for key in ("code", "raw", "detail", "request_id", CURATED_ERROR_EVENT):
         value = answer_event.get(key)
         if value:
             error_event[key] = value
@@ -107,8 +110,9 @@ def _is_compaction(event: dict) -> bool:
 
 def _is_pinned(event: dict) -> bool:
     """What an error turn keeps of its trace and what a cap never drops: its
-    compactions and the cleaned cause of its failure."""
-    return _is_compaction(event) or event.get("t") == ERROR_DETAIL_EVENT
+    compactions, the cleaned cause of its failure and the kind of its curated
+    line (what the interface translates it from)."""
+    return _is_compaction(event) or event.get("t") in (ERROR_DETAIL_EVENT, CURATED_ERROR_EVENT)
 
 
 def _append_failure(partial: str, failure: str) -> str:
@@ -130,8 +134,8 @@ def _cap_trace(events: list) -> Optional[list]:
     ``{"t":"truncated"}`` marker counted in the budget -- until the marker plus the
     remaining events fit, always keeping at least the newest event.
 
-    Compaction events (#614) and the failure's ``error_detail`` (#615) are
-    pinned: a reasoning turn emits one event per token, so a compaction
+    Compaction events (#614), the failure's ``error_detail`` (#615) and a
+    curated turn's ``curated_error`` (#690) are pinned: a reasoning turn emits one event per token, so a compaction
     announced at the first model call would be the first dropped. They lead the
     capped trace, in their order, and are never dropped;
     the other events are capped against what they leave -- all of them may go,
@@ -443,8 +447,9 @@ class ConversationService:
         appended to ``assistant_response`` so the persisted content is byte-for-byte
         the pre-#90 error turn, and (b) re-framed on the wire as an ``error`` event
         (the frontend renders the red bubble from ``error`` as it did from the
-        sentinel substring). Error turns persist only their compaction and error_detail events
-        (the compaction is checkpointed even when the model call then fails).
+        sentinel substring). Error turns persist only their compaction, error_detail and
+        curated_error events (the compaction is checkpointed even when the model call then
+        fails).
         """
         start_s = time.perf_counter()
         # Local-first policy: log the question content (bounded), never image
@@ -496,7 +501,7 @@ class ConversationService:
             persisted = True
             # An error turn persists only its compactions (checkpointed before
             # the model call failed, so their marker must survive a reload) and
-            # the cleaned cause of an unexpected failure.
+            # the cleaned cause of an unexpected failure or the kind of a curated one.
             if ERROR_SENTINEL in assistant_response:
                 persist_trace = _cap_trace([e for e in trace if _is_pinned(e)])
             else:
@@ -650,9 +655,15 @@ class ConversationService:
                                 trace.append(
                                     _error_detail_event(event["detail"], event.get("request_id"))
                                 )
+                            if event.get(CURATED_ERROR_EVENT):
+                                trace.append(curated_trace_event(event[CURATED_ERROR_EVENT]))
                             yield _ndjson(build_stream_error_event(event))
                         else:
                             assistant_response += text
+                            # An empty-answer line (#554) is a normal answer:
+                            # its kind rides the event and the trace (#690).
+                            if event.get(CURATED_ERROR_EVENT):
+                                trace.append(curated_trace_event(event[CURATED_ERROR_EVENT]))
                             yield _ndjson(event)
                     elif event["t"] == "memory_warning":
                         # Wire only, NEVER the persisted trace (1.1.2): the

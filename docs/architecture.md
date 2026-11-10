@@ -95,7 +95,7 @@ Routers are mounted under the `/erudi` prefix in `register_routers`
 ### 4. Arena
 
 - **Responsibility**: comparing models on the same prompt
-- **Endpoint**: `POST /erudi/arena/{llm_id}/query` (one call per model, plain-text stream)
+- **Endpoint**: `POST /erudi/arena/{llm_id}/query` (one call per model, NDJSON stream of `answer` and `error` events)
 - [Reference](reference/arena.md)
 
 ### 5. Hardware
@@ -243,8 +243,8 @@ LangGraph: a title cut short flags the inference child, so the next prefix-cache
 sends a barrier first.
 
 A turn is captured as structured events — `answer`, `thinking`, `tool_call`,
-`tool_result` — which the conversation service frames as NDJSON. Arena projects the same
-stream down to answer text only, preserving its plain-text contract.
+`tool_result` — which the conversation service frames as NDJSON. Arena frames the same
+stream as NDJSON too, down to its `answer` events and the `error` event of a failed turn.
 
 Other modules in the layer:
 
@@ -592,7 +592,8 @@ Linux it never acts (see [the CUDA brake](dev/architecture/engines.md#the-memory
 
 Conversation turns stream as **NDJSON** (`application/x-ndjson`): one JSON event per
 line, typed `answer`, `thinking`, `tool_call`, `tool_result`, `compaction`, `memory_reload`, `memory_warning`, `error`,
-or `done`. Title generation and Arena keep a plain-text stream.
+or `done`. Arena queries stream NDJSON as well, limited to `answer` and `error` events.
+Title generation keeps a plain-text stream.
 
 ## Main flows
 

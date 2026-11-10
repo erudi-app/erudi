@@ -8,7 +8,9 @@
 // A /compact run (#585) saves its own `done` event, `manual: true`, on the
 // last answer it found: that separator renders below the bubble.
 // A failed turn also holds {"t":"error_detail","text","request_id"} (#615): the
-// cleaned cause, shown under the red headline.
+// cleaned cause, shown under the red headline. A curated turn holds
+// {"t":"curated_error","kind","params"} (#690): what its sentence is
+// translated from (utils/curatedTurns.js).
 
 const STRIP_KINDS = new Set(["thinking", "tool_call", "tool_result"]);
 
@@ -42,12 +44,15 @@ export function errorDetailOf(trace) {
   return (Array.isArray(trace) && trace.find(isErrorDetail)) || null;
 }
 
+const isCuratedError = (e) => isEvent(e) && e.t === "curated_error";
+
 /** What an error turn keeps of its trace: its compactions (checkpointed before
- * the model call failed) and the cause of its failure, or nothing. */
+ * the model call failed), the cause of its failure and the kind of a curated
+ * one, or nothing. */
 export function errorTurnTrace(trace) {
   if (!Array.isArray(trace)) {
     return null;
   }
-  const kept = trace.filter((e) => isCompactionDone(e) || isErrorDetail(e));
+  const kept = trace.filter((e) => isCompactionDone(e) || isErrorDetail(e) || isCuratedError(e));
   return kept.length > 0 ? kept : null;
 }

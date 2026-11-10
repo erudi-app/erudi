@@ -45,6 +45,7 @@ import {
   isGenericFailure,
 } from "../utils/messageContent";
 import { formatBytes } from "../utils/formatBytes";
+import { curatedErrorOf, curatedTurnText, withCuratedLine } from "../utils/curatedTurns";
 import {
   automaticCompactions,
   errorDetailOf,
@@ -657,6 +658,11 @@ export default function ConversationPage() {
                 reloading = false;
                 compacting = false;
                 answerText += evt.text || "";
+                // An empty-answer line (#554): its kind, what it is
+                // translated from at display, joins the trace as persisted.
+                if (evt.curated_error) {
+                  traceEvents.push({ t: "curated_error", ...evt.curated_error });
+                }
                 break;
               case "thinking":
               case "tool_call":
@@ -693,6 +699,11 @@ export default function ConversationPage() {
                     text: evt.detail,
                     request_id: evt.request_id || null,
                   });
+                }
+                // A curated turn's kind and numbers (#690): its sentence is
+                // shown in the interface language, as after a reload.
+                if (evt.curated_error) {
+                  traceEvents.push({ t: "curated_error", ...evt.curated_error });
                 }
                 // The engine identified WHY it failed (a card the bundled CUDA
                 // build cannot drive, a driver too old, VRAM exhaustion): raise
@@ -1407,7 +1418,13 @@ export default function ConversationPage() {
                 isError && isGenericFailure(msg.content, msg.trace)
                   ? t("chat:errors.generationFailed")
                   : undefined;
-              const displayText = getDisplayContent(msg.content, failureHeadline);
+              // A curated turn (#690): its sentence in the interface language,
+              // from the kind its trace carries, in place of the stored
+              // English line; a turn without one shows as stored.
+              const content = isUser
+                ? msg.content
+                : withCuratedLine(msg.content, curatedTurnText(curatedErrorOf(msg.trace)));
+              const displayText = getDisplayContent(content, failureHeadline);
 
               return (
                 <div key={msg.id} className={`group flex flex-col mb-2 ${alignmentClass}`}>
@@ -1495,7 +1512,7 @@ export default function ConversationPage() {
                       ) : (
                         // Assistant normal messages: render markdown
                         (msg.content || (!showReload && !showCompacting)) && (
-                          <MarkdownRenderer content={msg.content} />
+                          <MarkdownRenderer content={content} />
                         )
                       )}
                       {showReload && (
@@ -1529,7 +1546,7 @@ export default function ConversationPage() {
                         // Copy the readable text the user sees, not the raw
                         // stored content with internal attachment markers.
                         navigator.clipboard
-                          .writeText(getDisplayContent(msg.content, failureHeadline))
+                          .writeText(getDisplayContent(content, failureHeadline))
                           .then(() => {
                             setCopiedMessageId(msg.id);
                             clearTimeout(copiedTimerRef.current);

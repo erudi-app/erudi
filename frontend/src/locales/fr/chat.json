@@ -270,6 +270,16 @@
     "generationFailed": "Je suis désolé, une erreur est survenue lors de la génération de la réponse. Veuillez reposer votre question.",
     "connectionInterrupted": "Connexion interrompue pendant la génération de la réponse."
   },
+  "curated": {
+    "context_overflow": "Cette conversation ne tient plus dans la fenêtre de contexte du modèle (la requête demande environ {{prompt_tokens}} tokens ; la fenêtre en contient {{context_tokens}}). Démarrez une nouvelle conversation ou envoyez moins de texte à la fois.",
+    "context_overflow_unsized": "Cette conversation ne tient plus dans la fenêtre de contexte du modèle. Démarrez une nouvelle conversation ou envoyez moins de texte à la fois.",
+    "memory_overflow": "Cette conversation dépasse ce que la mémoire de votre machine peut contenir pour ce modèle (la requête demande environ {{prompt_tokens}} tokens ; la mémoire en permet {{context_tokens}}). Démarrez une nouvelle conversation, envoyez moins de texte à la fois ou passez à un modèle plus petit.",
+    "prefill_timeout": "Ce modèle n'a pas commencé à répondre en {{minutes}} min sur cette machine. Avant d'écrire un mot, il doit lire tout ce que ce tour lui envoie (toute la conversation jusqu'ici), et il n'y est pas parvenu à temps. Renvoyer la même chose prendra plus de temps, pas moins : démarrez une nouvelle conversation, envoyez moins de texte à la fois ou choisissez un modèle plus petit.",
+    "decode_timeout": "Ce modèle a commencé à répondre, puis est resté silencieux pendant {{seconds}} secondes : le tour a donc été arrêté. Ce qu'il avait déjà écrit est conservé ci-dessus. Veuillez reposer votre question.",
+    "loop_limit": "Je n'ai pas pu aboutir à une réponse finale pour cette demande (le modèle a réessayé sans progresser). Essayez de reformuler votre question.",
+    "empty_answer_length": "La génération s'est arrêtée pendant le raisonnement, avant qu'une réponse ne soit écrite. Envoyez un message demandant directement la réponse finale, ou baissez l'effort de raisonnement.",
+    "empty_answer_stop": "Le modèle a terminé son tour sans écrire de réponse. Envoyez un message lui demandant de continuer."
+  },
   "memoryWarning": {
     "bound": "La mémoire de votre ordinateur limite cette conversation : le modèle et cette conversation occupent ensemble environ {{size}}, presque toute la place que la mémoire permet. Démarrez une nouvelle conversation, envoyez moins à la fois ou passez à un modèle plus petit.",
     "pressure": "La mémoire de votre ordinateur est sous pression : cette conversation sera résumée plus tôt pour rester fluide.",

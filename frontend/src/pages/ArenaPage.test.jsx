@@ -53,7 +53,7 @@ vi.mock("../components/QuestionInput", () => ({
 import apiClient from "../services/api/client";
 import ArenaPage from "./ArenaPage.jsx";
 
-/** Minimal streaming Response stub: an already-finished text/plain body. */
+/** Minimal streaming Response stub: an already-finished, empty body. */
 const doneStream = () => ({
   ok: true,
   body: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },

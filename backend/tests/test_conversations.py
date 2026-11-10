@@ -1333,6 +1333,89 @@ class TestConversationService:
         messages = service.message_repo.get_messages_by_conversation(conversation.id)
         assert messages[1].trace is None
 
+    async def test_a_curated_failure_carries_and_persists_its_kind_and_numbers(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        """#690.2: the English line is stored as the content (what an older
+        client shows, what the model saw), the trace keeps ``curated_error``
+        so the interface translates it at display."""
+        from src.agents.curated_turns import curated_answer
+
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+        event = curated_answer("memory_overflow", prompt_tokens=13531, context_tokens=8584)
+
+        async def fake_stream(**kwargs):
+            yield {"t": "thinking", "text": "hm"}
+            yield dict(event)
+
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        result = [
+            t
+            async for t in service.query_and_respond_stream(
+                conversation.id, ConversationQuery(question="Go on")
+            )
+        ]
+
+        error = next(e for e in _parse_ndjson(result) if e["t"] == "error")
+        assert error["text"] == event["text"]
+        assert error["curated"] is True
+        assert error["curated_error"] == {
+            "kind": "memory_overflow",
+            "params": {"prompt_tokens": 13531, "context_tokens": 8584},
+        }
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[1].content == event["text"]
+        assert messages[1].trace == [
+            {
+                "t": "curated_error",
+                "kind": "memory_overflow",
+                "params": {"prompt_tokens": 13531, "context_tokens": 8584},
+            }
+        ]
+
+    async def test_an_empty_answer_line_keeps_its_trace_and_its_kind(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        """#690.2: the empty-answer line is a normal answer (its reasoning
+        is kept); its kind rides the answer event and the trace."""
+        from src.agents.curated_turns import curated_answer
+
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+        event = curated_answer("empty_answer_length")
+
+        async def fake_stream(**kwargs):
+            yield {"t": "thinking", "text": "hm"}
+            yield dict(event)
+
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        result = [
+            t
+            async for t in service.query_and_respond_stream(
+                conversation.id, ConversationQuery(question="Go on")
+            )
+        ]
+
+        events = _parse_ndjson(result)
+        assert not any(e["t"] == "error" for e in events)
+        answer = next(e for e in events if e["t"] == "answer")
+        assert answer["curated_error"] == {"kind": "empty_answer_length", "params": {}}
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[1].content == event["text"]
+        assert messages[1].trace == [
+            {"t": "thinking", "text": "hm"},
+            {"t": "curated_error", "kind": "empty_answer_length", "params": {}},
+        ]
+
     async def test_a_failure_after_partial_text_ends_red_and_keeps_the_text(
         self, test_db_session, mock_llm, monkeypatch
     ):
@@ -1584,6 +1667,18 @@ class TestTraceHelpers:
 
         assert len(json.dumps(capped)) <= TRACE_MAX_BYTES
         assert capped[0] == detail
+        assert capped[1] == {"t": "truncated"}
+
+    def test_cap_trace_pins_the_curated_error(self):
+        """#690.2: a long reasoning turn ending on a curated line keeps the
+        kind the interface translates it from."""
+        curated = {"t": "curated_error", "kind": "empty_answer_length", "params": {}}
+        events = [{"t": "thinking", "text": "x" * 1000} for _ in range(50)] + [curated]
+
+        capped = _cap_trace(events)
+
+        assert len(json.dumps(capped)) <= TRACE_MAX_BYTES
+        assert capped[0] == curated
         assert capped[1] == {"t": "truncated"}
 
     def test_cap_trace_marks_nothing_when_only_compactions_overflow(self):

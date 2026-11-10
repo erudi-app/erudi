@@ -6,7 +6,7 @@ and benchmarking.
 
 Key Features:
 - **Stateless**: No conversation history or message storage.
-- **Streaming**: Real-time token generation via Server-Sent Events.
+- **Streaming**: Real-time answer events, one NDJSON line each (``answer``, ``error``).
 - **KB-aware**: Automatically injects relevant context from attached Knowledge Bases.
 - **Customizable**: Supports temperature, top_p, and custom instructions. The output
   budget is not a request parameter: the backend derives it from the context window
@@ -24,10 +24,10 @@ Architecture:
     │.query_llm_   │ ← build_agent_system_prompt() + KB context
     │ stream()     │ ← AgentRunner (stateless) → ChatOpenAI(base_url)
     └───────┬──────┘
-            │ (2) Yield tokens via StreamingResponse
+            │ (2) Yield NDJSON lines via StreamingResponse
             ↓
     ┌──────────────┐
-    │ Client       │ ← Receives text/plain stream
+    │ Client       │ ← Receives application/x-ndjson stream
     └──────────────┘
 
 Use Cases:
@@ -46,7 +46,8 @@ Example:
         "top_p": 0.9,
         "custom_prompt": "Use analogies suitable for a 10-year-old."
     }
-    Response: StreamingResponse(text/plain) → "Imagine two magic coins..."
+    Response: StreamingResponse(application/x-ndjson) →
+        {"t": "answer", "text": "Imagine two magic coins..."}
 """
 
 from fastapi import Depends, APIRouter
@@ -89,7 +90,9 @@ async def query_arena(
         service: ArenaService instance injected by FastAPI.
 
     Returns:
-        StreamingResponse: Real-time token stream (text/plain).
+        StreamingResponse: Real-time NDJSON stream (application/x-ndjson): ``answer``
+        events, and one ``error`` event for a failed turn (its ``text``, and a
+        curated turn's ``curated_error``).
 
     Raises:
         HTTPException: 404 if llm_id not found, 500 on model loading or generation errors.
@@ -102,7 +105,7 @@ async def query_arena(
             "top_p": 0.9,
             "custom_prompt": "Explain like I'm 5 years old."
         }
-        Response: StreamingResponse → "Imagine you have a tiny ball..."
+        Response: StreamingResponse → {"t": "answer", "text": "Imagine you have a tiny ball..."}
     """
     logger.info(f"Arena query request for LLM {llm_id}")
 
@@ -112,7 +115,7 @@ async def query_arena(
 
     return StreamingResponse(
         service.query_llm_stream(llm_id, payload),
-        media_type="text/plain",
+        media_type="application/x-ndjson",
         headers={
             "Cache-Control": "no-cache",
             "X-Accel-Buffering": "no",

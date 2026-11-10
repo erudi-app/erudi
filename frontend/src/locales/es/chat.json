@@ -270,6 +270,16 @@
     "generationFailed": "Lo siento, se produjo un error al generar la respuesta. Vuelve a hacer tu pregunta.",
     "connectionInterrupted": "La conexión se interrumpió mientras se generaba la respuesta."
   },
+  "curated": {
+    "context_overflow": "Esta conversación ya no cabe en la ventana de contexto del modelo (la solicitud necesita unos {{prompt_tokens}} tokens; la ventana admite {{context_tokens}}). Empieza una conversación nueva o envía menos texto a la vez.",
+    "context_overflow_unsized": "Esta conversación ya no cabe en la ventana de contexto del modelo. Empieza una conversación nueva o envía menos texto a la vez.",
+    "memory_overflow": "Esta conversación ya no cabe en lo que la memoria de tu equipo puede contener para este modelo (la solicitud necesita unos {{prompt_tokens}} tokens; la memoria permite {{context_tokens}}). Empieza una conversación nueva, envía menos texto a la vez o cambia a un modelo más pequeño.",
+    "prefill_timeout": "Este modelo no empezó a responder en {{minutes}} min en este equipo. Antes de escribir una palabra tiene que leer todo lo que este turno le envía (toda la conversación hasta ahora), y no lo terminó a tiempo. Enviar lo mismo otra vez tardará más, no menos: empieza una conversación nueva, envía menos texto a la vez o elige un modelo más pequeño.",
+    "decode_timeout": "Este modelo empezó a responder y luego se quedó en silencio durante {{seconds}} segundos, así que el turno se detuvo. Lo que ya había escrito se conserva arriba. Vuelve a hacer tu pregunta.",
+    "loop_limit": "No pude llegar a una respuesta final para esta solicitud (el modelo siguió reintentando sin avanzar). Intenta reformular tu pregunta.",
+    "empty_answer_length": "La generación se detuvo durante el razonamiento, antes de escribir una respuesta. Envía un mensaje pidiendo directamente la respuesta final, o baja el esfuerzo de razonamiento.",
+    "empty_answer_stop": "El modelo terminó su turno sin escribir una respuesta. Envía un mensaje pidiéndole que continúe."
+  },
   "memoryWarning": {
     "bound": "La memoria de su equipo limita esta conversación: el modelo y esta conversación ocupan juntos alrededor de {{size}}, casi todo el espacio que permite la memoria. Inicie una nueva conversación, envíe menos a la vez o cambie a un modelo más pequeño.",
     "pressure": "La memoria de su equipo está bajo presión: esta conversación se resumirá antes para mantener la fluidez.",

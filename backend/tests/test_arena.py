@@ -9,6 +9,8 @@ Generation goes through the shared AgentRunner (stateless: no checkpointer),
 so the fake chat model is injected by patching ``build_chat_model``.
 """
 
+import json
+
 import pytest
 from unittest.mock import patch
 from fastapi import status
@@ -39,6 +41,18 @@ class _FakeEngine(BaseEngine):
 # model is not positively vision-capable (#212). Hardcoded on purpose: the test
 # pins the wire contract, not the constant's name.
 _VISION_NOTICE = "*This model doesn't support images — your image was ignored.*\n\n"
+
+
+def _arena_events(body):
+    """The Arena's NDJSON stream (a str or the yielded lines) as event dicts."""
+    if isinstance(body, (list, tuple)):
+        body = "".join(body)
+    return [json.loads(line) for line in body.splitlines() if line.strip()]
+
+
+def _arena_text(body):
+    """The answer text an Arena stream carries."""
+    return "".join(e["text"] for e in _arena_events(body) if e["t"] == "answer")
 
 
 def _fake_chat_model(*texts):
@@ -86,7 +100,7 @@ class TestArenaService:
 
         result = [t async for t in service.query_llm_stream(mock_llm.id, payload)]
 
-        assert "".join(result) == "AI is artificial intelligence."
+        assert _arena_text(result) == "AI is artificial intelligence."
 
     async def test_query_llm_stream_empty_question_rejected_by_pydantic(
         self, test_db_session, mock_llm
@@ -125,7 +139,7 @@ class TestArenaService:
         payload = ArenaQueryPayload(question="What does it say?", attachments=[str(doc)])
         result = [t async for t in service.query_llm_stream(mock_llm.id, payload)]
 
-        assert "".join(result) == "It is a report."
+        assert _arena_text(result) == "It is a report."
         user_message = captured["user_message"]
         assert "[Attached file: report.txt]" in user_message
         assert "Revenue grew by twelve percent." in user_message
@@ -147,7 +161,7 @@ class TestArenaService:
         payload = ArenaQueryPayload(question="Read this", attachments=[str(bad)])
         result = [t async for t in service.query_llm_stream(mock_llm.id, payload)]
 
-        joined = "".join(result)
+        joined = _arena_text(result)
         assert "archive.zip" in joined
         assert joined.endswith("Answer.")
 
@@ -182,7 +196,7 @@ class TestArenaService:
         payload = ArenaQueryPayload(question="What is this?", images=[data_url])
 
         result = [t async for t in service.query_llm_stream(mock_llm.id, payload)]
-        assert "".join(result) == "A red square."
+        assert _arena_text(result) == "A red square."
 
         # The model received multimodal content carrying the image.
         um = captured["user_message"]
@@ -201,7 +215,7 @@ class TestArenaService:
         payload = ArenaQueryPayload(question="What is this?", images=["data:image/png;base64,AAA"])
         result = [t async for t in service.query_llm_stream(mock_llm.id, payload)]
 
-        assert "".join(result) == _VISION_NOTICE + "A red square."
+        assert _arena_text(result) == _VISION_NOTICE + "A red square."
 
     async def test_query_llm_stream_vision_true_no_notice(
         self, test_db_session, mock_llm, monkeypatch
@@ -215,7 +229,7 @@ class TestArenaService:
         payload = ArenaQueryPayload(question="What is this?", images=["data:image/png;base64,AAA"])
         result = [t async for t in service.query_llm_stream(mock_llm.id, payload)]
 
-        assert "".join(result) == "A red square."
+        assert _arena_text(result) == "A red square."
 
     async def test_query_llm_stream_plain_is_zero_tool(
         self, test_db_session, mock_llm, monkeypatch
@@ -238,7 +252,7 @@ class TestArenaService:
         payload = ArenaQueryPayload(question="Say hello")
         result = [t async for t in service.query_llm_stream(mock_llm.id, payload)]
 
-        assert "".join(result) == "Hello."
+        assert _arena_text(result) == "Hello."
         assert captured["tools"] == []
 
     async def test_query_llm_stream_no_images_no_notice(
@@ -252,8 +266,8 @@ class TestArenaService:
         payload = ArenaQueryPayload(question="Say hello")
         result = [t async for t in service.query_llm_stream(mock_llm.id, payload)]
 
-        assert "".join(result) == "Hello."
-        assert not "".join(result).startswith(_VISION_NOTICE)
+        assert _arena_text(result) == "Hello."
+        assert not _arena_text(result).startswith(_VISION_NOTICE)
 
     async def test_query_llm_stream_model_not_found(self, test_db_session):
         service = ArenaService(test_db_session)
@@ -274,7 +288,7 @@ class TestArenaService:
             mock_kb.return_value = [KbExcerpt(source_file="notes.md", text="Relevant KB context")]
             result = [t async for t in service.query_llm_stream(llm.id, payload)]
 
-        assert "".join(result) == "Answer from KB."
+        assert _arena_text(result) == "Answer from KB."
         mock_kb.assert_called_once()
         # param_size=7 → medium tier → its KB token budget reaches retrieval.
         assert mock_kb.call_args.kwargs["token_budget"] == 1000
@@ -309,7 +323,7 @@ class TestArenaService:
             mock_kb.return_value = [KbExcerpt(source_file="notes.md", text="Relevant KB context")]
             result = [t async for t in service.query_llm_stream(llm.id, payload)]
 
-        streamed = "".join(result)
+        streamed = _arena_text(result)
         assert "Relevant KB context" in streamed
         assert ERROR_SENTINEL not in streamed
 
@@ -334,7 +348,7 @@ class TestArenaService:
 
         result = [t async for t in service.query_llm_stream(mock_llm.id, payload)]
 
-        assert "".join(result) == "Custom response."
+        assert _arena_text(result) == "Custom response."
         assert captured["temperature"] == 1.5
         assert captured["top_p"] == 0.95
         # ...except the output budget, which is no longer a per-request param:
@@ -357,7 +371,65 @@ class TestArenaService:
         payload = ArenaQueryPayload(question="Trigger error")
 
         result = [t async for t in service.query_llm_stream(mock_llm.id, payload)]
-        assert any(ERROR_SENTINEL in t for t in result)
+        (error,) = [e for e in _arena_events(result) if e["t"] == "error"]
+        assert error["text"].startswith(ERROR_SENTINEL)
+        # The sentinel line never reaches the answer text the panel renders.
+        assert ERROR_SENTINEL not in _arena_text(result)
+
+    async def test_query_llm_stream_frames_a_curated_turn_with_its_kind(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        """#690.2: the Arena translates a curated turn like a conversation
+        does, from its kind and numbers on the error event."""
+        from src.agents.curated_turns import curated_answer
+
+        event = curated_answer("context_overflow", prompt_tokens=9030, context_tokens=8192)
+
+        async def fake_stream(**kwargs):
+            yield {"t": "answer", "text": "Partial "}
+            yield {"t": "thinking", "text": "not for the Arena"}
+            yield dict(event)
+
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ArenaService(test_db_session)
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        result = [
+            t async for t in service.query_llm_stream(mock_llm.id, ArenaQueryPayload(question="Go"))
+        ]
+
+        events = _arena_events(result)
+        assert [e["t"] for e in events] == ["answer", "error"]
+        assert events[1]["curated_error"] == {
+            "kind": "context_overflow",
+            "params": {"prompt_tokens": 9030, "context_tokens": 8192},
+        }
+        assert events[1]["curated"] is True
+
+    async def test_query_llm_stream_keeps_the_kind_of_an_empty_answer_line(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        from src.agents.curated_turns import curated_answer
+
+        event = curated_answer("empty_answer_stop")
+
+        async def fake_stream(**kwargs):
+            yield dict(event)
+
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ArenaService(test_db_session)
+        monkeypatch.setattr(service.runner, "astream_text", fake_stream)
+
+        result = [
+            t async for t in service.query_llm_stream(mock_llm.id, ArenaQueryPayload(question="Go"))
+        ]
+
+        (answer,) = _arena_events(result)
+        assert answer == {
+            "t": "answer",
+            "text": event["text"],
+            "curated_error": {"kind": "empty_answer_stop", "params": {}},
+        }
 
 
 # ============ Endpoint Tests ============
@@ -378,7 +450,8 @@ class TestArenaEndpoints:
         ):
             response = client.post(f"/erudi/arena/{mock_llm.id}/query", json=payload)
         assert response.status_code == status.HTTP_200_OK
-        assert response.text == "Machine learning is AI."
+        assert response.headers["content-type"].startswith("application/x-ndjson")
+        assert _arena_text(response.text) == "Machine learning is AI."
 
     def test_query_endpoint_invalid_payload(self, client, test_db_session, mock_llm):
         payload = {"question": "", "temperature": 3.0}  # empty + out-of-range
@@ -397,7 +470,7 @@ class TestArenaEndpoints:
         with patch.object(agent_runner, "build_chat_model", _fake_chat_model("A tiny image.")):
             response = client.post(f"/erudi/arena/{mock_llm.id}/query", json=payload)
         assert response.status_code == status.HTTP_200_OK
-        assert response.text == _VISION_NOTICE + "A tiny image."
+        assert _arena_text(response.text) == _VISION_NOTICE + "A tiny image."
 
     def test_query_endpoint_with_custom_prompt(self, client, mock_llm):
         payload = {
@@ -410,4 +483,4 @@ class TestArenaEndpoints:
         ):
             response = client.post(f"/erudi/arena/{mock_llm.id}/query", json=payload)
         assert response.status_code == status.HTTP_200_OK
-        assert "Quantum" in response.text
+        assert "Quantum" in _arena_text(response.text)

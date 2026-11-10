@@ -7,8 +7,8 @@ dedicated delta field that ``Erudi_Chat_OpenAI`` carries to the runner's
 ``thinking`` events. This splitter stays on the CONTENT channel as the
 fallback for families whose markers the server parser does not know: inline
 ``<think>`` tags that slip through still become ``thinking`` events instead of
-leaking into the answer. Arena's plain-text projection (``emit_events=False``)
-depends on it -- it is what keeps stray inline reasoning off Arena's wire. It
+leaking into the answer. The Arena, which streams answer events only, depends
+on it -- it is what keeps stray inline reasoning off Arena's wire. It
 is fed the model's answer deltas and emits event dicts: text outside the tags
 becomes ``answer`` events, text inside becomes ``thinking`` events.
 

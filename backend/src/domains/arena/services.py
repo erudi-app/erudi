@@ -9,7 +9,11 @@ Pipeline:
 2. Pick a prompting strategy (param_size-based) and, if the model has a KB
    attached, retrieve top-k chunks (hybrid pgvector search via ``kb_utils``).
 3. Build a real system prompt (size-adaptive + custom + KB context) and stream
-   the answer as raw token text via the shared agent runner.
+   the answer through the shared agent runner as NDJSON: ``answer`` events
+   (text) and, for a failed turn, one ``error`` event shaped like a
+   conversation's (``build_stream_error_event``: the red line, and a curated
+   turn's ``curated_error`` the panel translates it from). Reasoning, tool and
+   memory events are not sent: a panel shows the answer only.
 
 The A/B "duel" is orchestrated entirely on the frontend (N parallel calls to
 this endpoint); the runner's engine guard serializes them on the single-model
@@ -17,6 +21,7 @@ engine, so model swaps don't thrash the subprocess.
 """
 
 import contextlib
+import json
 import time
 from typing import AsyncGenerator, Dict, Any
 
@@ -33,19 +38,25 @@ from src.utils.attachment_utils import (
 from src.utils.kb_utils import KbExcerpt, retrieve_kb_excerpts
 from src.agents.kb_mode import plan_turn
 from src.agents.reasoning_effort import plan_reasoning_effort
-from src.agents.runner import AgentRunner, GenParams, IMAGES_IGNORED_NOTICE
+from src.agents.runner import AgentRunner, ERROR_SENTINEL, GenParams, IMAGES_IGNORED_NOTICE
 from src.database.generation_hints import resolve_sampling_defaults
 from src.domains.arena.repository import ArenaRepository
 from src.domains.llms.conversation_defaults import read_conversation_defaults
 from src.domains.llms.repository import detect_supports_vision
 from src.domains.user_settings.repository import User_Settings_Repository
 from src.domains.arena.schemas import ArenaQueryPayload
+from src.domains.conversations.services import build_stream_error_event
 from src.entities.Llm import Llm
 from src.core.exceptions import (
     KnowledgeBaseNotFoundException,
     KnowledgeBaseCorruptedException,
     InvalidInputException,
 )
+
+
+def _line(event: dict) -> str:
+    """One NDJSON line (non-ASCII ``\\uXXXX``-escaped, like a conversation's)."""
+    return json.dumps(event) + "\n"
 
 
 class ArenaService:
@@ -109,7 +120,7 @@ class ArenaService:
         llm_id: int,
         payload: ArenaQueryPayload,
     ) -> AsyncGenerator[str, None]:
-        """Query an LLM in stateless arena mode and stream response tokens (raw text).
+        """Query an LLM in stateless arena mode and stream its answer as NDJSON lines.
 
         Raises:
             InvalidInputException: empty question.
@@ -118,7 +129,8 @@ class ArenaService:
             KnowledgeBase*Exception: KB retrieval failure.
 
         Generation/model-load failures are NOT raised here — the runner yields the
-        ``[ERROR_MESSAGE_SYSTEM]`` sentinel inline (unified with conversation).
+        ``[ERROR_MESSAGE_SYSTEM]`` sentinel inline (unified with conversation),
+        sent as an ``error`` event.
         """
         if not payload.question.strip() and not payload.images and not payload.attachments:
             raise InvalidInputException("question")
@@ -196,11 +208,11 @@ class ArenaService:
         response = ""
         if payload.images and supports_vision is not True:
             response += IMAGES_IGNORED_NOTICE
-            yield IMAGES_IGNORED_NOTICE
+            yield _line({"t": "answer", "text": IMAGES_IGNORED_NOTICE})
         attachment_notice = build_attachment_notice(attachments)
         if attachment_notice:
             response += attachment_notice
-            yield attachment_notice
+            yield _line({"t": "answer", "text": attachment_notice})
         # ``aclosing``: whenever THIS generator is closed, the runner is closed
         # with it, inside the guard. Starlette never closes a body iterator
         # itself: a disconnect noticed while ``send()`` is in progress leaves
@@ -222,11 +234,17 @@ class ArenaService:
                 context=plan.context,
                 supports_vision=supports_vision,
                 effort_plan=effort_plan,
+                emit_events=True,
             )
-        ) as tokens:
-            async for token in tokens:
-                response += token
-                yield token
+        ) as events:
+            async for event in events:
+                if event["t"] != "answer":
+                    continue
+                response += event["text"]
+                if event["text"].startswith(ERROR_SENTINEL):
+                    yield _line(build_stream_error_event(event))
+                else:
+                    yield _line(event)
 
         duration_ms = (time.perf_counter() - start_s) * 1000
         logger.info(

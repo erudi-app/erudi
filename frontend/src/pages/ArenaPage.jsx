@@ -12,11 +12,28 @@ import CustomizePromptModal from "../components/modals/CustomizePromptModal";
 import MarkdownRenderer from "../components/MarkdownRenderer";
 import apiClient from "../services/api/client";
 import { createLogger } from "../utils/logger";
-import { baseName } from "../utils/messageContent";
+import { baseName, getDisplayContent, isGenericFailure } from "../utils/messageContent";
+import { curatedErrorOf, curatedTurnText, withCuratedLine } from "../utils/curatedTurns";
 
 const log = createLogger("ArenaPage");
 
 const MAX_PANELS = 4;
+
+// How a panel's answer ends, from the stream event that ends it: an `error`
+// (the red line below what streamed, exactly one blank line between them) or
+// an empty-answer line (#554). Its kind and numbers, when the turn is curated,
+// are kept as the trace a conversation persists (#690): the sentence is
+// translated at display from them, like a conversation's.
+const endTurn = (message, event) => {
+  const text = event.text || "";
+  const head = message.content.replace(/\n+$/, "");
+  return {
+    ...message,
+    content: event.t === "error" ? (head ? `${head}\n\n${text}` : text) : message.content + text,
+    error: event.t === "error" || message.error === true,
+    trace: event.curated_error ? [{ t: "curated_error", ...event.curated_error }] : message.trace,
+  };
+};
 
 // A panel is model-scoped (#388, #609): its sliders show ITS model's
 // recommended sampling (`sampling_defaults` on the /llms/local row) until the
@@ -229,10 +246,12 @@ export default function ArenaPage() {
           if (buf?.length) {
             const nextTok = buf.shift();
             const msgs = [...p.messages];
-            msgs[msgs.length - 1] = {
-              ...msgs[msgs.length - 1],
-              content: msgs[msgs.length - 1].content + nextTok,
-            };
+            const last = msgs[msgs.length - 1];
+            // A string is answer text (typed out); an event ends the turn.
+            msgs[msgs.length - 1] =
+              typeof nextTok === "string"
+                ? { ...last, content: last.content + nextTok }
+                : endTurn(last, nextTok);
             return { ...p, messages: msgs };
           }
           return p;
@@ -268,8 +287,12 @@ export default function ArenaPage() {
         topP: panel.touched.topP ? panel.topP : null,
         customPrompt: panel.customPrompt,
         signal: abortRef.current.signal,
-        onStreamChunk: (chunk) => {
-          buffersRef.current[panel.id].push(chunk);
+        onStreamEvent: (event) => {
+          if (event?.t === "answer" && !event.curated_error) {
+            buffersRef.current[panel.id].push(event.text || "");
+          } else if (event?.t === "answer" || event?.t === "error") {
+            buffersRef.current[panel.id].push(event);
+          }
         },
       })
         .then(() => {
@@ -423,6 +446,18 @@ export default function ArenaPage() {
         {panel.messages.map((msg, idx) => {
           const isUser = msg.role === "user";
           const isError = msg.error === true;
+          // Shown as a conversation shows it: a curated turn's sentence in the
+          // interface language, a generic failure's headline translated, the
+          // sentinel as a cross.
+          const content = isUser
+            ? msg.content
+            : withCuratedLine(msg.content, curatedTurnText(curatedErrorOf(msg.trace)));
+          const errorText = isError
+            ? getDisplayContent(
+                content,
+                isGenericFailure(content, msg.trace) ? t("chat:errors.generationFailed") : undefined
+              )
+            : null;
           return (
             <div
               key={idx}
@@ -463,12 +498,14 @@ export default function ArenaPage() {
                       ))}
                     </div>
                   )}
-                  {msg.content && (
-                    <pre className="whitespace-pre-wrap font-sans">{msg.content}</pre>
+                  {(isError ? errorText : msg.content) && (
+                    <pre className="whitespace-pre-wrap font-sans">
+                      {isError ? errorText : msg.content}
+                    </pre>
                   )}
                 </div>
               ) : (
-                <MarkdownRenderer content={msg.content} />
+                <MarkdownRenderer content={content} />
               )}
             </div>
           );

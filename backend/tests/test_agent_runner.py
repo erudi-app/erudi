@@ -20,6 +20,7 @@ from src.agents import runner as runner_module
 from src.agents.chat_model import PHASE_FIRST_CHUNK, PHASE_INTER_CHUNK
 from src.agents.model_factory import build_chat_model
 from src.agents.runner import AgentRunner, GenParams, ERROR_SENTINEL
+from src.agents.curated_turns import curated_text
 from src.agents.tools import calculator
 from src.core import config
 from src.core.exceptions import GenerationTimeoutException
@@ -767,7 +768,7 @@ async def test_empty_final_answer_no_tool_yields_the_curated_stop_turn(monkeypat
         )
     ]
 
-    assert "".join(out) == runner_module.EMPTY_ANSWER_STOP_MESSAGE
+    assert "".join(out) == curated_text("empty_answer_stop")
     assert ERROR_SENTINEL not in "".join(out)
 
 
@@ -2687,13 +2688,13 @@ async def test_all_reasoning_length_cut_yields_the_curated_length_turn(monkeypat
 
     assert _thinking(events) == "Okay, the user asks about X. Let me start by"
     answers = [e for e in events if e["t"] == "answer"]
-    assert [a["text"] for a in answers] == [runner_module.EMPTY_ANSWER_LENGTH_MESSAGE]
+    assert [a["text"] for a in answers] == [curated_text("empty_answer_length")]
     assert ERROR_SENTINEL not in _answers(events)
     # Thread state: the empty assistant message is replaced by the curated
     # line, so the next turn's template never replays an empty turn.
     tup = saver.get_tuple({"configurable": {"thread_id": "r554-4"}})
     msgs = tup.checkpoint["channel_values"]["messages"]
-    assert str(msgs[-1].text) == runner_module.EMPTY_ANSWER_LENGTH_MESSAGE
+    assert str(msgs[-1].text) == curated_text("empty_answer_length")
     assert not any(m.type == "ai" and not str(m.text).strip() for m in msgs)
 
 
@@ -2716,11 +2717,11 @@ async def test_stop_with_no_answer_yields_the_curated_stop_turn(monkeypatch):
 
     assert _thinking(events) == "hmm."
     answers = [e for e in events if e["t"] == "answer"]
-    assert [a["text"] for a in answers] == [runner_module.EMPTY_ANSWER_STOP_MESSAGE]
+    assert [a["text"] for a in answers] == [curated_text("empty_answer_stop")]
     assert ERROR_SENTINEL not in _answers(events)
     tup = saver.get_tuple({"configurable": {"thread_id": "r554-5"}})
     msgs = tup.checkpoint["channel_values"]["messages"]
-    assert str(msgs[-1].text) == runner_module.EMPTY_ANSWER_STOP_MESSAGE
+    assert str(msgs[-1].text) == curated_text("empty_answer_stop")
 
 
 async def test_the_curated_turn_keeps_the_replaced_messages_usage_and_stamp():
@@ -2774,7 +2775,7 @@ async def test_curated_turn_state_is_written_before_the_event_is_emitted(monkeyp
         thread_id="r554-7",
     )
     async for event in stream:
-        if event["t"] == "answer" and event["text"] == runner_module.EMPTY_ANSWER_STOP_MESSAGE:
+        if event["t"] == "answer" and event["text"] == curated_text("empty_answer_stop"):
             # The disconnecting client: the curated event was delivered, then
             # the connection died. Close the generator right here.
             await stream.aclose()
@@ -2782,7 +2783,7 @@ async def test_curated_turn_state_is_written_before_the_event_is_emitted(monkeyp
 
     tup = saver.get_tuple({"configurable": {"thread_id": "r554-7"}})
     msgs = tup.checkpoint["channel_values"]["messages"]
-    assert str(msgs[-1].text) == runner_module.EMPTY_ANSWER_STOP_MESSAGE
+    assert str(msgs[-1].text) == curated_text("empty_answer_stop")
 
 
 async def test_curated_turn_never_fires_when_a_tool_result_exists(monkeypatch):
@@ -2810,8 +2811,8 @@ async def test_curated_turn_never_fires_when_a_tool_result_exists(monkeypatch):
     )
 
     assert _answers(events).strip() == "4"
-    assert runner_module.EMPTY_ANSWER_STOP_MESSAGE not in _answers(events)
-    assert runner_module.EMPTY_ANSWER_LENGTH_MESSAGE not in _answers(events)
+    assert curated_text("empty_answer_stop") not in _answers(events)
+    assert curated_text("empty_answer_length") not in _answers(events)
 
 
 def test_curated_empty_answer_messages_are_one_ascii_line_without_the_sentinel():
@@ -2820,15 +2821,15 @@ def test_curated_empty_answer_messages_are_one_ascii_line_without_the_sentinel()
     the trace), and the ``length`` wording never names the removed Max Tokens
     control."""
     for message in (
-        runner_module.EMPTY_ANSWER_LENGTH_MESSAGE,
-        runner_module.EMPTY_ANSWER_STOP_MESSAGE,
+        curated_text("empty_answer_length"),
+        curated_text("empty_answer_stop"),
     ):
         assert message.isascii()
         assert "\n" not in message
         assert ERROR_SENTINEL not in message
         assert " I " not in f" {message} "  # impersonal: no first person
-    assert "Max Tokens" not in runner_module.EMPTY_ANSWER_LENGTH_MESSAGE
-    assert runner_module.EMPTY_ANSWER_LENGTH_MESSAGE != runner_module.EMPTY_ANSWER_STOP_MESSAGE
+    assert "Max Tokens" not in curated_text("empty_answer_length")
+    assert curated_text("empty_answer_length") != curated_text("empty_answer_stop")
 
 
 # ============ Compaction trigger + memory warning ============

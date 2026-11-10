@@ -143,25 +143,36 @@ class BaseChatServerEngine(BaseEngine):
         return ", ".join(parts)
 
     @classmethod
-    def child_crash_report(cls) -> Optional[str]:
-        """Describe the loaded child if it is dead; None when it runs or when
-        nothing is loaded.
+    def child_death_cause(cls) -> Optional[str]:
+        """`mlx_vlm.server child is dead (pid 61112, port 27300, exit code -9)`
+        when the loaded child is dead; None when it runs or when nothing is
+        loaded.
 
         The agent layer calls this when a stream fails: a generation that
-        breaks because llama-server aborted mid-request surfaces as an HTTP
-        connection error, and the exit code and the child's last lines are
-        the only diagnostic there is. The engine does not notice the death by
-        itself; the next request for the same model does (see
+        breaks because the child died mid-request surfaces as an HTTP
+        connection error ("peer closed connection...", a bare `ReadError` on
+        Windows), and this line is the cause the failed turn's Details shows.
+        The liveness check is the subclass's (`mp.Process.is_alive` for MLX,
+        `Popen.poll` for llama-server). The engine does not notice the death
+        by itself; the next request for the same model does (see
         `_should_not_reload_model`).
         """
         proc = cls._model.get("proc") if isinstance(cls._model, dict) else None
         if proc is None or cls._proc_is_alive(proc):
             return None
         port = cls._model.get("port") if isinstance(cls._model, dict) else None
-        return (
-            f"{cls._server_name} child is dead ({cls._describe_child(proc, port)}). "
-            f"{cls._read_child_output(proc)}"
-        )
+        return f"{cls._server_name} child is dead ({cls._describe_child(proc, port)})"
+
+    @classmethod
+    def child_crash_report(cls) -> Optional[str]:
+        """`child_death_cause` followed by the child's last lines; None when
+        the child runs or when nothing is loaded. What the backend log records
+        for a stream that failed on a dead child: the exit code and those
+        lines are the only diagnostic there is."""
+        cause = cls.child_death_cause()
+        if cause is None:
+            return None
+        return f"{cause}. {cls._read_child_output(cls._model.get('proc'))}"
 
     @classmethod
     @abstractmethod
