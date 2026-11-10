@@ -259,7 +259,7 @@
   "empty": {
     "noModels": "No se encontraron modelos locales. Añade modelos locales para continuar.",
     "orphansTitle": "Tus asistentes no tienen un modelo con el que responder",
-    "orphansBody": "Se eliminó el modelo base de todos los asistentes de Knowledge Base instalados. Descarga un modelo: podrás chatear con él y volver a vincular cada asistente a él desde su tarjeta en Modelos.",
+    "orphansBody": "Se eliminó el modelo base de todos los asistentes de Knowledge Base instalados. Descarga un modelo: podrás chatear con él y volver a vincular cada asistente a él desde la tarjeta del asistente en Modelos.",
     "orphansDownload": "Descargar un modelo"
   },
   "languageNote": {
