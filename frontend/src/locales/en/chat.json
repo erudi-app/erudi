@@ -257,7 +257,11 @@
     "confirmBody": "It will be installed locally on your system."
   },
   "empty": {
-    "noModels": "No current local models found, please add local models to proceed."
+    "noModels": "No current local models found, please add local models to proceed.",
+    "orphansTitle": "Your assistants have no model to run on",
+    "orphansBody": "The base model of every installed Knowledge Base assistant was deleted. Download a model, then re-bind each assistant to it from its card in Models.",
+    "orphansDownload": "Download a model",
+    "orphansRebind": "Re-bind the assistant"
   },
   "languageNote": {
     "title": "Note on Language",

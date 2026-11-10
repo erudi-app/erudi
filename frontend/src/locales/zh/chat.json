@@ -257,7 +257,11 @@
     "confirmBody": "它将安装在您的本地系统上。"
   },
   "empty": {
-    "noModels": "未找到本地模型，请先添加本地模型。"
+    "noModels": "未找到本地模型，请先添加本地模型。",
+    "orphansTitle": "您的助手没有可用的模型",
+    "orphansBody": "所有已安装的知识库助手的基础模型都已被删除。请下载一个模型，然后在“模型”页面的助手卡片上将助手重新绑定到该模型。",
+    "orphansDownload": "下载模型",
+    "orphansRebind": "重新绑定助手"
   },
   "languageNote": {
     "title": "关于语言的说明",

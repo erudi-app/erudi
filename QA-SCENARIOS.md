@@ -86,7 +86,7 @@ non-functional behavior.
 - [ ] When I open Chat via `?model=<name|id>`, then that model is pre-selected (else the first model stays).
 - [ ] When the **backend is unreachable**, then an error dialog "Failed to load models: …" shows.
 - [ ] When I have **no model at all**, then the Chat page shows the message of the "zero local models" line above.
-- [ ] *(not built yet: v1.3.0, #690.10 — record as not applicable)* When the only installed entries are Knowledge Base assistants whose base model was deleted, then the Chat page shows a guided empty state (download a model, or re-bind the assistant to an installed one) instead of a red "Please select a model" with nothing to select.
+- [ ] When the only installed entries are Knowledge Base assistants whose base model was deleted, then the Chat page shows a guided empty state (no composer; two buttons that open Models, to download a model or to re-bind the assistant from its card) instead of a red "Please select a model" with nothing to select.
 - [ ] When at least one model can be selected, then it is auto-selected and the composer works.
 
 ## Conversation — `/erudi/conversations/:id`

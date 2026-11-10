@@ -257,7 +257,11 @@
     "confirmBody": "Il sera installé localement sur votre système."
   },
   "empty": {
-    "noModels": "Aucun modèle local trouvé. Ajoutez des modèles locaux pour continuer."
+    "noModels": "Aucun modèle local trouvé. Ajoutez des modèles locaux pour continuer.",
+    "orphansTitle": "Vos assistants n'ont pas de modèle pour répondre",
+    "orphansBody": "Le modèle de base de chaque assistant Knowledge Base installé a été supprimé. Téléchargez un modèle, puis rattachez chaque assistant à celui-ci depuis sa carte dans Modèles.",
+    "orphansDownload": "Télécharger un modèle",
+    "orphansRebind": "Rattacher l'assistant"
   },
   "languageNote": {
     "title": "Remarque sur la langue",
