@@ -393,6 +393,11 @@ a = Analysis(
     hooksconfig={},
     runtime_hooks=_runtime_hooks,
     excludes=excludes,
+    # python-docx opens its default parts (styles, settings, header, footer,
+    # comments) through <docx/parts>/../templates/. "pyz" alone leaves no
+    # docx/parts/ directory on disk, so a .docx saved without a styles part
+    # (TextEdit) fails with ENOENT on macOS (#705). "pyz+py" adds the sources.
+    module_collection_mode={"docx": "pyz+py"},
     noarchive=False,
     optimize=0,
 )

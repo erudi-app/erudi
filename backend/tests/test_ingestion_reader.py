@@ -227,6 +227,48 @@ class TestDocx:
         assert "| T1 | 1 200 € |" in doc.markdown
 
 
+@pytest.fixture
+def docx_without_styles(tmp_path):
+    """A .docx with no word/styles.xml part, as TextEdit saves one (#705)."""
+    import io
+    import re
+    import zipfile
+
+    import docx
+
+    source = docx.Document()
+    source.add_paragraph("Compte rendu de maintenance.")
+    source.add_paragraph("Le groupe froid a été remplacé.")
+    buffer = io.BytesIO()
+    source.save(buffer)
+
+    path = tmp_path / "maintenance.docx"
+    with zipfile.ZipFile(buffer) as zin, zipfile.ZipFile(path, "w") as zout:
+        for item in zin.infolist():
+            if item.filename == "word/styles.xml":
+                continue
+            data = zin.read(item.filename)
+            if item.filename == "word/_rels/document.xml.rels":
+                data = re.sub(rb'<Relationship [^>]*relationships/styles"[^>]*/>', b"", data)
+            if item.filename == "[Content_Types].xml":
+                data = re.sub(rb'<Override [^>]*/word/styles\.xml"[^>]*/>', b"", data)
+            zout.writestr(item, data)
+    with zipfile.ZipFile(path) as check:
+        assert "word/styles.xml" not in check.namelist()
+        assert b'relationships/styles"' not in check.read("word/_rels/document.xml.rels")
+    return path
+
+
+class TestDocxWithoutStylesPart:
+    def test_extractor_reads_a_docx_that_has_no_styles_part(self, docx_without_styles):
+        # python-docx falls back to its bundled default-styles.xml; the frozen
+        # app must find that file on disk (spec + scripts/ci check, #705).
+        doc = DocumentReader().read(docx_without_styles)
+        assert doc.status == "active"
+        assert "Compte rendu de maintenance." in doc.markdown
+        assert "Le groupe froid a été remplacé." in doc.markdown
+
+
 class TestXlsx:
     def test_each_sheet_becomes_a_section_with_table(self, xlsx_file):
         doc = DocumentReader().read(xlsx_file)

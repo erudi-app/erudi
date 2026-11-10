@@ -244,3 +244,41 @@ def test_release_verifies_both_flavours_in_the_cuda_bundle():
     assert '"$cpu_exe" --version' in run
     assert "cudart64_12.dll" in run
     assert 'if [ -f "$cpu_dir/cudart64_12.dll" ]' in run
+
+
+@pytest.mark.unit
+def test_specs_collect_docx_as_pyz_and_source_files():
+    # python-docx loads default-styles.xml (and the four other default parts)
+    # through os.path.join(<docx/parts dir>, "..", "templates", ...). A `.docx`
+    # saved without a styles part (TextEdit) reaches that path. In the frozen
+    # app docx/parts/ is not a directory (its modules live in the PYZ), so the
+    # OS cannot resolve the `..` on macOS and the read fails with ENOENT (#705).
+    # "pyz+py" also writes the sources, which makes docx/parts/ exist on disk.
+    # backend-cpu.spec executes backend.spec in its own namespace, so the three
+    # specs carry the one option as long as the two Analysis calls do.
+    option = 'module_collection_mode={"docx": "pyz+py"}'
+    assert option in _read("backend.spec")
+    assert option in _read("backend-mac-silicon.spec")
+    assert "backend.spec" in _read("backend-cpu.spec")
+
+
+@pytest.mark.unit
+def test_release_and_smoke_check_the_frozen_bundle_ships_the_docx_parts():
+    # The spec option is only text; what proves it is the frozen tree on disk.
+    # Both the release build and the boot gate run the check right after
+    # PyInstaller, on every leg (it only walks the directory).
+    import yaml
+
+    root = _BACKEND.parent
+    for workflow, job in (("release.yml", "build"), ("app-build-smoke.yml", None)):
+        data = yaml.safe_load((root / ".github/workflows" / workflow).read_text(encoding="utf-8"))
+        jobs = data["jobs"]
+        steps = jobs[job]["steps"] if job else next(iter(jobs.values()))["steps"]
+        names = [s.get("name") for s in steps]
+        step = _step(steps, "Check the frozen backend ships python-docx's default parts")
+        assert "scripts/ci/check_docx_default_parts.py backend/dist" in step["run"], workflow
+        assert "if" not in step, workflow
+        freeze = next(
+            i for i, s in enumerate(steps) if "pyinstaller backend/" in str(s.get("run", ""))
+        )
+        assert freeze < names.index(step["name"]), workflow

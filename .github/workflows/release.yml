@@ -175,6 +175,14 @@ jobs:
       - name: Build backend bundle
         run: pyinstaller backend/${{ matrix.spec }} --distpath backend/dist
 
+      # python-docx reads its default parts through <docx/parts>/../templates/;
+      # a bundle without docx/parts/ on disk cannot open a .docx saved without
+      # a styles part (TextEdit), and the failure is an ENOENT on macOS only
+      # when a user drops such a file (#705). Checked on every leg: it only
+      # walks the frozen tree.
+      - name: Check the frozen backend ships python-docx's default parts
+        run: python scripts/ci/check_docx_default_parts.py backend/dist
+
       # The installer refuses systems below the floor; this refuses a frozen
       # backend that would not load on the systems the installer accepts.
       - name: Check the frozen backend's macOS floor
