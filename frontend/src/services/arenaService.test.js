@@ -13,7 +13,7 @@ import { askArena } from "./arenaService.js";
 
 const DATA_URL = "data:image/png;base64,AAA";
 
-/** Minimal streaming Response stub: an already-finished text/plain body. */
+/** Minimal streaming Response stub: an already-finished, empty body. */
 const doneStream = () => ({
   ok: true,
   body: { getReader: () => ({ read: async () => ({ done: true, value: undefined }) }) },

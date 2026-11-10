@@ -2358,7 +2358,6 @@ class TestThinkingModelRegression:
                 params=GenParams(temperature=0.0, top_p=1.0, max_tokens=1500),
                 thread_id="think-regression",
                 summarize=False,
-                emit_events=True,
             ):
                 if event["t"] == "answer":
                     answer += event["text"]

@@ -20,6 +20,7 @@ from src.agents import runner as runner_module
 from src.agents.chat_model import PHASE_FIRST_CHUNK, PHASE_INTER_CHUNK
 from src.agents.model_factory import build_chat_model
 from src.agents.runner import AgentRunner, GenParams, ERROR_SENTINEL
+from src.agents.curated_turns import curated_text
 from src.agents.tools import calculator
 from src.core import config
 from src.core.exceptions import GenerationTimeoutException
@@ -69,7 +70,7 @@ async def test_astream_yields_raw_token_text(monkeypatch):
         )
     ]
     # raw concatenation of token text (the text/plain wire contract)
-    assert "".join(out) == "Python is awesome"
+    assert _answers(out) == "Python is awesome"
 
 
 async def test_multi_turn_restores_context_from_checkpointer(monkeypatch):
@@ -111,7 +112,7 @@ async def test_arena_mode_runs_without_checkpointer(monkeypatch):
             summarize=False,
         )
     ]
-    assert "".join(out) == "duel answer"
+    assert _answers(out) == "duel answer"
 
 
 async def test_tools_none_builds_zero_tool_agent(monkeypatch, caplog):
@@ -151,9 +152,9 @@ async def test_construction_error_yields_sentinel(monkeypatch):
             llm=_Llm(), user_message="hi", system_prompt="s", params=_PARAMS, thread_id="c1"
         )
     ]
-    assert any(ERROR_SENTINEL in t for t in out)
+    assert ERROR_SENTINEL in _answers(out)
     # error message must NOT leak a traceback
-    assert all("Traceback" not in t for t in out)
+    assert "Traceback" not in _answers(out)
 
 
 async def test_recursion_limit_loop_falls_back_to_last_tool_result(monkeypatch):
@@ -187,7 +188,7 @@ async def test_recursion_limit_loop_falls_back_to_last_tool_result(monkeypatch):
             tools=[loop_tool],
         )
     ]
-    joined = "".join(out)
+    joined = _answers(out)
     # It terminated (no 16-minute hang, no unhandled GraphRecursionError) and
     # delivered what was gathered rather than the generic streaming error.
     assert "stuck result" in joined
@@ -223,7 +224,6 @@ async def test_recursion_limit_loop_no_result_yields_loop_message(monkeypatch, c
                 params=_PARAMS,
                 thread_id="c1",
                 tools=[blank_tool],
-                emit_events=True,
             )
         ]
     answers = [e for e in out if e["t"] == "answer"]
@@ -699,7 +699,7 @@ async def test_tool_call_round_trip_streams_only_final_text(monkeypatch):
         )
     ]
 
-    assert "".join(out) == "Le total est 5763 k€."
+    assert _answers(out) == "Le total est 5763 k€."
     # The second model call must carry the REAL tool result (5763), proof
     # the calculator executed inside the loop.
     second_call = fake.received[-1]
@@ -741,8 +741,8 @@ async def test_empty_final_answer_falls_back_to_last_tool_result(monkeypatch):
     ]
 
     # The tool result (4074) is delivered as the answer, sober (no prefix/JSON).
-    assert "".join(out).strip() == "4074"
-    assert ERROR_SENTINEL not in "".join(out)
+    assert _answers(out).strip() == "4074"
+    assert ERROR_SENTINEL not in _answers(out)
 
 
 async def test_empty_final_answer_no_tool_yields_the_curated_stop_turn(monkeypatch):
@@ -767,8 +767,8 @@ async def test_empty_final_answer_no_tool_yields_the_curated_stop_turn(monkeypat
         )
     ]
 
-    assert "".join(out) == runner_module.EMPTY_ANSWER_STOP_MESSAGE
-    assert ERROR_SENTINEL not in "".join(out)
+    assert _answers(out) == curated_text("empty_answer_stop")
+    assert ERROR_SENTINEL not in _answers(out)
 
 
 async def test_non_empty_final_with_tool_does_not_append_tool_result(monkeypatch):
@@ -783,7 +783,7 @@ async def test_non_empty_final_with_tool_does_not_append_tool_result(monkeypatch
     _patch_model(monkeypatch, fake)
     runner = AgentRunner(checkpointer=InMemorySaver())
 
-    out = "".join(
+    out = _answers(
         [
             t
             async for t in runner.astream_text(
@@ -1071,7 +1071,7 @@ async def test_kb_tool_round_trip_searches_with_runtime_context(monkeypatch):
         )
     ]
 
-    assert "".join(out) == "90 jours."
+    assert _answers(out) == "90 jours."
     # query from the model + kb_id/budget from the hidden runtime context
     mock_retrieve.assert_called_once_with("préavis de résiliation", 7, 1000)
     tool_messages = [m for m in fake.received[-1] if m.type == "tool"]
@@ -1187,7 +1187,7 @@ async def _events(runner, **kwargs):
     # A compacting turn carries its compaction threshold (#607): the default.
     if kwargs.get("summarize"):
         kwargs.setdefault("compaction_threshold", 80)
-    return [e async for e in runner.astream_text(emit_events=True, **kwargs)]
+    return [e async for e in runner.astream_text(**kwargs)]
 
 
 async def test_events_answer_only_stream(monkeypatch):
@@ -1234,9 +1234,9 @@ async def test_events_split_thinking_from_answer(monkeypatch):
     assert "<think>" not in _answers(events) and "</think>" not in _answers(events)
 
 
-async def test_str_mode_drops_thinking_keeps_answer(monkeypatch):
-    """Default (str) mode -- used by arena -- yields ONLY answer text and strips
-    inline thinking, preserving the plain-text wire."""
+async def test_inline_thinking_never_reaches_the_answer_events(monkeypatch):
+    """Inline ``<think>`` is split off into thinking events: the answer events,
+    all a panel or a conversation shows as the answer, carry the answer only."""
     fake = ToolableFakeChatModel(
         messages=iter([AIMessage(content="<think>reasoning here</think>Answer text")])
     )
@@ -1255,8 +1255,8 @@ async def test_str_mode_drops_thinking_keeps_answer(monkeypatch):
         )
     ]
 
-    assert "".join(out) == "Answer text"
-    assert all(isinstance(t, str) for t in out)
+    assert _answers(out) == "Answer text"
+    assert _thinking(out) == "reasoning here"
 
 
 async def test_events_tool_call_then_result_then_answer(monkeypatch):
@@ -2157,10 +2157,10 @@ async def test_multi_hop_narration_reclassified_each_hop(monkeypatch):
     assert all(i > idx_result_2 for i, k in enumerate(kinds) if k == "answer")
 
 
-async def test_str_mode_drops_narration_keeps_final_answer(monkeypatch):
-    """Arena projection (emit_events=False): the reclassified narration rides
-    thinking events, which the projection drops -- the hallucinated guessing
-    disappears from arena answers while the final answer is unchanged."""
+async def test_a_stateless_turn_keeps_narration_out_of_the_answer(monkeypatch):
+    """Arena (stateless): the reclassified narration rides thinking events,
+    which the Arena does not show -- the hallucinated guessing disappears from
+    its answer while the final answer is unchanged."""
     fake = ToolableFakeChatModel(
         messages=iter([_NARRATION_CALL, AIMessage(content="The result is 9.")])
     )
@@ -2179,8 +2179,8 @@ async def test_str_mode_drops_narration_keeps_final_answer(monkeypatch):
         )
     ]
 
-    assert "".join(out) == "The result is 9."
-    assert all("one thousand" not in t for t in out)
+    assert _answers(out) == "The result is 9."
+    assert "one thousand" not in _answers(out)
 
 
 # ===== One-shot stream (#266) — thinking must never reach the title =====
@@ -2687,13 +2687,13 @@ async def test_all_reasoning_length_cut_yields_the_curated_length_turn(monkeypat
 
     assert _thinking(events) == "Okay, the user asks about X. Let me start by"
     answers = [e for e in events if e["t"] == "answer"]
-    assert [a["text"] for a in answers] == [runner_module.EMPTY_ANSWER_LENGTH_MESSAGE]
+    assert [a["text"] for a in answers] == [curated_text("empty_answer_length")]
     assert ERROR_SENTINEL not in _answers(events)
     # Thread state: the empty assistant message is replaced by the curated
     # line, so the next turn's template never replays an empty turn.
     tup = saver.get_tuple({"configurable": {"thread_id": "r554-4"}})
     msgs = tup.checkpoint["channel_values"]["messages"]
-    assert str(msgs[-1].text) == runner_module.EMPTY_ANSWER_LENGTH_MESSAGE
+    assert str(msgs[-1].text) == curated_text("empty_answer_length")
     assert not any(m.type == "ai" and not str(m.text).strip() for m in msgs)
 
 
@@ -2716,11 +2716,11 @@ async def test_stop_with_no_answer_yields_the_curated_stop_turn(monkeypatch):
 
     assert _thinking(events) == "hmm."
     answers = [e for e in events if e["t"] == "answer"]
-    assert [a["text"] for a in answers] == [runner_module.EMPTY_ANSWER_STOP_MESSAGE]
+    assert [a["text"] for a in answers] == [curated_text("empty_answer_stop")]
     assert ERROR_SENTINEL not in _answers(events)
     tup = saver.get_tuple({"configurable": {"thread_id": "r554-5"}})
     msgs = tup.checkpoint["channel_values"]["messages"]
-    assert str(msgs[-1].text) == runner_module.EMPTY_ANSWER_STOP_MESSAGE
+    assert str(msgs[-1].text) == curated_text("empty_answer_stop")
 
 
 async def test_the_curated_turn_keeps_the_replaced_messages_usage_and_stamp():
@@ -2766,7 +2766,6 @@ async def test_curated_turn_state_is_written_before_the_event_is_emitted(monkeyp
     runner = AgentRunner(checkpointer=saver)
 
     stream = runner.astream_text(
-        emit_events=True,
         llm=_Llm(),
         user_message="hi",
         system_prompt="s",
@@ -2774,7 +2773,7 @@ async def test_curated_turn_state_is_written_before_the_event_is_emitted(monkeyp
         thread_id="r554-7",
     )
     async for event in stream:
-        if event["t"] == "answer" and event["text"] == runner_module.EMPTY_ANSWER_STOP_MESSAGE:
+        if event["t"] == "answer" and event["text"] == curated_text("empty_answer_stop"):
             # The disconnecting client: the curated event was delivered, then
             # the connection died. Close the generator right here.
             await stream.aclose()
@@ -2782,7 +2781,7 @@ async def test_curated_turn_state_is_written_before_the_event_is_emitted(monkeyp
 
     tup = saver.get_tuple({"configurable": {"thread_id": "r554-7"}})
     msgs = tup.checkpoint["channel_values"]["messages"]
-    assert str(msgs[-1].text) == runner_module.EMPTY_ANSWER_STOP_MESSAGE
+    assert str(msgs[-1].text) == curated_text("empty_answer_stop")
 
 
 async def test_curated_turn_never_fires_when_a_tool_result_exists(monkeypatch):
@@ -2810,8 +2809,8 @@ async def test_curated_turn_never_fires_when_a_tool_result_exists(monkeypatch):
     )
 
     assert _answers(events).strip() == "4"
-    assert runner_module.EMPTY_ANSWER_STOP_MESSAGE not in _answers(events)
-    assert runner_module.EMPTY_ANSWER_LENGTH_MESSAGE not in _answers(events)
+    assert curated_text("empty_answer_stop") not in _answers(events)
+    assert curated_text("empty_answer_length") not in _answers(events)
 
 
 def test_curated_empty_answer_messages_are_one_ascii_line_without_the_sentinel():
@@ -2820,15 +2819,15 @@ def test_curated_empty_answer_messages_are_one_ascii_line_without_the_sentinel()
     the trace), and the ``length`` wording never names the removed Max Tokens
     control."""
     for message in (
-        runner_module.EMPTY_ANSWER_LENGTH_MESSAGE,
-        runner_module.EMPTY_ANSWER_STOP_MESSAGE,
+        curated_text("empty_answer_length"),
+        curated_text("empty_answer_stop"),
     ):
         assert message.isascii()
         assert "\n" not in message
         assert ERROR_SENTINEL not in message
         assert " I " not in f" {message} "  # impersonal: no first person
-    assert "Max Tokens" not in runner_module.EMPTY_ANSWER_LENGTH_MESSAGE
-    assert runner_module.EMPTY_ANSWER_LENGTH_MESSAGE != runner_module.EMPTY_ANSWER_STOP_MESSAGE
+    assert "Max Tokens" not in curated_text("empty_answer_length")
+    assert curated_text("empty_answer_length") != curated_text("empty_answer_stop")
 
 
 # ============ Compaction trigger + memory warning ============

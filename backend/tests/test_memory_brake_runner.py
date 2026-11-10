@@ -145,7 +145,7 @@ def _answer(monkeypatch, text="hello"):
     _patch_model(monkeypatch, ToolableFakeChatModel(messages=iter([AIMessage(content=text)])))
 
 
-async def _events(runner, *, thread_id="b1", summarize=True, emit_events=True, **kwargs):
+async def _events(runner, *, thread_id="b1", summarize=True, **kwargs):
     # A conversation turn carries its compaction threshold (#607); an arena turn none.
     kwargs.setdefault("compaction_threshold", 80 if summarize else None)
     return [
@@ -157,7 +157,6 @@ async def _events(runner, *, thread_id="b1", summarize=True, emit_events=True, *
             params=_PARAMS,
             thread_id=thread_id,
             summarize=summarize,
-            emit_events=emit_events,
             **kwargs,
         )
     ]
@@ -239,7 +238,6 @@ async def test_an_abandoned_turn_takes_no_turn_end_sample(monkeypatch):
         params=_PARAMS,
         thread_id="ab",
         summarize=True,
-        emit_events=True,
         compaction_threshold=80,
     )
     async for event in stream:
@@ -271,7 +269,6 @@ async def test_an_abandoned_turn_closes_with_its_threshold(monkeypatch):
         thread_id="ab",
         summarize=True,
         compaction_threshold=65,
-        emit_events=True,
     )
     async for event in stream:
         if event["t"] == "answer":
@@ -671,25 +668,6 @@ async def test_no_bound_warning_on_llama_when_memory_does_not_bind(monkeypatch):
     events = await _events(AgentRunner(checkpointer=InMemorySaver()))
 
     assert not any(e["t"] == "memory_warning" for e in events)
-
-
-async def test_the_arena_wire_never_carries_the_reload(monkeypatch):
-    _answer(monkeypatch, "duel")
-    _BrakeEngine.pending = {7}
-
-    out = [
-        t
-        async for t in AgentRunner(checkpointer=None).astream_text(
-            llm=_Llm(),
-            user_message="hi",
-            system_prompt="s",
-            params=_PARAMS,
-            thread_id=None,
-            summarize=False,
-        )
-    ]
-
-    assert out == ["duel"]
 
 
 async def test_a_reload_that_fails_ends_with_the_error(monkeypatch):

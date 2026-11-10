@@ -38,6 +38,7 @@ import {
   subscribeCompacting,
 } from "../shared/compactingConversations";
 import {
+  ERROR_SENTINEL,
   baseName,
   getAttachmentNames,
   getDisplayContent,
@@ -45,6 +46,7 @@ import {
   isGenericFailure,
 } from "../utils/messageContent";
 import { formatBytes } from "../utils/formatBytes";
+import { withCuratedTurn } from "../utils/curatedTurns";
 import {
   automaticCompactions,
   errorDetailOf,
@@ -54,11 +56,6 @@ import {
 } from "../utils/traceEvents";
 
 const log = createLogger("ConversationPage");
-
-// Wire sentinel the backend persists on error turns; getDisplayContent and the
-// bubble styling detect it, so it stays untranslated and only the text after it
-// is localized.
-const ERROR_SENTINEL = "[ERROR_MESSAGE_SYSTEM]";
 
 // The red line of a failed turn goes below whatever the model had already
 // written, as the backend stores it (a paragraph of its own).
@@ -657,6 +654,11 @@ export default function ConversationPage() {
                 reloading = false;
                 compacting = false;
                 answerText += evt.text || "";
+                // An empty-answer line (#554): its kind, what it is
+                // translated from at display, joins the trace as persisted.
+                if (evt.curated_error) {
+                  traceEvents.push({ t: "curated_error", ...evt.curated_error });
+                }
                 break;
               case "thinking":
               case "tool_call":
@@ -693,6 +695,11 @@ export default function ConversationPage() {
                     text: evt.detail,
                     request_id: evt.request_id || null,
                   });
+                }
+                // A curated turn's kind and numbers (#690): its sentence is
+                // shown in the interface language, as after a reload.
+                if (evt.curated_error) {
+                  traceEvents.push({ t: "curated_error", ...evt.curated_error });
                 }
                 // The engine identified WHY it failed (a card the bundled CUDA
                 // build cannot drive, a driver too old, VRAM exhaustion): raise
@@ -1355,7 +1362,7 @@ export default function ConversationPage() {
           <div className="flex flex-col gap-6">
             {messages.map((msg) => {
               const isUser = msg.sender === "user";
-              const isError = !isUser && msg.content.includes("[ERROR_MESSAGE_SYSTEM]");
+              const isError = !isUser && msg.content.includes(ERROR_SENTINEL);
               const alignmentClass = alignmentClassFor(isUser);
               const bubbleClass = bubbleClassFor(isUser, isError);
 
@@ -1415,7 +1422,11 @@ export default function ConversationPage() {
                 isError && isGenericFailure(msg.content, msg.trace)
                   ? t("chat:errors.generationFailed")
                   : undefined;
-              const displayText = getDisplayContent(msg.content, failureHeadline);
+              // A curated turn (#690): its sentence in the interface language,
+              // from the kind its trace carries, in place of the stored
+              // English line; a turn without one shows as stored.
+              const content = isUser ? msg.content : withCuratedTurn(msg.content, msg.trace);
+              const displayText = getDisplayContent(content, failureHeadline);
 
               return (
                 <div key={msg.id} className={`group flex flex-col mb-2 ${alignmentClass}`}>
@@ -1476,7 +1487,7 @@ export default function ConversationPage() {
                             </div>
                           )}
                         </div>
-                      ) : isUser || msg.content.includes("[ERROR_MESSAGE_SYSTEM]") ? (
+                      ) : isUser || msg.content.includes(ERROR_SENTINEL) ? (
                         // Keep user messages and error messages as plain text.
                         <div className="flex flex-col gap-2">
                           {/* Reloaded sessions without image bytes: placeholder
@@ -1503,7 +1514,7 @@ export default function ConversationPage() {
                       ) : (
                         // Assistant normal messages: render markdown
                         (msg.content || (!showReload && !showCompacting)) && (
-                          <MarkdownRenderer content={msg.content} />
+                          <MarkdownRenderer content={content} />
                         )
                       )}
                       {showReload && (
@@ -1537,7 +1548,7 @@ export default function ConversationPage() {
                         // Copy the readable text the user sees, not the raw
                         // stored content with internal attachment markers.
                         navigator.clipboard
-                          .writeText(getDisplayContent(msg.content, failureHeadline))
+                          .writeText(getDisplayContent(content, failureHeadline))
                           .then(() => {
                             setCopiedMessageId(msg.id);
                             clearTimeout(copiedTimerRef.current);

@@ -343,10 +343,14 @@ def test_the_generic_apology_is_the_text_the_frontend_matches():
     ERROR_MESSAGE without the constant there stops the headline translation."""
     from pathlib import Path
 
-    from src.agents.runner import ERROR_MESSAGE
+    from src.agents.runner import ERROR_MESSAGE, ERROR_SENTINEL
 
     frontend = Path(__file__).resolve().parents[2] / "frontend" / "src" / "utils"
-    assert ERROR_MESSAGE in (frontend / "messageContent.js").read_text(encoding="utf-8")
+    source = (frontend / "messageContent.js").read_text(encoding="utf-8")
+    # The line is written there as `${ERROR_SENTINEL} <apology>`.
+    assert f'export const ERROR_SENTINEL = "{ERROR_SENTINEL}";' in source
+    apology = ERROR_MESSAGE.removeprefix(f"{ERROR_SENTINEL} ")
+    assert f"`${{ERROR_SENTINEL}} {apology}`" in source
 
 
 def test_a_failing_str_never_raises():

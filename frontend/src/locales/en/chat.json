@@ -283,6 +283,16 @@
     "generationFailed": "I apologize, but I encountered an error while generating a response. Please try asking your question again.",
     "connectionInterrupted": "Connection interrupted while generating response."
   },
+  "curated": {
+    "context_overflow": "This conversation no longer fits the model's context window (the request needs about {{prompt_tokens}} tokens; the window holds {{context_tokens}}). Start a new conversation or send less at once.",
+    "context_overflow_unsized": "This conversation no longer fits the model's context window. Start a new conversation or send less at once.",
+    "memory_overflow": "This conversation no longer fits what your machine's memory can hold for this model (the request needs about {{prompt_tokens}} tokens; memory allows {{context_tokens}}). Start a new conversation, send less at once, or switch to a smaller model.",
+    "prefill_timeout": "This model did not start answering within {{minutes}} min on this machine. Before writing a word it has to read everything this turn sends it (the whole conversation so far), and it did not get through that in time. Sending the same thing again will take longer, not less: start a new conversation, send less at once, or pick a smaller model.",
+    "decode_timeout": "This model started answering, then went silent for {{seconds}} seconds, so the turn was stopped. Anything it had already written is kept above. Please try asking your question again.",
+    "loop_limit": "I couldn't reach a final answer for this request (the model kept retrying without making progress). Please try rephrasing your question.",
+    "empty_answer_length": "Generation stopped during reasoning, before an answer was written. Send a follow-up asking for the final answer directly, or lower the reasoning effort.",
+    "empty_answer_stop": "The model finished its turn without writing an answer. Send a follow-up asking it to continue."
+  },
   "memoryWarning": {
     "bound": "Your computer's memory limits this conversation: the model and this conversation together take about {{size}}, nearly all the room memory allows. Start a new conversation, send less at once, or switch to a smaller model.",
     "pressure": "Your computer's memory is under pressure: this conversation will be summarized sooner to keep things fluid.",

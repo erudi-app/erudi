@@ -3,15 +3,10 @@
 One ``create_agent`` per turn. The turn is captured as STRUCTURED EVENTS (#90):
 ``_astream_events`` yields dicts — ``{"t":"answer",...}``, ``{"t":"thinking",...}``,
 ``{"t":"tool_call",...}``, ``{"t":"tool_result",...}`` — so thinking and tool
-activity are surfaced instead of dropped. ``astream_text`` is a thin projection
-over those events with two modes selected by ``emit_events``:
-
-  - ``emit_events=True`` (conversations): yields the event dicts unchanged; the
-    conversation service frames them as NDJSON and persists a replayable trace.
-  - ``emit_events=False`` (arena / default): yields ONLY answer text as ``str``,
-    dropping thinking + tool events — byte-for-byte the old plain-text contract,
-    so arena and its wire stay untouched. Reasoning stays hidden there because
-    the same splitter strips inline ``<think>`` before the text is yielded.
+activity are surfaced instead of dropped. ``astream_text`` yields them as they
+come: the conversation service frames them as NDJSON and persists a replayable
+trace, the arena service frames its ``answer`` events (and the ``error`` of a
+failed turn) as NDJSON.
 
   - Conversation: ``thread_id`` set + ``summarize=True`` + a checkpointer →
     history is restored from the checkpointer (only the new message is sent),
@@ -25,8 +20,8 @@ server-side (llama-server's default ``--reasoning-format auto``, mlx_vlm's
 native split) and ``Erudi_Chat_OpenAI`` re-attaches it to every streamed chunk
 as ``additional_kwargs["reasoning_content"]``. The fallback is the streaming
 ThinkSplitter on the content channel, for families whose markers the server
-parser does not know -- and Arena's plain-text projection depends on it to keep
-inline ``<think>`` out of its wire. A turn that ends with reasoning but no
+parser does not know -- and the Arena, which shows answer events only, depends
+on it to keep inline ``<think>`` out of its panels. A turn that ends with reasoning but no
 answer text (and no tool result to fall back to, #90) yields a curated
 empty-answer line -- a NORMAL answer picked by ``finish_reason``, never the
 ERROR sentinel, so the trace survives persistence -- and, on stateful runs,
@@ -72,6 +67,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Optional, Protocol
 
 from fastapi.concurrency import run_in_threadpool
 
+from src.agents.curated_turns import ERROR_SENTINEL, curated_answer
 from src.agents.chat_model import (
     CONSERVATIVE_PREFILL_TOKENS_PER_SEC,
     INTER_CHUNK_BUDGET_S,
@@ -101,7 +97,7 @@ from src.agents.token_accounting import (
 from src.database.generation_hints import resolve_sampling_defaults, trained_context_window
 from src.agents.think_splitter import ThinkSplitter
 from src.core import config
-from src.core.error_detail import error_detail, sanitize
+from src.core.error_detail import clean_detail, error_detail, exception_chain, sanitize
 from src.core.exceptions import (
     AppBaseException,
     CompactionFailedException,
@@ -1456,41 +1452,13 @@ def _summarization_middleware_class():
 # the user stare at a spinner.
 AGENT_RECURSION_LIMIT = 15
 
-# Frontend detects this prefix (substring match) to render an error turn in red.
-# Keep it; the message intentionally carries NO traceback (avoids info leak).
-ERROR_SENTINEL = "[ERROR_MESSAGE_SYSTEM]"
+# The generic failure: the English apology behind ``ERROR_SENTINEL`` (defined
+# with the curated turns, ``src.agents.curated_turns``). It is also what closes
+# a failed turn in the thread state, so the model reads it back on the next
+# request whichever failure it was.
 ERROR_MESSAGE = (
     f"{ERROR_SENTINEL} I apologize, but I encountered an error while generating "
     "a response. Please try asking your question again."
-)
-
-# Curated turn for a runaway agent that hit AGENT_RECURSION_LIMIT with nothing
-# usable to fall back to (#277). Carries the ERROR sentinel so the frontend
-# renders it in red and no traceback leaks -- there is genuinely no answer, so an
-# honest error turn beats a raw tool dump or a silent stop.
-LOOP_LIMIT_MESSAGE = (
-    f"{ERROR_SENTINEL} I couldn't reach a final answer for this request "
-    "(the model kept retrying without making progress). Please try rephrasing "
-    "your question."
-)
-
-# Curated turns for a stream that ended with NO answer text and nothing to
-# fall back to (#554). Deliberately NOT the ERROR sentinel: a sentinel turn is
-# rendered red by the frontend and persisted WITHOUT its trace (the
-# conversation service drops the trace on sentinel answers), which would throw
-# away exactly the reasoning that explains what happened. One impersonal ASCII
-# line each, actionable by the user AND by the model -- the persisted line is
-# replayed to the model on the next turn. Two wordings because the two
-# finish_reasons are different failures: ``length`` means generation was cut
-# mid-reasoning (the length line never names the removed Max Tokens control);
-# ``stop`` means the model closed its turn without writing an answer.
-EMPTY_ANSWER_LENGTH_MESSAGE = (
-    "Generation stopped during reasoning, before an answer was written. "
-    "Send a follow-up asking for the final answer directly, or lower the reasoning effort."
-)
-EMPTY_ANSWER_STOP_MESSAGE = (
-    "The model finished its turn without writing an answer. "
-    "Send a follow-up asking it to continue."
 )
 
 # What closes a stateful turn the client interrupted before anything was
@@ -1563,83 +1531,57 @@ def _closing_messages(committed: list, answer_text: str) -> list:
     return closing + [_interrupted_answer(answer_text)]
 
 
-# Curated turns for a stream that ran out of wall-clock budget (#573). The two
-# silences are not the same failure and must not read the same: one says the
-# model never started on a prompt this size (retrying makes it WORSE -- the
-# history only grows), the other says it started and then stopped.
-PREFILL_TIMEOUT_MESSAGE_TEMPLATE = (
-    "{sentinel} This model did not start answering within {minutes} minutes on this "
-    "machine. Before writing a word it has to read everything this turn sends it -- "
-    "the whole conversation so far -- and it did not get through that in time. "
-    "Sending the same thing again will take longer, not less: start a new "
-    "conversation, send less at once, or pick a smaller model."
-)
-DECODE_TIMEOUT_MESSAGE = (
-    f"{ERROR_SENTINEL} This model started answering, then went silent for "
-    f"{INTER_CHUNK_BUDGET_S:.0f} seconds, so the turn was stopped. Anything it had "
-    "already written is kept above. Please try asking your question again."
-)
-
-
-# Curated turn for a context-window overflow (PR-G). Both local engines
-# reject an over-budget prompt with a precise 400 that names the real numbers
+# The curated turns (``src.agents.curated_turns``) the stream failures
+# become. A context-window overflow (PR-G): both local engines reject an
+# over-budget prompt with a precise 400 that names the real numbers
 # (src.agents.overflow.parse_context_overflow discriminates it from a generic
-# 400). Surfacing those numbers beats the catch-all apology below -- the user
-# learns exactly why and what to do -- and the app never silently truncates
-# or shifts the conversation to make it fit. The turn names what limits the
-# conversation: the MEMORY wording when the limit the engine refused on is the
-# memory bound of the loaded child (``BaseEngine.memory_bound_tokens``: the
-# bound the MLX child enforces, or the window a llama.cpp engine sized from
-# its memory budget: RAM on CPU, VRAM on CUDA), the model-window wording
-# otherwise (a model whose own window binds, a window llama-server's fit
-# chose, a failed memory bound, an inherited ``MAX_KV_SIZE``).
-CONTEXT_OVERFLOW_MESSAGE_TEMPLATE = (
-    f"{ERROR_SENTINEL} This conversation no longer fits the model's context window "
-    "(the request needs about {prompt_tokens} tokens; the window holds {context_tokens}). "
-    "Start a new conversation or send less at once."
-)
-CONTEXT_OVERFLOW_MESSAGE = (
-    f"{ERROR_SENTINEL} This conversation no longer fits the model's context window. "
-    "Start a new conversation or send less at once."
-)
-MEMORY_OVERFLOW_MESSAGE_TEMPLATE = (
-    f"{ERROR_SENTINEL} This conversation no longer fits what your machine's memory can "
-    "hold for this model (the request needs about {prompt_tokens} tokens; memory allows "
-    "{context_tokens}). Start a new conversation, send less at once, or switch to a "
-    "smaller model."
-)
+# 400), and the app never silently truncates or shifts the conversation to make
+# it fit. The turn names what limits the conversation: the MEMORY kind when the
+# limit the engine refused on is the memory bound of the loaded child
+# (``BaseEngine.memory_bound_tokens``: the bound the MLX child enforces, or the
+# window a llama.cpp engine sized from its memory budget: RAM on CPU, VRAM on
+# CUDA), the model-window kind otherwise (a model whose own window binds, a
+# window llama-server's fit chose, a failed memory bound, an inherited
+# ``MAX_KV_SIZE``). A stream out of wall-clock budget (#573): the two silences
+# are not the same failure and must not read the same -- one says the model
+# never started on a prompt this size (retrying makes it WORSE: the history
+# only grows), the other says it started and then stopped.
 
 
-def _context_overflow_message(overflow: ContextOverflow, memory_bound: Optional[int]) -> str:
+def _context_overflow_answer(overflow: ContextOverflow, memory_bound: Optional[int]) -> dict:
     """The curated turn a parsed ``ContextOverflow`` becomes: the numbers
-    when the wire error carried them, a numberless variant when it matched
+    when the wire error carried them, the numberless kind when it matched
     but didn't parse (still an honest overflow message, just without figures).
     ``memory_bound`` is the loaded engine's ``memory_bound_tokens()``: a limit
     equal to it is the machine's memory, not the model's window."""
     if overflow.prompt_tokens is None or overflow.context_tokens is None:
-        return CONTEXT_OVERFLOW_MESSAGE
-    if memory_bound is not None and overflow.context_tokens == memory_bound:
-        return MEMORY_OVERFLOW_MESSAGE_TEMPLATE.format(
-            prompt_tokens=overflow.prompt_tokens,
-            context_tokens=overflow.context_tokens,
-        )
-    return CONTEXT_OVERFLOW_MESSAGE_TEMPLATE.format(
+        return curated_answer("context_overflow_unsized")
+    kind = (
+        "memory_overflow"
+        if memory_bound is not None and overflow.context_tokens == memory_bound
+        else "context_overflow"
+    )
+    return curated_answer(
+        kind,
         prompt_tokens=overflow.prompt_tokens,
         context_tokens=overflow.context_tokens,
     )
 
 
-def _stream_timeout_message(exc: GenerationTimeoutException) -> str:
+def _prefill_timeout_answer(budget_s: float) -> dict:
+    """The curated turn of a model that did not start answering within
+    ``budget_s``."""
+    return curated_answer("prefill_timeout", minutes=max(1, round(budget_s / 60)))
+
+
+def _stream_timeout_answer(exc: GenerationTimeoutException) -> dict:
     """The curated turn a ``GenerationTimeoutException`` becomes."""
     if exc.phase != PHASE_FIRST_CHUNK:
-        return DECODE_TIMEOUT_MESSAGE
+        return curated_answer("decode_timeout", seconds=round(INTER_CHUNK_BUDGET_S))
     # The estimated prompt size stays in the WARNING and out of the turn: it is
     # a deliberate UPPER BOUND (one token per UTF-8 byte, #573), so quoting it
     # to the user as a token count would overstate the real prompt several-fold.
-    return PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
-        sentinel=ERROR_SENTINEL,
-        minutes=max(1, round(exc.budget_s / 60)),
-    )
+    return _prefill_timeout_answer(exc.budget_s)
 
 
 # Prepended (and persisted with the assistant message) by the conversation and
@@ -1667,20 +1609,15 @@ def _construction_error_message(exc: Exception) -> str:
     return ERROR_MESSAGE
 
 
-def _curated_answer(text: str) -> dict:
-    """The answer event of a curated failed turn: words the app chose (a prompt
-    that does not fit, a model that went silent, the tool-loop limit), not an
-    unexpected failure. ``curated`` rides to the wire ``error`` event, where the
-    renderer logs it at WARNING instead of ERROR."""
-    return {"t": "answer", "text": text, "curated": True}
-
-
-def _generic_failure_detail(exc: BaseException) -> dict:
+def _generic_failure_detail(exc: BaseException, child_death: Optional[str] = None) -> dict:
     """What a generic failure carries next to its headline (#615): the cleaned
     leaf cause and the id of the failing request, so the interface can show
     both under the red message and the matching Diagnostics entry is findable.
-    Built where the exception is caught."""
-    return {"detail": error_detail(exc), "request_id": get_request_id()}
+    Built where the exception is caught. When the inference child died
+    (``child_death``, a ``ChildDeath`` cause), that is the cause: the
+    exception is only the transport symptom of the death (#690)."""
+    detail = clean_detail(child_death) if child_death else error_detail(exc)
+    return {"detail": detail, "request_id": get_request_id()}
 
 
 def _construction_error_event(exc: Exception) -> dict:
@@ -1786,16 +1723,57 @@ class GenParams:
     max_tokens: int
 
 
-def _child_crash_suffix(engine) -> str:
-    """`; llama-server child is dead (...)` when the engine's child died, else ""."""
-    report = getattr(engine, "child_crash_report", None)
-    if report is None:
-        return ""
+# How long a stream that broke on a transport error waits for the inference
+# child to be seen dead, and how often it looks. The connection drops while the
+# process is still being torn down: on Windows the reset can reach the client
+# before the process handle reports the exit of a ``llama-server.exe`` ended
+# from Task Manager. A child still running after the wait is not the cause.
+CHILD_DEATH_GRACE_S = 1.0
+CHILD_DEATH_POLL_S = 0.05
+
+
+def _is_transport_failure(exc: BaseException) -> bool:
+    """Whether ``exc`` (or what led to it) is the HTTP connection to the
+    inference child breaking -- the symptom of a child that died mid-answer."""
+    import httpx
+
+    return any(isinstance(e, httpx.TransportError) for e in exception_chain(exc))
+
+
+def _observe_child_death(engine) -> Any:
+    """The engine's inference child's death (``ChildDeath``: ``cause`` and
+    ``report``), read once, or None when it runs, when nothing is loaded or
+    when the engine has no child."""
+    probe = getattr(engine, "child_death", None)
+    if probe is None:
+        return None
     try:
-        text = report()
+        return probe()
     except Exception:  # a diagnostic must never mask the failure it describes
-        return ""
-    return f"; {text}" if text else ""
+        return None
+
+
+async def _await_child_death(engine, exc: BaseException) -> Any:
+    """The death the failure's record did not see yet, for the Details leaf.
+
+    After a transport failure the connection can drop before the process
+    handle reports the exit: look again for up to ``CHILD_DEATH_GRACE_S``. Any
+    other failure is answered at once (None).
+    """
+    if not _is_transport_failure(exc):
+        return None
+    death = None
+    deadline = time.monotonic() + CHILD_DEATH_GRACE_S
+    while death is None and time.monotonic() < deadline:
+        await asyncio.sleep(CHILD_DEATH_POLL_S)
+        death = _observe_child_death(engine)
+    return death
+
+
+def _child_crash_suffix(death: Any) -> str:
+    """`; llama-server child is dead (...). <last output>` for an observed
+    death (``_observe_child_death``), else ""."""
+    return f"; {death.report}" if death is not None else ""
 
 
 @dataclass(frozen=True)
@@ -1859,8 +1837,8 @@ class AgentRunner:
     """Streams an agent turn as structured events. Shared by conversation and arena.
 
     ``_astream_events`` is the single capture loop (answer / thinking / tool_call /
-    tool_result); ``astream_text`` projects it to either event dicts or plain
-    answer text via ``emit_events`` (see the module docstring). Pass a
+    tool_result); ``astream_text`` hands its events to the caller (see the module
+    docstring). Pass a
     ``checkpointer`` (the app-wide ``AsyncPostgresSaver``) for stateful
     conversations; arena constructs it with ``checkpointer=None``.
     """
@@ -1884,19 +1862,16 @@ class AgentRunner:
         supports_vision: Optional[bool] = None,
         effort_plan: Optional[EffortPlan] = None,
         compaction_threshold: Optional[int] = None,
-        emit_events: bool = False,
         announce_idle_reload: bool = False,
-    ) -> AsyncIterator:
-        """Project the turn's event stream (:meth:`_astream_events`).
+    ) -> AsyncIterator[dict]:
+        """The turn's event stream (:meth:`_astream_events`), closed with its
+        consumer.
 
-        ``emit_events=True`` yields the event dicts unchanged (conversations frame
-        them as NDJSON). ``emit_events=False`` (arena / default) yields ONLY answer
-        text as ``str`` -- thinking and tool events are dropped and inline
-        ``<think>`` is stripped, preserving the old plain-text wire byte-for-byte.
-        Error paths ride an ``answer`` event carrying the ERROR sentinel string, so
-        in str mode the sentinel is yielded exactly as before (the conversation
-        service maps it to an ``error`` event on the wire; DB persistence
-        unchanged).
+        The conversation service frames the events as NDJSON, the arena its
+        ``answer`` events. Error paths ride an ``answer`` event carrying the
+        ERROR sentinel string, which both services map to an ``error`` event on
+        the wire (DB persistence unchanged). A curated turn's answer event also
+        carries ``curated_error`` (``src.agents.curated_turns``).
 
         ``compaction_threshold`` is the conversation's compaction threshold
         (#607, a whole percent): required with ``summarize=True``, where it
@@ -1932,10 +1907,7 @@ class AgentRunner:
             )
         ) as events:
             async for event in events:
-                if emit_events:
-                    yield event
-                elif event["t"] == "answer":
-                    yield event["text"]
+                yield event
 
     async def _astream_events(
         self,
@@ -1971,7 +1943,8 @@ class AgentRunner:
         each one saying what actually happened. Callers map it: the
         conversation service turns a sentinel-prefixed answer into an ``error``
         wire event while still accumulating the sentinel STRING for persistence
-        (DB behavior unchanged per #225-D4); arena yields it as plain text.
+        (DB behavior unchanged per #225-D4); the arena service frames it as an
+        ``error`` event too.
         """
         if summarize and compaction_threshold is None:
             # A caller contract, not a turn failure: a compacting turn must
@@ -2381,17 +2354,17 @@ class AgentRunner:
                         # wording follows finish_reason: ``length`` = cut mid-reasoning,
                         # anything else = the model closed its turn without an answer.
                         if not emitted_model_text and last_tool_result is None:
-                            curated = (
-                                EMPTY_ANSWER_LENGTH_MESSAGE
+                            curated = curated_answer(
+                                "empty_answer_length"
                                 if finish_reason == "length"
-                                else EMPTY_ANSWER_STOP_MESSAGE
+                                else "empty_answer_stop"
                             )
                             logger.info(
                                 f"Turn ended with no answer text: llm={getattr(llm, 'id', '?')}, "
                                 f"finish_reason={finish_reason or 'unknown'}, "
                                 f"reasoning_chars={reasoning_chars}; yielding the curated turn"
                             )
-                            char_count += len(curated)
+                            char_count += len(curated["text"])
                             if stateful:
                                 # State BEFORE the yield: a client that disconnects
                                 # right after receiving the curated event closes this
@@ -2404,8 +2377,12 @@ class AgentRunner:
                                 # handling. Without the write at all, the checkpointer
                                 # keeps the EMPTY AIMessage the model node committed
                                 # and the next turn replays an empty assistant turn.
-                                await self._write_curated_empty_turn(agent, run_config, curated)
-                            yield _record({"t": "answer", "text": curated})
+                                # The model reads the English line; only the
+                                # interface translates it (``curated_error``).
+                                await self._write_curated_empty_turn(
+                                    agent, run_config, curated["text"]
+                                )
+                            yield _record(curated)
                         # The turn's memory ends here (Arena turns too): the
                         # window closes and the memory brake takes its
                         # turn_end sample, before the warning check below
@@ -2500,7 +2477,7 @@ class AgentRunner:
                                 char_count += len(last_tool_result)
                                 yield _record({"t": "answer", "text": last_tool_result})
                             else:
-                                yield _record(_curated_answer(LOOP_LIMIT_MESSAGE))
+                                yield _record(curated_answer("loop_limit"))
                         if stateful:
                             await self._repair_alternation(agent, run_config)
                     except GenerationTimeoutException as exc:
@@ -2522,7 +2499,7 @@ class AgentRunner:
                         for text in hop_text_buffer:
                             yield _record({"t": "answer", "text": text})
                         hop_text_buffer.clear()
-                        yield _record(_curated_answer(_stream_timeout_message(exc)))
+                        yield _record(_stream_timeout_answer(exc))
                     except Exception as exc:
                         overflow = parse_context_overflow(exc)
                         if overflow is not None:
@@ -2542,9 +2519,7 @@ class AgentRunner:
                                 yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
                             yield _record(
-                                _curated_answer(
-                                    _context_overflow_message(overflow, _memory_bound_of(engine))
-                                )
+                                _context_overflow_answer(overflow, _memory_bound_of(engine))
                             )
                         elif is_child_prefill_timeout(exc):
                             # Defense in depth (#573 alignment): the MLX child's
@@ -2570,23 +2545,24 @@ class AgentRunner:
                                 yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
                             # Reuse the parent watchdog's curated first-chunk turn.
-                            yield _record(
-                                _curated_answer(
-                                    PREFILL_TIMEOUT_MESSAGE_TEMPLATE.format(
-                                        sentinel=ERROR_SENTINEL,
-                                        minutes=max(1, round(ceiling / 60)),
-                                    )
-                                )
-                            )
+                            yield _record(_prefill_timeout_answer(ceiling))
                         else:
                             # A stream that breaks because the inference child died shows
                             # up here as a connection error; the engine knows the exit
-                            # code and the child's last lines, so ask it.
+                            # code and the child's last lines, so ask it, once: the
+                            # record and the turn's Details (#690) read the same
+                            # observation. The record is written before anything
+                            # waits, so a client gone meanwhile cannot lose it; only
+                            # the Details leaf waits for a death not visible yet.
+                            death = _observe_child_death(engine)
                             logger.exception(
                                 f"Agent streaming failed: llm={getattr(llm, 'id', '?')} "
                                 f"({getattr(llm, 'name', '?')}), thread_id={thread_id}"
-                                f"{_child_crash_suffix(engine)}"
+                                f"{_child_crash_suffix(death)}"
                             )
+                            if death is None:
+                                death = await _await_child_death(engine, exc)
+                            child_death = death.cause if death is not None else None
                             if stateful:
                                 await self._repair_alternation(agent, run_config)
                             # Parity with the pre-#297 live stream: text buffered before the
@@ -2599,7 +2575,7 @@ class AgentRunner:
                                 {
                                     "t": "answer",
                                     "text": ERROR_MESSAGE,
-                                    **_generic_failure_detail(exc),
+                                    **_generic_failure_detail(exc, child_death),
                                 }
                             )
             except BaseException as exit_in_flight:
@@ -2709,7 +2685,7 @@ class AgentRunner:
                     logger.warning(
                         f"One-shot streaming failed: llm={getattr(llm, 'id', '?')} "
                         f"({getattr(llm, 'name', '?')}); using the default"
-                        f"{_child_crash_suffix(engine)}",
+                        f"{_child_crash_suffix(_observe_child_death(engine))}",
                         exc_info=True,
                     )
                     return

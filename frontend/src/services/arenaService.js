@@ -1,5 +1,9 @@
 import { getApiBaseUrl } from "../config/api.js";
 import { tracedFetch } from "./api/client";
+import { createLogger } from "../utils/logger";
+
+const log = createLogger("arenaService");
+
 export async function askArena({
   question,
   images = [],
@@ -10,7 +14,7 @@ export async function askArena({
   quantize,
   customPrompt,
   signal,
-  onStreamChunk,
+  onStreamEvent,
 }) {
   // Image-only asks are valid vision-model turns (#136 C); document-only asks
   // are valid "what does this say?" turns (#492).
@@ -37,9 +41,37 @@ export async function askArena({
     throw new Error("Arena query failed");
   }
 
+  // NDJSON, one event per line: `answer` (text) and, for a failed turn, one
+  // `error` shaped like a conversation's (its red line, and a curated turn's
+  // `curated_error`). A line can span chunks; a chunk can hold several lines.
   const reader = res.body.getReader();
   const decoder = new TextDecoder("utf-8");
-  let fullText = "";
+  let buffer = "";
+  let answerText = "";
+  let parseWarned = false;
+
+  const handleLine = (rawLine) => {
+    const text = rawLine.trim();
+    if (!text) {
+      return;
+    }
+    let event;
+    try {
+      event = JSON.parse(text);
+    } catch (parseError) {
+      // The line is skipped and the stream goes on: degraded, once per ask so
+      // a garbled stream cannot flood the log.
+      if (!parseWarned) {
+        parseWarned = true;
+        log.warn(`Skipping an unparseable Arena stream line (${text.length} chars)`, parseError);
+      }
+      return;
+    }
+    if (event?.t === "answer") {
+      answerText += event.text || "";
+    }
+    onStreamEvent?.(event);
+  };
 
   let streamDone = false;
   while (!streamDone) {
@@ -48,10 +80,14 @@ export async function askArena({
     if (done) {
       break;
     }
-    const chunk = decoder.decode(value, { stream: true });
-    fullText += chunk;
-    onStreamChunk?.(chunk);
+    buffer += decoder.decode(value, { stream: true });
+    let newline;
+    while ((newline = buffer.indexOf("\n")) !== -1) {
+      handleLine(buffer.slice(0, newline));
+      buffer = buffer.slice(newline + 1);
+    }
   }
+  handleLine(buffer + decoder.decode());
 
-  return fullText.trim();
+  return answerText.trim();
 }

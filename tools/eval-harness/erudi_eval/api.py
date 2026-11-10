@@ -95,20 +95,6 @@ class ErudiApi:
         finally:
             conn.close()
 
-    def stream_chunks(self, path: str, body: Any, read_timeout: float = 600.0) -> Iterator[tuple[float, str]]:
-        """POST a text/plain stream (arena, generate_title) and yield (monotonic time, chunk)."""
-        conn, resp, rid = self._open("POST", path, body, read_timeout)
-        try:
-            if resp.status != 200:
-                raise ApiError(f"POST {path} -> {resp.status}: {resp.read()[:500]!r}")
-            while True:
-                chunk = resp.read1(4096)
-                if not chunk:
-                    break
-                yield time.monotonic(), chunk.decode("utf-8", errors="replace")
-        finally:
-            conn.close()
-
 
 def parse_ndjson(lines: Iterable[tuple[float, str]]) -> Iterator[tuple[float, dict[str, Any]]]:
     """(t, raw line) -> (t, event). Tolerates split lines and non-JSON noise."""

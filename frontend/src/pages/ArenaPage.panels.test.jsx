@@ -62,9 +62,12 @@ import ArenaPage from "./ArenaPage.jsx";
 
 const encoder = new TextEncoder();
 
-/** Streaming Response stub yielding the given chunks. */
+/** Streaming Response stub: one NDJSON answer event per given text. */
 const streamOf = (...chunks) => {
-  const queue = chunks.map((text) => ({ done: false, value: encoder.encode(text) }));
+  const queue = chunks.map((text) => ({
+    done: false,
+    value: encoder.encode(`${JSON.stringify({ t: "answer", text })}\n`),
+  }));
   queue.push({ done: true, value: undefined });
   return {
     ok: true,

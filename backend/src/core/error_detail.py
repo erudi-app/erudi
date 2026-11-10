@@ -4,7 +4,10 @@
 did the exception that ended the turn actually say? It is the message of the
 leaf cause, on one line, with every machine-specific or secret fragment removed
 and at most ``MAX_DETAIL_CHARS`` characters. It is never a traceback and never
-translated: it is quoted as the backend produced it.
+translated: it is quoted as the backend produced it. When the inference child
+died mid-answer, the exception is only the transport symptom of that death;
+the runner then shows the engine's own account of it, cleaned the same way by
+``clean_detail``.
 
 Pure and dependency-free so the three catch sites (agent construction, agent
 streaming, the conversation service's last-resort handler) share one rule.
@@ -145,7 +148,7 @@ def sanitize(text: str) -> str:
     return " ".join(text.split())
 
 
-def _chain(exc: BaseException) -> list[BaseException]:
+def exception_chain(exc: BaseException) -> list[BaseException]:
     """The exception and what led to it, outermost first.
 
     ``__cause__`` is followed first, then ``__context__`` unless the raiser
@@ -195,7 +198,7 @@ def error_detail(exc: BaseException) -> str:
     The innermost exception of the chain whose sanitised message says
     something; when none does, the outermost exception's type name.
     """
-    chain = _chain(exc)
+    chain = exception_chain(exc)
     message = ""
     for candidate in reversed(chain):
         message = _message_of(candidate)
@@ -203,6 +206,16 @@ def error_detail(exc: BaseException) -> str:
             break
     else:
         message = type(exc).__name__
+    return _bounded(message)
+
+
+def clean_detail(text: str) -> str:
+    """A cause the backend wrote itself (an inference child's death), cleaned
+    like an exception's: sanitised, one line, at most ``MAX_DETAIL_CHARS``."""
+    return _bounded(sanitize(str(text)[:_MAX_INPUT_CHARS]).strip())
+
+
+def _bounded(message: str) -> str:
     if len(message) > MAX_DETAIL_CHARS:
         message = message[: MAX_DETAIL_CHARS - 3].rstrip() + "..."
     return message

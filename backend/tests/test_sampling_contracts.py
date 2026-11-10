@@ -276,7 +276,7 @@ class TestArenaResolvesDefaults:
             t
             async for t in service.query_llm_stream(hinted_llm.id, ArenaQueryPayload(question="q"))
         ]
-        assert "".join(out) == "ok"
+        assert "".join(out) == '{"t": "answer", "text": "ok"}\n'
         assert (captured["temperature"], captured["top_p"], captured["max_tokens"]) == (
             0.6,
             0.95,
