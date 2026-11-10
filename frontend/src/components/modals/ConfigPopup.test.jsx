@@ -52,7 +52,9 @@ function Harness({
   id = 7,
 }) {
   const settings = useConversationSettings(id);
-  hookRef = settings;
+  React.useEffect(() => {
+    hookRef = settings;
+  });
   React.useEffect(() => {
     if (conversation) settings.adopt(conversation);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps
@@ -63,7 +65,9 @@ function Harness({
 function ClosingHarness() {
   const [open, setOpen] = React.useState(true);
   const settings = useConversationSettings(7);
-  hookRef = settings;
+  React.useEffect(() => {
+    hookRef = settings;
+  });
   React.useEffect(() => {
     settings.adopt(CONVERSATION);
   }, []); // eslint-disable-line react-hooks/exhaustive-deps

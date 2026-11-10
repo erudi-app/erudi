@@ -9,6 +9,34 @@ import { formatNumber } from "../i18n/format";
 // Temperature / top-p read-outs: two decimals in the active locale.
 const TWO_DECIMALS = { minimumFractionDigits: 2, maximumFractionDigits: 2 };
 
+function TooltipIcon({ id, side = "right", isXs, isSm }) {
+  const { t } = useTranslation();
+  const text =
+    id === "temperature"
+      ? t("chat:header.tooltips.temperature")
+      : id === "top-p"
+        ? t("chat:header.tooltips.topP")
+        : id === "prompt"
+          ? t("chat:header.tooltips.prompt")
+          : "";
+  const widthClass = isXs ? "w-40" : isSm ? "w-52" : "w-64";
+  const iconSize = isXs ? "w-3 h-3" : isSm ? "w-3.5 h-3.5" : "w-4 h-4";
+  return (
+    <Tooltip content={text} side={side} width={widthClass}>
+      <HelpCircle
+        className={`${iconSize} text-gray-400 hover:text-emerald-400 transition-colors cursor-help`}
+      />
+    </Tooltip>
+  );
+}
+
+TooltipIcon.propTypes = {
+  id: PropTypes.string.isRequired,
+  side: PropTypes.string,
+  isXs: PropTypes.bool,
+  isSm: PropTypes.bool,
+};
+
 // The Arena panel header: a model picker, the creativity and diversity
 // sliders, and the panel's custom instructions. A conversation uses
 // ConversationHeader and the command popups instead.
@@ -30,14 +58,18 @@ export default function HeaderBar({
   const [temperature, setTemperature] = useState(initialTemperature);
   const [topP, setTopP] = useState(initialTopP);
 
-  // Sync internal state with props when they change
-  useEffect(() => {
+  // Sync internal state with props when they change: adjusted while rendering,
+  // so the new value shows without an extra committed render.
+  const [seenTemperature, setSeenTemperature] = useState(initialTemperature);
+  if (!Object.is(seenTemperature, initialTemperature)) {
+    setSeenTemperature(initialTemperature);
     setTemperature(initialTemperature);
-  }, [initialTemperature]);
-
-  useEffect(() => {
+  }
+  const [seenTopP, setSeenTopP] = useState(initialTopP);
+  if (!Object.is(seenTopP, initialTopP)) {
+    setSeenTopP(initialTopP);
     setTopP(initialTopP);
-  }, [initialTopP]);
+  }
 
   const rootRef = useRef(null);
   const dropdownRef = useRef(null);
@@ -96,26 +128,6 @@ export default function HeaderBar({
   const handleApply = () => {
     onApply?.({ temperature, topP });
     setIsOpen(false);
-  };
-
-  const TooltipIcon = ({ id, side = "right" }) => {
-    const text =
-      id === "temperature"
-        ? t("chat:header.tooltips.temperature")
-        : id === "top-p"
-          ? t("chat:header.tooltips.topP")
-          : id === "prompt"
-            ? t("chat:header.tooltips.prompt")
-            : "";
-    const widthClass = isXs ? "w-40" : isSm ? "w-52" : "w-64";
-    const iconSize = isXs ? "w-3 h-3" : isSm ? "w-3.5 h-3.5" : "w-4 h-4";
-    return (
-      <Tooltip content={text} side={side} width={widthClass}>
-        <HelpCircle
-          className={`${iconSize} text-gray-400 hover:text-emerald-400 transition-colors cursor-help`}
-        />
-      </Tooltip>
-    );
   };
 
   const sliderBg = (value, max = 1) => {
@@ -305,7 +317,12 @@ export default function HeaderBar({
                       >
                         {t("chat:header.creativity")}
                       </span>
-                      <TooltipIcon id="temperature" side={isNarrow ? "bottom-right" : "right"} />
+                      <TooltipIcon
+                        id="temperature"
+                        side={isNarrow ? "bottom-right" : "right"}
+                        isXs={isXs}
+                        isSm={isSm}
+                      />
                       {/* Backend accepts 0-2; values above 1.0 get an amber tint
                           as a light "high creativity" cue (no redesign). */}
                       <span
@@ -344,7 +361,7 @@ export default function HeaderBar({
                       >
                         {t("chat:header.diversity")}
                       </span>
-                      <TooltipIcon id="top-p" side="right" />
+                      <TooltipIcon id="top-p" side="right" isXs={isXs} isSm={isSm} />
                       <span
                         className={`ml-auto ${statText} font-semibold text-emerald-200/90 bg-emerald-500/10 px-2 py-0.5 rounded-md border border-emerald-400/25`}
                       >
@@ -393,7 +410,7 @@ export default function HeaderBar({
                         {t("chat:header.customizePrompt")}
                       </button>
                       <div>
-                        <TooltipIcon id="prompt" side="top-left" />
+                        <TooltipIcon id="prompt" side="top-left" isXs={isXs} isSm={isSm} />
                       </div>
                     </div>
                     <button

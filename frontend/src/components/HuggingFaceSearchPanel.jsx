@@ -61,24 +61,35 @@ export default function HuggingFaceSearchPanel({
     setSearchedTerm("");
   };
 
-  const runSearch = async (term) => {
-    const q = (term ?? query).trim();
-    if (!q) {
-      return;
-    }
+  // The synchronous half of a search: the panel opens on the term, the sort
+  // goes back to fit, and the offline guard answers. Searching Hugging Face
+  // needs the internet, so say so plainly instead of returning an empty "no
+  // matches" or throwing. Returns whether the request has to go out.
+  const beginSearch = (q) => {
     setCollapsed(false);
     setQuery(q);
     setSearchedTerm(q);
     setError("");
     setSortBy("fit");
-    // Offline guard: searching Hugging Face needs the internet, so say so plainly
-    // instead of returning an empty "no matches" or throwing.
     if (typeof navigator !== "undefined" && navigator.onLine === false) {
       setResults([]);
       setError(t("models:search.offline"));
-      return;
+      return false;
     }
     setLoading(true);
+    return true;
+  };
+
+  const runSearch = async (term) => {
+    const q = (term ?? query).trim();
+    if (!q) {
+      return;
+    }
+    if (!beginSearch(q)) return;
+    await fetchHits(q);
+  };
+
+  const fetchHits = async (q) => {
     try {
       const data = await apiClient.get(`/llms/search/huggingface?q=${encodeURIComponent(q)}`);
       const mapped = data.map((m) => ({
@@ -109,13 +120,21 @@ export default function HuggingFaceSearchPanel({
     }
   };
 
+  // A handoff is a new object each time: its synchronous half is applied while
+  // rendering, and the request goes out from the effect below.
+  const [seenHandoff, setSeenHandoff] = useState(null);
+  const [handoffRequest, setHandoffRequest] = useState(null);
+  if (handoff !== seenHandoff) {
+    setSeenHandoff(handoff);
+    const q = handoff?.term?.trim();
+    if (q && beginSearch(q)) setHandoffRequest({ q });
+  }
+
   useEffect(() => {
-    if (handoff?.term) {
-      runSearch(handoff.term);
-    }
-    // runSearch is recreated every render; the handoff object is the trigger.
+    if (handoffRequest) fetchHits(handoffRequest.q);
+    // fetchHits is recreated every render; the request object is the trigger.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [handoff]);
+  }, [handoffRequest]);
 
   return (
     <section className="rounded-2xl border border-[var(--line)] bg-[var(--surface)] p-5">

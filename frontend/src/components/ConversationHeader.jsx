@@ -1,25 +1,33 @@
-import React, { useId, useState } from "react";
+import React, { useId, useRef, useState } from "react";
 import PropTypes from "prop-types";
 import { motion, AnimatePresence } from "framer-motion";
 import { SlidersHorizontal } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
+import ModelPicker from "./ModelPicker";
 import { headerCommands } from "../utils/slashCommands";
 
 /**
  * The header of a conversation and of the new-conversation page (#585): a
- * static "You are chatting with <model>" line and a settings icon that opens
- * a panel with one button per command the page offers (`commands`, from the
- * slash-command registry, shown in its `headerOrder`), each running it
- * exactly as typing it does. What
- * the page adds as children renders in the panel after the command buttons.
+ * "You are chatting with <model>" line whose model name is a picker of the
+ * installed models (#704, `ModelPicker`: `models`, `currentModelId`,
+ * `onPickModel`, locked with the Model command in `disabledCommands`), and a
+ * settings icon that opens a panel with one button per command the page offers
+ * (`commands`, from the slash-command registry, shown in its `headerOrder`),
+ * labelled in words, never by slash name, each running the command exactly as
+ * typing it does. What the page adds as children renders in the panel after
+ * the command buttons.
  *
  * `attention` is the orphaned-conversation state (#225): the model is gone,
- * the line turns into a red "Please select a model", and the panel's Model
- * button stays usable although the composer is blocked.
+ * the line is replaced by a red "Please select a model" that is the picker's
+ * button, and the panel's Model button stays usable although the composer is
+ * blocked.
  */
 export default function ConversationHeader({
   modelName,
   attention = false,
+  models,
+  currentModelId,
+  onPickModel,
   commands,
   disabledCommands = [],
   onCommand,
@@ -29,6 +37,21 @@ export default function ConversationHeader({
   const { t } = useTranslation();
   const [open, setOpen] = useState(false);
   const panelId = useId();
+  const settingsRef = useRef(null);
+  // Where the picker's list is drawn: beside the heading, never inside it.
+  const [menuHost, setMenuHost] = useState(null);
+  const picker = (
+    <ModelPicker
+      modelName={modelName}
+      attention={attention}
+      models={models}
+      currentId={currentModelId}
+      onPick={onPickModel}
+      disabled={disabledCommands.includes("model")}
+      menuHost={menuHost}
+      fallbackFocusRef={settingsRef}
+    />
+  );
 
   return (
     <div
@@ -48,22 +71,27 @@ export default function ConversationHeader({
       />
       <div className="relative z-10 p-5">
         <div className="flex items-center justify-between gap-3">
-          <h3 className="min-w-0 break-words text-[1.15rem] font-semibold tracking-tight text-[#F2F7F4]">
-            {attention ? (
-              <span role="alert" className="text-red-400">
-                {t("chat:conversationHeader.pickerAttention")}
-              </span>
-            ) : (
+          <div className="relative min-w-0">
+            <h3 className="break-words text-[1.15rem] font-semibold tracking-tight text-[#F2F7F4]">
+              {/* One tree for both states, the picker in the same slot: the
+                  orphaned line is the slot alone (`gap` keeps its place), so
+                  the button is never remounted and keeps the focus. */}
               <Trans
-                i18nKey="chat:conversationHeader.chattingWith"
-                values={{ model: modelName }}
-                components={{
-                  model: <span className="text-emerald-300" title={modelName} />,
-                }}
+                i18nKey={
+                  attention
+                    ? "chat:conversationHeader.attentionLine"
+                    : "chat:conversationHeader.chattingWith"
+                }
+                components={{ model: picker, gap: <span aria-hidden /> }}
               />
-            )}
-          </h3>
+            </h3>
+            <span aria-live="polite" className="sr-only">
+              {attention ? t("chat:conversationHeader.pickerAttention") : ""}
+            </span>
+            <div ref={setMenuHost} />
+          </div>
           <button
+            ref={settingsRef}
             type="button"
             aria-label={t("chat:conversationHeader.settings")}
             aria-expanded={open}
@@ -106,16 +134,13 @@ export default function ConversationHeader({
                     onClick={() => onCommand({ name: command.name, arg: null })}
                     title={t(`chat:commands.${command.name}.description`)}
                     className={[
-                      "inline-flex items-baseline gap-2 rounded-xl px-3.5 py-2 text-sm font-semibold",
+                      "inline-flex items-baseline rounded-xl px-3.5 py-2 text-sm font-semibold",
                       "bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20",
                       "text-gray-100 transition active:scale-95",
                       "disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100",
                     ].join(" ")}
                   >
                     {t(`chat:commands.${command.name}.label`)}
-                    <span className="font-mono text-[11px] font-normal text-emerald-300/80">
-                      {`/${command.name}`}
-                    </span>
                   </button>
                 ))}
                 {children}
@@ -131,6 +156,9 @@ export default function ConversationHeader({
 ConversationHeader.propTypes = {
   modelName: PropTypes.string,
   attention: PropTypes.bool,
+  models: PropTypes.array.isRequired,
+  currentModelId: PropTypes.oneOfType([PropTypes.string, PropTypes.number]),
+  onPickModel: PropTypes.func.isRequired,
   commands: PropTypes.arrayOf(
     PropTypes.shape({
       name: PropTypes.string.isRequired,

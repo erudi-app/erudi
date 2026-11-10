@@ -20,13 +20,13 @@ checks, downloads and installs nothing until a later launch reads them. The manu
 
 `default_reasoning_effort` (`none`, `low`, `medium`, `high`, `xhigh`, `medium` by default)
 is what a NEW conversation starts at and what an arena panel runs at, on every model that has
-no level saved with `/config global`; an existing conversation keeps the level it started
+no level saved as that model's defaults (the **Save as defaults** button of a conversation's settings window); an existing conversation keeps the level it started
 at. See
 [Conversations](../guides/conversations.md#how-much-the-model-may-think-reasoning-effort).
 
 `default_compaction_threshold` (a whole percent from 50 to 90 in steps of 5, 80 by
 default) is the share of the working context window at which a NEW conversation compacts,
-on every model that has no threshold saved with `/config global`; the conversation copies
+on every model that has no threshold saved as that model's defaults; the conversation copies
 it at creation and keeps it, so a later change never touches an existing conversation. Arena turns never compact and do not read it. A `PUT` carrying only
 this field is a valid update; a value off the scale is a 422. See
 [Conversations](../guides/conversations.md#how-conversation-state-is-kept).

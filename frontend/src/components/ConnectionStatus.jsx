@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useCallback, useRef } from "react";
+import React, { useState, useEffect, useCallback, useRef, useSyncExternalStore } from "react";
 import PropTypes from "prop-types";
 import { useTranslation } from "react-i18next";
 import { HelpCircle, RefreshCw } from "lucide-react";
@@ -90,18 +90,23 @@ export default function ConnectionStatus({
 }) {
   const { t } = useTranslation();
   // Optimistic backend defaults so mounting never flashes an alarming state
-  // before the first health poll resolves. Connectivity needs no such guess:
-  // the operating system already knows the answer.
-  const [status, setStatus] = useState({
+  // before the first health poll resolves.
+  const [health, setHealth] = useState({
     backendReachable: true,
     dbState: "ok",
-    online: isNetworkOnline(),
   });
+  // Connectivity needs no such guess: the operating system already knows the
+  // answer. No request of our own, ever: the OS reports link changes as they
+  // happen and the API client reports requests that died on the wire.
+  const online = useSyncExternalStore(subscribeNetworkStatus, isNetworkOnline);
+  const status = { ...health, online };
 
   // Kept in a ref so the interval callback always sees the latest timeout
   // without re-subscribing the effect on every prop identity change.
   const healthTimeoutRef = useRef(healthTimeoutMs);
-  healthTimeoutRef.current = healthTimeoutMs;
+  useEffect(() => {
+    healthTimeoutRef.current = healthTimeoutMs;
+  });
 
   useEffect(() => {
     let cancelled = false;
@@ -125,11 +130,11 @@ export default function ConnectionStatus({
         const data = await res.json();
         if (cancelled) return;
         const db = data && typeof data.db === "string" ? data.db : "ok";
-        setStatus((s) => ({ ...s, backendReachable: true, dbState: db }));
+        setHealth((s) => ({ ...s, backendReachable: true, dbState: db }));
       } catch {
         // Any failure/timeout means the local backend is not answering. A failed
         // poll is a state change, never a crash.
-        if (!cancelled) setStatus((s) => ({ ...s, backendReachable: false }));
+        if (!cancelled) setHealth((s) => ({ ...s, backendReachable: false }));
       } finally {
         clearTimeout(timer);
         controllers.delete(controller);
@@ -146,13 +151,6 @@ export default function ConnectionStatus({
       controllers.forEach((c) => c.abort());
     };
   }, [healthPollMs]);
-
-  // Connectivity: no request of our own, ever. The OS reports link changes as
-  // they happen and the API client reports requests that died on the wire.
-  useEffect(() => {
-    setStatus((s) => ({ ...s, online: isNetworkOnline() }));
-    return subscribeNetworkStatus((online) => setStatus((s) => ({ ...s, online })));
-  }, []);
 
   const handleRestart = useCallback(() => {
     const pending = window.backendAPI?.restartBackend?.();

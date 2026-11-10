@@ -35,6 +35,51 @@ export function KnowledgeBaseProvider({ children }) {
 
   const cancelConfirm = useCallback(() => setIsConfirmOpen(false), []);
 
+  const checkCreationStatus = useCallback(
+    async (assistantId) => {
+      try {
+        const res = await tracedFetch(`${API_BASE_URL}/knowledge_base/${assistantId}/status`);
+        if (!res.ok) {
+          throw new Error(`Server responded with ${res.status}: ${res.statusText}`);
+        }
+        const data = await res.json();
+
+        setStatus(data.status);
+
+        if (data.status === "completed" || data.status === "failed") {
+          clearInterval(intervalRef.current);
+          setIsCreating(false);
+          setShowSpinner(false);
+          if (data.status === "completed") {
+            // A job can complete with some files failed: name them to the page.
+            callbacksRef.current.onComplete?.({ failedFiles: data.failed_files ?? [] });
+          } else {
+            // The backend logged the traceback under this job; this side
+            // records that the assistant the user asked for was not built.
+            log.error(`Knowledge base job failed for assistant ${assistantId}`, {
+              error: data.error_message || null,
+            });
+            const errorMsg =
+              data.error_message || t("knowledgeBase:creation.errors.failedUnexpectedly");
+            setErrorMessage(errorMsg);
+            // The names ride along: when every file failed, they are the part
+            // of the story the message alone does not tell.
+            callbacksRef.current.onError?.(errorMsg, { failedFiles: data.failed_files ?? [] });
+          }
+        }
+      } catch (err) {
+        log.error(`Status check failed for assistant ${assistantId}; polling stopped`, err);
+        clearInterval(intervalRef.current);
+        setIsCreating(false);
+        setShowSpinner(false);
+        const errorMsg = t("knowledgeBase:creation.errors.statusCheckFailed");
+        setErrorMessage(errorMsg);
+        callbacksRef.current.onError?.(errorMsg);
+      }
+    },
+    [t]
+  );
+
   const startCreation = useCallback(async () => {
     setIsConfirmOpen(false);
     setIsStarting(true); // Show spinner in button place
@@ -86,52 +131,7 @@ export function KnowledgeBaseProvider({ children }) {
       setErrorMessage(err.message || t("knowledgeBase:creation.errors.startFailedGeneric"));
       callbacksRef.current.onError?.(err.message);
     }
-  }, [task, t]);
-
-  const checkCreationStatus = useCallback(
-    async (assistantId) => {
-      try {
-        const res = await tracedFetch(`${API_BASE_URL}/knowledge_base/${assistantId}/status`);
-        if (!res.ok) {
-          throw new Error(`Server responded with ${res.status}: ${res.statusText}`);
-        }
-        const data = await res.json();
-
-        setStatus(data.status);
-
-        if (data.status === "completed" || data.status === "failed") {
-          clearInterval(intervalRef.current);
-          setIsCreating(false);
-          setShowSpinner(false);
-          if (data.status === "completed") {
-            // A job can complete with some files failed: name them to the page.
-            callbacksRef.current.onComplete?.({ failedFiles: data.failed_files ?? [] });
-          } else {
-            // The backend logged the traceback under this job; this side
-            // records that the assistant the user asked for was not built.
-            log.error(`Knowledge base job failed for assistant ${assistantId}`, {
-              error: data.error_message || null,
-            });
-            const errorMsg =
-              data.error_message || t("knowledgeBase:creation.errors.failedUnexpectedly");
-            setErrorMessage(errorMsg);
-            // The names ride along: when every file failed, they are the part
-            // of the story the message alone does not tell.
-            callbacksRef.current.onError?.(errorMsg, { failedFiles: data.failed_files ?? [] });
-          }
-        }
-      } catch (err) {
-        log.error(`Status check failed for assistant ${assistantId}; polling stopped`, err);
-        clearInterval(intervalRef.current);
-        setIsCreating(false);
-        setShowSpinner(false);
-        const errorMsg = t("knowledgeBase:creation.errors.statusCheckFailed");
-        setErrorMessage(errorMsg);
-        callbacksRef.current.onError?.(errorMsg);
-      }
-    },
-    [t]
-  );
+  }, [task, t, checkCreationStatus]);
 
   const closeModal = useCallback(() => {
     if (intervalRef.current) {

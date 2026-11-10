@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from "react";
+import React, { useState } from "react";
 import PropTypes from "prop-types";
 import { motion, AnimatePresence } from "framer-motion";
 import { useTranslation } from "react-i18next";
@@ -20,9 +20,11 @@ export default function CustomizePromptModal({ isOpen, onClose, customPrompt, on
   const [localPrompt, setLocalPrompt] = useState(customPrompt);
 
   // Update local state when the prop changes (when switching conversations)
-  useEffect(() => {
+  const [seenPrompt, setSeenPrompt] = useState(customPrompt);
+  if (seenPrompt !== customPrompt) {
+    setSeenPrompt(customPrompt);
     setLocalPrompt(customPrompt);
-  }, [customPrompt]);
+  }
 
   const handleSave = () => {
     onSave?.(localPrompt);

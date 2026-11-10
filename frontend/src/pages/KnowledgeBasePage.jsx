@@ -230,25 +230,24 @@ export default function KnowledgeBasePage() {
   // the effect a new `models` array on every call, and re-running the
   // pre-fill on an unchanged param wiped out a name the user had since typed
   // (#510 follow-up).
-  const appliedModelParamRef = useRef(null);
+  const [appliedModelParam, setAppliedModelParam] = useState(null);
 
-  // Handle URL parameter for model selection
-  useEffect(() => {
-    const modelParam = searchParams.get("model");
-    if (!modelParam || models.length === 0) return;
-    if (appliedModelParamRef.current === modelParam) return;
-
-    // Find the model by name or id
-    const foundModel = models.find(
+  // Find the model by name or id
+  const findModelByParam = (modelParam) =>
+    models.find(
       (model) =>
         model.name === modelParam ||
         model.id === modelParam ||
         model.name.toLowerCase() === modelParam.toLowerCase()
     );
 
+  // Handle URL parameter for model selection: applied while rendering, as the
+  // models list arrives, so the pick shows without an extra committed render.
+  const modelParam = searchParams.get("model");
+  if (modelParam && models.length > 0 && appliedModelParam?.param !== modelParam) {
+    const foundModel = findModelByParam(modelParam);
     if (foundModel) {
-      appliedModelParamRef.current = modelParam;
-      log.log("Setting model from URL parameter", { name: foundModel.name });
+      setAppliedModelParam({ param: modelParam, name: foundModel.name });
       setSelectedModel(foundModel.id);
       // Update vs create (#317): only a KB assistant's own name is safe to
       // pre-fill, since the update flow keeps it. A base model's name is
@@ -256,10 +255,20 @@ export default function KnowledgeBasePage() {
       // name typed but never confirmed submit the base model's name
       // instead (#510).
       setModelName(isKbAssistant(foundModel) ? foundModel.name : "");
-    } else {
-      log.warn("Model not found for parameter", { modelParam });
     }
-  }, [searchParams, models]); // Re-run when searchParams or models change
+  }
+
+  useEffect(() => {
+    if (appliedModelParam) {
+      log.log("Setting model from URL parameter", { name: appliedModelParam.name });
+    }
+  }, [appliedModelParam]);
+
+  useEffect(() => {
+    if (!modelParam || models.length === 0) return;
+    if (appliedModelParam?.param === modelParam) return;
+    log.warn("Model not found for parameter", { modelParam });
+  }, [modelParam, models, appliedModelParam]);
 
   // Handle model selection from ModelLibrary
   const handleModelSelect = (modelId) => {
@@ -293,6 +302,9 @@ export default function KnowledgeBasePage() {
 
   // Check presence on mount; if a download is already running, enter the spinner.
   useEffect(() => {
+    // refreshGateStatus sets state only once the request has answered (the
+    // rule does not see the await): nothing is set while the effect runs.
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     refreshGateStatus(GATE.CHECKING);
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

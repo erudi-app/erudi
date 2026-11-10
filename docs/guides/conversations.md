@@ -439,12 +439,24 @@ part of the answer was written keeps that text above the red headline, with Deta
 
 ## Session controls in the app: the header and the slash commands
 
-A conversation's header reads a static "You are chatting with <model>". Its settings icon opens a
-panel with one button per command (Model, Config, Effort, Compact, Context), each running that
-command exactly as typing it does. When the conversation's model was deleted, the line turns into a
-red "Please select a model" and the composer is blocked; the panel's Model button still works, and
-picking a model there unblocks sending (Compact and Context then say to pick a model first and ask
-the backend nothing). The composer also stays blocked until the conversation's
+A conversation's header reads "You are chatting with <model>", and the model name is a picker: one
+click (or Enter, Space or an arrow key on it) opens the installed models, the arrows move, Enter
+picks, Escape closes and returns the focus to the name
+(`frontend/src/components/ModelPicker.jsx`). It lists the models `/model` lists (a Knowledge Base
+assistant whose weights are missing is left out, `offeredModels` in
+`frontend/src/utils/modelWeights.js`) and picks through the same path as the Model button, a
+`PATCH` of `llm_id` alone, so the model's saved or recommended values apply exactly as there. It is
+disabled while an answer is being written and while a compaction runs, like `/model`. When no model
+can be offered, the open picker says to download one in Models or to re-bind the assistant in
+Knowledge Base. The settings icon opens a panel with one button per command (Model, Config, Effort,
+Compact, Context), labelled in words and never by slash name, each running that command exactly as
+typing it does. When the conversation's model was deleted, the whole line becomes a red "Please
+select a model" that is the picker's button, and the composer is blocked; picking a model there, or
+with the panel's Model button, unblocks sending (Compact and Context then say to pick a model first
+and ask the backend nothing). The state is also announced in a polite live region, and the picker
+button keeps the keyboard focus when the pick ends it. The list is drawn beside the heading, not
+inside it; it closes when the conversation changes, and a picker locked while open hands the focus
+to the settings icon. The composer also stays blocked until the conversation's
 values are loaded, so no turn goes out without them; when the conversation cannot be read, an error
 line with a Retry button shows above the composer and runs the load again. Model and Context are
 disabled from the moment a message is sent until its answer starts, and a context panel opened
@@ -462,9 +474,10 @@ interrupted, and when another model was loaded since, it refuses with "Another m
 now." and the button names that model. The next message of a conversation then says "You unloaded the model;
 reloading it…" until the model answers (see [Model residency](#model-residency)).
 
-The same commands are typed in the composer. Their names are fixed English identifiers in every
-interface language (`frontend/src/utils/slashCommands.js`); their descriptions and popups are
-translated. A message runs a command only when it is exactly one of `/config`, `/config global`,
+The same commands are typed in the composer. Slash names are a typing shortcut: they appear in the
+composer's drop-up and nowhere else in the interface (the Settings page and the header explain
+defaults in their own words). Their names are fixed English identifiers in every interface language
+(`frontend/src/utils/slashCommands.js`); their descriptions and popups are translated. A message runs a command only when it is exactly one of `/config`, `/config global`,
 `/context`, `/compact`, `/effort` or `/model` (surrounding spaces aside); anything else is an
 ordinary message sent to the model — an unknown name (`/foo`), an argument a command does not take
 (`/effort high`, `/compact now`), or text before the command. A command never reaches the model, clears the composer and keeps the files
@@ -503,7 +516,11 @@ closes the help alone. An engine failure that opens its dialog closes any comman
   row loaded while a save or a `/model` switch was made is dropped, and so is a load of a
   conversation the page has already left. The header panel, the popups
   and the send path read one state (`frontend/src/shared/hooks/useConversationSettings.js`), so
-  two views never disagree.
+  two views never disagree. At the bottom of the window, **Save as defaults for <model>** does what
+  `/config global` does (it opens the same popup, after saving the instructions being edited), on a
+  conversation and on the new-conversation page, so the defaults are reachable without typing. It
+  is disabled while an answer is being written or a compaction runs, as `/config global` cannot be
+  typed then.
 - **`/config global`** saves the six current values as the defaults of the current model with
   `PUT /erudi/llms/{id}/conversation_defaults` (see
   [Conversation defaults per model](#conversation-defaults-per-model)); the popup names the model,
@@ -580,9 +597,11 @@ saved values replace the others when they arrive), and a value set after the swi
 Sending waits for the picked model's values. The creation `POST` carries the model and only the
 values the user set, every other field being resolved by the backend for that model; the first
 message is then sent on the values of the conversation as created, read back by the conversation
-page. `/config global` there saves the draft's values for the picked model; it refuses while the
-model's values are on their way, and after a failed read it reads them again first, so it never
-saves the shipped defaults shown in their place.
+page. `/config global` there, and the **Save as defaults** button of the draft's settings window
+(shown there because the draft holds the values and the model it saves), save the draft's values
+for the picked model; they refuse while the model's values are on their way, and after a failed
+read they read them again first, so they never save the shipped defaults shown in their place. The
+header's model name is the same picker there, and picks through the draft's Model path.
 
 The Arena keeps its own panel header (model picker, creativity and diversity sliders, custom
 instructions). Each panel shows the values its model starts from (`GET
