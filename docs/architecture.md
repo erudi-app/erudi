@@ -327,8 +327,9 @@ cause: the model never started on a prompt this size, or it started and went sil
     models downloaded before that column existed. It runs after readiness, in a
     threadpool, never inside the awaited boot sequence.
 12. **GC freeze** — `gc.freeze()` as the last startup step moves every object boot built
-    (catalog, ORM metadata, routers) into the collector's permanent generation, so it is
-    never scanned again and its memory pages stay clean.
+    (catalog, ORM metadata, routers) into the collector's permanent generation, so the
+    collector never scans it again (fewer and shorter full collections). It does not change
+    resident memory.
 
 At rest, after boot, the backend loads neither a model nor the document parsers (`pypdf`,
 `python-docx`, `lxml`, `openpyxl`): the extractors import them in function scope, on the

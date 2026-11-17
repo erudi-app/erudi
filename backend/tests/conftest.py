@@ -71,6 +71,17 @@ from tests._helpers import is_mlx_platform
 
 
 @pytest.fixture(autouse=True)
+def _no_gc_freeze(monkeypatch):
+    """The real lifespan calls ``gc.freeze()``: never freeze the test process's heap.
+
+    A test that observes the call patches ``gc.freeze`` itself, which overrides this.
+    """
+    import gc
+
+    monkeypatch.setattr(gc, "freeze", lambda: None)
+
+
+@pytest.fixture(autouse=True)
 def _memory_observations_in_tmp(tmp_path, monkeypatch):
     """No test ever writes the user's ``memory_calibration.json``: the
     recorded memory observations go to a per-test temporary file."""

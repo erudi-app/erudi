@@ -470,8 +470,8 @@ async def _start_services(app: FastAPI, _phase) -> None:
     )
     app.state.wire_backfill_task.add_done_callback(_log_background_task_failure)
     # Boot is over: park every object it built (catalog, ORM metadata, routers) in the
-    # permanent generation so the collector never walks them again and their pages stay
-    # clean (#621).
+    # permanent generation so the collector never scans them again (fewer, shorter
+    # full collections; no effect on resident memory) (#621).
     gc.freeze()
 
 
