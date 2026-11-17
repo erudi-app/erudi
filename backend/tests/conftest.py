@@ -118,6 +118,36 @@ def _no_real_cache_limit(request, monkeypatch):
     monkeypatch.setattr(runner, "_bound_buffer_cache", lambda: None)
 
 
+@pytest.fixture(scope="session", autouse=True)
+def _in_process_embeddings():
+    """The test session never spawns a real embedding child by accident (#594).
+
+    On macOS ARM the product serves KB embeddings from a dedicated
+    `mlx_vlm.server` child; the suite's KB tests must stay deterministic and
+    runnable on every CI leg, so they run the in-process embedder (still
+    shipped on every platform until F4). SESSION-scoped on purpose: KB
+    module-scoped fixtures (the vector-store/pipeline setups) embed during
+    their own setup, which runs before any function-scoped fixture could
+    force the seam. The child's lifecycle is covered by fakes
+    (`test_embedder_child.py`); the ``mlx_only`` parity test
+    (`test_embedder_child_real.py`) opts back into the real platform adapter
+    itself, and the selection tests override the seam per test.
+    """
+    from src.ingestion import embedder_child, embeddings
+
+    forced_before = embeddings._forced_backend
+    adapter_before = embedder_child._adapter_override
+    # The factory, pinned: vector_store and the KB tests embed in process.
+    embeddings._forced_backend = "in-process"
+    # The manager, disarmed: a stray `prewarm_embedder` (a conversation GET on
+    # a KB assistant) must stay a no-op, never resolve the real platform
+    # adapter. Tests of the manager install their own fake over this.
+    embedder_child._adapter_override = None
+    yield
+    embeddings._forced_backend = forced_before
+    embedder_child._adapter_override = adapter_before
+
+
 # ============ Database Fixtures ============
 
 

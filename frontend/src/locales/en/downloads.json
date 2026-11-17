@@ -62,7 +62,10 @@
     "doneTitle": "Embedding model downloaded",
     "doneBody": "The embedding model was downloaded successfully. The Knowledge Base is ready to use.",
     "errorTitle": "Download failed",
-    "errorBody": "The embedding model could not be downloaded. Check your connection and try again."
+    "errorBody": "The embedding model could not be downloaded. Check your connection and try again.",
+    "bannerMissing": "This assistant's Knowledge Base needs its embedding model, which is not downloaded. Document search is off until it is.",
+    "bannerDownloading": "Downloading the embedding model… Document search will work once it is done.",
+    "bannerError": "The embedding model could not be downloaded."
   },
   "waitingForInstall": "Waiting for the download to finish installing…"
 }

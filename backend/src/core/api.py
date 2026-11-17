@@ -72,6 +72,7 @@ from src.database.migrations import run_migrations
 from src.database.seed import backfill_wire_tools_startup, startup_populate_database
 from src.launcher.postgres_runtime import start_postgres, stop_postgres
 from src.launcher.db_watchdog import start_watchdog, stop_watchdog
+from src.ingestion.embedder_child import shutdown_embedder
 from src.ingestion.vector_store import close_kb_store, init_kb_store
 
 from src.core.exceptions import (
@@ -368,8 +369,10 @@ def apply_idle_unload_preference() -> None:
     attribute, so it must land on the engine left once CUDA may have been
     swapped for CPU, and before the idle monitor starts. The settings PUT
     applies later changes to the same ``config.LLM_Engine``. The knowledge-base
-    embedding model is not governed by it: once used, it stays loaded until the
-    backend stops.
+    embedder is not governed by it: on macOS its dedicated child is released
+    after a fixed 5 minutes unused (``embedder_child.EMBEDDER_IDLE_SECONDS``);
+    on Windows and Linux the in-process embedding model stays loaded until the
+    backend stops (until F3 of #594).
     """
     from src.domains.user_settings.repository import read_idle_unload_minutes
 
@@ -625,6 +628,9 @@ async def _stop_services(app: FastAPI) -> None:
     await step("stop_pressure_task", lambda: config.LLM_Engine.stop_pressure_task())
     await step("drain_pending_reset", drain_pending_reset)
     await step("engine_cleanup", lambda: config.LLM_Engine.cleanup())
+    # The KB embedding child is not an engine: it has its own stop. In a
+    # thread because the terminate joins the child (bounded, up to ~7 s).
+    await step("stop_kb_embedder", lambda: asyncio.to_thread(shutdown_embedder))
     await step("close_checkpointer", lambda: app.state.checkpointer_cm.__aexit__(None, None, None))
     await step("close_kb_store", close_kb_store)
     # Cluster stops LAST: every DB consumer above must be closed first.

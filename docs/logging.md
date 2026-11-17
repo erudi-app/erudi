@@ -190,6 +190,7 @@ including everything MLX and Metal write from native code, into a file beside
 | File | Where |
 |------|-------|
 | `mlx-child-<port>.log` | Development: `backend/logs/` · Packaged app: next to `backend.log` (the table at the top of this page) |
+| `embedder-child-<port>.log` | Same place — the Knowledge Base **embedding child** (#594), a second `mlx_vlm.server` process on Apple Silicon (ports 27400-27499), captured the same way |
 
 - One file per spawn, named after the port that child serves. The previous
   spawn's file is kept as `mlx-child-<port>.log.1`; older ones are removed, so
@@ -199,7 +200,9 @@ including everything MLX and Metal write from native code, into a file beside
   writing to that file as it happens.
 - Stopping a model — switching to another one, the idle reap, quitting — deletes
   both files. A child that died on its own keeps them: that output is the whole
-  account of the death.
+  account of the death. The embedding child follows the same rules with its own
+  stop reasons (its fixed 5-minute idle release, the backend's shutdown); the
+  backend's record of its death quotes its tail exactly like the chat child's.
 - A report quotes only the child it is about. Ports are reused, so a new child
   can inherit the previous one's file as `mlx-child-<port>.log.1`; that older
   file is read only when it belongs to the running child, so two crashes on one

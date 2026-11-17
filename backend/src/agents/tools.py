@@ -44,6 +44,7 @@ from src.agents.prompts import (
     answer_language_line,
     build_kb_context_block,
 )
+from src.core.exceptions import EmbeddingModelMissingException
 from src.core.logging import logger
 from src.core.logutils import truncate_for_log
 from src.utils.kb_utils import KbExcerpt, retrieve_kb_excerpts
@@ -206,6 +207,14 @@ async def run_kb_search(query: str, ctx: TurnToolContext) -> Optional[List[KbExc
         excerpts = await run_in_threadpool(
             retrieve_kb_excerpts, query, ctx.kb_id, ctx.kb_token_budget
         )
+    except EmbeddingModelMissingException:
+        # A state the interface owns (#594: the gate, the conversation/Arena
+        # banner), not a failure of this turn: one INFO, and the tool answers
+        # that the documents cannot be searched right now.
+        logger.info(
+            f"search_knowledge_base skipped: the embedding model is not downloaded (kb_id={ctx.kb_id})"
+        )
+        return None
     except Exception:
         logger.exception("search_knowledge_base tool failed (degrading gracefully)")
         return None
