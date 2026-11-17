@@ -32,17 +32,17 @@
     "node": "^22.18.0 || ^24.11.0 || >=26.0.0"
   },
   "devDependencies": {
-    "@babel/core": "^8.1.0",
+    "@babel/core": "^8.1.2",
     "@babel/preset-react": "^8.0.1",
     "@tailwindcss/postcss": "^4.3.5",
     "@testing-library/jest-dom": "^7.0.1",
     "@testing-library/react": "^16.3.3",
-    "@testing-library/user-event": "^14.6.8",
+    "@testing-library/user-event": "^14.6.10",
     "@vercel/webpack-asset-relocator-loader": "1.11.0",
     "@vitest/coverage-v8": "5.1.0",
     "autoprefixer": "^10.6.1",
     "babel-loader": "^10.1.1",
-    "concurrently": "^10.0.6",
+    "concurrently": "^10.0.7",
     "cross-env": "^10.1.0",
     "css-loader": "^6.11.0",
     "electron": "^44.10.0",
@@ -58,14 +58,14 @@
     "playwright": "^1.65.0",
     "postcss": "^8.5.30",
     "postcss-loader": "^8.2.1",
-    "prettier": "^3.9.10",
+    "prettier": "^3.10.1",
     "style-loader": "^4.0.0",
     "tailwindcss": "^3.4.19",
     "vitest": "^5.1.0",
     "wait-on": "^8.0.5",
     "webpack": "^5.112.0",
     "webpack-cli": "^7.3.1",
-    "webpack-dev-server": "^5.2.6"
+    "webpack-dev-server": "^6.1.0"
   },
   "dependencies": {
     "@fontsource/montserrat": "^5.3.0",
