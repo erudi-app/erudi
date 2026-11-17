@@ -36,7 +36,11 @@ from langchain_postgres.v2.indexes import DistanceStrategy, HNSWIndex
 
 from src.core.logging import logger
 from src.core.logutils import truncate_for_log
-from src.launcher.postgres_settings import KB_STORE_POOL_MAX_OVERFLOW, KB_STORE_POOL_SIZE
+from src.launcher.postgres_settings import (
+    KB_STORE_POOL_MAX_OVERFLOW,
+    KB_STORE_POOL_SIZE,
+    POOL_TIMEOUT_SECONDS,
+)
 from src.ingestion.embeddings import (
     EMBEDDING_DIMENSIONS,
     E5Embeddings,
@@ -112,6 +116,7 @@ def init_kb_store(handle: "PostgresHandle") -> PGVectorStore:
         handle.sqlalchemy_url,
         pool_size=KB_STORE_POOL_SIZE,
         max_overflow=KB_STORE_POOL_MAX_OVERFLOW,
+        pool_timeout=POOL_TIMEOUT_SECONDS,
     )
 
     if not table_exists:

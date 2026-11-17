@@ -135,9 +135,7 @@ def _is_disconnect(exc_ctx) -> bool:
     if getattr(exc_ctx, "is_disconnect", False):
         return True
     original = getattr(exc_ctx, "original_exception", None)
-    return isinstance(original, psycopg.OperationalError) and not _is_live_server_refusal(
-        original
-    )
+    return isinstance(original, psycopg.OperationalError) and not _is_live_server_refusal(original)
 
 
 def _on_db_error(exc_ctx) -> None:

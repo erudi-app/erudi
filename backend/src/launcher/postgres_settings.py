@@ -25,18 +25,26 @@ from __future__ import annotations
 # The business SQLAlchemy engine (`src/database/core.py`, `init_database`):
 # a QueuePool keeps up to `pool_size` connections open between requests and
 # opens up to `max_overflow` more while that many are checked out at once.
-# Each connection kept open is a server process of its own (5 to 9 MB). A
-# session with a Knowledge Base assistant, a title, two compactions and the
-# renderer's polls never had more than 4 queries in flight at once: two are
-# kept, and up to 8 can be open.
+# Each connection kept open is a server process of its own (5 to 9 MB), so
+# two are kept. A streamed answer (chat, arena, title) holds its request's
+# session -- and its connection, `idle in transaction` -- for the whole
+# generation, waiting turns included. The worst one-user case measured (a
+# Knowledge Base ingestion, two arena answers, two titles and a chat answer
+# at once, the renderer polling on three threads) had 10 connections in a
+# transaction at once, and exhausted a pool of 8; up to 12 can be open.
 BUSINESS_POOL_SIZE = 2
-BUSINESS_POOL_MAX_OVERFLOW = 6
+BUSINESS_POOL_MAX_OVERFLOW = 10
 
 # The langchain-postgres `PGEngine` behind the Knowledge Base store
 # (`src/ingestion/vector_store.py`, `init_kb_store`): an async pool of its own.
 # A search and an ingestion each use one connection at a time.
 KB_STORE_POOL_SIZE = 1
 KB_STORE_POOL_MAX_OVERFLOW = 2
+
+# How long a request waits for a pooled connection before it fails with
+# DATABASE_BUSY (503, `src/core/exceptions.py`). SQLAlchemy's own default,
+# stated so the error can say it.
+POOL_TIMEOUT_SECONDS = 30
 
 # The LangGraph `AsyncPostgresSaver` (`src/agents/checkpoint.py`): one
 # connection held for the app's lifetime.
@@ -53,12 +61,15 @@ BACKUP_CONNECTIONS = 1
 
 # Short `psycopg.connect` calls outside the pools: the admin connection of
 # `start_postgres`, `init_kb_store`'s schema checks, and the dense-similarity
-# read of every Knowledge Base search (`_dense_similarities`).
+# read of every Knowledge Base search (`_dense_similarities`). Two cover one
+# search at a time beside a boot step; searches running at once (two arena
+# answers on Knowledge Base assistants) open one each and use the margin.
 DIRECT_CONNECTIONS = 2
 
-# Room for what the sum does not hold: a `psql` opened during a bug hunt, and
-# the overlap of a DB watchdog restart, where the old checkpointer is closed
-# only after the new one is open.
+# Room for what the sum does not hold: a `psql` opened during a bug hunt, the
+# overlap of a DB watchdog restart, where the old checkpointer is closed only
+# after the new one is open, and the direct connections of Knowledge Base
+# searches running at once beyond `DIRECT_CONNECTIONS`.
 CONNECTION_MARGIN = 5
 
 

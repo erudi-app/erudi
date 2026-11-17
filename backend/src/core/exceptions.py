@@ -958,6 +958,41 @@ def log_level_for_status(status_code: int) -> int:
     return logging.ERROR if status_code >= 500 else logging.INFO
 
 
+class DatabaseBusyException(AppBaseException):
+    """Every pooled database connection stayed in use for the pool timeout.
+
+    Raised for SQLAlchemy's pool ``TimeoutError`` by
+    :func:`database_pool_timeout_handler`: the request was not served, the
+    database itself is fine (a streamed answer holds its connection for its
+    whole generation, so many at once can fill the pool).
+    """
+
+    def __init__(self, timeout_seconds: int, trace: Optional[str] = None):
+        super().__init__(
+            message=(
+                f"Every database connection was in use for {timeout_seconds} s, so this "
+                "request was not served. Try again once the answers in progress have finished."
+            ),
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            erudi_code="DATABASE_BUSY",
+            trace=trace,
+        )
+
+
+async def database_pool_timeout_handler(request: Request, exc: Exception):
+    """SQLAlchemy's pool ``TimeoutError`` as a ``DATABASE_BUSY`` 503.
+
+    Written through :func:`app_base_exception_handler`, so the request gets
+    one ERROR record carrying the pool's own message (its size, overflow and
+    timeout) as the trace.
+    """
+    from src.launcher.postgres_settings import POOL_TIMEOUT_SECONDS
+
+    busy = DatabaseBusyException(POOL_TIMEOUT_SECONDS, trace=str(exc))
+    busy.__cause__ = exc
+    return await app_base_exception_handler(request, busy)
+
+
 async def app_base_exception_handler(request: Request, exc: AppBaseException):
     """Global exception handler for AppBaseException and subclasses.
 

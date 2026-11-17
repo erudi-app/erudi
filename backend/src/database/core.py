@@ -51,7 +51,11 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 from src.core.logging import logger
-from src.launcher.postgres_settings import BUSINESS_POOL_MAX_OVERFLOW, BUSINESS_POOL_SIZE
+from src.launcher.postgres_settings import (
+    BUSINESS_POOL_MAX_OVERFLOW,
+    BUSINESS_POOL_SIZE,
+    POOL_TIMEOUT_SECONDS,
+)
 
 # Session factory — configured in place by init_database(). Safe to import.
 SessionLocal = sessionmaker(autocommit=False, autoflush=False)
@@ -103,6 +107,7 @@ def init_database(sqlalchemy_url: str) -> Engine:
         sqlalchemy_url,
         pool_size=BUSINESS_POOL_SIZE,
         max_overflow=BUSINESS_POOL_MAX_OVERFLOW,
+        pool_timeout=POOL_TIMEOUT_SECONDS,
     )
     SessionLocal.configure(bind=db_engine)
     logger.info(f"Database bound: {_sanitize_url_for_log(sqlalchemy_url)}")

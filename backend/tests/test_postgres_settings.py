@@ -30,6 +30,7 @@ from src.launcher.postgres_settings import (
     KB_STORE_POOL_MAX_OVERFLOW,
     KB_STORE_POOL_SIZE,
     MIGRATION_CONNECTIONS,
+    POOL_TIMEOUT_SECONDS,
     max_connections,
     postmaster_options,
     server_settings,
@@ -59,14 +60,16 @@ class TestConnectionBudget:
 
     @pytest.mark.unit
     def test_pools_are_sized_for_one_user(self):
-        # A session (KB assistant, title, two compactions, the renderer's
-        # polls) never had more than 4 queries in flight at once and held
-        # 6 connections: the pools keep few idle connections and still open
-        # twice the measured peak.
+        # The worst one-user case measured -- a Knowledge Base ingestion, two
+        # arena answers, two titles and a chat answer at once, the renderer
+        # polling on three threads -- had 10 connections in a transaction at
+        # once (pg_stat_activity, state <> 'idle'); a streamed answer holds
+        # its session's connection for the whole generation. The business
+        # pool opens that peak plus room; few connections are kept idle.
         assert BUSINESS_POOL_SIZE + KB_STORE_POOL_SIZE <= 3
-        assert BUSINESS_POOL_SIZE + BUSINESS_POOL_MAX_OVERFLOW >= 2 * 4
+        assert BUSINESS_POOL_SIZE + BUSINESS_POOL_MAX_OVERFLOW >= 10 + 2
         assert KB_STORE_POOL_SIZE + KB_STORE_POOL_MAX_OVERFLOW >= 2
-        assert max_connections() <= 25
+        assert max_connections() <= 30
 
     @pytest.mark.unit
     def test_settings_carry_the_computed_max_connections(self):
@@ -83,6 +86,7 @@ class TestConnectionBudget:
         try:
             assert engine.pool.size() == BUSINESS_POOL_SIZE
             assert engine.pool._max_overflow == BUSINESS_POOL_MAX_OVERFLOW
+            assert engine.pool._timeout == POOL_TIMEOUT_SECONDS
         finally:
             engine.dispose()
 
@@ -121,6 +125,7 @@ class TestConnectionBudget:
         assert recorded == {
             "pool_size": KB_STORE_POOL_SIZE,
             "max_overflow": KB_STORE_POOL_MAX_OVERFLOW,
+            "pool_timeout": POOL_TIMEOUT_SECONDS,
         }
 
 
@@ -337,3 +342,35 @@ class TestJoinedPostmasterKeepsItsSettings:
                 postgres_runtime._pg_server_mod.pg_ctl(
                     ["-w", "stop", "-m", "fast"], pgdata=data_dir
                 )
+
+
+class TestPoolTimeout:
+    @pytest.mark.unit
+    def test_an_exhausted_pool_answers_503_with_a_clear_error(self, caplog):
+        from fastapi import FastAPI
+        from fastapi.testclient import TestClient
+        from sqlalchemy.exc import TimeoutError as PoolTimeout
+
+        from src.core.api import add_exception_handlers
+
+        app = FastAPI()
+        add_exception_handlers(app)
+
+        @app.get("/busy")
+        def busy():
+            raise PoolTimeout(
+                "QueuePool limit of size 2 overflow 10 reached, connection timed out, "
+                "timeout 30.00"
+            )
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            response = TestClient(app, raise_server_exceptions=False).get("/busy")
+
+        assert response.status_code == 503
+        error = response.json()["error"]
+        assert error["type"] == "DATABASE_BUSY"
+        assert "database connection" in error["message"]
+        assert f"{POOL_TIMEOUT_SECONDS} s" in error["message"]
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1
+        assert "QueuePool limit" in errors[0].getMessage()
