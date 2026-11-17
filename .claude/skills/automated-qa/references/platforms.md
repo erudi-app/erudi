@@ -23,6 +23,12 @@ On macOS `erudi/` and `Erudi/` are the same directory. The Electron logs are
 **not** inside the data directory on any platform, so they survive the clean
 step: always filter them by today's date before reading them as this run's.
 
+Help → Clear All Data, by contrast, deletes the backend data folder, both log
+folders and the stdout capture, and empties the Electron profile's storage
+(the profile folder itself stays): the full list is in `docs/privacy.md`,
+"What Clear All Data removes". Pasted images live in the backend data folder
+(`.../prod/data/pasted-images/`).
+
 ## Confirm nothing is running
 
 ```bash

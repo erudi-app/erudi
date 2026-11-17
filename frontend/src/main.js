@@ -1,5 +1,5 @@
 /* eslint-disable no-console */
-const { app, BrowserWindow, ipcMain, dialog, Menu, shell } = require("electron");
+const { app, BrowserWindow, ipcMain, dialog, Menu, session, shell } = require("electron");
 const { createMainTranslator } = require("./i18n/mainTranslator");
 
 // Interface language for the native menu and dialogs (#385). The renderer
@@ -27,7 +27,42 @@ const { readAppLogTailResult } = require("./utils/appLogTail");
 const { describeProcessGone, formatMainRecord } = require("./utils/mainLog");
 const { createBackendStartTracker, requestStop } = require("./utils/backendStartTracker");
 const { configureUpdater, createUpdaterWiring } = require("./utils/updaterWiring");
+const {
+  resolveDataLocations,
+  listClearTargets,
+  isSafeToDelete,
+  UPDATE_NOTES_FILE,
+  LAST_SEEN_VERSION_FILE,
+} = require("./utils/dataLocations");
+const { clearAllData, PENDING_CLEAR_FILE } = require("./utils/clearAllData");
 const { readImageAsDataUrl } = require("./utils/imageReader");
+
+// Where Erudi keeps what it stores: the backend's data and log folders, as
+// backend/src/launcher/runtime_paths.py resolves them (utils/dataLocations.js
+// computes the same folders, checked against one shared table). Open Data
+// Folder, Clear All Data and the pasted images all go through it.
+const dataLocations = resolveDataLocations({
+  platform: process.platform,
+  env: process.env,
+  home: os.homedir(),
+  tmpdir: os.tmpdir(),
+  isPackaged: app.isPackaged,
+  devBackendRoot: path.resolve(app.getAppPath(), "..", "backend"),
+});
+
+// An ERUDI_DATA_ROOT instance keeps its Electron side under the same root
+// (<root>/electron: the Chromium profile, Erudi's files beside it, the
+// Electron logs), so a QA run next to the installed app shares nothing with
+// it -- neither its storage nor its single-instance lock. Set before
+// electron-updater loads and before the lock is taken: both read these paths.
+// Without a root, the logs folder is Electron's default, set explicitly so
+// that app.getPath("logs") is defined for Clear All Data.
+if (dataLocations.electronDir) {
+  app.setPath("userData", dataLocations.electronDir);
+}
+app.setAppLogsPath(
+  dataLocations.electronDir ? path.join(dataLocations.electronDir, "logs") : undefined
+);
 
 // electron-updater: only loaded in production to avoid dev noise.
 // Reads latest.yml / latest-mac.yml from GitHub Releases and handles
@@ -41,6 +76,12 @@ if (app.isPackaged) {
     autoUpdater = require("electron-updater").autoUpdater;
     autoUpdater.logger = require("electron-log");
     autoUpdater.logger.transports.file.level = "info";
+    // Electron's logs folder (app.getPath("logs")) rather than the library's
+    // own default: the same folder on a default install, and the instance's
+    // under ERUDI_DATA_ROOT, where electron-log would still write to
+    // ~/Library/Logs on macOS. Clear All Data deletes this folder.
+    autoUpdater.logger.transports.file.resolvePathFn = (vars) =>
+      path.join(vars.electronDefaultDir, vars.fileName);
     // Before anything can run: both library flags off (its defaults are on)
     // and its per-install identifier replaced by a constant.
     configureUpdater(autoUpdater);
@@ -125,9 +166,16 @@ function killBackend(proc) {
 }
 
 // Create a log file for debugging. This is THE file QA reads (app:getLogPath);
-// renderer logs are forwarded here too via the "renderer-log" IPC channel.
-const logFile = path.join(os.tmpdir(), "erudi-backend.log");
-const oldLogFile = path.join(os.tmpdir(), "erudi-backend.old.log");
+// renderer logs are forwarded here too via the "renderer-log" IPC channel. In
+// the system temporary folder, or the instance log folder under ERUDI_DATA_ROOT.
+try {
+  fs.mkdirSync(dataLocations.appLogDir, { recursive: true });
+} catch (err) {
+  // Not fatal: log() below reports, on the console, a file it cannot write.
+  console.error("Failed to create the log folder:", err);
+}
+const logFile = path.join(dataLocations.appLogDir, "erudi-backend.log");
+const oldLogFile = path.join(dataLocations.appLogDir, "erudi-backend.old.log");
 const LOG_MAX_BYTES = 10 * 1024 * 1024; // 10 MB size cap
 const LOG_STAT_EVERY = 200; // fs.stat is cheap but not free — sample it
 let logWriteCount = 0;
@@ -625,100 +673,12 @@ const createApplicationMenu = () => {
       submenu: [
         {
           label: t("menu.help.openDataFolder"),
-          click: async () => {
-            try {
-              const dataDir = getDataDirectory();
-
-              // Create directory if it doesn't exist
-              if (!fs.existsSync(dataDir)) {
-                fs.mkdirSync(dataDir, { recursive: true });
-              }
-
-              // Open in Finder
-              shell.openPath(dataDir);
-              log(`Opened data folder: ${dataDir}`);
-            } catch (error) {
-              logError("Failed to open the data folder", error);
-              dialog.showErrorBox(
-                t("dialogs.errorTitle"),
-                t("dialogs.openDataFolderFailed", { error: error.message })
-              );
-            }
-          },
+          click: openDataFolder,
         },
         { type: "separator" },
         {
           label: t("menu.help.clearAllData"),
-          click: async () => {
-            try {
-              if (!mainWindow) {
-                logWarn("Cannot clear data: no main window");
-                return;
-              }
-
-              const dataDir = getDataDirectory();
-
-              // Show confirmation dialog
-              const result = await dialog.showMessageBox(mainWindow, {
-                type: "warning",
-                buttons: [t("dialogs.cancel"), t("dialogs.clearAll.confirm")],
-                defaultId: 0,
-                cancelId: 0,
-                title: t("dialogs.clearAll.title"),
-                message: t("dialogs.clearAll.message"),
-                detail: t("dialogs.clearAll.detail"),
-              });
-
-              if (result.response === 1) {
-                // User clicked "Delete All Data"
-                log("User confirmed data deletion. Clearing all data...");
-
-                // Stop the backend first — graceful so Postgres runs
-                // stop_postgres and releases the data-dir locks we are about to
-                // delete; killBackend is the hard tree-kill fallback (#216).
-                if (backendProcess) {
-                  log("Stopping backend process...");
-                  requestStop(backendProcess);
-                  await gracefulShutdown(backendProcess, { killFn: killBackend });
-                  backendProcess = null;
-                }
-
-                // Wait a bit for the OS to release any lingering file handles
-                await new Promise((resolve) => setTimeout(resolve, 1000));
-
-                // Delete the data directory
-                if (fs.existsSync(dataDir)) {
-                  try {
-                    fs.rmSync(dataDir, { recursive: true, force: true });
-                    log(`Successfully deleted data directory: ${dataDir}`);
-                  } catch (error) {
-                    logError(`Failed to delete the data directory ${dataDir}`, error);
-                    throw error;
-                  }
-                }
-
-                // Show success message
-                await dialog.showMessageBox(mainWindow, {
-                  type: "info",
-                  buttons: [t("dialogs.ok")],
-                  title: t("dialogs.dataCleared.title"),
-                  message: t("dialogs.dataCleared.message"),
-                  detail: t("dialogs.dataCleared.detail"),
-                });
-
-                // Quit the app
-                app.quit();
-              } else {
-                log("User cancelled data deletion");
-              }
-            } catch (error) {
-              logError("Failed to clear the data", error);
-              dialog.showErrorBox(
-                t("dialogs.errorTitle"),
-                t("dialogs.clearAll.failedWithError", { error: error.message })
-              );
-            }
-          },
+          click: clearAllDataFromMenu,
         },
         { type: "separator" },
         {
@@ -907,29 +867,12 @@ ipcMain.handle("diagnostics:appLogTail", (_event, limit) => {
  *
  * `shell.showItemInFolder` takes whatever path it is given, and the path the
  * renderer passes comes from an HTTP response. Rather than trust it, the
- * handler checks the file sits in a directory this app writes logs to. The
- * list mirrors `backend/src/launcher/runtime_paths.py`.
+ * handler checks the file sits in a directory this app writes logs to: the
+ * app log's, and the backend's (utils/dataLocations.js, which mirrors
+ * `backend/src/launcher/runtime_paths.py`).
  */
 function knownLogDirectories() {
-  const dirs = [path.dirname(logFile)];
-  const appName = "erudi";
-  if (process.platform === "darwin") {
-    dirs.push(path.join(os.homedir(), "Library", "Logs", appName));
-  } else if (process.platform === "win32") {
-    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
-    dirs.push(path.join(localAppData, appName, "logs"));
-  } else {
-    const stateHome = process.env.XDG_STATE_HOME || path.join(os.homedir(), ".local", "state");
-    dirs.push(path.join(stateHome, appName, "logs"));
-  }
-  if (process.env.ERUDI_DATA_ROOT) {
-    dirs.push(path.join(process.env.ERUDI_DATA_ROOT, "logs"));
-  }
-  if (!app.isPackaged) {
-    // Dev: backend/logs sits next to the frontend directory Electron runs from.
-    dirs.push(path.resolve(app.getAppPath(), "..", "backend", "logs"));
-  }
-  return dirs.map((dir) => path.resolve(dir));
+  return [path.dirname(logFile), dataLocations.backendLogDir].map((dir) => path.resolve(dir));
 }
 
 // Reveal a log file in the OS file manager. Called with the backend log path
@@ -1026,9 +969,9 @@ ipcMain.handle("fs:readImageAsDataURL", async (_event, filePath) => {
 // Persist a pasted (clipboard) image to disk and return its absolute path.
 // The renderer has no fs access, and a clipboard image has no source path, so
 // it would otherwise be stored as a bare [image] placeholder and lost on reload
-// (#136). Writing it under the user-data dir gives it a real path that flows
+// (#136). Writing it in the data folder gives it a real path that flows
 // through the same [image_path:...] persistence + fs:readImageAsDataURL reload
-// pipeline as any file attachment.
+// pipeline as any file attachment, and Clear All Data deletes it with the rest.
 ipcMain.handle("image:savePasted", async (_event, dataUrl) => {
   try {
     const match = /^data:image\/([a-zA-Z0-9.+-]+);base64,(.*)$/.exec(dataUrl || "");
@@ -1042,10 +985,9 @@ ipcMain.handle("image:savePasted", async (_event, dataUrl) => {
       ext = "svg";
     }
     const bytes = Buffer.from(match[2], "base64");
-    const dir = path.join(getDataDirectory(), "pasted-images");
-    fs.mkdirSync(dir, { recursive: true });
+    fs.mkdirSync(dataLocations.pastedImagesDir, { recursive: true });
     const filePath = path.join(
-      dir,
+      dataLocations.pastedImagesDir,
       `paste-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`
     );
     fs.writeFileSync(filePath, bytes);
@@ -1057,112 +999,163 @@ ipcMain.handle("image:savePasted", async (_event, dataUrl) => {
   }
 });
 
-// Helper function to get the user data directory path (cross-platform)
-function getDataDirectory() {
-  const appName = "erudi";
-  if (process.platform === "win32") {
-    const localAppData = process.env.LOCALAPPDATA || path.join(os.homedir(), "AppData", "Local");
-    return path.join(localAppData, appName);
+// ── Open Data Folder / Clear All Data (Help menu) ────────────────────────────
+
+// The backend's data folder, created if this is a first run.
+async function openDataFolder() {
+  const dataDir = dataLocations.dataDir;
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    // openPath answers an error message, or "" when the folder opened.
+    const failure = await shell.openPath(dataDir);
+    if (failure) {
+      throw new Error(failure);
+    }
+    log(`Opened data folder: ${dataDir}`);
+  } catch (error) {
+    logError(`Failed to open the data folder ${dataDir}`, error);
+    dialog.showErrorBox(
+      t("dialogs.errorTitle"),
+      t("dialogs.openDataFolderFailed", { error: error.message })
+    );
   }
-  return path.join(os.homedir(), "Library", "Application Support", appName);
 }
 
-// IPC handler to open data folder in Finder
-ipcMain.handle("data:openFolder", async () => {
-  try {
-    const dataDir = getDataDirectory();
+// What Clear All Data deletes (utils/dataLocations.js): the backend's data
+// and log folders, the pasted images an earlier version kept elsewhere, the
+// Electron logs (electron-log writes nothing in a dev run without an
+// instance root, and there that folder is the installed app's), Erudi's own
+// files in the user data folder, and the app log.
+function clearTargets() {
+  return listClearTargets(dataLocations, {
+    userData: app.getPath("userData"),
+    electronLogsDir: app.isPackaged || dataLocations.electronDir ? app.getPath("logs") : null,
+    appLogFiles: [logFile, oldLogFile],
+  });
+}
 
-    // Create directory if it doesn't exist
-    if (!fs.existsSync(dataDir)) {
-      fs.mkdirSync(dataDir, { recursive: true });
-    }
+// Never a root Erudi does not own: the ERUDI_DATA_ROOT folder (a user may
+// point it at a shared folder) and the Electron user data folder itself (the
+// running Chromium's profile) are protected, with the home folder.
+const isSafeClearTarget = (target) =>
+  isSafeToDelete(target, {
+    platform: process.platform,
+    home: os.homedir(),
+    protectedDirs: [dataLocations.instanceRoot, app.getPath("userData")],
+  });
 
-    // Open in Finder
-    shell.openPath(dataDir);
-    log(`Opened data folder: ${dataDir}`);
-    return { success: true, path: dataDir };
-  } catch (error) {
-    logError("Failed to open the data folder", error);
-    return { success: false, error: error.message };
+const pendingClearMarker = () => path.join(app.getPath("userData"), PENDING_CLEAR_FILE);
+
+// The interface's own storage (local storage, IndexedDB, caches...), cleared
+// through Chromium rather than by deleting its profile folder under it.
+async function clearInterfaceStorage() {
+  await session.defaultSession.clearStorageData();
+  await session.defaultSession.clearCache();
+}
+
+function reportClear(result) {
+  for (const { target, code } of result.pending) {
+    logWarn(`Clear All Data: ${target} is still in use (${code}); deleted at the next start`);
   }
-});
+  for (const target of result.refused) {
+    logError(`Clear All Data refused to delete ${target}: not a folder Erudi owns`);
+  }
+  if (result.storageError) {
+    logWarn(
+      "Clear All Data: the interface storage could not be cleared; retried at the next start",
+      result.storageError
+    );
+  }
+  log(`Clear All Data: ${result.complete ? "everything deleted" : "finishes at the next start"}`);
+}
 
-// IPC handler to clear all data and quit
-ipcMain.handle("data:clearAll", async () => {
+async function clearAllDataFromMenu() {
+  if (!mainWindow) {
+    logWarn("Cannot clear data: no main window");
+    return;
+  }
+  const choice = await dialog.showMessageBox(mainWindow, {
+    type: "warning",
+    buttons: [t("dialogs.cancel"), t("dialogs.clearAll.confirm")],
+    defaultId: 0,
+    cancelId: 0,
+    title: t("dialogs.clearAll.title"),
+    message: t("dialogs.clearAll.message"),
+    detail: t("dialogs.clearAll.detail"),
+  });
+  if (choice.response !== 1) {
+    log("User cancelled data deletion");
+    return;
+  }
+  log("User confirmed data deletion. Clearing all data...");
+
+  // The app quits at the end, whatever happens: marked now, so the backend
+  // supervisor stands down instead of respawning the backend stopped below,
+  // and the quit skips the teardown already done here.
+  shuttingDown = true;
   try {
-    const dataDir = getDataDirectory();
-
-    // Show confirmation dialog
-    const result = await dialog.showMessageBox(mainWindow, {
-      type: "warning",
-      buttons: [t("dialogs.cancel"), t("dialogs.clearAll.confirm")],
-      defaultId: 0,
-      cancelId: 0,
-      title: t("dialogs.clearAll.title"),
-      message: t("dialogs.clearAll.message"),
-      detail: t("dialogs.clearAll.detail"),
-    });
-
-    if (result.response === 1) {
-      // User clicked "Delete All Data"
-      log("User confirmed data deletion. Clearing all data...");
-
-      // Stop the backend BEFORE deleting the data dir it holds open. Graceful
-      // first so the embedded Postgres runs stop_postgres and releases its
-      // locks; killBackend is the hard fallback that tears down the whole tree
-      // (not a bare SIGTERM, which on Windows only hits the parent — #147/#216).
-      if (backendProcess) {
+    const result = await clearAllData({
+      // The same graceful stop a quit runs: the embedded Postgres and the
+      // backend close their files; killBackend is the hard fallback (#216).
+      stopBackend: async () => {
+        if (!backendProcess) return;
         log("Stopping backend process...");
         requestStop(backendProcess);
         await gracefulShutdown(backendProcess, { killFn: killBackend });
         backendProcess = null;
-      }
-
-      // Wait a bit for the OS to release any lingering file handles
-      await new Promise((resolve) => setTimeout(resolve, 1000));
-
-      // Delete the data directory
-      if (fs.existsSync(dataDir)) {
-        try {
-          fs.rmSync(dataDir, { recursive: true, force: true });
-          log(`Successfully deleted data directory: ${dataDir}`);
-        } catch (error) {
-          logError(`Failed to delete the data directory ${dataDir}`, error);
-          throw error;
+      },
+      // A blank page writes nothing to the storage once it is cleared.
+      quietRenderer: async () => {
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          await mainWindow.webContents.loadURL("about:blank");
         }
-      }
-
-      // Show success message
-      await dialog.showMessageBox(mainWindow, {
-        type: "info",
-        buttons: [t("dialogs.ok")],
-        title: t("dialogs.dataCleared.title"),
-        message: t("dialogs.dataCleared.message"),
-        detail: t("dialogs.dataCleared.detail"),
-      });
-
-      // Quit the app
-      app.quit();
-
-      return { success: true };
-    } else {
-      log("User cancelled data deletion");
-      return { success: false, cancelled: true };
-    }
+      },
+      clearStorage: clearInterfaceStorage,
+      targets: clearTargets(),
+      isSafe: isSafeClearTarget,
+      pendingMarker: pendingClearMarker(),
+    });
+    reportClear(result);
+    await dialog.showMessageBox({
+      type: "info",
+      buttons: [t("dialogs.ok")],
+      title: t("dialogs.dataCleared.title"),
+      message: t("dialogs.dataCleared.message"),
+      detail: result.complete
+        ? t("dialogs.dataCleared.detail")
+        : t("dialogs.dataCleared.detailPending"),
+    });
   } catch (error) {
     logError("Failed to clear the data", error);
-
-    await dialog.showMessageBox(mainWindow, {
-      type: "error",
-      buttons: [t("dialogs.ok")],
-      title: t("dialogs.errorTitle"),
-      message: t("dialogs.clearAll.failed"),
-      detail: error.message,
-    });
-
-    return { success: false, error: error.message };
+    dialog.showErrorBox(
+      t("dialogs.errorTitle"),
+      t("dialogs.clearAll.failedWithError", { error: error.message })
+    );
   }
-});
+  app.quit();
+}
+
+// A Clear All Data that left files still in use (or the storage uncleared)
+// is finished here, at the next start, before the window opens and the
+// backend starts.
+async function finishPendingClear() {
+  if (!fs.existsSync(pendingClearMarker())) return;
+  log("Finishing the Clear All Data of the previous session...");
+  try {
+    reportClear(
+      await clearAllData({
+        stopBackend: null,
+        quietRenderer: null,
+        clearStorage: clearInterfaceStorage,
+        targets: clearTargets(),
+        isSafe: isSafeClearTarget,
+        pendingMarker: pendingClearMarker(),
+      })
+    );
+  } catch (error) {
+    logError("Could not finish the Clear All Data of the previous session", error);
+  }
+}
 
 // ── Auto-updater IPC ──────────────────────────────────────────────────────────
 // The renderer side of utils/updaterWiring.js. Without an updater (running
@@ -1217,14 +1210,12 @@ ipcMain.on("updater:set-preferences", (_event, snapshot) => {
 });
 
 // ── "Updated to X.Y.Z" (#572) ─────────────────────────────────────────────────
-// Two small files in the app's user data folder (not getDataDirectory(), which
-// names a macOS path on Linux): the release notes received with the last
-// update downloaded, kept so the first launch of that version can show them
-// offline, and the version the renderer's dialog last settled. The renderer
-// decides whether to show the dialog (utils/updateNotice.js); main only reads
-// and writes the files.
-const UPDATE_NOTES_FILE = "update-notes.json";
-const LAST_SEEN_VERSION_FILE = "last-seen-version";
+// Two small files in the app's user data folder (UPDATE_NOTES_FILE and
+// LAST_SEEN_VERSION_FILE, utils/dataLocations.js, which Clear All Data
+// deletes): the release notes received with the last update downloaded, kept
+// so the first launch of that version can show them offline, and the version
+// the renderer's dialog last settled. The renderer decides whether to show
+// the dialog (utils/updateNotice.js); main only reads and writes the files.
 
 function userDataFile(name) {
   return path.join(app.getPath("userData"), name);
@@ -1315,6 +1306,10 @@ app
 
     // Create application menu and window immediately — never block on backend startup.
     // The renderer handles the loading/error state via backend-event IPC messages.
+    // Before the window and the backend: they would write again what a Clear
+    // All Data left to delete.
+    await finishPendingClear();
+
     createApplicationMenu();
     createWindow();
 

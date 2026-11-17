@@ -91,8 +91,10 @@ describe("the IPC routes to the wiring", () => {
 describe("the update notice files (#572)", () => {
   it("live in the user data folder", () => {
     expect(functionBody("userDataFile")).toMatch(/app\.getPath\("userData"\)/);
-    expect(source).toMatch(/const UPDATE_NOTES_FILE = "update-notes\.json";/);
-    expect(source).toMatch(/const LAST_SEEN_VERSION_FILE = "last-seen-version";/);
+    // Named in utils/dataLocations.js, whose list Clear All Data deletes.
+    expect(source).toMatch(
+      /UPDATE_NOTES_FILE,\s*LAST_SEEN_VERSION_FILE,\s*\} = require\("\.\/utils\/dataLocations"\)/
+    );
   });
 
   it("keep the notes received with each download", () => {

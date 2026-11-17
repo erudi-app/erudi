@@ -19,15 +19,15 @@
     "clearAll": {
       "title": "Clear All Data",
       "message": "Are you sure you want to delete all data?",
-      "detail": "This will permanently delete:\n• All downloaded AI models\n• Conversation history\n• Custom settings\n• Knowledge bases\n\nThis action cannot be undone.\n\nThe application will quit after deletion.",
+      "detail": "This will permanently delete:\n• All downloaded AI models\n• Conversation history and pasted images\n• Knowledge bases\n• Settings and interface preferences\n• Logs (they contain the text of your conversations)\n\nThis action cannot be undone.\n\nThe application will quit after deletion.",
       "confirm": "Delete All Data",
-      "failed": "Failed to clear data",
       "failedWithError": "Failed to clear data: {{error}}"
     },
     "dataCleared": {
       "title": "Data Cleared",
       "message": "All data has been deleted successfully.",
-      "detail": "The application will now quit."
+      "detail": "The application will now quit.",
+      "detailPending": "A few files were still in use and could not be deleted yet. Erudi deletes them the next time it starts.\n\nThe application will now quit."
     }
   }
 }

@@ -9,6 +9,7 @@ semantics, and the macOS symlink swap.
 
 from __future__ import annotations
 
+import json
 import os
 from pathlib import Path
 
@@ -350,3 +351,34 @@ class TestProdMode:
         assert (paths.data_dir / "catalog.json").exists()
         assert packaged.is_symlink()
         assert packaged.resolve() == paths.data_dir.resolve()
+
+
+# =====================================================================
+# UNIT - the layout the Electron side mirrors
+# =====================================================================
+
+# The Electron main process opens and clears these folders without asking the
+# backend (which is stopped by then), so it computes them too
+# (frontend/src/utils/dataLocations.js). Both sides are checked against this
+# one table: a change to either fails a test until the table, and so the
+# other side, follows.
+_SHARED_LAYOUT = json.loads(
+    (Path(__file__).parent / "fixtures" / "runtime_paths_layout.json").read_text(encoding="utf-8")
+)["cases"]
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("case", _SHARED_LAYOUT, ids=[c["name"] for c in _SHARED_LAYOUT])
+def test_prod_layout_matches_the_table_shared_with_electron(case, monkeypatch, tmp_path):
+    home = (tmp_path / "home").resolve()
+    monkeypatch.setattr(rp.platform, "system", lambda: case["system"])
+    monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
+    for name, relative in case["env"].items():
+        monkeypatch.setenv(name, str(home / relative))
+
+    paths = rp._compute_runtime_paths(
+        mode="prod", backend_root=tmp_path / "bundle", packaged_data_dir=tmp_path / "no-payload"
+    )
+
+    assert paths.data_dir.relative_to(home).as_posix() == case["data_dir"]
+    assert paths.log_dir.relative_to(home).as_posix() == case["log_dir"]

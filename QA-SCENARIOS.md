@@ -634,8 +634,8 @@ say which hardware was missing. The rest run on any machine.*
 - [ ] When the catalog refreshes on restart, then my downloaded and in-progress models are never altered (only remote suggestions reconcile, with stable IDs).
 - [ ] When I **force-kill** the app and relaunch, then it recovers (stale DB locks pruned) and interrupted download/KB jobs are marked failed and cleaned up.
 - [ ] When I close the window on **macOS**, then the app keeps running; on **Windows/Linux**, closing the last window quits and stops the backend.
-- [ ] When I use Help → **"Clear All Data"** and confirm, then the backend stops, the data directory is deleted, and the app quits.
-- [ ] *(not built yet: v1.3.0, #676 — record as not applicable)* When I use **Clear All Data** on macOS, Windows or Linux, then everything Erudi stored is gone: the data folder of that platform, the logs (they hold conversation text) and the interface's own storage, so the next start is a first run; on Windows, log files still open at that moment do not stop the clearing. **Open data folder** opens that same folder on every platform.
+- [ ] When I use Help → **"Clear All Data"** and confirm, then the backend stops, the data is deleted, and the app quits.
+- [ ] When I use **Clear All Data** on macOS, Windows or Linux, then everything Erudi stored is gone: the data folder of that platform, the logs (they hold conversation text) and the interface's own storage, so the next start is a first run (the folders are listed in `docs/privacy.md`, "What Clear All Data removes"); on Windows, log files still open at that moment do not stop the clearing (a file still held is named in `erudi-backend.log` as `still in use`, the closing message says a few files are deleted at the next start, and the next start deletes them before the window opens). **Open data folder** opens that same folder on every platform.
 
 **Shutdown & orphans**
 - [ ] When I **hard-kill the app process** (Activity Monitor "Force Quit" / Task Manager "End task") rather than quitting cleanly, then the **backend stops by itself within a few seconds** — it does not survive holding port 27182 (parent-death watchdog).
@@ -691,7 +691,7 @@ tool path explicitly — a working chat proves nothing about it.*
 - [ ] When the notes are not available (a manual install, or a release without notes), then the popup shows the version and a **Read the release notes** link that opens the release page in the browser only when clicked.
 - [ ] When I first launch this version over an earlier one, then the popup says **Updated to** this version, with the link, and explains that downloading and installing updates are now separate choices in Settings, both off.
 - [ ] When I launch a fresh install (no conversation and no downloaded model), then no update popup appears and the welcome dialog shows as usual.
-- [ ] *(not built yet: v1.3.0, #676 — record as not applicable)* When I launch the app after **Clear all data** (no conversation and no downloaded model), on any system including Linux, then no update popup appears and the welcome dialog shows as usual.
+- [ ] When I launch the app after **Clear all data** (no conversation and no downloaded model), on any system including Linux, then no update popup appears and the welcome dialog shows as usual.
 - [ ] *(verified at the next real update)* When I run an older version than the last one I ran, then no update popup appears.
 - [ ] *(QA setup)* Lines marked *verified at the next real update* need a newer published release: on this version's draft, record them as covered by the updater policy's unit tests (one run per platform, attached to the pass) and run them on the first real update from this version to the next one. On macOS, record every update line NOT RUN while no notarized macOS build exists.
 - [ ] When a release is still a **draft**, then my installed build is **not** offered that update.

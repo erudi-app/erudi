@@ -205,7 +205,8 @@ takes any folder, since an image may have been attached from anywhere on the dis
 the extension of the real path (symlinks resolved) must be one the composer accepts (PNG, JPEG, WebP,
 GIF, BMP), the target a regular file, and its size at most 20 MB, the composer's own limit
 (`frontend/src/utils/imageLimits.js`). A refused file shows "Image not shown" with the reason where the
-image was; a file that is gone shows the plain image placeholder.
+image was; a file that is gone shows the plain image placeholder. Pasted images are written to
+`pasted-images/` in the data folder.
 
 ### Event types
 

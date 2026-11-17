@@ -19,15 +19,15 @@
     "clearAll": {
       "title": "Effacer toutes les données",
       "message": "Voulez-vous vraiment supprimer toutes les données ?",
-      "detail": "Cette action supprimera définitivement :\n• Tous les modèles d'IA téléchargés\n• L'historique des conversations\n• Les paramètres personnalisés\n• Les bases de connaissances\n\nCette action est irréversible.\n\nL'application se fermera après la suppression.",
+      "detail": "Cette action supprimera définitivement :\n• Tous les modèles d'IA téléchargés\n• L'historique des conversations et les images collées\n• Les bases de connaissances\n• Les paramètres et les préférences de l'interface\n• Les journaux (ils contiennent le texte de vos conversations)\n\nCette action est irréversible.\n\nL'application se fermera après la suppression.",
       "confirm": "Supprimer toutes les données",
-      "failed": "Impossible d'effacer les données",
       "failedWithError": "Impossible d'effacer les données : {{error}}"
     },
     "dataCleared": {
       "title": "Données effacées",
       "message": "Toutes les données ont été supprimées.",
-      "detail": "L'application va maintenant se fermer."
+      "detail": "L'application va maintenant se fermer.",
+      "detailPending": "Quelques fichiers étaient encore utilisés et n'ont pas pu être supprimés tout de suite. Erudi les supprime au prochain démarrage.\n\nL'application va maintenant se fermer."
     }
   }
 }

@@ -36,12 +36,6 @@ contextBridge.exposeInMainWorld("imageAPI", {
   savePasted: (dataUrl) => ipcRenderer.invoke("image:savePasted", dataUrl),
 });
 
-// Expose additional API for data management
-contextBridge.exposeInMainWorld("electronAPI", {
-  openDataFolder: () => ipcRenderer.invoke("data:openFolder"),
-  clearAllData: () => ipcRenderer.invoke("data:clearAll"),
-});
-
 // Backend lifecycle bridge: forwards run.py / main.js "backend-event" messages
 // ({event: "starting"|"ready"|"shutdown"|"startup_error", code?, message?}) so the
 // renderer can show a real error instead of an endless loading spinner.
