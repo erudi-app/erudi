@@ -23,6 +23,7 @@ from alembic.config import Config
 from alembic.runtime.migration import MigrationContext
 from alembic.script import ScriptDirectory
 from sqlalchemy import create_engine, inspect
+from sqlalchemy.pool import NullPool
 
 from src.core.config import ROOT_DIR
 from src.core.logging import logger
@@ -70,7 +71,10 @@ def run_migrations(handle: PostgresHandle) -> None:
     revision rather than leaving a half-migrated schema.
     """
     cfg = _alembic_config(handle.sqlalchemy_url)
-    engine = create_engine(handle.sqlalchemy_url)
+    # NullPool: each connection closes when released, so this engine holds the
+    # one connection the cluster's connection budget counts for it
+    # (MIGRATION_CONNECTIONS) only while a step runs, and none afterwards.
+    engine = create_engine(handle.sqlalchemy_url, poolclass=NullPool)
     try:
         with engine.connect() as conn:
             current = MigrationContext.configure(conn).get_current_revision()

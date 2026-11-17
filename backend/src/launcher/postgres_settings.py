@@ -43,7 +43,8 @@ KB_STORE_POOL_MAX_OVERFLOW = 2
 CHECKPOINTER_CONNECTIONS = 1
 
 # `run_migrations` (`src/database/migrations.py`) opens an engine of its own
-# at boot, beside the business engine, and disposes of it afterwards.
+# at boot, beside the business engine. It has no pool (NullPool): one
+# connection at a time while a step runs, none once the schema is at head.
 MIGRATION_CONNECTIONS = 1
 
 # The pre-migration `pg_dump` (`src/database/backup.py`): one connection, no
