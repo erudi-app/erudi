@@ -2,50 +2,57 @@
 # check_mac_app_signature.sh
 #
 # Usage:
-#   check_mac_app_signature.sh <Erudi.app>                 # local / smoke builds
-#   check_mac_app_signature.sh --verify-only <Erudi.app>   # release builds
+#   check_mac_app_signature.sh <Erudi.app>              # local and smoke builds
+#   check_mac_app_signature.sh --release <Erudi.app>    # signed and notarized release
 #
-# Fails unless `codesign --verify --deep --strict` passes on the whole bundle.
+# Verify only: nothing is ever re-signed here.
 #
-# An app with no signing identity (CSC_IDENTITY_AUTO_DISCOVERY=false, no
-# certificate in the keychain) leaves electron-builder with an ad hoc signature
-# on the main executable only. `codesign --verify --deep --strict` rejects it
-# ("code has no resources but signature indicates they must be present") and
-# macOS 26 kills it at launch (exit 137). Without --verify-only, an app that
-# carries no signing authority is therefore re-signed ad hoc as a whole
-# (`codesign --force --deep --sign -`) before the check. An app signed with an
-# identity is never re-signed, and --verify-only never re-signs anything.
+# Both modes require `codesign --verify --deep --strict` to pass on the whole
+# bundle. An app whose signature covers the main executable only fails it ("code
+# has no resources but signature indicates they must be present") and macOS 26
+# kills it at launch (#690). Builds without a signing identity are signed ad hoc
+# by electron-builder (`-c.mac.identity=-`), which signs every file.
 #
-# The last line of stdout is "adhoc-resigned" or "verified".
+# Default mode also requires the hardened runtime flag in `codesign -dvv`
+# (flags=0x10000(runtime)), so a regression of the hardened runtime is caught on
+# builds that carry no certificate.
+#
+# --release also requires the Developer ID Application authority, the team
+# identifier of the release certificate and a valid notarization ticket
+# (`xcrun stapler validate`).
 
 set -euo pipefail
 
-VERIFY_ONLY=0
-if [ "${1:-}" = "--verify-only" ]; then
-    VERIFY_ONLY=1
+RELEASE_TEAM_ID="FAF8JCAT86"
+
+RELEASE=0
+if [ "${1:-}" = "--release" ]; then
+    RELEASE=1
     shift
 fi
 APP="${1:-}"
+
+fail() { echo "error: $*" >&2; exit 1; }
 
 if [ -z "$APP" ] || [ ! -d "$APP" ]; then
     echo "error: app bundle not found: '$APP'" >&2
     exit 2
 fi
 
-RESULT="verified"
-if [ "$VERIFY_ONLY" -eq 0 ]; then
-    # `codesign -dvv` writes to stderr. A missing signature makes it exit
-    # non-zero, which also means "no authority": both lead to the ad hoc re-sign.
-    DETAILS="$(codesign -dvv "$APP" 2>&1 || true)"
-    if ! printf '%s\n' "$DETAILS" | grep -q '^Authority='; then
-        echo "App carries no signing authority: re-signing it ad hoc as a whole." >&2
-        codesign --force --deep --sign - "$APP" >&2
-        RESULT="adhoc-resigned"
-    fi
-fi
+codesign --verify --deep --strict --verbose=2 "$APP" >&2 \
+    || fail "codesign --verify --deep --strict failed on $APP"
 
-if ! codesign --verify --deep --strict --verbose=2 "$APP" >&2; then
-    echo "error: codesign --verify --deep --strict failed on $APP" >&2
-    exit 1
+# `codesign -dvv` writes to stderr.
+DETAILS="$(codesign -dvv "$APP" 2>&1)" || fail "codesign -dvv failed on $APP"
+
+if [ "$RELEASE" -eq 1 ]; then
+    grep -q '^Authority=Developer ID Application:' <<<"$DETAILS" \
+        || fail "no Developer ID Application authority on $APP"
+    grep -q "^TeamIdentifier=$RELEASE_TEAM_ID\$" <<<"$DETAILS" \
+        || fail "TeamIdentifier is not $RELEASE_TEAM_ID on $APP"
+    xcrun stapler validate "$APP" >&2 || fail "no valid notarization ticket stapled to $APP"
+else
+    grep -Eq 'flags=0x[0-9a-f]+\([^)]*runtime' <<<"$DETAILS" \
+        || fail "the hardened runtime flag is not set on $APP"
 fi
-echo "$RESULT"
+echo "verified"

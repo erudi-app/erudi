@@ -128,19 +128,28 @@ first launch.
 Without a signing identity electron-builder leaves an ad hoc signature on the
 main executable only. `codesign --verify --deep --strict` rejects that app
 ("code has no resources but signature indicates they must be present") and
-macOS 26 kills it at launch (exit 137). After electron-builder, the script
-therefore runs `scripts/ci/check_mac_app_signature.sh` on `Erudi.app`: an app
-that carries no signing authority is re-signed ad hoc as a whole
-(`codesign --force --deep --sign -`), then `codesign --verify --deep --strict`
-must pass or the script fails. The DMG and zip electron-builder had already
-written hold the unfixed copy, so the script packs them again from the re-signed
-app (`electron-builder --prepackaged`, which skips its own pack and signing
-steps). An app signed with an identity is only verified, never re-signed.
+macOS 26 kills it at launch (exit 137). The script therefore decides the way
+electron-builder does: with no `CSC_LINK`, no `CSC_NAME`, and either
+`CSC_IDENTITY_AUTO_DISCOVERY=false` or no valid code-signing identity in the
+keychain, it passes `-c.mac.identity=-`. electron-builder then signs every file
+ad hoc, with the hardened runtime and entitlements of `electron-builder.yml`,
+before the DMG and zip are made. A build that has an identity is left alone.
 
-The macOS leg of `app-build-smoke.yml` builds unsigned and runs the same script
-after electron-builder, so a regression fails the pull request. `release.yml`
-runs it with `--verify-only` after the signed build: a signed and notarized app
-must verify as it is, and nothing re-signs it.
+Whatever the mode, the script ends by running
+`scripts/ci/check_mac_app_signature.sh` on `frontend/dist/mac-arm64/Erudi.app`.
+It never re-signs: it requires `codesign --verify --deep --strict` to pass and
+the hardened runtime flag (`flags=0x10000(runtime)`) to be set, and fails
+otherwise.
+
+The macOS leg of `app-build-smoke.yml` builds with the same `-c.mac.identity=-`
+(and `CSC_FOR_PULL_REQUEST=true`, because electron-builder skips signing on a
+pull request without it) and runs the same check. `release.yml` builds the macOS
+app with `--publish never`, runs the check with `--release` (which also requires
+the Developer ID Application authority, the release team identifier and a valid
+stapled notarization ticket, `xcrun stapler validate`), and only then publishes
+with `electron-builder --prepackaged`, which packs the DMG and zip from the
+verified app and goes through the same publish pipeline (DMG, zip, blockmaps,
+`latest-mac.yml`). A red verify therefore leaves nothing on the draft.
 
 ### Windows (CUDA)
 

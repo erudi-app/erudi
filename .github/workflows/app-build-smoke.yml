@@ -33,6 +33,10 @@ jobs:
             reqs: mac-silicon-prod.txt
             spec: backend-mac-silicon.spec
             dist_script: dist:mac
+            # No certificate on this leg: electron-builder signs every file ad
+            # hoc (hardened runtime and entitlements included) instead of
+            # leaving a signature on the main executable only (#690).
+            eb_sign_args: "-c.mac.identity=-"
           - os: windows-latest # x64 CPU
             reqs: win-cpu-prod.txt
             spec: backend-cpu.spec
@@ -95,21 +99,20 @@ jobs:
 
       - name: Build packaged app (unsigned, no publish)
         working-directory: frontend
+        env:
+          # electron-builder skips signing on a pull request (GITHUB_BASE_REF)
+          # unless this is set. This leg holds no secret and signs ad hoc.
+          CSC_FOR_PULL_REQUEST: "true"
         run: |
           npm ci
-          npm run ${{ matrix.dist_script }} -- --publish never
+          npm run ${{ matrix.dist_script }} -- --publish never ${{ matrix.eb_sign_args }}
 
-      # An unsigned build carries an ad hoc signature on the main executable
-      # only, which `codesign --verify --deep --strict` rejects and macOS 26
-      # refuses to launch (#690). The script re-signs the app ad hoc as a whole,
-      # as scripts/build/build-mac-silicon.sh does, and fails when the bundle
-      # still does not verify.
+      # The app must verify as a whole and carry the hardened runtime: an ad hoc
+      # signature on the main executable only fails the check and macOS 26
+      # refuses to launch it (#690).
       - name: Check the macOS app signature
         if: runner.os == 'macOS'
-        run: |
-          APP=$(find frontend/dist -maxdepth 2 -name "Erudi.app" -type d | head -1)
-          test -n "$APP"
-          bash scripts/ci/check_mac_app_signature.sh "$APP"
+        run: bash scripts/ci/check_mac_app_signature.sh frontend/dist/mac-arm64/Erudi.app
 
       - name: Locate the bundled backend executable
         id: locate
