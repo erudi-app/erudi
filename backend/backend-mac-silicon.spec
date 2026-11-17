@@ -69,6 +69,9 @@ datas.append((str(spec_root / "alembic.ini"), "."))
 # ROOT_DIR/src/database/base_models_fallback.json on first boot (placeholder before
 # the background HF refresh). Bundle it preserving that path, else boot can't seed.
 datas.append((str(spec_root / "src" / "database" / "base_models_fallback.json"), "src/database"))
+# The e5 tokenizer frozen in the repository: KB chunking and retrieval count
+# tokens with it, reading it at ROOT_DIR/src/ingestion/e5_tokenizer.json.gz.
+datas.append((str(spec_root / "src" / "ingestion" / "e5_tokenizer.json.gz"), "src/ingestion"))
 
 # Build-time catalog snapshot (#112): the full resolved remote catalog for this
 # engine format, so first boot loads it instantly (zero HF calls). The macOS bundle

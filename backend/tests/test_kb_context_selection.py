@@ -99,6 +99,9 @@ class TestAdaptiveThreshold:
 
 
 class TestTokenBudgetTruncation:
+    """``_truncate_to_token_budget`` takes ``(text, stored token_count)`` pairs
+    and returns how many of them fit, best-first."""
+
     def test_keeps_whole_chunks_within_budget(self):
         texts = [
             "Le préavis de résiliation est de quatre-vingt-dix jours calendaires.",
@@ -106,28 +109,55 @@ class TestTokenBudgetTruncation:
             "Le présent contrat est conclu pour une durée de trente-six mois.",
         ]
         budget = count_tokens(texts[0]) + count_tokens(texts[1])
-        assert _truncate_to_token_budget(texts, budget) == texts[:2]
+        assert _truncate_to_token_budget([(t, None) for t in texts], budget) == 2
 
     def test_first_chunk_always_survives_a_tiny_budget(self):
         # Never return zero context because one chunk overflows the budget.
-        texts = ["Un chunk nettement plus long que le budget accordé ici."]
-        assert _truncate_to_token_budget(texts, 1) == texts
+        chunks = [("Un chunk nettement plus long que le budget accordé ici.", None)]
+        assert _truncate_to_token_budget(chunks, 1) == 1
 
     def test_large_budget_keeps_everything_in_order(self):
-        texts = ["alpha", "bravo", "charlie"]
-        assert _truncate_to_token_budget(texts, 10_000) == texts
+        chunks = [("alpha", None), ("bravo", None), ("charlie", None)]
+        assert _truncate_to_token_budget(chunks, 10_000) == 3
 
     def test_empty_input(self):
-        assert _truncate_to_token_budget([], 500) == []
+        assert _truncate_to_token_budget([], 500) == 0
+
+    def test_stored_counts_are_used_without_tokenizing(self, monkeypatch):
+        def boom(text):
+            raise AssertionError("a chunk with a stored count must not be tokenized")
+
+        monkeypatch.setattr("src.utils.kb_utils.count_tokens", boom)
+        chunks = [("alpha", 60), ("bravo", 50), ("charlie", 10)]
+        assert _truncate_to_token_budget(chunks, 110) == 2
+
+    def test_only_chunks_without_a_stored_count_are_counted(self, monkeypatch):
+        counted = []
+
+        def spy(text):
+            counted.append(text)
+            return 5
+
+        monkeypatch.setattr("src.utils.kb_utils.count_tokens", spy)
+        chunks = [("alpha", 10), ("bravo", None), ("charlie", 10), ("delta", None)]
+        assert _truncate_to_token_budget(chunks, 1000) == 4
+        assert counted == ["bravo", "delta"]
+
+    @pytest.mark.parametrize("stored", [-1, "12", 1.5, True])
+    def test_an_unusable_stored_count_is_recounted(self, stored, monkeypatch):
+        monkeypatch.setattr("src.utils.kb_utils.count_tokens", lambda text: 7)
+        assert _truncate_to_token_budget([("a", stored), ("b", stored)], 13) == 1
 
 
-def _pool(entries):
+def _pool(entries, token_counts=None):
+    token_counts = token_counts or {}
     return [
         (
             Document(
                 page_content=text,
                 id=str(i),
-                metadata={"source_file": f"doc-{i}.md"},
+                metadata={"source_file": f"doc-{i}.md"}
+                | ({"token_count": token_counts[i]} if i in token_counts else {}),
             ),
             sim,
         )
@@ -177,6 +207,19 @@ class TestRetrieveKbExcerpts:
         with patch("src.utils.kb_utils.search_kb_chunks_scored", return_value=pool):
             excerpts = retrieve_kb_excerpts("question", llm.kb_id, token_budget=100)
         assert [e.text for e in excerpts] == [long_a]
+
+    def test_budget_reads_the_stored_token_counts(self, monkeypatch):
+        # The stored count decides, not a recount: "court" claims 90 tokens,
+        # so with a 100-token budget the second chunk no longer fits.
+        def boom(text):
+            raise AssertionError("stored counts must not be recounted")
+
+        monkeypatch.setattr("src.utils.kb_utils.count_tokens", boom)
+        pool = _pool([("court", 0.88), ("suite", 0.86)], token_counts={0: 90, 1: 20})
+        llm = SimpleNamespace(kb_id=7)
+        with patch("src.utils.kb_utils.search_kb_chunks_scored", return_value=pool):
+            excerpts = retrieve_kb_excerpts("question", llm.kb_id, token_budget=100)
+        assert [e.text for e in excerpts] == ["court"]
 
     def test_empty_pool_returns_empty(self):
         llm = SimpleNamespace(kb_id=7)

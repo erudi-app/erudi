@@ -6,7 +6,7 @@
 #   py -3.12 scripts\dev\lock_backend_requirements.py   (Windows)
 # Install: pip install -r <this file> --require-hashes --no-deps
 # See backend/requirements/README.md.
-# sha256: 8f3d298202961e6091e963203857f19c7778f74b5d1084aad34efebed449a1ed
+# sha256: c13c9ed667ac509ecb8d37e50cb54ff7764e2630454ddd35823adcbabb0f9657
 --extra-index-url https://download.pytorch.org/whl/cpu
 alembic==1.18.4 --hash=sha256:a5ed4adcf6d8a4cb575f3d759f071b03cd6e5c7618eb796cb52497be25bfe19a
 altgraph==0.17.5 --hash=sha256:f3a22400bce1b0c701683820ac4f3b159cd301acab067c51c653e06961600597

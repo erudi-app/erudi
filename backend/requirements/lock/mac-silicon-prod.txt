@@ -6,7 +6,7 @@
 #   py -3.12 scripts\dev\lock_backend_requirements.py   (Windows)
 # Install: pip install -r <this file> --require-hashes --no-deps
 # See backend/requirements/README.md.
-# sha256: 6c2c61400b02055661e43f98dcb4e15cfbc8932da5fcbdde7041bfd80a82d899
+# sha256: 39ea1032d8d267671864393890dffaf6c8246a36ad368c73d81a477d1e58abf3
 alembic==1.18.4 --hash=sha256:a5ed4adcf6d8a4cb575f3d759f071b03cd6e5c7618eb796cb52497be25bfe19a
 altgraph==0.17.5 --hash=sha256:f3a22400bce1b0c701683820ac4f3b159cd301acab067c51c653e06961600597
 annotated-doc==0.0.5 --hash=sha256:117bac03a25ede5df5440e855b32d556049ca169ead221505badf432fed4b101

@@ -71,7 +71,12 @@ from src.database.migrations import run_migrations
 from src.database.seed import backfill_wire_tools_startup, startup_populate_database
 from src.launcher.postgres_runtime import start_postgres, stop_postgres
 from src.launcher.db_watchdog import start_watchdog, stop_watchdog
-from src.ingestion.vector_store import close_kb_store, init_kb_store
+from src.ingestion.vector_store import (
+    backfill_chunk_token_counts_startup,
+    close_kb_store,
+    init_kb_store,
+    stop_chunk_token_count_backfill,
+)
 
 from src.core.exceptions import (
     AppBaseException,
@@ -468,6 +473,14 @@ async def _start_services(app: FastAPI, _phase) -> None:
         run_in_threadpool(backfill_wire_tools_startup)
     )
     app.state.wire_backfill_task.add_done_callback(_log_background_task_failure)
+    # Post-ready backfill of the e5 token count stored with each KB chunk:
+    # chunks ingested before counts were stored get theirs, in bounded batches,
+    # without blocking the start. Retrieval counts the ones still missing on
+    # the fly meanwhile.
+    app.state.token_count_backfill_task = asyncio.create_task(
+        run_in_threadpool(backfill_chunk_token_counts_startup)
+    )
+    app.state.token_count_backfill_task.add_done_callback(_log_background_task_failure)
 
 
 # How long the shutdown waits for interrupted downloads before it stops the
@@ -535,12 +548,14 @@ async def lifespan(app: FastAPI):
            / emit_engine_notice)
         7. Open the LangGraph checkpointer (app.state.checkpointer)
         8. Start the cleanup background task (30s interval) and the memory
-           pressure monitor (60s interval)
+           pressure monitor (60s interval), then the two background backfills
+           nobody awaits (tool-call wire capability, KB chunk token counts)
         9. **[YIELD]** → Application handles requests
         10. Shutdown: active downloads interrupted and their tasks awaited
-            (bounded) → then, in reverse order: cleanup task → pressure
-            monitor (awaited) → pending prefix-cache reset drained → engine
-            → checkpointer → embedded PostgreSQL cluster last; finally
+            (bounded), the backfills cancelled → then, in reverse order:
+            cleanup task → pressure monitor (awaited) → pending prefix-cache
+            reset drained → engine → checkpointer → embedded PostgreSQL
+            cluster last; finally
             ``app.state.services_stopped`` (a ``threading.Event`` run.py
             injects) is set, so the launcher bounds the process exit from
             there
@@ -610,6 +625,16 @@ async def _stop_services(app: FastAPI) -> None:
             task.cancel()
 
     await step("cancel_wire_backfill", cancel_wire_backfill)
+
+    def stop_token_count_backfill() -> None:
+        # The thread cannot be cancelled: it stops after its current batch,
+        # long before the cluster stops below.
+        stop_chunk_token_count_backfill()
+        task = getattr(app.state, "token_count_backfill_task", None)
+        if task is not None and not task.done():
+            task.cancel()
+
+    await step("stop_token_count_backfill", stop_token_count_backfill)
     await step("stop_watchdog", stop_watchdog)
     await step("stop_cleanup_task", lambda: config.LLM_Engine.stop_cleanup_task())
     # The monitor's sample in flight finishes first (it is shielded), and a

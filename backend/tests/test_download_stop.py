@@ -647,6 +647,25 @@ class TestLifespanStopsDownloadsFirst:
 
         assert order == ["stop_active_downloads", "stop_postgres"]
 
+    async def test_the_token_count_backfill_runs_after_start_and_stops_before_the_database(
+        self, monkeypatch
+    ):
+        order: list[str] = []
+        self._arm(monkeypatch, order)
+        monkeypatch.setattr(
+            api, "backfill_chunk_token_counts_startup", lambda: order.append("backfill") or 0
+        )
+        monkeypatch.setattr(
+            api, "stop_chunk_token_count_backfill", lambda: order.append("stop_backfill")
+        )
+        app = FastAPI()
+
+        async with api.lifespan(app):
+            # Scheduled, never awaited by the start itself.
+            await app.state.token_count_backfill_task
+
+        assert order == ["backfill", "stop_active_downloads", "stop_backfill", "stop_postgres"]
+
     async def test_the_launcher_is_told_once_every_service_has_stopped(self, monkeypatch):
         order: list[str] = []
         self._arm(monkeypatch, order)

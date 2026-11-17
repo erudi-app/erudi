@@ -59,8 +59,10 @@ def kb_rows(pg_test_cluster):
 
 
 def _chunks(texts: list[str]) -> list[Chunk]:
+    from src.ingestion.chunking import count_tokens
+
     return [
-        Chunk(chunk_index=i, text=t, token_count=len(t.split()), page_number=None)
+        Chunk(chunk_index=i, text=t, token_count=count_tokens(t), page_number=None)
         for i, t in enumerate(texts)
     ]
 
@@ -240,6 +242,190 @@ class TestSearch:
                 (kb_id,),
             ).fetchone()[0]
         assert distinct == 2
+
+
+class TestTokenCounts:
+    """Each chunk stores its e5 token count in ``langchain_metadata`` (no
+    migration: the JSON column takes every key that is not a typed column),
+    so retrieval reads it instead of tokenizing the pool on every turn."""
+
+    def test_stored_metadata_carries_the_token_count(self, kb_store, kb_rows, pg_test_cluster):
+        from src.ingestion.chunking import count_tokens
+        from src.ingestion.vector_store import search_kb_chunks_scored
+
+        kb_id, doc_id = kb_rows["a"]
+        text = "Le préavis de résiliation est de quatre-vingt-dix jours calendaires."
+        _add(kb_id, doc_id, [text])
+        with psycopg.connect(pg_test_cluster.psycopg_url) as conn:
+            stored = conn.execute(
+                "SELECT langchain_metadata->>'token_count' FROM rag.kb_chunks WHERE kb_id = %s",
+                (kb_id,),
+            ).fetchone()[0]
+        assert int(stored) == count_tokens(text)
+
+        (doc, _sim), *_ = search_kb_chunks_scored("préavis de résiliation", kb_id=kb_id)
+        assert doc.metadata["token_count"] == count_tokens(text)
+
+
+def _strip_token_counts(url: str, kb_id: int) -> None:
+    """Shape rows like the ones ingested before token counts were stored:
+    an empty metadata object, and a NULL one."""
+    with psycopg.connect(url, autocommit=True) as conn:
+        conn.execute(
+            "UPDATE rag.kb_chunks SET langchain_metadata = '{}'::json WHERE kb_id = %s",
+            (kb_id,),
+        )
+        conn.execute(
+            "UPDATE rag.kb_chunks SET langchain_metadata = NULL WHERE langchain_id ="
+            " (SELECT langchain_id FROM rag.kb_chunks WHERE kb_id = %s LIMIT 1)",
+            (kb_id,),
+        )
+
+
+def _stored_counts(url: str, kb_id: int) -> dict[str, int | None]:
+    with psycopg.connect(url) as conn:
+        rows = conn.execute(
+            "SELECT content, (langchain_metadata->>'token_count')::int"
+            " FROM rag.kb_chunks WHERE kb_id = %s",
+            (kb_id,),
+        ).fetchall()
+    return {content: count for content, count in rows}
+
+
+BACKFILL_TEXTS = [f"Paragraphe numéro {i} d'une ancienne base de connaissances." for i in range(5)]
+
+
+class TestTokenCountBackfill:
+    """The post-ready backfill gives chunks ingested before token counts were
+    stored their count, in bounded batches, once."""
+
+    def test_backfill_adds_the_missing_counts(self, kb_store, kb_rows, pg_test_cluster):
+        from src.ingestion.chunking import count_tokens
+        from src.ingestion.vector_store import backfill_chunk_token_counts
+
+        kb_id, doc_id = kb_rows["a"]
+        _add(kb_id, doc_id, BACKFILL_TEXTS)
+        _strip_token_counts(pg_test_cluster.psycopg_url, kb_id)
+        assert set(_stored_counts(pg_test_cluster.psycopg_url, kb_id).values()) == {None}
+
+        assert backfill_chunk_token_counts() == len(BACKFILL_TEXTS)
+        assert _stored_counts(pg_test_cluster.psycopg_url, kb_id) == {
+            text: count_tokens(text) for text in BACKFILL_TEXTS
+        }
+
+    def test_backfill_keeps_the_other_metadata_keys(self, kb_store, kb_rows, pg_test_cluster):
+        from src.ingestion.vector_store import backfill_chunk_token_counts
+
+        kb_id, doc_id = kb_rows["a"]
+        _add(kb_id, doc_id, BACKFILL_TEXTS[:1])
+        with psycopg.connect(pg_test_cluster.psycopg_url, autocommit=True) as conn:
+            conn.execute(
+                'UPDATE rag.kb_chunks SET langchain_metadata = \'{"origin": "x"}\'::json'
+                " WHERE kb_id = %s",
+                (kb_id,),
+            )
+        assert backfill_chunk_token_counts() == 1
+        with psycopg.connect(pg_test_cluster.psycopg_url) as conn:
+            metadata = conn.execute(
+                "SELECT langchain_metadata FROM rag.kb_chunks WHERE kb_id = %s", (kb_id,)
+            ).fetchone()[0]
+        assert metadata["origin"] == "x"
+        assert isinstance(metadata["token_count"], int)
+
+    def test_backfill_is_idempotent(self, kb_store, kb_rows, pg_test_cluster):
+        from src.ingestion.vector_store import backfill_chunk_token_counts
+
+        kb_id, doc_id = kb_rows["a"]
+        _add(kb_id, doc_id, BACKFILL_TEXTS)
+        _strip_token_counts(pg_test_cluster.psycopg_url, kb_id)
+        assert backfill_chunk_token_counts() == len(BACKFILL_TEXTS)
+        assert backfill_chunk_token_counts() == 0
+
+    def test_backfill_is_bounded(self, kb_store, kb_rows, pg_test_cluster):
+        from src.ingestion.vector_store import backfill_chunk_token_counts
+
+        kb_id, doc_id = kb_rows["a"]
+        _add(kb_id, doc_id, BACKFILL_TEXTS)
+        _strip_token_counts(pg_test_cluster.psycopg_url, kb_id)
+
+        assert backfill_chunk_token_counts(batch_size=2, max_batches=1) == 2
+        counts = _stored_counts(pg_test_cluster.psycopg_url, kb_id).values()
+        assert sum(count is not None for count in counts) == 2
+        # The rest waits for a later pass (the next start).
+        assert backfill_chunk_token_counts(batch_size=2) == len(BACKFILL_TEXTS) - 2
+
+    def test_backfill_stops_when_asked(self, kb_store, kb_rows, pg_test_cluster):
+        import threading
+
+        from src.ingestion.vector_store import backfill_chunk_token_counts
+
+        kb_id, doc_id = kb_rows["a"]
+        _add(kb_id, doc_id, BACKFILL_TEXTS)
+        _strip_token_counts(pg_test_cluster.psycopg_url, kb_id)
+        stop = threading.Event()
+        stop.set()
+        assert backfill_chunk_token_counts(stop=stop) == 0
+
+    def test_backfill_frees_the_tokenizer_it_loaded(self, kb_store, kb_rows, pg_test_cluster):
+        from src.ingestion import chunking
+        from src.ingestion.vector_store import backfill_chunk_token_counts
+
+        kb_id, doc_id = kb_rows["a"]
+        _add(kb_id, doc_id, BACKFILL_TEXTS)
+        _strip_token_counts(pg_test_cluster.psycopg_url, kb_id)
+        chunking.release_tokenizer()
+
+        assert backfill_chunk_token_counts() == len(BACKFILL_TEXTS)
+        assert not chunking.tokenizer_loaded()
+
+    def test_backfill_leaves_a_resident_tokenizer_resident(
+        self, kb_store, kb_rows, pg_test_cluster
+    ):
+        from src.ingestion import chunking
+        from src.ingestion.vector_store import backfill_chunk_token_counts
+
+        kb_id, doc_id = kb_rows["a"]
+        _add(kb_id, doc_id, BACKFILL_TEXTS)
+        _strip_token_counts(pg_test_cluster.psycopg_url, kb_id)
+        chunking.count_tokens("une ingestion en cours")
+
+        assert backfill_chunk_token_counts() == len(BACKFILL_TEXTS)
+        assert chunking.tokenizer_loaded()
+
+    def test_nothing_to_backfill_never_loads_the_tokenizer(self, kb_store, kb_rows):
+        from src.ingestion import chunking
+        from src.ingestion.vector_store import backfill_chunk_token_counts
+
+        kb_id, doc_id = kb_rows["a"]
+        _add(kb_id, doc_id, BACKFILL_TEXTS)
+        chunking.release_tokenizer()
+
+        assert backfill_chunk_token_counts() == 0
+        assert not chunking.tokenizer_loaded()
+
+    def test_startup_entrypoint_never_raises(self, monkeypatch):
+        from src.ingestion import vector_store
+
+        def boom(**kwargs):
+            raise RuntimeError("database gone")
+
+        monkeypatch.setattr(vector_store, "backfill_chunk_token_counts", boom)
+        assert vector_store.backfill_chunk_token_counts_startup() == 0
+
+    def test_shutdown_request_reaches_the_startup_backfill(self, monkeypatch):
+        from src.ingestion import vector_store
+
+        seen = {}
+
+        def fake(*, stop):
+            seen["stop"] = stop
+            return 0
+
+        monkeypatch.setattr(vector_store, "backfill_chunk_token_counts", fake)
+        vector_store.backfill_chunk_token_counts_startup()
+        assert not seen["stop"].is_set()
+        vector_store.stop_chunk_token_count_backfill()
+        assert seen["stop"].is_set()
 
 
 class TestCascade:
