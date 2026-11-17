@@ -60,11 +60,17 @@ class _BrakeEngine(BaseEngine):
     bound_footprint: ClassVar[Optional[int]] = None
     window: ClassVar[Optional[int]] = None
     contention: ClassVar[Optional[dict]] = None
+    # The models whose child is loaded and alive (``loaded_child_for``).
+    loaded_ids: ClassVar[set] = set()
     turn_start_outcome: ClassVar[BrakeOutcome] = BrakeOutcome()
 
     @classmethod
     def gpu_contention_state(cls):
         return cls.contention
+
+    @classmethod
+    def loaded_child_for(cls, llm_id):
+        return llm_id in cls.loaded_ids
 
     @classmethod
     def brake_point(cls, point, *, llm_id=None):
@@ -121,6 +127,7 @@ def _engine(monkeypatch):
     _BrakeEngine.bound_footprint = None
     _BrakeEngine.window = None
     _BrakeEngine.contention = None
+    _BrakeEngine.loaded_ids = {_Llm.id}
     _BrakeEngine.turn_start_outcome = BrakeOutcome()
     _BrakeEngine._idle_unload = None
     _BrakeEngine._model = None
@@ -451,6 +458,20 @@ async def test_the_turn_start_notice_reads_the_state_the_turn_start_sample_left(
     kinds = [e["t"] for e in events]
     assert kinds.index("memory_warning") < kinds.index("answer")
     assert len(_brakes("turn_start")) == 1
+
+
+async def test_another_model_contended_says_nothing_at_the_turn_start(monkeypatch):
+    """The cached reading is the LOADED child's: when another model is loaded
+    (this turn swaps it out), its contention says nothing about this one."""
+    _answer(monkeypatch)
+    _patch_budget(monkeypatch, _StubBudget(ceiling=16_000))
+    _BrakeEngine.loaded_ids = {_Llm.id + 1}
+    _BrakeEngine.contention = _contended()
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    kinds = [e["t"] for e in events]
+    assert "memory_warning" not in kinds[: kinds.index("answer")]
 
 
 async def test_no_contention_at_the_turn_start_says_nothing_then(monkeypatch):

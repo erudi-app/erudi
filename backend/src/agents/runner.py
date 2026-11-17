@@ -432,6 +432,14 @@ def _gpu_contention_active(engine: Any) -> bool:
     return isinstance(state, dict) and bool(state.get("active"))
 
 
+def _serves_turn_model(engine: Any, llm: Any) -> bool:
+    """Whether the loaded, live child serves ``llm`` (``loaded_child_for``),
+    read defensively like the other engine probes: an engine without the
+    probe serves nothing."""
+    probe = getattr(engine, "loaded_child_for", None)
+    return callable(probe) and bool(probe(getattr(llm, "id", None)))
+
+
 def _track_memory_warning(engine: Any, thread_id: Optional[str], active: bool) -> None:
     """Per-conversation warning state on the loaded child's handle, with ONE
     INFO line at each transition (start, end). Lost when the child is reaped
@@ -2248,13 +2256,19 @@ class AgentRunner:
                     # conversation, so the reload state is said in this turn.
                     if not reload_announced and _respawned(outcome):
                         yield {"t": "memory_reload", "reason": RELOAD_REASON_MEMORY}
-                # Another app already takes the graphics card (the eviction
-                # gauge's cached state, which the turn_start sample above
-                # just refreshed when it could): said now, before the answer
-                # the user would otherwise wait for unwarned. Read, never
-                # sampled here. Stateful turns only, like the turn-end check,
-                # which then does not say it again.
-                contention_said = stateful and _gpu_contention_active(engine)
+                # Another app already takes the graphics card from THIS
+                # turn's model (the eviction gauge's cached state; the
+                # turn_start sample above reads it again for a loaded child
+                # unless a generation ended less than the settle delay ago):
+                # said now, before the answer the user would otherwise wait
+                # for unwarned. Read, never sampled here. Only when the loaded
+                # child serves this turn's model: another model's contention
+                # says nothing about the one this turn loads. Stateful turns
+                # only, like the turn-end check, which then does not say it
+                # again.
+                contention_said = (
+                    stateful and _serves_turn_model(engine, llm) and _gpu_contention_active(engine)
+                )
                 if contention_said:
                     yield dict(_GPU_CONTENTION_WARNING)
                 sampling = resolve_sampling_defaults(llm)

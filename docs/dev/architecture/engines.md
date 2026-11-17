@@ -766,7 +766,7 @@ reading replaces it; a missing reading (a respawned child has no PDH instance fo
 6 s, NVML fails) leaves it unchanged, silently, and each transition is one INFO line, `GPU contention
 started|ended: evicted_mib=..., device_free_mib=...`. It never acts on the child.
 
-A stateful turn whose start finds the cached reading active (read right after the
+A stateful turn whose model the loaded child serves (`loaded_child_for`), and whose start finds the cached reading active (read right after the
 turn_start sample, never sampled again for it) sends `memory_warning` with
 `reason: "gpu_contention"` then, before the answer, and its end does not send it again;
 otherwise a stateful turn end turns an active contention into that event, again at every
