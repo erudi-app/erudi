@@ -1,7 +1,7 @@
 import React, { useId, useRef, useState } from "react";
 import PropTypes from "prop-types";
 import { motion, AnimatePresence } from "framer-motion";
-import { SlidersHorizontal } from "lucide-react";
+import { Hourglass, SlidersHorizontal } from "lucide-react";
 import { Trans, useTranslation } from "react-i18next";
 import ModelPicker from "./ModelPicker";
 import { headerCommands } from "../utils/slashCommands";
@@ -18,6 +18,9 @@ import { headerCommands } from "../utils/slashCommands";
  * them (`exportDisabled` while a turn runs): it is no command and has no
  * slash form. What the page adds as children
  * renders in the panel after the buttons.
+ *
+ * `ephemeral` (#428) adds a badge beside the line: the conversation is
+ * deleted when the user leaves it.
  *
  * `attention` is the orphaned-conversation state (#225): the model is gone,
  * the line is replaced by a red "Please select a model" that is the picker's
@@ -36,6 +39,7 @@ export default function ConversationHeader({
   onExport,
   exportDisabled = false,
   saveFailed = false,
+  ephemeral = false,
   children,
 }) {
   const { t } = useTranslation();
@@ -76,19 +80,30 @@ export default function ConversationHeader({
       <div className="relative z-10 p-5">
         <div className="flex items-center justify-between gap-3">
           <div className="relative min-w-0">
-            <h3 className="break-words text-[1.15rem] font-semibold tracking-tight text-[#F2F7F4]">
-              {/* One tree for both states, the picker in the same slot: the
+            <div className="flex flex-wrap items-center gap-x-3 gap-y-1">
+              <h3 className="break-words text-[1.15rem] font-semibold tracking-tight text-[#F2F7F4]">
+                {/* One tree for both states, the picker in the same slot: the
                   orphaned line is the slot alone (`gap` keeps its place), so
                   the button is never remounted and keeps the focus. */}
-              <Trans
-                i18nKey={
-                  attention
-                    ? "chat:conversationHeader.attentionLine"
-                    : "chat:conversationHeader.chattingWith"
-                }
-                components={{ model: picker, gap: <span aria-hidden /> }}
-              />
-            </h3>
+                <Trans
+                  i18nKey={
+                    attention
+                      ? "chat:conversationHeader.attentionLine"
+                      : "chat:conversationHeader.chattingWith"
+                  }
+                  components={{ model: picker, gap: <span aria-hidden /> }}
+                />
+              </h3>
+              {ephemeral && (
+                <span
+                  title={t("chat:ephemeral.badgeHint")}
+                  className="inline-flex shrink-0 items-center gap-1 text-[10px] uppercase tracking-wide text-sky-300/90 border border-sky-400/40 rounded px-1.5 py-0.5"
+                >
+                  <Hourglass size={11} aria-hidden />
+                  {t("chat:ephemeral.badge")}
+                </span>
+              )}
+            </div>
             <span aria-live="polite" className="sr-only">
               {attention ? t("chat:conversationHeader.pickerAttention") : ""}
             </span>
@@ -189,5 +204,6 @@ ConversationHeader.propTypes = {
   onExport: PropTypes.func,
   exportDisabled: PropTypes.bool,
   saveFailed: PropTypes.bool,
+  ephemeral: PropTypes.bool,
   children: PropTypes.node,
 };

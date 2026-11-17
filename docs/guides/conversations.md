@@ -32,6 +32,7 @@ out, is resolved for that model rather than hard-coded. The first value that exi
 | `web_search_enabled` | bool | saved for the model, else the global default from `GET /erudi/user_settings/` |
 | `reasoning_effort` | `none` \| `low` \| `medium` \| `high` \| `xhigh` | saved for the model, else the global default from `GET /erudi/user_settings/` |
 | `compaction_threshold` | int, 50–90 in steps of 5 (percent) | saved for the model, else the global default from `GET /erudi/user_settings/` — see [compaction](#how-conversation-state-is-kept) |
+| `ephemeral` | bool | `false` — see [Ephemeral conversations](#ephemeral-conversations); set at creation only |
 
 "Saved for the model" is what `/config global` stored with `PUT
 /erudi/llms/{id}/conversation_defaults` (see [Conversation defaults per
@@ -45,9 +46,68 @@ global compaction threshold never retro-affects it.
 
 The response (`ConversationResponse`) carries `id`, `llm_id`, `name`, `created_at`,
 `last_message_time`, `temperature`, `top_p`, `max_tokens`, `custom_prompt`, `web_search_enabled`,
-`reasoning_effort`, `compaction_threshold`.
+`reasoning_effort`, `compaction_threshold`, `ephemeral`.
 `llm_id` is nullable: deleting the bound model nulls it server-side and the conversation survives,
 unbound, until it is pointed at another model.
+
+## Ephemeral conversations
+
+A conversation created with `"ephemeral": true` is deleted when the user leaves it. In the app, the
+new-conversation page has an **Ephemeral conversation** toggle under the header, off by default,
+which reads "This conversation is deleted when you leave it."; it applies to the conversation the
+next message creates. The flag is a column of the conversation (`conversations.ephemeral`, `NOT
+NULL`, `false` by default) and never changes afterwards: `PATCH` ignores it.
+
+What differs from a regular conversation:
+
+- **Never found again.** `GET /erudi/conversations/` and `GET /erudi/conversations/search` leave it
+  out, so the sidebar never lists it, and the count of conversations a model shows before its
+  deletion does not include it. `GET /erudi/conversations/{id}` still reads it: the open page needs
+  it.
+- **A badge.** The conversation header shows an **Ephemeral** badge, whose tooltip says the same
+  thing as the toggle and that the conversation is not in the history.
+- **No title.** The page asks for none, and `generate_title` streams nothing and stores nothing for
+  it; the stored name stays `New Conversation`.
+- **No export.** The header offers no **Export as Markdown**, and `conversationExport.js` refuses
+  an ephemeral conversation before anything reaches the main process.
+
+**Leaving deletes it.** Leaving is the conversation id of the route changing: another conversation,
+the Chat page, a new chat, any other page. `EphemeralConversationGuard`
+(`frontend/src/components/`, mounted once inside the router in `App.jsx`) watches the route, not a
+page unmounting (the conversation page stays mounted from one conversation to the next), and calls
+`leaveConversation` (`frontend/src/utils/ephemeralConversations.js`), which aborts the answer the
+conversation is streaming, if any, then sends `DELETE /erudi/conversations/{id}` without asking.
+The abandoned answer is neither an error record nor a red bubble. A conversation is deleted once,
+whatever the route does next, and a regular conversation is never touched.
+
+The delete removes the row, its messages, its checkpointer thread and its pasted images (see
+[Delete](#delete)). It waits for the turn in flight: the renderer's abort reaches the backend as a
+disconnect, possibly after the DELETE, and the turn persists its partial answer in its `finally`,
+after the generation lock is released. Each turn, title and manual compaction is registered as
+work on its conversation from its first statement to its last write
+(`backend/src/domains/conversations/turns.py`); the delete marks the conversation as closing, waits
+for that work to end, and only then deletes. While it closes, a new turn is refused (`error` then
+`done`, nothing written), a title is skipped and `/compact` is a 404. Nothing can therefore write a
+row or a thread after the delete.
+
+What the renderer cannot delete, the backend does (`backend/src/domains/conversations/ephemeral.py`):
+
+- **When the app quits**, the lifespan deletes every ephemeral conversation before it closes the
+  checkpointer, within 10 s (`SHUTDOWN_PURGE_SECONDS`); what is left goes at the next start.
+- **At the next start** (a crash, a force-quit, a killed backend), once the checkpointer is open
+  and before the first request, every ephemeral conversation left over is deleted, then every
+  checkpointer thread whose conversation no longer exists: a delete interrupted between the rows
+  and the thread leaves one, and once the row is gone nothing tells whether the conversation was
+  ephemeral. Such a thread is never read again and would be handed to a later conversation that got
+  the same id, so every one goes.
+
+Each sweep writes one `INFO` line with its count (`Ephemeral conversations purged at startup: N`,
+`Orphan conversation threads purged at startup: N`, `Ephemeral conversations purged at shutdown:
+N`).
+
+What the flag does not cover: the model's own memory while it stays loaded, the backend log (which
+records each question at `INFO`, see [privacy](../privacy.md)), and whatever the operating system
+keeps. The interface says what happens and nothing more.
 
 ## Asking a question
 
@@ -208,7 +268,7 @@ that handle must be a regular file of at most 20 MB, the composer's own limit
 (`frontend/src/utils/imageLimits.js`), whose first bytes are one of those formats' signatures; the
 MIME type is taken from those bytes. Pasting writes only those five formats. A refused file shows "Image not shown" with the reason where the
 image was; a file that is gone shows the plain image placeholder. Pasted images are written to
-`pasted-images/` in the data folder.
+`pasted-images/` in the data folder, and deleted with their conversation (see [Delete](#delete)).
 
 ### Event types
 
@@ -738,6 +798,9 @@ in a French title; Latin words and lone Greek letters are always kept, so "iPhon
 so the sidebar shows what is stored. If nothing usable remains, the conversation keeps the default
 name.
 
+An [ephemeral conversation](#ephemeral-conversations) gets no title: the app does not ask for one,
+and the endpoint streams nothing, calls no model and stores nothing for it.
+
 A first message that is only a greeting ("Bonjour !", "Hi", "Salut, ça va ?", or a greeting followed
 by a short request to introduce oneself, "in two sentences", "briefly") gets no title: the stream is empty, no model is called, and the
 stored name stays `New Conversation`, which the sidebar shows in the interface language (the stored
@@ -772,7 +835,8 @@ curl 'http://127.0.0.1:27182/erudi/conversations/search?q=zeppelin'
 
 Returns the conversations (the same rows as `GET /erudi/conversations/`) whose **title** or whose
 **message text** contains `q`, newest first, at most 50. The match is a case-insensitive substring
-(`ILIKE`); the `%`, `_` and `\` the user types are taken literally (`ESCAPE`), so `100%` finds
+(`ILIKE`); an ephemeral conversation is never found. The `%`, `_` and `\` the user types are
+taken literally (`ESCAPE`), so `100%` finds
 "100%" and never "1000". Only `messages.content` is searched: the model's reasoning lives in the
 message's `trace`, so text that appears only in a reasoning block finds nothing, and a failed turn
 (the `[ERROR_MESSAGE_SYSTEM]` line) is not conversation text and never matches. The attachment
@@ -818,6 +882,9 @@ the answer a `/compact` run was saved on. The summary itself is not written. **L
 model's reasoning and tool activity, and the failed turns. **Named, not embedded**: an image is
 `> Image: <file name>` (`> Image` for a pasted one that has no file), an attached document is
 `> Attachment: <file name>`; no file path is written.
+
+An [ephemeral conversation](#ephemeral-conversations) is not exported: it has no history row, its
+header has no export button, and `conversationExport.js` throws on one before calling main.
 
 ### Update a conversation
 
@@ -1034,7 +1101,20 @@ Returns `{"message": ..., "error_message_id": <id>}`.
 curl -X DELETE http://127.0.0.1:27182/erudi/conversations/42
 ```
 
-Permanent; messages cascade.
+Permanent. It removes, in order, the conversation's row and its messages (they cascade), its
+checkpointer thread, and its pasted images. It first waits for a turn, a title or a manual
+compaction still writing to the conversation (see [Ephemeral
+conversations](#ephemeral-conversations)), so a delete sent during an answer returns once that
+answer has ended.
+
+A pasted image is deleted only when the real path of its `[image_path:...]` marker (symlinks
+resolved) is inside the app's pasted-images folder: `PASTED_IMAGES_FOLDER` in the data folder
+(`backend/src/launcher/runtime_paths.py`, the folder the Electron main process writes a pasted
+image to; the name is pinned on both sides by `backend/tests/fixtures/runtime_paths_layout.json`).
+An image attached from the disk is the user's own file and is never touched, nor is a link in that
+folder that leads out of it, nor an image another conversation still references. A file already
+gone is not a failure; one that cannot be deleted stays on disk with one `WARNING`
+(`backend/src/utils/pasted_images.py`).
 
 ## How conversation state is kept
 

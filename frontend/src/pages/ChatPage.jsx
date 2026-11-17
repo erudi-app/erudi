@@ -22,6 +22,8 @@ import { hasMissingWeights, isKbAssistant, offeredModels } from "../utils/modelW
 import { COMMAND_SCOPES, commandsFor, commandsOutside } from "../utils/slashCommands";
 import useConversationSettings, { DRAFT } from "../shared/hooks/useConversationSettings";
 import CommandNotice from "../components/CommandNotice";
+import ToggleSwitch from "../components/ToggleSwitch";
+import { markEphemeral } from "../utils/ephemeralConversations";
 
 const log = createLogger("ChatPage");
 
@@ -44,6 +46,9 @@ export default function ChatPage() {
   const [errorMessage, setErrorMessage] = useState("");
   const [collapsed, setCollapsed] = useState(false);
   const [isLanguageWarningExpanded, setIsLanguageWarningExpanded] = useState(false);
+  // The ephemeral toggle (#428), off by default: set before the first
+  // message, it creates a conversation that is deleted when the user leaves it.
+  const [ephemeral, setEphemeral] = useState(false);
 
   // The draft the conversation is created from (#609): the picked model's
   // resolved defaults, and what the user set through /config, /effort and
@@ -212,12 +217,16 @@ export default function ChatPage() {
         const res = await tracedFetch(`${API_BASE_URL}/conversations/`, {
           method: "POST",
           headers: { "Content-Type": "application/json" },
-          body: JSON.stringify(createPayload()),
+          body: JSON.stringify(
+            ephemeral ? { ...createPayload(), ephemeral: true } : createPayload()
+          ),
         });
         if (!res.ok) {
           throw new Error(t("chat:errors.createConversation"));
         }
         const conversation = await res.json();
+        // Leaving it deletes it (EphemeralConversationGuard).
+        if (conversation.ephemeral) markEphemeral(conversation.id);
 
         // 2. Hand the question over: the conversation page reads the created
         // conversation and sends the first turn on its values.
@@ -236,7 +245,7 @@ export default function ChatPage() {
         );
       }
     },
-    [llm, navigate, ready, createPayload, t]
+    [llm, navigate, ready, createPayload, ephemeral, t]
   );
 
   const handleRename = (id, newName) => {
@@ -367,6 +376,19 @@ export default function ChatPage() {
               {/* Re-read the loaded model when the draft's model changes. */}
               <UnloadModelButton refreshKey={llm?.id} />
             </ConversationHeader>
+
+            {/* The ephemeral toggle (#428): what it does, said plainly. */}
+            <div className="mt-4 flex items-center gap-3 px-2">
+              <ToggleSwitch
+                checked={ephemeral}
+                onChange={setEphemeral}
+                label={t("chat:ephemeral.toggle")}
+              />
+              <div className="min-w-0">
+                <p className="text-sm font-medium text-gray-100">{t("chat:ephemeral.toggle")}</p>
+                <p className="text-xs text-gray-400">{t("chat:ephemeral.toggleHint")}</p>
+              </div>
+            </div>
 
             {/* Question Input - Always visible */}
             <div className="mt-6">

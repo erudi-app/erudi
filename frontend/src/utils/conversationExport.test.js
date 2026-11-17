@@ -68,4 +68,16 @@ describe("exportConversation", () => {
     const fetcher = vi.fn(async () => ({ ok: true, json: async () => conversation }));
     await expect(exportConversation(7, { t: tr, fetcher })).rejects.toThrow();
   });
+
+  it("never exports an ephemeral conversation (#428)", async () => {
+    const save = vi.fn(async () => ({ status: "saved" }));
+    globalThis.window = { exportAPI: { saveMarkdown: save } };
+    const fetcher = vi.fn(async () => ({
+      ok: true,
+      json: async () => ({ ...conversation, ephemeral: true }),
+    }));
+
+    await expect(exportConversation(7, { t: tr, fetcher })).rejects.toThrow(/ephemeral/);
+    expect(save).not.toHaveBeenCalled();
+  });
 });

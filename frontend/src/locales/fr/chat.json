@@ -54,6 +54,12 @@
     "unloadFailed": "Le modèle n'a pas pu être déchargé.",
     "unloadModelChanged": "Un autre modèle est chargé maintenant."
   },
+  "ephemeral": {
+    "toggle": "Conversation éphémère",
+    "toggleHint": "Cette conversation est supprimée quand vous la quittez.",
+    "badge": "Éphémère",
+    "badgeHint": "Cette conversation est supprimée quand vous la quittez. Elle n'apparaît pas dans votre historique."
+  },
   "commands": {
     "listLabel": "Commandes",
     "config": {

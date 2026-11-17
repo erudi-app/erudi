@@ -54,6 +54,12 @@
     "unloadFailed": "The model could not be unloaded.",
     "unloadModelChanged": "Another model is loaded now."
   },
+  "ephemeral": {
+    "toggle": "Ephemeral conversation",
+    "toggleHint": "This conversation is deleted when you leave it.",
+    "badge": "Ephemeral",
+    "badgeHint": "This conversation is deleted when you leave it. It is not in your history."
+  },
   "commands": {
     "listLabel": "Commands",
     "config": {

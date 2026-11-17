@@ -54,6 +54,12 @@
     "unloadFailed": "No se pudo liberar el modelo.",
     "unloadModelChanged": "Ahora hay otro modelo cargado."
   },
+  "ephemeral": {
+    "toggle": "Conversación efímera",
+    "toggleHint": "Esta conversación se elimina cuando la dejas.",
+    "badge": "Efímera",
+    "badgeHint": "Esta conversación se elimina cuando la dejas. No aparece en tu historial."
+  },
   "commands": {
     "listLabel": "Comandos",
     "config": {

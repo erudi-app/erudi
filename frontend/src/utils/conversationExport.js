@@ -32,8 +32,8 @@ export function exportLabels(conversation, t) {
  * @param {Function} options.t - i18next `t`.
  * @param {Function} [options.fetcher] - `tracedFetch`, replaceable in tests.
  * @returns {Promise<{status: "saved"|"cancelled"}>}
- * @throws When the conversation cannot be read, the bridge is missing, or the
- *   main process could not save.
+ * @throws When the conversation cannot be read or is ephemeral, the bridge is
+ *   missing, or the main process could not save.
  */
 export async function exportConversation(id, { t, fetcher = tracedFetch }) {
   const save = window.exportAPI?.saveMarkdown;
@@ -45,6 +45,11 @@ export async function exportConversation(id, { t, fetcher = tracedFetch }) {
     throw new Error(`Could not read the conversation (HTTP ${response.status})`);
   }
   const conversation = await response.json();
+  // An ephemeral conversation (#428) is never written to a file: the header
+  // offers no export for it and its history row does not exist.
+  if (conversation.ephemeral) {
+    throw new Error("An ephemeral conversation is not exported");
+  }
   const text = buildConversationMarkdown(conversation, exportLabels(conversation, t));
   const result = await save({ title: conversation.name, text });
   if (result?.status === "saved" || result?.status === "cancelled") {
