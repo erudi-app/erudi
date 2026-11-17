@@ -231,7 +231,9 @@ _WEB_SECTION_COMPACT = (
 
 # Slotted into the web section only when the KB tool is ALSO on the turn, so
 # the two triggers stay coherent: document questions go to the documents,
-# fresh/external facts go to the web.
+# fresh/external facts go to the web. Small models do not always follow it
+# (#707: Qwen3 4B searched the web on document questions), so the agent loop
+# enforces the order: ``src.agents.middleware._KbBeforeWebMiddleware``.
 _WEB_KB_ARBITRATION = (
     "For questions about the user's documents, use search_knowledge_base, " "not web_search."
 )

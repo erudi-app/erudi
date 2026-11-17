@@ -2190,6 +2190,7 @@ class AgentRunner:
 
         from src.agents.middleware import (
             _FoldSystemIntoUserMiddleware,
+            _KbBeforeWebMiddleware,
             _KbContextMiddleware,
             _StripImagesForTextModel,
         )
@@ -2286,6 +2287,15 @@ class AgentRunner:
                     middleware = [
                         *middleware,
                         _KbContextMiddleware(kb_context_block, kb_language_line),
+                    ]
+                tools_by_name = {getattr(t, "name", None): t for t in effective_tools}
+                if "search_knowledge_base" in tools_by_name and "web_search" in tools_by_name:
+                    # A Knowledge Base assistant with web search on searches
+                    # its documents before the web (#707): the guard wraps
+                    # tool execution only, so its place in the list is free.
+                    middleware = [
+                        *middleware,
+                        _KbBeforeWebMiddleware(tools_by_name["search_knowledge_base"]),
                     ]
                 if supports_vision is not True:
                     # Unless the model is POSITIVELY vision-capable, strip images

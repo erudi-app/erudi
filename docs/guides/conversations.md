@@ -1350,6 +1350,11 @@ Knowledge Base turns. A systematic-KB turn stays zero-tool whatever the toggle s
 When the tool is gated in, it is exposed whether or not the machine is online: an offline turn gets
 the tool's explicit failure text instead of a silently missing tool.
 
+On a Knowledge Base assistant's agentic turn, a `web_search` call made before the turn searched the
+documents searches the Knowledge Base first with the same query, and the call's result carries both
+(see [Knowledge Base](knowledge_base.md#with-web-search-on-the-documents-first)). The trace shows
+the model's one `web_search` call and its one result.
+
 ## Model residency
 
 Only one model is resident at a time, and it is unloaded once it has gone unused for the Settings

@@ -165,6 +165,15 @@ class TurnToolContext:
     web_token_budget: int = WEB_SEARCH_DEFAULT_TOKEN_BUDGET
 
 
+# What an empty Knowledge Base search returns: the fact, then the order to
+# tell the user. ``kb_then_web_result`` keeps the fact alone: beside web
+# results the order would contradict them.
+KB_NO_EXCERPTS_FACT = "No relevant excerpts were found in the user's documents for this query."
+KB_NO_EXCERPTS_TEXT = (
+    f"{KB_NO_EXCERPTS_FACT} Tell the user the information is not in their documents."
+)
+
+
 def format_kb_tool_result(excerpts: List[KbExcerpt], query: str) -> str:
     """Grounded ToolMessage payload: attributed excerpts + grounding reminder +
     the localized answer-language line, LAST (close to generation — the spot
@@ -172,10 +181,7 @@ def format_kb_tool_result(excerpts: List[KbExcerpt], query: str) -> str:
     block builder so both KB paths ground identically. Empty pool -> an explicit
     "not in the documents" instruction rather than silence."""
     if not excerpts:
-        return (
-            "No relevant excerpts were found in the user's documents for this "
-            "query. Tell the user the information is not in their documents."
-        )
+        return KB_NO_EXCERPTS_TEXT
     block = build_kb_context_block(excerpts=excerpts, question=query)
     return f"{block}\n\n{answer_language_line(query)}"
 
@@ -208,6 +214,34 @@ async def search_knowledge_base(query: str, runtime: ToolRuntime[TurnToolContext
         f"Tool search_knowledge_base returned {len(excerpts)} excerpt(s) " f"(kb_id={ctx.kb_id})"
     )
     return format_kb_tool_result(excerpts, query)
+
+
+# The frame of a web result that searched the documents first (#707,
+# ``src.agents.middleware._KbBeforeWebMiddleware``): the documents' results,
+# then the web's, then which of the two answers what -- last, close to
+# generation.
+KB_THEN_WEB_DOCUMENTS_HEADER = "The user's documents were searched first, with the same query:"
+KB_THEN_WEB_WEB_HEADER = "Then the web:"
+KB_THEN_WEB_ARBITRATION = (
+    "When the document excerpts answer the question, answer from them and name "
+    "the source document; use the web results only for what the documents do "
+    "not cover, and cite their source URLs."
+)
+
+
+def kb_then_web_result(kb_text: str, web_text: str) -> str:
+    """The one tool result that answers a ``web_search`` call the guard
+    preceded with a Knowledge Base search: both results, the documents first,
+    and the arbitration LAST. An empty search keeps its fact and drops its
+    order to tell the user the information is not in the documents, which
+    the web results may well answer."""
+    if kb_text == KB_NO_EXCERPTS_TEXT:
+        kb_text = KB_NO_EXCERPTS_FACT
+    return (
+        f"{KB_THEN_WEB_DOCUMENTS_HEADER}\n\n{kb_text}\n\n"
+        f"{KB_THEN_WEB_WEB_HEADER}\n\n{web_text}\n\n"
+        f"{KB_THEN_WEB_ARBITRATION}"
+    )
 
 
 # ===================== Web search (issue #310) =====================

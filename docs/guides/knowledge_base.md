@@ -161,6 +161,25 @@ whose wire capability is unverified.
 
 Every turn logs the decision, including which gate decided it (`Turn mode: agentic KB (... decided_by=...)`).
 
+### With web search on: the documents first
+
+An agentic turn with web search on carries both `search_knowledge_base` and `web_search`. The
+instructions say document questions go to the documents, but small models do not always follow
+them, so the order is enforced in the agent loop (`_KbBeforeWebMiddleware`,
+`backend/src/agents/middleware.py`): when the model calls `web_search` and the turn has not
+searched the Knowledge Base yet, the Knowledge Base is searched first with the same query, then the
+web search runs, and the model's `web_search` call gets one result holding both — the document
+excerpts first, then the web results, then a line saying to answer from the documents when they
+contain the answer and to use the web for the rest. `backend.log` shows
+`KB-first guard: web_search called before any knowledge base search this turn, ...` followed by
+`Tool invoked: search_knowledge_base` and `Tool invoked: web_search`.
+
+The guard never blocks the web: once the turn has searched the documents — the model called
+`search_knowledge_base` earlier in the turn or in the same message, or the guard already did —
+every `web_search` runs as it is. It acts on web searches only: a turn where the model calls no
+tool at all is answered without any search. The fixed question set that measures this behaviour,
+and the manual procedure for a real model, are in `backend/tests/fixtures/kb/README.md`.
+
 ## The embedding-model gate
 
 The KB needs `intfloat/multilingual-e5-small` for both embeddings and token-accurate chunking. It is
