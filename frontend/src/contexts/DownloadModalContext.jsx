@@ -322,6 +322,8 @@ export function DownloadModalProvider({ children }) {
                 param_size: model.param_size ?? null,
                 quantized: model.quantized !== false,
                 category: model.category || "general",
+                // The date the search card showed stays on the downloaded card (#561).
+                published_at: model.publishedAt ?? null,
               }),
             });
       if (!res.ok) {

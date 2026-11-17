@@ -18,6 +18,7 @@ import { isKbAssistant, hasMissingWeights } from "../utils/modelWeights";
 import { isTestedModel } from "../utils/testedModels";
 import { isVerySmallModel, SMALL_MODEL_PARAM_THRESHOLD_B } from "../utils/modelCapabilities";
 import { displayModelSize } from "../utils/modelSize";
+import { publishedLabel } from "../utils/publishedDate";
 import { createLogger } from "../utils/logger";
 
 const log = createLogger("ModelCard");
@@ -50,6 +51,7 @@ function ModelCard({
   onRebind,
 }) {
   const { t } = useTranslation();
+  const publishedText = publishedLabel(model?.publishedAt);
   const { open } = useDownloadModal();
   const [rebindOpen, setRebindOpen] = useState(false);
   const unavailable = model?.runnable === false;
@@ -148,6 +150,8 @@ function ModelCard({
           ) : (
             <p>{t("models:card.size", { size: displayModelSize(model) ?? model.size })}</p>
           )}
+          {/* Nothing at all when the publication date is unknown (#561). */}
+          {!(type === "local" && isAssistant) && publishedText && <p>{publishedText}</p>}
 
           {/* Additional metadata for remote models. "Unknown" is the backend's
               sentinel for an absent value, not copy — it is compared, never shown. */}
@@ -284,6 +288,7 @@ ModelCard.propTypes = {
     description: PropTypes.string,
     downloads: PropTypes.string,
     likes: PropTypes.string,
+    publishedAt: PropTypes.string,
     author: PropTypes.string,
     library: PropTypes.string,
     parameters: PropTypes.string,
