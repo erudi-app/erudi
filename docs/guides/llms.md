@@ -49,6 +49,18 @@ fetches, or an estimate when Hugging Face does not answer.
 (`false`). The UI splits the catalog on that flag alone — there is no hand-maintained list of base
 model names.
 
+### Publication date
+
+`LLMResponse.published_at` (and `published_at` on each Hugging Face search hit) is an ISO-8601
+date, or `null` when it is unknown. Cards print it as "Published <month year>" in the interface
+language, and print nothing for `null`. It is computed at response time from the `Created:` line of
+the row's stored `model_metadata`, so there is no column and no network call. For a curated base
+row that line holds the creation date of the **base** repo (the quant the resolver picked is always
+younger and would mislead); for a derived or community row, and for a search hit, it is the date of
+the repo itself, the only one known. A row whose metadata has no `Created:` line, such as a
+snapshot entry built before the date was requested, shows no date; the next snapshot regeneration
+fills it in.
+
 ### Hardware-aware ordering
 
 `GET /erudi/hardware/app_startup` returns the machine's recommended model-size window, in billions of
@@ -203,7 +215,7 @@ curl 'http://127.0.0.1:27182/erudi/llms/search/huggingface?q=uncensored&limit=30
 ```
 
 Hugging Face hits (`HFSearchResult`: `link`, `name`, `param_size`, `category`, `downloads`, `likes`,
-`gated`, `pipeline_tag`, `quantized`) are ephemeral. Download a chosen one through
+`gated`, `pipeline_tag`, `quantized`, `published_at`) are ephemeral. Download a chosen one through
 `POST /llms/download/huggingface`.
 
 ## Installed models

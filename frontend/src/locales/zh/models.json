@@ -48,6 +48,7 @@
     "library": "库：{{library}}",
     "parameters": "参数量：{{parameters}}",
     "lastUpdate": "最近更新：{{date}}",
+    "published": "发布于 {{date}}",
     "info": "详情",
     "chatBlocked": "模型权重缺失 - 重新绑定后即可聊天",
     "rebindTitle": "重新绑定到另一个已安装的模型",

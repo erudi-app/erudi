@@ -70,7 +70,15 @@ def search_huggingface(query: str, limit: int = 30) -> List[Dict[str, Any]]:
                 search=query,
                 sort="downloads",
                 limit=max(limit * 3, 60),
-                expand=["safetensors", "tags", "pipeline_tag", "gated", "downloads", "likes"],
+                expand=[
+                    "safetensors",
+                    "tags",
+                    "pipeline_tag",
+                    "gated",
+                    "downloads",
+                    "likes",
+                    "createdAt",
+                ],
                 _max_retries=_SEARCH_MAX_RETRIES,
                 _max_backoff=_SEARCH_MAX_BACKOFF,
             )
@@ -102,6 +110,7 @@ def search_huggingface(query: str, limit: int = 30) -> List[Dict[str, Any]]:
             logger.debug(f"is_runnable check failed for {m.id}; keeping the hit", exc_info=True)
         seen.add(key)
         slug = m.id.split("/")[-1]
+        created = getattr(m, "created_at", None)
         results.append(
             {
                 "link": m.id,
@@ -113,6 +122,9 @@ def search_huggingface(query: str, limit: int = 30) -> List[Dict[str, Any]]:
                 "gated": bool(getattr(m, "gated", None)),
                 "pipeline_tag": getattr(m, "pipeline_tag", None),
                 "quantized": True,
+                # The repo's own creation date (ISO) or None: the search hit is
+                # the quant repo itself, there is no base to look up (#561).
+                "published_at": created.isoformat() if created else None,
             }
         )
         if len(results) >= limit:

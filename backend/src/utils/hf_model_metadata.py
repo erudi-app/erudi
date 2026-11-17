@@ -63,6 +63,7 @@ Notes:
 """
 
 import re
+from datetime import datetime
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
@@ -768,6 +769,27 @@ def measure_dir_size_gb(path: Union[str, Path]) -> float:
     return measure_dir_size_bytes(path) / BYTES_PER_GB
 
 
+def published_at_from_metadata(metadata_str: Optional[str]) -> Optional[str]:
+    """ISO-8601 publication date read from a stored metadata string (#561).
+
+    The ``Created:`` line holds the creation date of the repo the metadata was
+    built from: the BASE repo for a curated row (the quant is resolved after it
+    and is always younger, so it never stands in for the release), the repo
+    itself for a derived/community row. ``Unknown``, a missing line or an
+    unparseable value gives ``None``: a card shows nothing rather than a wrong date.
+    """
+    if not metadata_str:
+        return None
+    for line in metadata_str.split("\n"):
+        key, sep, value = line.partition(":")
+        if sep and key.strip().lower() == "created":
+            try:
+                return datetime.fromisoformat(value.strip()).isoformat()
+            except ValueError:
+                return None
+    return None
+
+
 def rewrite_size_in_metadata(metadata_str: Optional[str], size_gb: float) -> str:
     """Return ``metadata_str`` with its size rewritten to a measured value (#220).
 
@@ -825,6 +847,7 @@ __all__ = [
     # On-disk size (measured reality)
     "measure_dir_size_bytes",
     "measure_dir_size_gb",
+    "published_at_from_metadata",
     "rewrite_size_in_metadata",
     # Helper functions
     "parse_quantization_type",
