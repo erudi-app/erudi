@@ -168,6 +168,10 @@
     "manualReload": "You unloaded the model; reloading it…",
     "compacting": "Summarizing earlier messages to make room…",
     "imagePlaceholder": "🖼 image attachment",
+    "imageRefused": {
+      "tooLarge": "Image not shown: it is larger than 20 MB.",
+      "notImage": "Image not shown: the file is not an image."
+    },
     "attachmentAlt": "attachment {{index}}",
     "copy": "Copy message",
     "star": "Star message"

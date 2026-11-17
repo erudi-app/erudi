@@ -23,7 +23,9 @@ contextBridge.exposeInMainWorld("electron", {
   },
 });
 
-// Local filesystem image loader (for reloading image attachments from stored paths)
+// Local filesystem image loader (for reloading image attachments from stored
+// paths). Answers {ok: true, dataUrl} or {ok: false, reason}: main refuses a
+// file that is not an image or is over the size cap (utils/imageReader.js).
 contextBridge.exposeInMainWorld("fsAPI", {
   readImageAsDataURL: (filePath) => ipcRenderer.invoke("fs:readImageAsDataURL", filePath),
 });

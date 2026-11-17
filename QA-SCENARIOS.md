@@ -77,7 +77,7 @@ non-functional behavior.
 - [ ] When I attach image(s) on a **vision-capable** model (button, paste, or drag-and-drop) and send, then thumbnails show (up to 4) and the images are used in the answer.
 - [ ] When the **selected model is NOT vision-capable**, then the image **attach button is not shown at all** (vision-only affordance) and pasting/dropping an image is ignored; if an image still reaches the backend it is stripped, so the answer is plain text (never broken).
 - [ ] When I try to attach a **5th** image, then it is rejected (cap of 4) and the attach button is disabled at 4.
-- [ ] *(not built yet: v1.3.0 — record as not applicable)* When an oversized or non-image file is passed as an image to the message box, then it is refused with a clear message and nothing crashes.
+- [ ] When an oversized or non-image file is passed as an image to the message box, then it is refused with a clear message and nothing crashes; and when a stored message points at an image that is no longer one (replace a pasted image in `pasted-images/` by a text file named `.png`, or by an image over 20 MB, then reopen the conversation), then the message says "Image not shown: …" with the reason where the image was, and nothing crashes.
 - [ ] When I drop a **non-image** file, then it is refused with "This format is not supported." and nothing is attached.
 - [ ] When the input is **empty or whitespace** only, then the send button is disabled.
 - [ ] When the model is loading on the first reply, then a "First response may take a bit longer while loading the model into memory…" hint shows.

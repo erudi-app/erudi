@@ -27,6 +27,7 @@ const { readAppLogTailResult } = require("./utils/appLogTail");
 const { describeProcessGone, formatMainRecord } = require("./utils/mainLog");
 const { createBackendStartTracker, requestStop } = require("./utils/backendStartTracker");
 const { configureUpdater, createUpdaterWiring } = require("./utils/updaterWiring");
+const { readImageAsDataUrl } = require("./utils/imageReader");
 
 // electron-updater: only loaded in production to avoid dev noise.
 // Reads latest.yml / latest-mac.yml from GitHub Releases and handles
@@ -1006,18 +1007,20 @@ ipcMain.handle("dialog:openDirectory", async () => {
   return result.filePaths[0];
 });
 
+// Read an image attachment back for the conversation thread. The path comes
+// from a stored message, so utils/imageReader.js checks it first: an image
+// extension on the real path, a regular file, at most MAX_IMAGE_BYTES.
+// Answers {ok: true, dataUrl} or {ok: false, reason}; the thread says why a
+// refused image is not shown.
 ipcMain.handle("fs:readImageAsDataURL", async (_event, filePath) => {
-  try {
-    const data = fs.readFileSync(filePath);
-    const ext = path.extname(filePath).slice(1).toLowerCase();
-    const mime = ext === "jpg" ? "jpeg" : ext || "png";
-    return `data:image/${mime};base64,${data.toString("base64")}`;
-  } catch (error) {
-    // The conversation renders without this attachment: degraded, and the
-    // path says which one (a file the user moved or deleted, usually).
-    logWarn(`Could not read the image attachment ${filePath}`, error);
-    return null;
+  const result = await readImageAsDataUrl(filePath);
+  if (result.ok) {
+    return result;
   }
+  // The conversation renders without this attachment: degraded, and the
+  // path says which one (a file the user moved or deleted, usually).
+  logWarn(`Could not read the image attachment ${filePath} (${result.reason})`, result.error);
+  return { ok: false, reason: result.reason };
 });
 
 // Persist a pasted (clipboard) image to disk and return its absolute path.
