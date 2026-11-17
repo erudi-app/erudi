@@ -81,7 +81,9 @@ def child(monkeypatch):
         },
     }
     monkeypatch.setattr(MLX_Engine, "_model", handle)
-    monkeypatch.setattr(MLX_Engine, "_reset_prefix_cache", classmethod(lambda cls, h, **k: True))
+    monkeypatch.setattr(
+        MLX_Engine, "_reset_prefix_cache", classmethod(lambda cls, h, **k: MLX_Engine._OUTCOME_OK)
+    )
     yield scripted, handle
 
 

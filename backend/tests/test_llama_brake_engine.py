@@ -628,7 +628,15 @@ def test_both_llama_engines_bind_the_brake_hooks(engine, hook):
     assert _engine_overrides(engine, hook)
 
 
-@pytest.mark.parametrize("hook", ["claim_prefix", "on_history_rewritten", "note_stream_abandoned"])
+@pytest.mark.parametrize(
+    "hook",
+    [
+        "claim_prefix",
+        "on_history_rewritten",
+        "note_stream_abandoned",
+        "note_stream_completed",
+    ],
+)
 @pytest.mark.parametrize("engine", [CPU_Engine, CUDA_Engine])
 def test_no_llama_engine_binds_the_prefix_cache_hooks(engine, hook):
     assert not _engine_overrides(engine, hook)

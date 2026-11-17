@@ -43,6 +43,13 @@ must not shrink the window to the floor nor release every minute):
   at most once per episode (a brake reload carries the
   episode), never within ``RELOAD_GRACE_S`` of a brake reload, and only when
   the child is worth it (``UNLOAD_MIN_SHARE`` of the memory total).
+  A release that TIMED OUT at an idle sample (a request the child could not
+  answer within the engine's bound: it is swapped out, and every further
+  request pages it back in) is an unload too, under warning as under
+  critical (:func:`release_timed_out`), with the same once-per-episode and
+  grace rules; the share is not asked, the release having already found
+  ``ATTRIBUTION_FLOOR_BYTES`` to give back. At a turn point it never is, and a
+  release that failed any other way is retried at the next eligible sample.
 * **Grow** (outside an episode): every ``CALM_SAMPLES_TO_GROW`` calm samples,
   one step back up, never to ``0.9 x`` the window that hurt while it is
   remembered (forgotten after ``CALM_SAMPLES_TO_FORGET`` calm samples), and
@@ -373,6 +380,19 @@ def step(state: BrakeState, sample: Sample, context: Context) -> Decision:
     if level == LEVEL_CALM:
         return _calm(state, context, level)
     return _pressure(state, sample, context, level, window)
+
+
+def release_timed_out(state: BrakeState, *, point: str, level: int, now: float) -> Decision:
+    """What the release ``step`` decided becomes when the child could not
+    answer it in time: an unload at an idle sample, unless the episode
+    already took its unload or a brake reload is within ``RELOAD_GRACE_S``;
+    nothing otherwise (the release is retried at the next eligible sample).
+    ``state`` is the state that sample left; it is never modified."""
+    grace_over = state.reloaded_at is None or now - state.reloaded_at >= RELOAD_GRACE_S
+    if point != POINT_IDLE or state.unloaded_this_episode or not grace_over:
+        return Decision(state=state, level=level)
+    state = replace(state, unloaded_this_episode=True, critical_idle_at=None)
+    return Decision(state=state, level=level, unload=True)
 
 
 def _calm(state: BrakeState, context: Context, level: int) -> Decision:
