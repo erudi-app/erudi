@@ -90,6 +90,13 @@ def init_database(sqlalchemy_url: str) -> Engine:
         The live engine (also published as ``core.db_engine``).
     """
     global db_engine
+    # A rebind (the DB watchdog restarting the cluster) replaces the engine:
+    # close the idle connections of the one it replaces, which would
+    # otherwise stay open until garbage collection, counted against the
+    # cluster's max_connections. A connection still checked out goes back to
+    # the old pool and closes with it once nothing references it.
+    if db_engine is not None:
+        db_engine.dispose()
     # Sized by the connection budget the cluster's max_connections is
     # computed from (src/launcher/postgres_settings.py).
     db_engine = create_engine(

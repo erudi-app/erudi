@@ -1096,6 +1096,37 @@ class TestInitDatabase:
             core.db_engine = None
 
     @pytest.mark.integration
+    def test_init_database_disposes_the_engine_it_replaces(self, pg):
+        # A rebind (the DB watchdog's restart) must not leave the previous
+        # pool's connections open against the cluster's connection budget.
+        from src.database import core
+
+        def backends() -> int:
+            with psycopg.connect(pg.psycopg_url, autocommit=True) as conn:
+                return conn.execute(
+                    "SELECT count(*) FROM pg_stat_activity "
+                    "WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()"
+                ).fetchone()[0]
+
+        try:
+            first = core.init_database(pg.sqlalchemy_url)
+            with first.connect() as conn:
+                conn.execute(text("SELECT 1"))
+            before = backends()
+            second = core.init_database(pg.sqlalchemy_url)
+            assert second is not first
+            assert first.pool.checkedin() == 0
+            deadline = time.monotonic() + 5
+            while backends() >= before and time.monotonic() < deadline:
+                time.sleep(0.1)
+            assert backends() == before - 1
+        finally:
+            if core.db_engine is not None:
+                core.db_engine.dispose()
+            core.SessionLocal.configure(bind=None)
+            core.db_engine = None
+
+    @pytest.mark.integration
     async def test_create_tables_works_after_init_database(self, pg):
         """Anti-B1: Database_Seeder.create_tables must read the LIVE engine,
         not a stale imported-by-value copy frozen at import time."""
