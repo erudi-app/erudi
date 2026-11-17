@@ -31,10 +31,13 @@ const {
   resolveDataLocations,
   listClearTargets,
   isSafeToDelete,
+  isUnsafeInstanceRoot,
   UPDATE_NOTES_FILE,
   LAST_SEEN_VERSION_FILE,
 } = require("./utils/dataLocations");
-const { clearAllData, PENDING_CLEAR_FILE } = require("./utils/clearAllData");
+const { createClearAllDataFlow, PENDING_CLEAR_FILE } = require("./utils/clearAllData");
+const { claimFolder, isOwnedFolder } = require("./utils/folderOwnership");
+const { setUpElectronPaths, openFirstWindow } = require("./utils/appStartup");
 const { readImageAsDataUrl } = require("./utils/imageReader");
 const { savePastedImage } = require("./utils/pastedImage");
 
@@ -47,50 +50,61 @@ const dataLocations = resolveDataLocations({
   env: process.env,
   home: os.homedir(),
   tmpdir: os.tmpdir(),
+  cwd: process.cwd(),
   isPackaged: app.isPackaged,
   devBackendRoot: path.resolve(app.getAppPath(), "..", "backend"),
 });
-
-// An ERUDI_DATA_ROOT instance keeps its Electron side under the same root
-// (<root>/electron: the Chromium profile, Erudi's files beside it, the
-// Electron logs), so a QA run next to the installed app shares nothing with
-// it -- neither its storage nor its single-instance lock. Set before
-// electron-updater loads and before the lock is taken: both read these paths.
-// Without a root, the logs folder is Electron's default, set explicitly so
-// that app.getPath("logs") is defined for Clear All Data.
-if (dataLocations.electronDir) {
-  app.setPath("userData", dataLocations.electronDir);
+// The backend this process spawns reads ERUDI_DATA_ROOT too: hand it the
+// absolute folder resolved here, so a relative or ~ value cannot name another
+// folder from the backend's own working directory.
+if (dataLocations.instanceRoot) {
+  process.env.ERUDI_DATA_ROOT = dataLocations.instanceRoot;
 }
-app.setAppLogsPath(
-  dataLocations.electronDir ? path.join(dataLocations.electronDir, "logs") : undefined
-);
 
-// electron-updater: only loaded in production to avoid dev noise.
-// Reads latest.yml / latest-mac.yml from GitHub Releases and handles
-// download + install of new versions.
-let autoUpdater = null;
-// Kept until the log file is set up below, then logged: electron-updater ships
-// with every packaged build, so a require that fails is a packaging defect.
+// electron-updater: only loaded in production to avoid dev noise. Reads
+// latest.yml / latest-mac.yml from GitHub Releases and handles download +
+// install of new versions. Loaded by setUpElectronPaths once an
+// ERUDI_DATA_ROOT instance's Electron folders are set (utils/appStartup.js),
+// before the single-instance lock is taken below.
+// A load error is kept until the log file is set up below, then logged:
+// electron-updater ships with every packaged build, so a require that fails
+// is a packaging defect.
 let updaterLoadError = null;
-if (app.isPackaged) {
-  try {
-    autoUpdater = require("electron-updater").autoUpdater;
-    autoUpdater.logger = require("electron-log");
-    autoUpdater.logger.transports.file.level = "info";
-    // Electron's logs folder (app.getPath("logs")) rather than the library's
-    // own default: the same folder on a default install, and the instance's
-    // under ERUDI_DATA_ROOT, where electron-log would still write to
-    // ~/Library/Logs on macOS. Clear All Data deletes this folder.
-    autoUpdater.logger.transports.file.resolvePathFn = (vars) =>
-      path.join(vars.electronDefaultDir, vars.fileName);
-    // Before anything can run: both library flags off (its defaults are on)
-    // and its per-install identifier replaced by a constant.
-    configureUpdater(autoUpdater);
-  } catch (e) {
-    updaterLoadError = e;
-    autoUpdater = null;
-  }
-}
+// A claim that fails is logged once the log file exists (claimElectronFolders).
+let electronClaimError = null;
+const autoUpdater = setUpElectronPaths({
+  app,
+  electronDir: dataLocations.electronDir,
+  claim: (dir) => {
+    try {
+      return claimFolder(dir, { namespaced: false });
+    } catch (error) {
+      electronClaimError = error;
+      return false;
+    }
+  },
+  loadUpdater: () => {
+    if (!app.isPackaged) return null;
+    try {
+      const updater = require("electron-updater").autoUpdater;
+      updater.logger = require("electron-log");
+      updater.logger.transports.file.level = "info";
+      // Electron's logs folder (app.getPath("logs")) rather than the
+      // library's own default: the same folder on a default install, and the
+      // instance's under ERUDI_DATA_ROOT, where electron-log would still
+      // write to ~/Library/Logs on macOS. Clear All Data deletes this folder.
+      updater.logger.transports.file.resolvePathFn = (vars) =>
+        path.join(vars.electronDefaultDir, vars.fileName);
+      // Before anything can run: both library flags off (its defaults are
+      // on) and its per-install identifier replaced by a constant.
+      configureUpdater(updater);
+      return updater;
+    } catch (e) {
+      updaterLoadError = e;
+      return null;
+    }
+  },
+});
 
 // The update switches (#563) -- Check for updates, Download updates
 // automatically, Install downloaded updates when I quit -- are persisted with
@@ -169,8 +183,17 @@ function killBackend(proc) {
 // Create a log file for debugging. This is THE file QA reads (app:getLogPath);
 // renderer logs are forwarded here too via the "renderer-log" IPC channel. In
 // the system temporary folder, or the instance log folder under ERUDI_DATA_ROOT.
+// A folder of the instance that main creates before the backend does is marked
+// as Erudi's here (the backend marks it only when it creates it itself).
+function ensureInstanceFolder(dir) {
+  if (dataLocations.instanceRoot) {
+    claimFolder(dir, { namespaced: false });
+  } else {
+    fs.mkdirSync(dir, { recursive: true });
+  }
+}
 try {
-  fs.mkdirSync(dataLocations.appLogDir, { recursive: true });
+  ensureInstanceFolder(dataLocations.appLogDir);
 } catch (err) {
   // Not fatal: log() below reports, on the console, a file it cannot write.
   console.error("Failed to create the log folder:", err);
@@ -197,10 +220,15 @@ const rotateLogIfNeeded = () => {
   }
 };
 
+// Set by Clear All Data just before it deletes the app log: from then on this
+// process writes to the console only, so no line brings the file back.
+let appLogSilenced = false;
+
 const log = (message) => {
   const timestamp = new Date().toISOString();
   const logMessage = `[${timestamp}] ${message}\n`;
   console.log(message);
+  if (appLogSilenced) return;
   try {
     rotateLogIfNeeded();
     fs.appendFileSync(logFile, logMessage);
@@ -215,6 +243,12 @@ const log = (message) => {
 // died or a renderer that crashed reaches the page that exists to report bugs.
 const logWarn = (message, error) => log(formatMainRecord("WARN", message, error));
 const logError = (message, error) => log(formatMainRecord("ERROR", message, error));
+
+// The Electron folders Clear All Data may delete carry the ownership file:
+// marked before anything creates them (Chromium creates the user data folder,
+// the single-instance lock below writes in it), so a folder Erudi creates is
+// recognised as its own.
+claimElectronFolders();
 
 log(`Starting app, log file: ${logFile}`);
 if (updaterLoadError) {
@@ -680,6 +714,8 @@ const createApplicationMenu = () => {
         {
           label: t("menu.help.clearAllData"),
           click: clearAllDataFromMenu,
+          // Hidden in a dev run without ERUDI_DATA_ROOT (clearAllDataAvailable).
+          visible: clearAllDataAvailable,
         },
         { type: "separator" },
         {
@@ -973,6 +1009,7 @@ ipcMain.handle("fs:readImageAsDataURL", async (_event, filePath) => {
 // Clear All Data deletes it with the rest.
 ipcMain.handle("image:savePasted", async (_event, dataUrl) => {
   try {
+    ensureInstanceFolder(dataLocations.dataDir);
     const saved = savePastedImage(dataUrl, dataLocations.pastedImagesDir);
     if (!saved) {
       logWarn("Refused to save a pasted image that is not a supported raster format");
@@ -991,7 +1028,7 @@ ipcMain.handle("image:savePasted", async (_event, dataUrl) => {
 async function openDataFolder() {
   const dataDir = dataLocations.dataDir;
   try {
-    fs.mkdirSync(dataDir, { recursive: true });
+    ensureInstanceFolder(dataDir);
     // openPath answers an error message, or "" when the folder opened.
     const failure = await shell.openPath(dataDir);
     if (failure) {
@@ -1022,7 +1059,8 @@ function clearTargets() {
 
 // Never a root Erudi does not own: the ERUDI_DATA_ROOT folder (a user may
 // point it at a shared folder) and the Electron user data folder itself (the
-// running Chromium's profile) are protected, with the home folder.
+// running Chromium's profile) are protected, with the home folder; compared
+// on real paths, case-folded where the file system ignores case.
 const isSafeClearTarget = (target) =>
   isSafeToDelete(target, {
     platform: process.platform,
@@ -1030,7 +1068,53 @@ const isSafeClearTarget = (target) =>
     protectedDirs: [dataLocations.instanceRoot, app.getPath("userData")],
   });
 
-const pendingClearMarker = () => path.join(app.getPath("userData"), PENDING_CLEAR_FILE);
+// A file another user owns (a shared /tmp/erudi-backend.log on a multi-user
+// Linux machine) is not Erudi's to delete: a permission error on it is final.
+// Windows reports no owner here; there a permission error is a held file.
+function isForeignFile(target) {
+  if (typeof process.getuid !== "function") return false;
+  try {
+    return fs.lstatSync(target).uid !== process.getuid();
+  } catch {
+    // Gone or unreadable: nothing to call foreign; the retry decides.
+    return false;
+  }
+}
+
+// Clear All Data in a dev run would delete the repository's backend/data
+// under the dev Postgres main does not run, and clear the Chromium storage
+// the installed app shares on macOS and Windows (same app name, `erudi` and
+// `Erudi`, on a case-insensitive disk): only with an ERUDI_DATA_ROOT
+// instance of its own.
+const clearAllDataAvailable = app.isPackaged || Boolean(dataLocations.instanceRoot);
+
+// An ERUDI_DATA_ROOT that is the home folder, above it, or a file system
+// root: Clear All Data refuses to run at all.
+const instanceRootRefused =
+  Boolean(dataLocations.instanceRoot) &&
+  isUnsafeInstanceRoot(dataLocations.instanceRoot, {
+    platform: process.platform,
+    home: os.homedir(),
+  });
+
+// The Electron folders Clear All Data deletes carry the ownership file too.
+// Under ERUDI_DATA_ROOT, setUpElectronPaths claimed them before Electron
+// created them. Otherwise the installed app's logs folder is Erudi's by name
+// (`Erudi` in the platform's log location, or in its user data folder) and is
+// claimed here, on every start; a dev run has no Electron logs to clear.
+function claimElectronFolders() {
+  if (electronClaimError) {
+    // Clear All Data then leaves these folders in place and names them.
+    logWarn("Could not mark the Electron folders as Erudi's", electronClaimError);
+  }
+  if (dataLocations.electronDir || !app.isPackaged) return;
+  try {
+    claimFolder(app.getPath("logs"), { namespaced: true });
+  } catch (error) {
+    // Same: the folder is then left in place and named.
+    logWarn("Could not mark the Electron logs folder as Erudi's", error);
+  }
+}
 
 // The interface's own storage (local storage, IndexedDB, caches...), cleared
 // through Chromium rather than by deleting its profile folder under it.
@@ -1039,109 +1123,93 @@ async function clearInterfaceStorage() {
   await session.defaultSession.clearCache();
 }
 
-function reportClear(result) {
-  for (const { target, code } of result.pending) {
-    logWarn(`Clear All Data: ${target} is still in use (${code}); deleted at the next start`);
+function clearResultDetail({ complete, leftInPlace }) {
+  const parts = [];
+  if (leftInPlace.length > 0) {
+    parts.push(t("dialogs.dataCleared.leftInPlace", { folders: leftInPlace.join("\n") }));
   }
-  for (const target of result.refused) {
-    logError(`Clear All Data refused to delete ${target}: not a folder Erudi owns`);
-  }
-  if (result.storageError) {
-    logWarn(
-      "Clear All Data: the interface storage could not be cleared; retried at the next start",
-      result.storageError
-    );
-  }
-  log(`Clear All Data: ${result.complete ? "everything deleted" : "finishes at the next start"}`);
+  parts.push(complete ? t("dialogs.dataCleared.detail") : t("dialogs.dataCleared.detailPending"));
+  return parts.join("\n\n");
 }
 
-async function clearAllDataFromMenu() {
-  if (!mainWindow) {
-    logWarn("Cannot clear data: no main window");
-    return;
-  }
-  const choice = await dialog.showMessageBox(mainWindow, {
-    type: "warning",
-    buttons: [t("dialogs.cancel"), t("dialogs.clearAll.confirm")],
-    defaultId: 0,
-    cancelId: 0,
-    title: t("dialogs.clearAll.title"),
-    message: t("dialogs.clearAll.message"),
-    detail: t("dialogs.clearAll.detail"),
-  });
-  if (choice.response !== 1) {
-    log("User cancelled data deletion");
-    return;
-  }
-  log("User confirmed data deletion. Clearing all data...");
-
-  // The app quits at the end, whatever happens: marked now, so the backend
-  // supervisor stands down instead of respawning the backend stopped below,
-  // and the quit skips the teardown already done here.
-  shuttingDown = true;
-  try {
-    const result = await clearAllData({
-      // The same graceful stop a quit runs: the embedded Postgres and the
-      // backend close their files; killBackend is the hard fallback (#216).
-      stopBackend: async () => {
-        if (!backendProcess) return;
-        log("Stopping backend process...");
-        requestStop(backendProcess);
-        await gracefulShutdown(backendProcess, { killFn: killBackend });
-        backendProcess = null;
-      },
-      // A blank page writes nothing to the storage once it is cleared.
-      quietRenderer: async () => {
-        if (mainWindow && !mainWindow.isDestroyed()) {
-          await mainWindow.webContents.loadURL("about:blank");
-        }
-      },
-      clearStorage: clearInterfaceStorage,
-      targets: clearTargets(),
-      isSafe: isSafeClearTarget,
-      pendingMarker: pendingClearMarker(),
+const clearAllDataFlow = createClearAllDataFlow({
+  context: { isPackaged: app.isPackaged, instanceRoot: dataLocations.instanceRoot },
+  available: clearAllDataAvailable,
+  rootRefused: instanceRootRefused,
+  confirm: async () => {
+    if (!mainWindow) {
+      logWarn("Cannot clear data: no main window");
+      return false;
+    }
+    const choice = await dialog.showMessageBox(mainWindow, {
+      type: "warning",
+      buttons: [t("dialogs.cancel"), t("dialogs.clearAll.confirm")],
+      defaultId: 0,
+      cancelId: 0,
+      title: t("dialogs.clearAll.title"),
+      message: t("dialogs.clearAll.message"),
+      detail: t("dialogs.clearAll.detail"),
     });
-    reportClear(result);
+    return choice.response === 1;
+  },
+  // The app quits at the end, whatever happens: the backend supervisor stands
+  // down instead of respawning the backend stopped next, and the quit skips
+  // the teardown already done here.
+  markQuitting: () => {
+    shuttingDown = true;
+  },
+  // The same graceful stop a quit runs: the embedded Postgres and the backend
+  // close their files; killBackend is the hard fallback (#216).
+  stopBackend: async () => {
+    if (!backendProcess) return;
+    log("Stopping backend process...");
+    requestStop(backendProcess);
+    await gracefulShutdown(backendProcess, { killFn: killBackend });
+    backendProcess = null;
+  },
+  // A blank page writes nothing to the storage once it is cleared.
+  quietRenderer: async () => {
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      await mainWindow.webContents.loadURL("about:blank");
+    }
+  },
+  clearStorage: clearInterfaceStorage,
+  silenceAppLog: () => {
+    appLogSilenced = true;
+  },
+  targets: clearTargets,
+  isSafe: isSafeClearTarget,
+  isOwned: isOwnedFolder,
+  isForeign: isForeignFile,
+  markerPath: path.join(app.getPath("userData"), PENDING_CLEAR_FILE),
+  showResult: async (result) => {
     await dialog.showMessageBox({
       type: "info",
       buttons: [t("dialogs.ok")],
       title: t("dialogs.dataCleared.title"),
       message: t("dialogs.dataCleared.message"),
-      detail: result.complete
-        ? t("dialogs.dataCleared.detail")
-        : t("dialogs.dataCleared.detailPending"),
+      detail: clearResultDetail(result),
     });
-  } catch (error) {
-    logError("Failed to clear the data", error);
+  },
+  showRootRefused: async () => {
+    dialog.showErrorBox(
+      t("dialogs.errorTitle"),
+      t("dialogs.clearAll.rootRefused", { root: dataLocations.instanceRoot })
+    );
+  },
+  showError: async (error) => {
     dialog.showErrorBox(
       t("dialogs.errorTitle"),
       t("dialogs.clearAll.failedWithError", { error: error.message })
     );
-  }
-  app.quit();
-}
+  },
+  quit: () => app.quit(),
+  log,
+  logWarn,
+  logError,
+});
 
-// A Clear All Data that left files still in use (or the storage uncleared)
-// is finished here, at the next start, before the window opens and the
-// backend starts.
-async function finishPendingClear() {
-  if (!fs.existsSync(pendingClearMarker())) return;
-  log("Finishing the Clear All Data of the previous session...");
-  try {
-    reportClear(
-      await clearAllData({
-        stopBackend: null,
-        quietRenderer: null,
-        clearStorage: clearInterfaceStorage,
-        targets: clearTargets(),
-        isSafe: isSafeClearTarget,
-        pendingMarker: pendingClearMarker(),
-      })
-    );
-  } catch (error) {
-    logError("Could not finish the Clear All Data of the previous session", error);
-  }
-}
+const clearAllDataFromMenu = () => clearAllDataFlow.clearFromMenu();
 
 // ── Auto-updater IPC ──────────────────────────────────────────────────────────
 // The renderer side of utils/updaterWiring.js. Without an updater (running
@@ -1293,11 +1361,13 @@ app
     // Create application menu and window immediately — never block on backend startup.
     // The renderer handles the loading/error state via backend-event IPC messages.
     // Before the window and the backend: they would write again what a Clear
-    // All Data left to delete.
-    await finishPendingClear();
-
-    createApplicationMenu();
-    createWindow();
+    // All Data left to delete (utils/appStartup.js).
+    await openFirstWindow({
+      finishPendingClear: () => clearAllDataFlow.finishPending(),
+      createApplicationMenu,
+      createWindow,
+      logError,
+    });
 
     // Auto-updater: wire up events and kick off initial check (production only).
     setupAutoUpdater();

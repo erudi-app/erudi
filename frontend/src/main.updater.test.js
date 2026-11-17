@@ -34,7 +34,7 @@ function handlerBody(channel, kind = "handle") {
 describe("loading the updater", () => {
   it("configures it right after the require, before anything can run", () => {
     const load = source.slice(source.indexOf('require("electron-updater")'));
-    expect(load.slice(0, load.indexOf("} catch"))).toMatch(/configureUpdater\(autoUpdater\);/);
+    expect(load.slice(0, load.indexOf("} catch"))).toMatch(/configureUpdater\(updater\);/);
   });
 
   it("leaves every flag and header to the wiring", () => {

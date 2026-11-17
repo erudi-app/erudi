@@ -2,10 +2,13 @@
  * Open Data Folder and Clear All Data act on the folders the backend uses, on
  * every platform (#676), and the image reader only reads images.
  *
- * The decisions live in utils/dataLocations.js, utils/clearAllData.js and
- * utils/imageReader.js (tested on their own); main.js runs in the Electron
- * main process and cannot be imported here, so its wiring is read from the
- * source text, as the other main.*.test.js files do.
+ * What happens, and in which order, is tested on fakes where it lives:
+ * utils/dataLocations.js, utils/clearAllData.js (the clearing and the start
+ * that finishes it), utils/appStartup.js (Electron paths before the updater,
+ * the pending clear before the window), utils/imageReader.js,
+ * utils/pastedImage.js. main.js runs in the Electron main process and cannot
+ * be imported here, so this file only checks, from the source text, that
+ * main.js hands its work to those functions and keeps no path of its own.
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
@@ -14,108 +17,73 @@ import { fileURLToPath } from "node:url";
 const source = readFileSync(fileURLToPath(new URL("./main.js", import.meta.url)), "utf8");
 const preload = readFileSync(fileURLToPath(new URL("./preload.js", import.meta.url)), "utf8");
 
-const indexOf = (pattern) => {
-  const match = source.match(pattern);
-  expect(match, String(pattern)).not.toBeNull();
-  return match.index;
-};
-
-describe("where main looks for Erudi's folders", () => {
+describe("main.js delegates Erudi's folders", () => {
   it("resolves them through utils/dataLocations.js, never a per-OS path of its own", () => {
     expect(source).toMatch(/const dataLocations = resolveDataLocations\(\{/);
     expect(source).not.toMatch(/Application Support/);
     expect(source).not.toMatch(/LOCALAPPDATA/);
     expect(source).not.toMatch(/XDG_/);
-    expect(source).not.toMatch(/function getDataDirectory/);
   });
 
-  it("moves the Electron folders of an ERUDI_DATA_ROOT instance before electron-updater loads", () => {
-    const setUserData = indexOf(/app\.setPath\("userData", dataLocations\.electronDir\)/);
-    const setLogs = indexOf(/app\.setAppLogsPath\(/);
-    const updater = indexOf(/require\("electron-updater"\)/);
-    const lock = indexOf(/app\.requestSingleInstanceLock\(\)/);
-    expect(setUserData).toBeLessThan(updater);
-    expect(setLogs).toBeLessThan(updater);
-    expect(setUserData).toBeLessThan(lock);
+  it("hands the backend the ERUDI_DATA_ROOT it resolved", () => {
+    expect(source).toMatch(/process\.env\.ERUDI_DATA_ROOT = dataLocations\.instanceRoot;/);
   });
 
-  it("writes electron-log's file in Electron's logs folder, the one Clear All Data deletes", () => {
+  it("sets the Electron folders and loads the updater through setUpElectronPaths, before the lock", () => {
+    const setUp = source.indexOf("setUpElectronPaths({");
+    expect(setUp).toBeGreaterThan(-1);
+    expect(setUp).toBeLessThan(source.indexOf("app.requestSingleInstanceLock()"));
+    // The updater is loaded nowhere else.
+    expect(source.match(/require\("electron-updater"\)/g)).toHaveLength(1);
+    expect(source.indexOf('require("electron-updater")')).toBeGreaterThan(setUp);
+    expect(source).not.toMatch(/app\.setPath\("userData"/);
+  });
+
+  it("writes the app log and the pasted images where dataLocations puts them", () => {
     expect(source).toMatch(
-      /transports\.file\.resolvePathFn = \(vars\) =>\s*path\.join\(vars\.electronDefaultDir, vars\.fileName\)/
+      /const logFile = path\.join\(dataLocations\.appLogDir, "erudi-backend\.log"\);/
     );
+    expect(source).toMatch(/savePastedImage\(dataUrl, dataLocations\.pastedImagesDir\)/);
   });
 
   it("opens the backend's data folder", () => {
     expect(source).toMatch(/label: t\("menu\.help\.openDataFolder"\),\s*click: openDataFolder/);
-    const body = source.match(/async function openDataFolder\(\) \{[\s\S]*?\n\}/);
-    expect(body).not.toBeNull();
-    expect(body[0]).toMatch(/const dataDir = dataLocations\.dataDir;/);
-    expect(body[0]).toMatch(/await shell\.openPath\(dataDir\)/);
-  });
-
-  it("writes the app log where dataLocations puts it (the instance's own folder under ERUDI_DATA_ROOT)", () => {
-    expect(source).toMatch(
-      /const logFile = path\.join\(dataLocations\.appLogDir, "erudi-backend\.log"\);/
-    );
-    expect(source).not.toMatch(/os\.tmpdir\(\), "erudi-backend/);
-  });
-
-  it("keeps pasted images in the data folder", () => {
-    expect(source).toMatch(/savePastedImage\(dataUrl, dataLocations\.pastedImagesDir\)/);
-  });
-
-  it("allows revealing a log only in the folders the backend and main write logs to", () => {
-    const dirs = source.match(/function knownLogDirectories\(\) \{[\s\S]*?\n\}/);
-    expect(dirs).not.toBeNull();
-    expect(dirs[0]).toMatch(/dataLocations\.backendLogDir/);
+    expect(source).toMatch(/const dataDir = dataLocations\.dataDir;/);
   });
 });
 
-describe("Clear All Data", () => {
-  const handler = () => {
-    const body = source.match(/async function clearAllDataFromMenu\(\) \{[\s\S]*?\n\}/);
-    expect(body).not.toBeNull();
-    return body[0];
-  };
-
-  it("is reached from the Help menu only: the dead renderer bridges are gone", () => {
-    expect(source).toMatch(/label: t\("menu\.help\.clearAllData"\),\s*click: clearAllDataFromMenu/);
+describe("main.js delegates Clear All Data", () => {
+  it("runs it through createClearAllDataFlow, from the Help menu only", () => {
+    expect(source).toMatch(/const clearAllDataFlow = createClearAllDataFlow\(\{/);
+    expect(source).toMatch(
+      /click: clearAllDataFromMenu,\s*(\/\/[^\n]*\n\s*)*visible: clearAllDataAvailable/
+    );
     expect(source).not.toMatch(/"data:clearAll"/);
     expect(source).not.toMatch(/"data:openFolder"/);
     expect(preload).not.toMatch(/electronAPI/);
   });
 
-  it("marks the app as quitting, then stops the backend the way a quit does", () => {
-    const body = handler();
-    expect(body.indexOf("shuttingDown = true")).toBeGreaterThan(-1);
-    expect(body.indexOf("shuttingDown = true")).toBeLessThan(body.indexOf("clearAllData({"));
-    expect(body).toMatch(
-      /requestStop\(backendProcess\);\s*await gracefulShutdown\(backendProcess, \{ killFn: killBackend \}\);/
+  it("is hidden in a dev run without ERUDI_DATA_ROOT", () => {
+    expect(source).toMatch(
+      /const clearAllDataAvailable = app\.isPackaged \|\| Boolean\(dataLocations\.instanceRoot\);/
     );
   });
 
-  it("blanks the window, clears the interface's storage through the session, then deletes the folders", () => {
-    const body = handler();
-    expect(body).toMatch(/quietRenderer: async \(\) => \{[\s\S]*loadURL\("about:blank"\)/);
-    expect(body).toMatch(/clearStorage: clearInterfaceStorage/);
-    expect(source).toMatch(/session\.defaultSession\.clearStorageData\(\)/);
-    expect(body).toMatch(/targets: clearTargets\(\)/);
-    expect(body).toMatch(/isSafe: isSafeClearTarget/);
-    expect(body).toMatch(/app\.quit\(\);/);
-  });
-
-  it("finishes an unfinished clearing at the next start, before the window and the backend", () => {
+  it("opens the first window through openFirstWindow, which finishes a pending clear first", () => {
     const ready = source.match(
-      /\.whenReady\(\)\s*\.then\(async \(\) => \{([\s\S]*?)createWindow\(\);/
+      /\.whenReady\(\)\s*\.then\(async \(\) => \{([\s\S]*?)\n {4}if \(!app\.isPackaged\)/
     );
     expect(ready).not.toBeNull();
-    expect(ready[1]).toMatch(/await finishPendingClear\(\);/);
+    expect(ready[1]).toMatch(/await openFirstWindow\(\{/);
+    expect(ready[1]).toMatch(/finishPendingClear: \(\) => clearAllDataFlow\.finishPending\(\)/);
+    expect(ready[1]).not.toMatch(/\bcreateWindow\(\)/);
   });
 
-  it("never deletes the instance root or the Electron user data folder itself", () => {
+  it("guards every deletion with the home folder, the instance root and the profile folder", () => {
     expect(source).toMatch(
       /protectedDirs: \[dataLocations\.instanceRoot, app\.getPath\("userData"\)\]/
     );
+    expect(source).toMatch(/isOwned: isOwnedFolder/);
   });
 });
 

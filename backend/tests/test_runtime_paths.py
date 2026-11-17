@@ -362,9 +362,17 @@ class TestProdMode:
 # (frontend/src/utils/dataLocations.js). Both sides are checked against this
 # one table: a change to either fails a test until the table, and so the
 # other side, follows.
-_SHARED_LAYOUT = json.loads(
+_SHARED_TABLE = json.loads(
     (Path(__file__).parent / "fixtures" / "runtime_paths_layout.json").read_text(encoding="utf-8")
-)["cases"]
+)
+_SHARED_LAYOUT = _SHARED_TABLE["cases"]
+
+
+def _table_env_value(home: Path, value: str) -> str:
+    """An env value of the table: empty and ~ values as is, others under home."""
+    if value == "" or value.startswith("~"):
+        return value
+    return str(home / value)
 
 
 @pytest.mark.unit
@@ -373,8 +381,11 @@ def test_prod_layout_matches_the_table_shared_with_electron(case, monkeypatch, t
     home = (tmp_path / "home").resolve()
     monkeypatch.setattr(rp.platform, "system", lambda: case["system"])
     monkeypatch.setattr(Path, "home", classmethod(lambda cls: home))
-    for name, relative in case["env"].items():
-        monkeypatch.setenv(name, str(home / relative))
+    # expanduser reads HOME (POSIX) or USERPROFILE (Windows).
+    monkeypatch.setenv("HOME", str(home))
+    monkeypatch.setenv("USERPROFILE", str(home))
+    for name, value in case["env"].items():
+        monkeypatch.setenv(name, _table_env_value(home, value))
 
     paths = rp._compute_runtime_paths(
         mode="prod", backend_root=tmp_path / "bundle", packaged_data_dir=tmp_path / "no-payload"
@@ -382,3 +393,70 @@ def test_prod_layout_matches_the_table_shared_with_electron(case, monkeypatch, t
 
     assert paths.data_dir.relative_to(home).as_posix() == case["data_dir"]
     assert paths.log_dir.relative_to(home).as_posix() == case["log_dir"]
+
+
+# =====================================================================
+# UNIT - the ownership sentinel Clear All Data checks
+# =====================================================================
+
+# Clear All Data deletes a backend folder only when it carries this file, so a
+# folder Erudi did not create (an ERUDI_DATA_ROOT pointed at an existing
+# folder holding a `data/` of the user's own) is never deleted.
+
+
+def test_the_sentinel_name_is_the_one_shared_with_electron():
+    assert rp.OWNERSHIP_SENTINEL == _SHARED_TABLE["ownership_sentinel"]
+
+
+@pytest.mark.unit
+class TestOwnershipSentinel:
+    def test_prod_folders_are_marked_even_when_they_already_exist(self, monkeypatch, tmp_path):
+        # An install from before the sentinel: its folders are Erudi's by name.
+        monkeypatch.setattr(rp.platform, "system", lambda: "Linux")
+        monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "share"))
+        monkeypatch.setenv("XDG_STATE_HOME", str(tmp_path / "state"))
+        existing = tmp_path / "share" / "erudi" / "backend" / "prod" / "data"
+        existing.mkdir(parents=True)
+
+        paths = rp._compute_runtime_paths("prod", tmp_path / "bundle", tmp_path / "no-payload")
+
+        assert (paths.data_dir / rp.OWNERSHIP_SENTINEL).is_file()
+        assert (paths.log_dir / rp.OWNERSHIP_SENTINEL).is_file()
+
+    def test_dev_folders_are_marked(self, tmp_path):
+        root = tmp_path / "backend"
+        root.mkdir()
+        paths = rp._compute_runtime_paths("dev", root, None)
+        assert (paths.data_dir / rp.OWNERSHIP_SENTINEL).is_file()
+        assert (paths.log_dir / rp.OWNERSHIP_SENTINEL).is_file()
+
+    def test_instance_folders_created_now_are_marked(self, monkeypatch, tmp_path):
+        monkeypatch.setenv("ERUDI_DATA_ROOT", str(tmp_path / "instance"))
+        paths = rp._compute_runtime_paths("dev", tmp_path / "backend", None)
+        assert (paths.data_dir / rp.OWNERSHIP_SENTINEL).is_file()
+        assert (paths.log_dir / rp.OWNERSHIP_SENTINEL).is_file()
+
+    def test_an_existing_folder_under_the_instance_root_is_never_marked(
+        self, monkeypatch, tmp_path
+    ):
+        # ERUDI_DATA_ROOT pointed at a folder that already holds the user's own
+        # data/ and logs/: they stay unmarked, so Clear All Data skips them.
+        shared = tmp_path / "shared"
+        (shared / "data").mkdir(parents=True)
+        (shared / "data" / "thesis.docx").write_text("mine")
+        (shared / "logs").mkdir()
+        monkeypatch.setenv("ERUDI_DATA_ROOT", str(shared))
+
+        paths = rp._compute_runtime_paths("dev", tmp_path / "backend", None)
+
+        assert not (paths.data_dir / rp.OWNERSHIP_SENTINEL).exists()
+        assert not (paths.log_dir / rp.OWNERSHIP_SENTINEL).exists()
+
+    def test_a_marked_instance_folder_stays_marked(self, monkeypatch, tmp_path):
+        instance = tmp_path / "instance"
+        monkeypatch.setenv("ERUDI_DATA_ROOT", str(instance))
+        rp._compute_runtime_paths("dev", tmp_path / "backend", None)
+
+        paths = rp._compute_runtime_paths("dev", tmp_path / "backend", None)
+
+        assert (paths.data_dir / rp.OWNERSHIP_SENTINEL).is_file()

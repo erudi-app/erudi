@@ -16,6 +16,7 @@ changes, this file is what goes stale first.
 | Electron logs (`main.log`, `backend.log`) | `~/Library/Logs/Erudi/` | `%APPDATA%\Erudi\logs\` | `~/.config/Erudi/logs/` |
 | Backend stdout capture | `$TMPDIR/erudi-backend.log` | `%TEMP%\erudi-backend.log` | `/tmp/erudi-backend.log` |
 | Electron profile (localStorage, caches) | `~/Library/Application Support/Erudi/` (same dir as the data on a case-insensitive FS) | `%APPDATA%\Erudi\` | `~/.config/Erudi/` |
+| Electron profile of a run from source | `~/Library/Application Support/erudi/` (the same folder as the installed app's on a case-insensitive FS) | `%APPDATA%\erudi\` (the same folder as the installed app's) | `~/.config/erudi/` (a separate folder) |
 | Inference child | `mlx_vlm.server` (an `mp.Process` of the backend) | `llama-server.exe` | `llama-server` |
 | Renderer sandbox | seatbelt, `--enable-sandbox` expected | expected sandboxed | `--no-sandbox` expected (user-namespace workaround) |
 
@@ -27,7 +28,10 @@ Help → Clear All Data, by contrast, deletes the backend data folder, both log
 folders and the stdout capture, and empties the Electron profile's storage
 (the profile folder itself stays): the full list is in `docs/privacy.md`,
 "What Clear All Data removes". Pasted images live in the backend data folder
-(`.../prod/data/pasted-images/`).
+(`.../prod/data/pasted-images/`). A folder is deleted only when it carries
+`.erudi-owned`; a file still held is retried at the next start of the same app
+(the marker is `clear-all-data-pending.json` in the profile folder, at most
+three starts).
 
 ## Confirm nothing is running
 
