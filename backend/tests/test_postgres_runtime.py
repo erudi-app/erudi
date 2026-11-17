@@ -1670,6 +1670,46 @@ class TestPostmasterLogRotation:
         assert "postmaster log" in warning.getMessage()
 
     @pytest.mark.unit
+    def test_a_failed_join_quotes_only_this_starts_lines(self, tmp_path, monkeypatch):
+        """Joining a live postmaster keeps its file, so the failure note must
+        quote what this start's attempt wrote, not the file's last 40 lines."""
+        (tmp_path / "PG_VERSION").write_text("16\n")
+        (tmp_path / "log").write_text(_OLD_POSTMASTER_LINES, encoding="utf-8")
+        monkeypatch.setattr(postgres_runtime, "_live_postmaster", lambda data_dir: object())
+
+        def failed_join(data_dir):
+            with (data_dir / "log").open("a", encoding="utf-8") as handle:
+                handle.write("FATAL:  the database system is starting up\n")
+            raise AssertionError()
+
+        monkeypatch.setattr(postgres_runtime, "_get_server_with_recovery", failed_join)
+
+        with pytest.raises(AssertionError) as excinfo:
+            start_postgres(tmp_path)
+
+        notes = "\n".join(getattr(excinfo.value, "__notes__", []))
+        assert "the database system is starting up" in notes
+        assert "not properly shut down" not in notes
+
+    @pytest.mark.unit
+    def test_a_join_that_wrote_nothing_says_so(self, tmp_path, monkeypatch):
+        (tmp_path / "PG_VERSION").write_text("16\n")
+        (tmp_path / "log").write_text(_OLD_POSTMASTER_LINES, encoding="utf-8")
+        monkeypatch.setattr(postgres_runtime, "_live_postmaster", lambda data_dir: object())
+        monkeypatch.setattr(
+            postgres_runtime,
+            "_get_server_with_recovery",
+            lambda data_dir: (_ for _ in ()).throw(AssertionError()),
+        )
+
+        with pytest.raises(AssertionError) as excinfo:
+            start_postgres(tmp_path)
+
+        notes = "\n".join(getattr(excinfo.value, "__notes__", []))
+        assert "not properly shut down" not in notes
+        assert "wrote nothing during this start" in notes
+
+    @pytest.mark.unit
     def test_start_postgres_rotates_before_starting_the_server(self, tmp_path, monkeypatch):
         (tmp_path / "PG_VERSION").write_text("16\n")
         (tmp_path / "log").write_text("LOG:  the previous run\n", encoding="utf-8")

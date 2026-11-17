@@ -263,7 +263,9 @@ unclean shutdown, a corrupt page, a full disk, the `FATAL` that stopped a boot
 
 Erudi's own records say what the app asked the cluster to do; that file is the
 only place the server's answer is written. So when starting or joining the
-cluster fails, the backend attaches the last 40 lines of it to the failure —
+cluster fails, the backend attaches the last 40 lines this start's attempt
+wrote to it (a start that joins a running server quotes nothing written
+before it began) to the failure —
 they travel inside the single `ERROR` the startup writes to `backend.log`, and
 therefore appear on the **Diagnostics** page and in a copied report. Only a
 window at the end of the file is read.

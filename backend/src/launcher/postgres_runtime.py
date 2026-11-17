@@ -310,8 +310,13 @@ def _rotate_postmaster_log(data_dir: Path) -> None:
         logger.warning(f"Could not set the postmaster log aside, it keeps growing: {exc}")
 
 
-def _attach_postmaster_log(exc: BaseException, data_dir: Path) -> None:
+def _attach_postmaster_log(exc: BaseException, data_dir: Path, offset: int | None = None) -> None:
     """Carry the postmaster's last words along with the exception.
+
+    With ``offset`` (the file's size when this start began), only what this
+    start's attempt wrote is quoted: a start that joins a live postmaster
+    keeps its file, whose earlier lines describe earlier starts. Without it
+    (the start failed before it could note the size), the file's last lines.
 
     A note (PEP 678) rather than a new exception: the failure paths propagate
     ``subprocess.TimeoutExpired`` and ``AssertionError`` on purpose (the
@@ -320,13 +325,20 @@ def _attach_postmaster_log(exc: BaseException, data_dir: Path) -> None:
     cause therefore reaches the Diagnostics page with the failure it explains,
     the same way a dead inference child's output does.
     """
-    tail = postmaster_log_tail(data_dir)
     log_file = Path(data_dir) / POSTMASTER_LOG_NAME
-    note = (
-        f"Embedded PostgreSQL log ({log_file}):\n{tail}"
-        if tail
-        else f"The embedded PostgreSQL log ({log_file}) is empty or unreadable."
-    )
+    if offset is None:
+        tail = postmaster_log_tail(data_dir)
+    else:
+        lines = [
+            line for line in postmaster_log_since(data_dir, offset).splitlines() if line.strip()
+        ]
+        tail = "\n".join(lines[-POSTMASTER_LOG_TAIL_LINES:])[-POSTMASTER_LOG_TAIL_CHARS:]
+    if tail:
+        note = f"Embedded PostgreSQL log ({log_file}):\n{tail}"
+    elif offset:
+        note = f"The embedded PostgreSQL log ({log_file}) wrote nothing during this start."
+    else:
+        note = f"The embedded PostgreSQL log ({log_file}) is empty or unreadable."
     try:
         exc.add_note(note)
     except Exception:
@@ -851,11 +863,15 @@ def start_postgres(data_dir: Path | str) -> PostgresHandle:
     log and nowhere else.
     """
     data_dir = Path(data_dir)
+    log_offset: int | None = None
     try:
         data_dir.mkdir(parents=True, exist_ok=True)
         _prune_stale_handle_pids(data_dir)
         _recover_corrupt_pgdata(data_dir)
         _rotate_postmaster_log(data_dir)
+        # Where this start's postmaster lines begin: 0 after a rotation, the
+        # end of the live postmaster's file when this start joins it.
+        log_offset = _postmaster_log_size(data_dir)
 
         server = _get_server_with_recovery(data_dir)
         # After initdb (the secret file must not pre-exist in PGDATA) and before
@@ -880,7 +896,7 @@ def start_postgres(data_dir: Path | str) -> PostgresHandle:
         with psycopg.connect(psycopg_url, autocommit=True) as conn:
             conn.execute("CREATE EXTENSION IF NOT EXISTS vector")
     except BaseException as exc:
-        _attach_postmaster_log(exc, data_dir)
+        _attach_postmaster_log(exc, data_dir, log_offset)
         raise
 
     sqlalchemy_url = psycopg_url.replace("postgresql://", "postgresql+psycopg://", 1)
