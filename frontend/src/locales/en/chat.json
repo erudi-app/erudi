@@ -247,6 +247,9 @@
     "notes": {
       "reducedByMemory": "The model supports up to {{trained}} tokens; this computer's memory limits this conversation to {{working}}.",
       "reducedByMemoryNoTrained": "This computer's memory limits this conversation to {{working}} tokens.",
+      "cutByEstimate": "The model supports up to {{trained}} tokens; this conversation works with {{working}}. Erudi sizes this model's window with a cautious estimate of its memory needs, so it may use less than this computer could hold.",
+      "reducedByBrake": "The model supports up to {{trained}} tokens; the memory brake reduced this conversation's window to {{working}} to free memory.",
+      "reducedByBrakeNoTrained": "The memory brake reduced this conversation's window to {{working}} tokens to free memory.",
       "notLoaded": "The model is not loaded: this is the window it was trained for. The window this computer allows is known once the model is loaded.",
       "unknownWindow": "The model's window is not known, so no share is shown.",
       "kbExcluded": "The counts leave out the knowledge-base excerpts each question retrieves.",
