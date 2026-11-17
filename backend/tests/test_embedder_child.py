@@ -172,9 +172,10 @@ class TestSpawnAndProbe:
         assert handle["base_url"] == f"http://127.0.0.1:{spawn['port']}"
 
     def test_api_key_is_fresh_per_spawn_and_never_logged(self, adapter, http, caplog):
+        # A shutdown is terminal, so the respawn comes from a dead child.
         with caplog.at_level("DEBUG"):
-            embedder_child.ensure_embedder_running()
-            embedder_child.shutdown_embedder()
+            first = embedder_child.ensure_embedder_running()
+            first["proc"].alive = False
             embedder_child.ensure_embedder_running()
         keys = [spawn["api_key"] for spawn in adapter.spawns]
         assert len(keys) == 2 and keys[0] != keys[1]
@@ -379,6 +380,218 @@ class TestPrewarm:
 
 
 # ====================== Platform selection ======================
+
+
+class TestQueryInterleavesIngestion:
+    def test_a_query_interleaves_between_ingestion_batches(self, adapter, http):
+        """The request lock is held PER BATCH, FIFO: a search query asked while
+        a file's batches stream waits for at most one batch, never the file."""
+        order = []
+        a1_entered = threading.Event()
+        a1_release = threading.Event()
+        batch = embedder_child.EMBED_BATCH_SIZE
+
+        def handler(url, json):
+            inputs = json["input"]
+            if len(inputs) == batch and inputs[0] == "A0":
+                order.append("A1")
+                a1_entered.set()
+                assert a1_release.wait(5.0)
+            elif len(inputs) == batch:
+                order.append("A2")
+            elif inputs != ["ping"]:  # the readiness probe stays out of it
+                order.append("B")
+            return FakeResponse(
+                200,
+                {
+                    "data": [
+                        {"object": "embedding", "index": i, "embedding": [0.5]}
+                        for i in range(len(inputs))
+                    ]
+                },
+            )
+
+        http.post_handler = handler
+        ingestion = threading.Thread(
+            target=lambda: embedder_child.embed_texts([f"A{i}" for i in range(batch * 2)])
+        )
+        ingestion.start()
+        assert a1_entered.wait(5.0)
+        query = threading.Thread(target=lambda: embedder_child.embed_texts(["une question"]))
+        query.start()
+        # The query is enqueued on the FIFO lock behind the batch in flight.
+        deadline = time.monotonic() + 5.0
+        while not embedder_child._request_lock._waiters and time.monotonic() < deadline:
+            time.sleep(0.005)
+        assert embedder_child._request_lock._waiters
+        a1_release.set()
+        ingestion.join(5.0)
+        query.join(5.0)
+        assert order == ["A1", "B", "A2"]
+
+
+class TestShutdownSemantics:
+    def test_ensure_refuses_after_shutdown(self, adapter, http):
+        embedder_child.shutdown_embedder()
+        with pytest.raises(EngineException):
+            embedder_child.ensure_embedder_running()
+        assert adapter.spawns == []
+
+    def test_shutdown_during_a_probe_is_prompt_and_terminates_the_pending_child(
+        self, adapter, http, monkeypatch
+    ):
+        monkeypatch.setattr(embedder_child, "PROBE_TIMEOUT_S", 10.0)
+        monkeypatch.setattr(embedder_child, "PROBE_POLL_INTERVAL_S", 0.02)
+        probing = threading.Event()
+
+        def slow_health(url, timeout=None, headers=None):
+            probing.set()
+            return FakeResponse(status_code=503)
+
+        http.get = slow_health
+        outcome = []
+
+        def run():
+            try:
+                embedder_child.ensure_embedder_running()
+                outcome.append("ok")
+            except Exception as exc:
+                outcome.append(exc)
+
+        prober = threading.Thread(target=run)
+        prober.start()
+        assert probing.wait(5.0)
+        start = time.monotonic()
+        embedder_child.shutdown_embedder()
+        # Never waits out the probe timeout.
+        assert time.monotonic() - start < 2.0
+        prober.join(10.0)
+        assert outcome and isinstance(outcome[0], EngineException)
+        assert len(adapter.terminated) >= 1
+        assert embedder_child._handle is None
+        with pytest.raises(EngineException):
+            embedder_child.ensure_embedder_running()
+
+
+class TestReleaseNow:
+    def test_release_now_frees_an_idle_unleased_child(self, adapter, http):
+        embedder_child.ensure_embedder_running()
+        assert embedder_child.release_now(reason="memory pressure")
+        assert embedder_child._handle is None
+        assert len(adapter.terminated) == 1
+
+    def test_release_now_refuses_under_a_lease(self, adapter, http):
+        with embedder_child.ingestion_lease():
+            embedder_child.ensure_embedder_running()
+            assert not embedder_child.release_now(reason="memory pressure")
+            assert embedder_child._handle is not None
+
+    def test_release_now_refuses_while_a_request_is_in_flight(self, adapter, http):
+        embedder_child.ensure_embedder_running()
+        embedder_child._request_lock.acquire()
+        try:
+            assert not embedder_child.release_now(reason="memory pressure")
+            assert embedder_child._handle is not None
+        finally:
+            embedder_child._request_lock.release()
+
+    def test_release_now_without_a_child_is_a_noop(self, adapter, http):
+        assert not embedder_child.release_now(reason="memory pressure")
+
+
+class TestAtexitPerHandle:
+    def test_the_atexit_handler_follows_its_handle(self, adapter, http, monkeypatch):
+        registered, unregistered = [], []
+        fake_atexit = SimpleNamespace(
+            register=lambda f: registered.append(f),
+            unregister=lambda f: unregistered.append(f),
+        )
+        monkeypatch.setattr(embedder_child, "atexit", fake_atexit)
+        first = embedder_child.ensure_embedder_running()
+        first["proc"].alive = False
+        embedder_child.ensure_embedder_running()
+        assert len(registered) == 2
+        # Dropping the dead handle unregistered ITS handler, not the new one.
+        assert unregistered == [registered[0]]
+        embedder_child.shutdown_embedder()
+        assert unregistered == [registered[0], registered[1]]
+
+
+class TestPrewarmTuning:
+    def test_prewarm_skips_a_live_child_and_keeps_its_idle_clock(self, adapter, http):
+        embedder_child.ensure_embedder_running()
+        embedder_child._last_used -= 100.0
+        before = embedder_child._last_used
+        thread_count = threading.active_count()
+        embedder_child.prewarm_embedder()
+        assert threading.active_count() == thread_count
+        assert embedder_child._last_used == before
+        assert len(adapter.spawns) == 1
+
+    def test_prewarm_backs_off_after_a_failure(self, adapter, http):
+        def spawn(**kwargs):
+            raise OSError("fork refused")
+
+        adapter.spawn = spawn
+        embedder_child._prewarm()
+        thread_count = threading.active_count()
+        embedder_child.prewarm_embedder()  # within the backoff window
+        assert threading.active_count() == thread_count
+
+    def test_prewarm_missing_model_logs_once_per_state(self, adapter, http, caplog):
+        def resolve_model():
+            raise EmbeddingModelMissingException()
+
+        adapter.resolve_model = resolve_model
+        with caplog.at_level("INFO"):
+            embedder_child._prewarm()
+            embedder_child._prewarm()
+        infos = [r for r in caplog.records if "pre-start" in r.getMessage()]
+        assert len(infos) == 1
+
+
+class TestParentWatch:
+    def test_the_watch_exits_when_the_parent_changes(self):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        ppids = iter([100, 100, 1])
+        exits = []
+        runner._parent_watch_loop(
+            100,
+            getppid=lambda: next(ppids),
+            hard_exit=exits.append,
+            sleep=lambda s: None,
+        )
+        assert exits == [0]
+
+    def test_the_mlx_adapter_spawns_with_the_parent_watch(self, tmp_path, monkeypatch):
+        from src.ingestion import mlx_embedder
+
+        captured = {}
+
+        class FakeProcess:
+            def __init__(self, target=None, args=None, daemon=None):
+                captured["target"] = target
+                captured["args"] = args
+                self.pid = 777
+
+            def start(self):
+                return None
+
+        monkeypatch.setattr(mlx_embedder.mp, "Process", FakeProcess)
+        mlx_embedder.spawn(
+            port=27400,
+            api_key="k" * 64,
+            model_path=tmp_path,
+            log_path=str(tmp_path / "embedder-child-27400.log"),
+        )
+        from src.engines._mlx_vlm_server_runner import run_mlx_vlm_server
+
+        assert captured["target"] is run_mlx_vlm_server
+        argv = captured["args"][0]
+        assert "--embedding-model" in argv
+        # (argv, log_path, apc_num_blocks, token_queue_timeout_s, watch_parent)
+        assert captured["args"][4] is True
 
 
 class TestPlatformSelection:

@@ -69,8 +69,9 @@ Ingestion runs as a FastAPI background task, one file at a time
    Loaded, it holds about 250 MB and stays resident once an ingestion, or a retrieval that counts an
    older chunk, has used it.
 6. **Embed.** `get_embeddings()` (`src/ingestion/embeddings.py`) picks the platform's backend for
-   `multilingual-e5-small` (384 dimensions, 512-token window) — the two produce identical vectors
-   (cosine 1.0000000 measured, inputs past 512 tokens included), so a Knowledge Base never needs
+   `multilingual-e5-small` (384 dimensions, 512-token window) — the two produce equivalent vectors
+   (cosine >= 0.9999 measured, 1.0000000 on the parity set, inputs past 512 tokens included; past
+   the window the truncation boundary token may differ), so a Knowledge Base never needs
    re-indexing across platforms or updates:
    - **Apple Silicon** — `ChildE5Embeddings`: a dedicated `mlx_vlm.server` child
      (`src/ingestion/embedder_child.py` + `src/ingestion/mlx_embedder.py`) serves the local e5

@@ -116,7 +116,13 @@ def spawn(*, port: int, api_key: str, model_path: Path, log_path: Optional[str])
         "--api-key",
         api_key,
     ]
-    proc = mp.Process(target=run_mlx_vlm_server, args=(argv, log_path), daemon=False)
+    # (argv, log_path, apc_num_blocks, token_queue_timeout_s, watch_parent):
+    # the chat knobs stay at their defaults; watch_parent makes the child
+    # exit if the backend dies without its orderly stops (os._exit paths),
+    # so nothing orphans a ~1.2 GB process.
+    proc = mp.Process(
+        target=run_mlx_vlm_server, args=(argv, log_path, None, None, True), daemon=False
+    )
     try:
         proc.start()
     except Exception as exc:

@@ -56,10 +56,14 @@ DEFAULT_TARGET_TOKENS = 180
 DEFAULT_OVERLAP_TOKENS = 27  # ~15 %
 
 # What fits in e5's 512-token window once ``<s>`` and ``</s>`` are counted.
-# sentence-transformers truncated the PREFIXED text to 512 ids specials
-# included; bounding the raw text at 510 content tokens reproduces that
-# exactly, so the dedicated embedding child (#594) sees the same input the
-# in-process embedder used to.
+# sentence-transformers truncated the PREFIXED text's ids at 512 specials
+# included; bounding the raw text at 510 content tokens keeps every input
+# inside the same window, but is NOT byte-identical at the boundary: the
+# re-tokenized prefix can end on a different final token than the id-level
+# cut (measured: 27 of 300 long texts differ there; the embedding server
+# truncates at 512 itself too, and vector parity stays >= 0.9999). The bound
+# exists Erudi-side because llama-server (F3 of #594) refuses, not truncates,
+# past 512.
 E5_MAX_CONTENT_TOKENS = 510
 
 HEADERS_TO_SPLIT_ON = [
@@ -105,6 +109,10 @@ def truncate_to_tokens(text: str, max_tokens: int = E5_MAX_CONTENT_TOKENS) -> st
     and the text is cut there — a plain prefix of the original, never a
     decode round-trip (decoding re-spaces subwords and would alter the text).
     A text already within the bound is returned unchanged, identity included.
+    The guarantee is the BOUND, not boundary identity: the cut prefix can
+    re-tokenize to a different final token than an id-level truncation (see
+    ``E5_MAX_CONTENT_TOKENS``); mean pooling over ~510 tokens keeps the
+    vectors within cosine 0.9999 either way.
     """
     encoding = _get_tokenizer().encode(text, add_special_tokens=False)
     if len(encoding.ids) <= max_tokens:

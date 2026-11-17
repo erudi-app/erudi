@@ -119,9 +119,11 @@ class TestChunkDocument:
 
 class TestTruncateToTokens:
     """Erudi-side 512-token bound for the embedding child (#594): inputs are
-    truncated with the SAME frozen tokenizer sentence-transformers counted
-    with, at 510 content tokens (512 minus ``<s>``/``</s>``), so the child
-    receives exactly what the in-process embedder used to see."""
+    truncated with the frozen tokenizer at 510 content tokens (512 minus
+    ``<s>``/``</s>``), so every input fits the window the in-process embedder
+    enforced. The bound, not boundary identity, is the contract: the cut
+    prefix can re-tokenize its last token differently (parity stays within
+    cosine 0.9999, pinned by the mlx_only test)."""
 
     def test_short_text_is_returned_unchanged(self):
         from src.ingestion.chunking import truncate_to_tokens
