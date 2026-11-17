@@ -34,6 +34,10 @@
       "detail": "La aplicación se cerrará ahora.",
       "detailPending": "Algunos archivos seguían en uso y no se pudieron eliminar todavía. Erudi los elimina la próxima vez que se inicie.\n\nLa aplicación se cerrará ahora.",
       "leftInPlace": "Estos elementos se han dejado en su sitio, porque Erudi no los creó o no puede eliminarlos:\n{{folders}}"
+    },
+    "exportConversation": {
+      "title": "Exportar la conversación",
+      "filter": "Markdown"
     }
   }
 }
