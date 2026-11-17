@@ -144,6 +144,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
 });
 
 describe("NDJSON reader (#90)", () => {
@@ -182,7 +183,15 @@ describe("NDJSON reader (#90)", () => {
     tracedFetchMock.mockImplementation(makeRoute({ queryResponse: ctrl.response }));
 
     await renderAndSettle();
+    // The 33 ms window opened by the thinking text must stay open for the whole
+    // test: the clock is faked and never advanced past the send, so the first
+    // answer event lands inside it every time, not by timing luck (#618).
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     fireEvent.click(screen.getByText("SEND"));
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+      await Promise.resolve();
+    });
     await settle();
 
     // Thinking streams first -> strip is the only content, expanded by default.

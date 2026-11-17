@@ -809,6 +809,10 @@ export default function ConversationPage() {
               }
               return;
             }
+            // The first answer text of the turn ends the live trace strip (it
+            // collapses) and replaces the typing indicator: a state change the
+            // user sees at once, whatever window thinking opened.
+            const startsAnswer = evt.t === "answer" && answerText === "";
             handleEvent(evt);
             if (!gotFirstEvent) {
               gotFirstEvent = true;
@@ -819,7 +823,10 @@ export default function ConversationPage() {
             // (a reasoning model streams thousands of thinking tokens);
             // anything else changes what the bubble shows besides text, so it
             // flushes now (and carries the text received so far with it).
-            if ((evt.t === "answer" && !evt.curated_error) || evt.t === "thinking") {
+            if (
+              !startsAnswer &&
+              ((evt.t === "answer" && !evt.curated_error) || evt.t === "thinking")
+            ) {
               flushAnswer();
             } else {
               flushNow();
