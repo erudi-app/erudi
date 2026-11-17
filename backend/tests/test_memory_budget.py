@@ -342,7 +342,7 @@ def test_an_invalid_prior_scale_warns_once_per_process(monkeypatch, caplog):
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
 
 
-def test_the_priors_are_the_named_provisional_values():
+def test_the_priors_are_the_named_measured_values():
     assert PRIOR_FIXED_BYTES == 1 * GIB
     assert PRIOR_KV_MULTIPLIER == 3.5
     assert PRIOR_MARGIN == 1.10
@@ -421,9 +421,10 @@ def test_without_base_or_total_there_is_no_ceiling(missing):
 def test_a_regression_pin_bench5_points_stay_under_the_prediction():
     """NOT a proof -- the priors were fitted on these points. The 107 points
     of the measurement campaign (``tests/fixtures/memory_prior_bench5.json``:
-    three models, prefill steps 2048 and 512, dirty points included) stay
-    under ``predict``; a change of the priors that puts one above fails
-    here. The gate campaign's clean points join this fixture before merge."""
+    three models, prefill steps 2048 and 512, MLX's default buffer cache,
+    dirty points included) stay under ``predict``; a change of the priors
+    that puts one above fails here. The cache-limit-0 points the child runs
+    with are pinned below (``memory_prior_gate_cl0.json``)."""
     from pathlib import Path
 
     fixture = json.loads(
@@ -437,6 +438,61 @@ def test_a_regression_pin_bench5_points_stay_under_the_prediction():
         worst_slack = slack if worst_slack is None else min(worst_slack, slack)
     assert len(fixture["points"]) == 107
     assert worst_slack > 0.35 * GIB
+
+
+def _gate_cl0():
+    from pathlib import Path
+
+    fixture = json.loads(
+        (Path(__file__).parent / "fixtures" / "memory_prior_gate_cl0.json").read_text()
+    )
+    for model, step, kind, n, n_prev, measured_gib, residue_gib in fixture["points"]:
+        facts = fixture["models"][model]
+        budget = _budget(
+            kv_token_bytes=facts["kv_bytes_per_token"],
+            vocab_size=facts["vocab_size"],
+            prefill_step=step,
+        )
+        yield (model, step, kind, n, n_prev), budget, measured_gib * GIB, residue_gib
+
+
+def test_the_gate_cl0_fixture_holds_the_clean_campaign_points():
+    points = list(_gate_cl0())
+    # 184 prefill points; 60 rows of turns after a large one (the large turn,
+    # the turn right after it, the same size after a drain).
+    assert len(points) == 244
+    assert len({key[0] for key, *_ in points}) == 3
+
+
+def test_gate_cl0_points_stay_under_the_prediction_of_their_window():
+    """The budget invariant at the cache limit the child runs with (0): every
+    clean turn of the campaign -- a small one right after a large one
+    included -- stays under ``predict`` of the largest request the window was
+    sized for, ``max(N, N_prev)``. Measured with the prior recorded as is for
+    this configuration, conservative by about 2x there (median ratio 0.48)."""
+    ratios = []
+    for key, budget, measured, _residue in _gate_cl0():
+        _model, _step, _kind, n, n_prev = key
+        assert measured < budget.predict(max(n, n_prev or 0)), key
+        ratios.append(measured / budget.predict(n))
+    ratios.sort()
+    assert ratios[len(ratios) // 2] < 0.6
+
+
+def test_gate_cl0_points_stay_under_their_own_prediction_once_the_residue_is_set_aside():
+    """A small turn right after a large one can exceed ``predict(N)`` at its
+    own size by what the large turn left in the child: set that residue
+    aside, as the exceeded-prediction WARNING does, and every point is under
+    its own prediction. The residue stays out of the admission."""
+    over_own = 0
+    for key, budget, measured, residue_gib in _gate_cl0():
+        n = key[3]
+        if measured >= budget.predict(n):
+            over_own += 1
+        residue = (residue_gib or 0.0) * GIB
+        assert measured - residue < budget.predict(n), key
+    # The case the residue is set aside for is in the data.
+    assert over_own > 0
 
 
 # ===================== from_engine =====================
