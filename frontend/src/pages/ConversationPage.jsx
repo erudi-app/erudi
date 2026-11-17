@@ -70,7 +70,7 @@ const joinFailure = (partial, failure) => {
 // Presentation-only tokens kept out of the JSX tree (they are class names and
 // CSS, not copy).
 const HIDE_SCROLLBAR_CSS = "::-webkit-scrollbar { display: none; }";
-// Streamed answer text reaches the page at most once per this many
+// Streamed answer and thinking text reaches the page at most once per this many
 // milliseconds (about 30 renders a second): a burst of tokens costs one render
 // of the message being written (#618). A timer rather than an animation frame
 // so that a hidden or minimized window, where frames stop, keeps receiving.
@@ -648,7 +648,7 @@ export default function ConversationPage() {
             );
           };
 
-          // Answer text is pushed to the page at most once per
+          // Answer and thinking text are pushed to the page at most once per
           // ANSWER_FLUSH_MS (#618): the first token shows at once, tokens
           // that arrive inside the window wait for its end, and one render
           // carries them all. The accumulators above already hold the
@@ -815,10 +815,11 @@ export default function ConversationPage() {
               setLoading(false);
               setFirstReplyPending(false);
             }
-            // Plain answer text is the only high-rate event; anything else
-            // changes what the bubble shows besides text, so it flushes now
-            // (and carries the text received so far with it).
-            if (evt.t === "answer" && !evt.curated_error) {
+            // Plain answer text and reasoning text are the high-rate events
+            // (a reasoning model streams thousands of thinking tokens);
+            // anything else changes what the bubble shows besides text, so it
+            // flushes now (and carries the text received so far with it).
+            if ((evt.t === "answer" && !evt.curated_error) || evt.t === "thinking") {
               flushAnswer();
             } else {
               flushNow();

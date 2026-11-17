@@ -1,5 +1,4 @@
 import React, { useMemo } from "react";
-import PropTypes from "prop-types";
 import ReactMarkdown from "react-markdown";
 import remarkGfm from "remark-gfm";
 import remarkMath from "remark-math";
@@ -186,15 +185,6 @@ export function convertTexDelimiters(text) {
   flushProse(false);
   return { text: out, trusted };
 }
-
-MarkdownRenderer.propTypes = {
-  content: PropTypes.string.isRequired,
-  className: PropTypes.string,
-};
-
-MarkdownRenderer.defaultProps = {
-  className: "",
-};
 
 // Module-level so react-markdown receives the same references on every render:
 // a component function recreated per render is a new element type, which

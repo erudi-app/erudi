@@ -13,9 +13,10 @@ import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-libra
 // messages (markdown and math), streams 200 tokens into the last one and logs
 // the renders it counted.
 
-const { tracedFetchMock, renders, navigateMock, locationMock } = vi.hoisted(() => ({
+const { tracedFetchMock, renders, traceRenders, navigateMock, locationMock } = vi.hoisted(() => ({
   tracedFetchMock: vi.fn(),
   renders: [],
+  traceRenders: [],
   navigateMock: vi.fn(),
   locationMock: { pathname: "/conversation/7", state: null },
 }));
@@ -45,6 +46,12 @@ vi.mock("../components/Sidebar", () => ({ default: () => null }));
 vi.mock("../components/ChatCollapsibleSection", () => ({ default: () => null }));
 vi.mock("../components/ConversationHeader", () => ({ default: () => null }));
 vi.mock("../components/TypingIndicator", () => ({ default: () => null }));
+vi.mock("../components/TraceStrip", () => ({
+  default: ({ events }) => {
+    traceRenders.push(events.map((e) => e.text).join(""));
+    return <div data-testid="trace">{events.map((e) => e.text).join("")}</div>;
+  },
+}));
 vi.mock("../components/QuestionInput", () => ({
   default: ({ onSend }) => <button onClick={() => onSend("hi", [], [])}>SEND</button>,
 }));
@@ -206,6 +213,8 @@ describe("streaming renders only the message being written (#618)", () => {
         `[bench] ${count} messages: old-message renders=${old}, streamed-message renders=${streamedRenders}, tokens=200`
       );
       expect(old).toBe(0);
+      // Coalescing: far fewer renders of the streamed message than tokens.
+      expect(streamedRenders).toBeLessThan(200 / 2);
     }, 120_000);
   }
 
@@ -243,7 +252,10 @@ describe("streaming renders only the message being written (#618)", () => {
     token(ctrl, "second ");
     token(ctrl, "third");
     await settle();
-    // No timer advance: the end of the turn must not leave "second third" behind.
+    // No timer advance: the window holds "second third" back, the page still
+    // shows the first token only...
+    expect(streamedText().trim()).toBe("first");
+    // ...and the end of the turn must not leave them behind.
     rowsAfterTurn = [...oldRows(6), { id: 2000, sender: "user", content: "hi" }];
     await act(async () => {
       ctrl.push('{"t":"done"}\n');
@@ -251,6 +263,29 @@ describe("streaming renders only the message being written (#618)", () => {
     });
     await settle();
     expect(streamedText()).toContain("first second third");
+  });
+
+  it("coalesces a burst of thinking tokens, in order, and flushes them with the answer", async () => {
+    await mountWith(6);
+    await send();
+    traceRenders.length = 0;
+    let expected = "";
+    for (let i = 0; i < 60; i++) {
+      ctrl.push(`${JSON.stringify({ t: "thinking", text: `t${i} ` })}\n`);
+      expected += `t${i} `;
+      await settle();
+    }
+    // A burst inside one window: the first token at once, the rest in one render.
+    expect(traceRenders.length).toBeLessThan(5);
+    await tick();
+    expect(screen.getByTestId("trace").textContent).toBe(expected);
+    // An answer event after more thinking still carries all of it, in order.
+    ctrl.push(`${JSON.stringify({ t: "thinking", text: "last " })}\n`);
+    token(ctrl, "done");
+    await settle();
+    await tick();
+    expect(screen.getByTestId("trace").textContent).toBe(`${expected}last `);
+    expect(streamedText()).toContain("done");
   });
 
   it("flushes what was received when an error event arrives", async () => {
