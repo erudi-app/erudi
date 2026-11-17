@@ -1,5 +1,9 @@
 """3-pass Markdown chunking, token-accurate against the real e5 tokenizer.
 
+The tokenizer is the e5 one frozen in ``e5_tokenizer.json.gz`` (see
+``E5_TOKENIZER_FILE``), so chunking works offline and before the embedding
+model is downloaded.
+
 Ported from the R&D ingestion POC and re-targeted at multilingual-e5-small:
 
 1. Split on Markdown headers (h1–h4) — chunks follow document structure.
@@ -19,17 +23,18 @@ most consistent — big chunks measurably HURT dense retrieval.
 
 from __future__ import annotations
 
+import gzip
 import threading
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
 from src.core import config
 from src.core.logging import logger
-from src.ingestion.embedding_model import embedding_model_available
 from src.ingestion.types import ExtractedDocument
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from langchain_text_splitters import RecursiveCharacterTextSplitter
+    from tokenizers import Tokenizer
 
 # NB: langchain_text_splitters is imported in FUNCTION scope only (issue #160).
 # Its package __init__ eagerly imports sentence_transformers -> torch/sklearn
@@ -37,7 +42,15 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 # so a module-level import here taxes every backend start for a splitter that
 # is only needed at KB ingestion time.
 
-E5_TOKENIZER_NAME = "intfloat/multilingual-e5-small"
+# The intfloat/multilingual-e5-small tokenizer (snapshot 614241f6), frozen once
+# as transformers 5.14.1 builds it: ``AutoTokenizer.from_pretrained(...)
+# .backend_tokenizer.to_str()``, gzipped (7.9 MB of JSON, 3.5 MB on disk). That
+# build, not the snapshot's raw tokenizer.json, is the one chunking always used:
+# the raw file normalizes differently and splits 7 of 43 measured documents
+# into other chunks. Loaded with the pure ``tokenizers`` package, so counting
+# needs neither transformers nor a download; tests/test_e5_tokenizer.py holds
+# it to transformers' ids and chunks.
+E5_TOKENIZER_FILE = config.ROOT_DIR / "src" / "ingestion" / "e5_tokenizer.json.gz"
 
 DEFAULT_TARGET_TOKENS = 180
 DEFAULT_OVERLAP_TOKENS = 27  # ~15 %
@@ -49,34 +62,32 @@ HEADERS_TO_SPLIT_ON = [
     ("####", "h4"),
 ]
 
-_tokenizer = None
+_tokenizer: Tokenizer | None = None
 _tokenizer_lock = threading.Lock()
 
 
-def _get_tokenizer():
-    """Lazy resident e5 tokenizer (a few MB, fetched from the HF cache)."""
+def _load_frozen_tokenizer() -> Tokenizer:
+    from tokenizers import Tokenizer
+
+    return Tokenizer.from_buffer(gzip.decompress(E5_TOKENIZER_FILE.read_bytes()))
+
+
+def _get_tokenizer() -> Tokenizer:
+    """Lazy resident e5 tokenizer, read from the frozen file (about 0.5 s and
+    250 MB, kept for the life of the process)."""
     global _tokenizer
-    if _tokenizer is None:
+    tokenizer = _tokenizer
+    if tokenizer is None:
         with _tokenizer_lock:
             if _tokenizer is None:
-                from transformers import AutoTokenizer
-
-                # Same repo as the embedding model, pinned to CACHE_DIR so the
-                # single #146 download serves both consumers (no 2nd fetch).
-                # local_files_only once the cache is complete: without it, hub
-                # HEAD-revalidates the tokenizer files on load and an offline
-                # machine fails on the DNS probe despite the pre-download (#164).
-                _tokenizer = AutoTokenizer.from_pretrained(
-                    E5_TOKENIZER_NAME,
-                    cache_dir=str(config.CACHE_DIR),
-                    local_files_only=embedding_model_available(),
-                )
-    return _tokenizer
+                _tokenizer = _load_frozen_tokenizer()
+            tokenizer = _tokenizer
+    return tokenizer
 
 
 def count_tokens(text: str) -> int:
     """Real e5 subword count (no special tokens) — never a chars/N estimate."""
-    return len(_get_tokenizer().encode(text, add_special_tokens=False))
+    return len(_get_tokenizer().encode(text, add_special_tokens=False).ids)
 
 
 @dataclass(slots=True)
@@ -158,11 +169,13 @@ def _reattach_table_headers(chunks: list[str]) -> list[str]:
 def _make_sub_splitter(target_tokens: int, overlap_tokens: int) -> RecursiveCharacterTextSplitter:
     from langchain_text_splitters import RecursiveCharacterTextSplitter
 
-    return RecursiveCharacterTextSplitter.from_huggingface_tokenizer(
-        _get_tokenizer(),
+    # Measured with count_tokens: from_huggingface_tokenizer only takes a
+    # transformers tokenizer, and counted len(tokenize(text)), the same number.
+    return RecursiveCharacterTextSplitter(
         chunk_size=target_tokens,
         chunk_overlap=overlap_tokens,
         separators=["\n\n", "\n", ". ", " ", ""],
+        length_function=count_tokens,
     )
 
 

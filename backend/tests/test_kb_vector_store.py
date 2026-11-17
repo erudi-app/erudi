@@ -59,8 +59,10 @@ def kb_rows(pg_test_cluster):
 
 
 def _chunks(texts: list[str]) -> list[Chunk]:
+    from src.ingestion.chunking import count_tokens
+
     return [
-        Chunk(chunk_index=i, text=t, token_count=len(t.split()), page_number=None)
+        Chunk(chunk_index=i, text=t, token_count=count_tokens(t), page_number=None)
         for i, t in enumerate(texts)
     ]
 
@@ -240,6 +242,29 @@ class TestSearch:
                 (kb_id,),
             ).fetchone()[0]
         assert distinct == 2
+
+
+class TestTokenCounts:
+    """Each chunk stores its e5 token count in ``langchain_metadata`` (no
+    migration: the JSON column takes every key that is not a typed column),
+    so retrieval reads it instead of tokenizing the pool on every turn."""
+
+    def test_stored_metadata_carries_the_token_count(self, kb_store, kb_rows, pg_test_cluster):
+        from src.ingestion.chunking import count_tokens
+        from src.ingestion.vector_store import search_kb_chunks_scored
+
+        kb_id, doc_id = kb_rows["a"]
+        text = "Le préavis de résiliation est de quatre-vingt-dix jours calendaires."
+        _add(kb_id, doc_id, [text])
+        with psycopg.connect(pg_test_cluster.psycopg_url) as conn:
+            stored = conn.execute(
+                "SELECT langchain_metadata->>'token_count' FROM rag.kb_chunks WHERE kb_id = %s",
+                (kb_id,),
+            ).fetchone()[0]
+        assert int(stored) == count_tokens(text)
+
+        (doc, _sim), *_ = search_kb_chunks_scored("préavis de résiliation", kb_id=kb_id)
+        assert doc.metadata["token_count"] == count_tokens(text)
 
 
 class TestCascade:

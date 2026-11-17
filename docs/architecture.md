@@ -494,7 +494,7 @@ Source files (.pdf .docx .xlsx .csv .txt .md; images → pending_vision)
    ↓  reader.py — DocumentReader routes to a per-format extractor
 Markdown pivot
    ↓  cleaning.py — non-destructive cleaning (accents and casing preserved)
-   ↓  chunking.py — 3-pass, token-accurate on the e5 tokenizer
+   ↓  chunking.py — 3-pass, token-accurate on the e5 tokenizer (frozen, shipped)
 Chunks (~180 tokens, ~15 % overlap)
    ↓  embeddings.py — intfloat/multilingual-e5-small, 384 dimensions
    ↓  vector_store.py — add_kb_chunks into rag.kb_chunks
@@ -502,7 +502,10 @@ KnowledgeDocument rows (SHA-256 dedup, per-file status)
 ```
 
 Chunk defaults live in `backend/src/ingestion/chunking.py`
-(`DEFAULT_TARGET_TOKENS = 180`, `DEFAULT_OVERLAP_TOKENS = 27`).
+(`DEFAULT_TARGET_TOKENS = 180`, `DEFAULT_OVERLAP_TOKENS = 27`). The tokenizer is the e5 one,
+frozen in `backend/src/ingestion/e5_tokenizer.json.gz` and loaded with the `tokenizers` package,
+so chunking needs neither `transformers` nor a download. Each chunk stores its token count
+(`token_count` in `langchain_metadata`), which the retrieval token budget reads.
 
 The `query:` and `passage:` prefixes required by the e5 model family are mandatory and
 applied by `E5Embeddings`; skipping them silently degrades retrieval.

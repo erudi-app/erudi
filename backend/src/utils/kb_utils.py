@@ -17,7 +17,8 @@ starved panorama and cross-document questions by construction:
    ``K_MIN_EXCERPTS``.
 3. Token budget: keep whole chunks best-first (RRF order — primacy beats
    burying, per the lost-in-the-middle literature) within the model-size
-   budget from ``get_prompting_strategy``.
+   budget from ``get_prompting_strategy``, costing each chunk by the e5
+   ``token_count`` stored with it (counted on the fly when missing).
 
 Excerpts carry their ``source_file`` so the KB prompt can attribute each
 one ("according to <document>" grounding) — see ``build_kb_system_prompt``.
@@ -25,7 +26,7 @@ one ("according to <document>" grounding) — see ``build_kb_system_prompt``.
 
 import statistics
 from dataclasses import dataclass
-from typing import List, Optional, Sequence
+from typing import List, Optional, Sequence, Tuple
 
 from src.core.exceptions import KnowledgeBaseNotFoundException
 from src.ingestion.chunking import count_tokens
@@ -87,19 +88,31 @@ def _adaptive_threshold(similarities: Sequence[float]) -> Optional[float]:
     return ordered[cut_index]
 
 
-def _truncate_to_token_budget(texts: List[str], token_budget: int) -> List[str]:
-    """Keep whole chunks, best-first, within ``token_budget`` e5 tokens.
+def _token_cost(text: str, stored: object) -> int:
+    """The chunk's stored e5 count, or a count now when it has none.
+
+    Ingestion stores ``token_count`` in each chunk's metadata; a chunk without
+    a usable one (ingested before counts were stored) is counted on the fly.
+    """
+    if isinstance(stored, int) and not isinstance(stored, bool) and stored >= 0:
+        return stored
+    return count_tokens(text)
+
+
+def _truncate_to_token_budget(chunks: Sequence[Tuple[str, object]], token_budget: int) -> int:
+    """How many ``(text, stored token_count)`` chunks fit, best-first, within
+    ``token_budget`` e5 tokens; whole chunks only.
 
     The first chunk always survives — one oversized chunk must yield a big
-    context, never an empty one.
+    context, never an empty one. Only the chunks reached are costed.
     """
-    kept: List[str] = []
+    kept = 0
     spent = 0
-    for text in texts:
-        cost = count_tokens(text)
+    for text, stored in chunks:
+        cost = _token_cost(text, stored)
         if kept and spent + cost > token_budget:
             break
-        kept.append(text)
+        kept += 1
         spent += cost
     return kept
 
@@ -156,13 +169,15 @@ def retrieve_kb_excerpts(
             selected.append((doc, sim))
             kept_ids.add(id(doc))
 
-    excerpts = [
+    # The budget keeps a prefix (best-first order).
+    kept = _truncate_to_token_budget(
+        [(doc.page_content, doc.metadata.get("token_count")) for doc, _ in selected],
+        token_budget,
+    )
+    return [
         KbExcerpt(
             source_file=doc.metadata.get("source_file", ""),
             text=doc.page_content,
         )
-        for doc, _ in selected
+        for doc, _ in selected[:kept]
     ]
-    # The budget keeps a prefix (best-first order), so indices line up.
-    kept = _truncate_to_token_budget([e.text for e in excerpts], token_budget)
-    return excerpts[: len(kept)]
