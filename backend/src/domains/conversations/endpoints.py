@@ -38,6 +38,7 @@ Streaming Pattern:
 
 Endpoints:
     - GET / → List all conversations
+    - GET /search?q= → Conversations whose title or message text matches
     - GET /{conversation_id} → Get conversation with messages
     - POST / → Create new conversation
     - PATCH /{conversation_id} → Update conversation (name, LLM, params)
@@ -90,7 +91,7 @@ Warning:
 
 from typing import List
 
-from fastapi import Depends, APIRouter
+from fastapi import Depends, APIRouter, Query
 from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 from fastapi.responses import StreamingResponse
@@ -299,6 +300,29 @@ async def get_all_conversations(
     logger.debug("Fetching all conversations")
     # Read-only operation, no commit needed
     return await run_in_threadpool(conversation_repo.get_all_conversations)
+
+
+# Declared before ``/{conversation_id}``: a later declaration would let the id
+# route take "search" as a path parameter and answer 422.
+@router.get("/search", response_model=List[ConversationResponse])
+async def search_conversations(
+    q: str = Query(..., max_length=200, description="Text to find (title or message text)"),
+    conversation_repo: ConversationRepository = Depends(get_conversation_repository),
+):
+    """Search the history by title and message text (#429).
+
+    Case-insensitive substring match; the model's reasoning is not searched.
+    Newest first, at most ``SEARCH_LIMIT`` conversations; a blank ``q`` matches
+    nothing.
+
+    Example:
+        ::
+
+            GET /erudi/conversations/search?q=zeppelin
+            → [{"id": 7, "name": "Airships", ...}]
+    """
+    logger.debug("Searching conversations")
+    return await run_in_threadpool(conversation_repo.search_conversations, q)
 
 
 @router.get("/{conversation_id}", response_model=ConversationWithMessagesResponse)

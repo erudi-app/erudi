@@ -553,7 +553,8 @@ disabled while an answer is being written and while a compaction runs, like `/mo
 can be offered, the open picker says to download one in Models or to re-bind the assistant in
 Knowledge Base. The settings icon opens a panel with one button per command (Model, Config, Effort,
 Compact, Context), labelled in words and never by slash name, each running that command exactly as
-typing it does. When the conversation's model was deleted, the whole line becomes a red "Please
+typing it does, followed by **Export as Markdown** (not a command: it has no slash form; see
+[Export as Markdown](#export-as-markdown)). When the conversation's model was deleted, the whole line becomes a red "Please
 select a model" that is the picker's button, and the composer is blocked; picking a model there, or
 with the panel's Model button, unblocks sending (Compact and Context then say to pick a model first
 and ask the backend nothing). The state is also announced in a polite live region, and the picker
@@ -759,8 +760,64 @@ curl http://127.0.0.1:27182/erudi/conversations/42/fetch_messages
 Each `MessageResponse` carries `id`, `conversation_id`, `sender` (`user`, `assistant` or `llm`),
 `content`, `timestamp`, `starred`, and the optional `trace` described above.
 
-`GET /erudi/conversations/` lists conversations without their messages;
+`GET /erudi/conversations/` lists conversations without their messages (and
+`GET /erudi/conversations/search?q=` finds some, see [Search the history](#search-the-history));
 `GET /erudi/conversations/{id}` returns the conversation with its full message list.
+
+### Search the history
+
+```bash
+curl 'http://127.0.0.1:27182/erudi/conversations/search?q=zeppelin'
+```
+
+Returns the conversations (the same rows as `GET /erudi/conversations/`) whose **title** or whose
+**message text** contains `q`, newest first, at most 50. The match is a case-insensitive substring
+(`ILIKE`); the `%`, `_` and `\` the user types are taken literally (`ESCAPE`), so `100%` finds
+"100%" and never "1000". Only `messages.content` is searched: the model's reasoning lives in the
+message's `trace`, so text that appears only in a reasoning block finds nothing, and a failed turn
+(the `[ERROR_MESSAGE_SYSTEM]` line) is not conversation text and never matches. The attachment
+markers a user message stores (`[file_path:...]`, `[image_path:...]`, `[image]`) are cut from the
+text before it is matched: the chat never shows them, so "pdf" or a folder name that sits only in
+an attached file's path finds nothing. A blank `q` matches
+nothing; `q` is required and holds at most 200 characters (422 otherwise). The route is declared
+before `/{conversation_id}`, which would otherwise take `search` for an id.
+
+In the app, the history list in the sidebar has a search field. Typing, after a pause of 300 ms,
+replaces the list with the matches (a "No conversation matches." line when there is none, a red
+line when the search fails); the matches open, rename, export and delete like any row. Emptying the
+field, its clear button or Escape brings the whole list back. Only the latest query's answer is
+shown, and the search runs again when the history changes under it (a rename, a new conversation,
+a delete), so the results never keep a title the history no longer has.
+
+### Export as Markdown
+
+An open conversation exports from two places: the download icon on its history row (with rename and
+delete: shown on hover or keyboard focus, each reachable with Tab and pressed with Enter or Space) and
+the **Export as Markdown** button of the conversation header's settings panel, disabled while a turn
+or a compaction runs. Both run `frontend/src/utils/conversationExport.js`: it reads
+`GET /erudi/conversations/{id}`, writes the Markdown in the interface language
+(`utils/conversationMarkdown.js`, a pure function) and hands the title and the text to the Electron
+main process (`window.exportAPI.saveMarkdown`, the `conversation:saveMarkdown` channel). **Main**
+opens the save dialog (in the user's documents folder, proposing "`<title> <YYYY-MM-DD>`.md", the
+title made safe as a file name on every OS: no path separator, control, zero-width or
+bidirectional character) and writes the text to the path the user chose. The dialog asks the
+system to confirm an overwrite; a name typed without an extension gets `.md`, and a file already at
+that name is not touched (the dialog never confirmed it). A target that is a symbolic link is
+refused, and the file is opened without following a link (`O_NOFOLLOW` where the platform has it).
+The renderer sends no path and receives none, only a status (`saved`, `cancelled`, `invalid`,
+`error`); main accepts requests from the main frame of the app window alone, reads only a string
+title and a non-empty string text of at most 20 million characters, and never logs the text. A
+failure opens the error dialog.
+
+The file holds the title, the start date, then the messages in order under a role heading
+(`## You`, `## Assistant`). A message's own Markdown cannot break what surrounds it: a code fence
+it left open is closed, and its headings move two levels down (below the role headings, at most
+`######`). A **compaction** is a separator (`---`, a line saying how many earlier
+messages were summarized, `---`) where it took over: before the answer of the turn that ran it, after
+the answer a `/compact` run was saved on. The summary itself is not written. **Left out**: the
+model's reasoning and tool activity, and the failed turns. **Named, not embedded**: an image is
+`> Image: <file name>` (`> Image` for a pasted one that has no file), an attached document is
+`> Attachment: <file name>`; no file path is written.
 
 ### Update a conversation
 

@@ -34,6 +34,10 @@
       "detail": "The application will now quit.",
       "detailPending": "A few files were still in use and could not be deleted yet. Erudi deletes them the next time it starts.\n\nThe application will now quit.",
       "leftInPlace": "These were left in place, because Erudi did not create them or may not delete them:\n{{folders}}"
+    },
+    "exportConversation": {
+      "title": "Export conversation",
+      "filter": "Markdown"
     }
   }
 }
