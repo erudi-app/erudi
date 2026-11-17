@@ -46,6 +46,9 @@ CUDA, MLX, and CPU builds.
       with ERUDI_NO_PARENT_WATCHDOG=1 for deliberately detached runs (nohup/setsid).
     * Hold an OS lock on the data folder for the life of the process, so two
       backends never share one cluster (DATA_DIR_IN_USE).
+    * Give backend.log to the running app version (ERUDI_APP_VERSION, passed by
+      Electron, #576): at the first start of another version the old file goes
+      into the numbered history before the logger opens it.
     * Bound the exit (#706): every shutdown path (SIGTERM/SIGINT, stdin EOF,
       parent death) goes through request_shutdown, which interrupts the model
       downloads at once; the launcher stops waiting for the server thread
@@ -744,6 +747,29 @@ def start_parent_watchdog(
     return thread
 
 
+def start_versioned_log(log_dir: Path) -> None:
+    """Give ``backend.log`` to the running app version, then say so in it.
+
+    The switch (``src.launcher.log_version``) renames the file, so it runs
+    before ``src.core.logging`` is imported; the records go through the
+    logger right after. Never stops the start: a log that keeps an older
+    version's records is a lesser harm than a backend that does not start.
+    """
+    try:
+        from src.launcher import log_version
+
+        version = log_version.app_version_from_env()
+        switch = log_version.switch_log_for_version(log_dir, version)
+
+        from src.core.logging import logger
+
+        log_version.record_log_version(logger, version, switch)
+    except Exception as exc:
+        # The logger may be what failed, so stderr (Electron echoes it into
+        # the app log); stdout is the launcher's JSON event channel.
+        print(f"Could not give backend.log to the running app version: {exc!r}", file=sys.stderr)
+
+
 def main() -> None:
     """Launch the backend, supervising readiness and emitting lifecycle events."""
     # Recorded FIRST: the reference parent for the death watchdog. Captured
@@ -809,6 +835,13 @@ def main() -> None:
             print(f"startup_error DATA_DIR_IN_USE: {exc}", file=sys.stderr, flush=True)
         emit_event({"event": "startup_error", "code": "DATA_DIR_IN_USE", "message": str(exc)})
         sys.exit(1)
+
+    # backend.log belongs to the running app version (#576): at the first
+    # start of another version the old file goes into the numbered history.
+    # BEFORE the first import of src.core.logging, whose file handler opens
+    # the file; AFTER the data-folder lock, so the previous backend (the one
+    # an update replaced) has stopped writing to it.
+    start_versioned_log(runtime_paths.log_dir)
 
     # Windows-only: bind Postgres/llama-server's lifetime to this process at
     # the kernel level, before either is ever spawned. Unlike the parent-death

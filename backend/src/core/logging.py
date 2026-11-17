@@ -40,7 +40,9 @@ File Management:
       The filename is stable (no date suffix): a date computed at import time
       froze at the process start, so a process crossing midnight kept writing
       to the previous day's file. Rotation preserves history instead.
-    - Rotation: 10 MB max file size.
+    - Rotation: 10 MB max file size, and at the first start of another app
+      version (``src.launcher.log_version``, run by ``run.py`` before this
+      module is imported), so the live file holds the running version only.
     - Retention: 10 backup files (backend.log.1, backend.log.2, ...).
     - Encoding: UTF-8 for multilingual support.
 
@@ -81,8 +83,11 @@ from logging.handlers import RotatingFileHandler
 from src.core.request_context import request_id_var
 from src.launcher import ensure_runtime_paths_initialized
 
+# The file name and its history are shared with the launcher, which rolls the
+# file over before this module opens it when the app version changed (#576).
+from src.launcher.log_version import LOG_BACKUP_COUNT, LOG_FILE_NAME
+
 DEFAULT_LOG_LEVEL = logging.INFO
-LOG_FILE_NAME = "backend.log"
 APP_LOGGER_NAME = "erudi"
 
 # Level at which another library's records are kept. WARNING, not the app's
@@ -117,7 +122,6 @@ _CONSOLE_BODY = (
 )
 
 MAX_LOG_FILE_BYTES = 10 * 1024 * 1024  # 10 MB
-LOG_BACKUP_COUNT = 10  # Keep 10 rotated files
 
 
 # ----------------------------

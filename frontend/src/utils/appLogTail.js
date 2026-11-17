@@ -7,7 +7,12 @@
 // `[renderer:<ns>] <LEVEL> <msg>`. There is no level column of its own.
 //
 // So the level is read out of the text, and only when the text states one:
-//   - `[WARNING]` / `[ERROR]` / `[CRITICAL]` — the backend's file format;
+//   - an echoed backend line, `Backend stdout|stderr: [LEVEL] ...`, whose
+//     level opens the line: the console formatter's `[WARN]` / `[ERROR]` /
+//     `[CRIT]` (colour codes allowed, from an app log written before main
+//     stripped them) or the file format's `[WARNING]` / `[CRITICAL]`. Only
+//     there: a level quoted later in a line (an INFO record carrying a
+//     pasted "[ERROR]") declares nothing;
 //   - `[renderer:ns] WARN|ERROR ...` — the renderer bridge's format;
 //   - `[main] WARN|ERROR ...` — main's own failures (utils/mainLog.js): a
 //     backend that exited, a spawn that failed, a renderer that crashed.
@@ -24,12 +29,23 @@
 // lines after it. Continuations inherit their header's level, so those under a
 // dropped record are dropped with it — including a leading fragment whose
 // header fell outside the read window.
+//
+// The log belongs to the running app version (utils/appLogVersion.js): every
+// record above the last version marker is an earlier version's and is dropped.
+//
+// Identical records (same level, same text once an echoed backend line's own
+// timestamp and request id are set aside, utils/foldIdentity.js) fold into one
+// carrying the newest occurrence and a `count`, before the `limit` cut: a line
+// repeated a thousand times holds one slot, not all of them (#534).
 
 // `import` rather than `require`: this module uses ESM exports (main.js
 // requires it the way it requires the other shared helpers, and webpack bridges
 // the two), and mixing `require` into an ESM module is the one combination
 // neither bundler nor test runner is obliged to support.
 import fs from "node:fs";
+
+import { APP_LOG_VERSION_MARKER } from "./appLogVersion.js";
+import { messageIdentity } from "./foldIdentity.js";
 
 /** Read window. Large enough for hundreds of records, small enough to be free. */
 export const DEFAULT_TAIL_BYTES = 512 * 1024;
@@ -43,8 +59,17 @@ export const MAX_MESSAGE_CHARS = 4000;
 /** Start of a record: `[2026-09-05T23:03:14.797Z] `. */
 const RECORD_RE = /^\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\]\s?([\s\S]*)$/;
 
-/** The backend's own level marker, as it survives inside a stdout line. */
-const BACKEND_LEVEL_RE = /\[(WARNING|ERROR|CRITICAL)\]/;
+/**
+ * The backend's own level, opening an echoed stdout/stderr line. The console
+ * formatter (backend/src/core/logging.py, `CustomFormatter`) writes `[WARN]`
+ * and `[CRIT]`, padded and coloured; the file format writes the full names.
+ */
+const BACKEND_LEVEL_RE =
+  // eslint-disable-next-line no-control-regex -- the ESC of a colour code is what is matched
+  /^Backend (?:stdout|stderr): (?:\x1b\[[0-9;]*m)?\[(WARNING|WARN|ERROR|CRITICAL|CRIT)\]/;
+
+/** Console spellings to the level names the rest of the app uses. */
+const BACKEND_LEVEL_NAMES = { WARN: "WARNING", CRIT: "CRITICAL" };
 
 /**
  * The shape of the two levelled writers of this process: the renderer bridge
@@ -61,7 +86,7 @@ export function detectLevel(text) {
   const levelled = LEVELLED_PREFIX_RE.exec(text);
   if (levelled) return levelled[1] === "WARN" ? "WARNING" : "ERROR";
   const backend = BACKEND_LEVEL_RE.exec(text);
-  if (backend) return backend[1];
+  if (backend) return BACKEND_LEVEL_NAMES[backend[1]] ?? backend[1];
   return null;
 }
 
@@ -69,7 +94,8 @@ export function detectLevel(text) {
  * Group raw app-log text into records and keep the levelled ones.
  * @param {string} text - Raw log text.
  * @param {number} limit - Maximum records to return (newest kept).
- * @returns {Array<{timestamp: string, level: string, message: string}>} Oldest first.
+ * @returns {Array<{timestamp: string, level: string, message: string, count: number}>}
+ *   Ordered by newest occurrence, oldest first.
  */
 export function parseAppLogRecords(text, limit = DEFAULT_LIMIT) {
   const records = [];
@@ -89,13 +115,19 @@ export function parseAppLogRecords(text, limit = DEFAULT_LIMIT) {
 
   for (const line of lines) {
     const match = RECORD_RE.exec(line);
+    if (match && match[2].startsWith(APP_LOG_VERSION_MARKER)) {
+      // A version's log starts here; what precedes it is an earlier version's.
+      records.length = 0;
+      current = null;
+      continue;
+    }
     if (match) {
       const level = detectLevel(match[2]);
       if (!level) {
         current = null;
         continue;
       }
-      current = { timestamp: match[1], level, message: match[2] };
+      current = { timestamp: match[1], level, message: match[2], count: 1 };
       records.push(current);
     } else if (current) {
       current.message += `\n${line}`;
@@ -111,7 +143,29 @@ export function parseAppLogRecords(text, limit = DEFAULT_LIMIT) {
     }
   }
 
-  return limit ? records.slice(-limit) : records;
+  const folded = foldRepeats(records);
+  return limit ? folded.slice(-limit) : folded;
+}
+
+/**
+ * One record per identity, at the place of its newest occurrence, whose
+ * timestamp and text it keeps; `count` is how many records it stands for.
+ * @param {Array<object>} records - Parsed records, oldest first.
+ * @returns {Array<object>} Folded records, oldest first.
+ */
+function foldRepeats(records) {
+  const byIdentity = new Map();
+  for (const record of records) {
+    const identity = `${record.level}\u0000${messageIdentity(record.message)}`;
+    const seen = byIdentity.get(identity);
+    if (seen) {
+      record.count += seen.count;
+      // Re-inserted last: the order is that of the newest occurrences.
+      byIdentity.delete(identity);
+    }
+    byIdentity.set(identity, record);
+  }
+  return [...byIdentity.values()];
 }
 
 /**
