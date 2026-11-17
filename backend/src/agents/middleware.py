@@ -1,4 +1,4 @@
-"""Per-turn request-time agent middleware (KB merge, image/tool-result hygiene).
+"""Per-turn agent middleware (KB merge, image/tool-result hygiene, KB before web).
 
 Factored out of ``runner.py`` so the runner module itself stays free of
 module-level LangChain imports: this module subclasses ``AgentMiddleware`` at
@@ -9,12 +9,16 @@ and the whole LangChain agent stack only loads on the first turn, not at boot
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated, Optional
 
 from langchain.agents.middleware import AgentMiddleware
 from langchain.agents.middleware.types import AgentState, PrivateStateAttr
-from langchain_core.messages import HumanMessage
+from langchain_core.messages import HumanMessage, ToolMessage
 from typing_extensions import NotRequired
+
+from src.core.logging import logger
+from src.core.logutils import truncate_for_log
 
 # One substitution helper and one marker table, shared with the real-token
 # counters (``src.agents.token_accounting``); re-exported here for the
@@ -314,3 +318,121 @@ class _StripStaleToolResults(AgentMiddleware):
 
     async def awrap_model_call(self, request, handler):
         return await handler(self._strip(request))
+
+
+# The artifact of a web result the guard preceded with a Knowledge Base
+# search: never sent to the model, it tells a later ``web_search`` of the
+# same turn that the documents were already searched.
+KB_FIRST_ARTIFACT = {"kb_searched_first": True}
+
+_KB_TOOL = "search_knowledge_base"
+_WEB_TOOL = "web_search"
+
+
+def _kb_searched_this_turn(messages) -> bool:
+    """Whether the current turn (what follows the last user message) holds a
+    ``search_knowledge_base`` call, or a web result the guard preceded with
+    one. The tool node runs after the model's message joined the state, so a
+    call made beside ``web_search`` in that same message counts."""
+    start = last_human_index(messages) or 0
+    for message in messages[start:]:
+        if message.type == "ai" and any(
+            call.get("name") == _KB_TOOL for call in getattr(message, "tool_calls", None) or []
+        ):
+            return True
+        if message.type == "tool" and getattr(message, "artifact", None) == KB_FIRST_ARTIFACT:
+            return True
+    return False
+
+
+class _KbBeforeWebMiddleware(AgentMiddleware):
+    """A Knowledge Base assistant searches its documents before the web (#707).
+
+    On a turn that carries both ``search_knowledge_base`` and ``web_search``,
+    a ``web_search`` call made before any Knowledge Base search of the turn
+    is run by the guard itself: the Knowledge Base search first, with the
+    same query, then the web search (``run_kb_search`` / ``run_web_search``,
+    the bodies of the two tools, so the log reads ``Tool invoked:
+    search_knowledge_base`` then ``Tool invoked: web_search``). The model's
+    call gets ONE tool result under its own id and name holding both
+    (``kb_then_web_result``: the excerpts, the snippets, one arbitration
+    line, the answer-language line last), so the ``AIMessage(tool_calls) ->
+    ToolMessage`` pairing the chat template needs is untouched and the
+    history holds no call the model did not make. Neither search raises:
+    a failed one stands as its text beside the other's result.
+
+    Never a block: the web search the model asked for always runs, and once
+    the documents were searched in the turn -- by the model, beside the web
+    call or on an earlier hop, or by this guard -- every ``web_search`` goes
+    to the tool node as it is. So does a call with no query (nothing to
+    search the documents with: the tool's own validation answers it).
+
+    Several ``web_search`` calls in one message run side by side, each
+    unaware of the others' results: each searches the documents first, and
+    calls with the same query share one search (``_searches``, keyed by
+    query; the middleware is built per turn, so the sharing never outlives
+    it).
+
+    On a later turn this result, like every past web result, is replaced by
+    the ``web_search`` marker of ``STALE_TOOL_RESULT_MARKERS`` ("call
+    web_search again"): the document excerpts it carried go with it, and the
+    model is pointed at the web, not at the documents. The guard searches the
+    documents again on that turn's first web search, and the KB section of
+    the system prompt tells the model to search again for document facts.
+
+    Why a guard and not words: the system prompt already says document
+    questions go to ``search_knowledge_base`` (``_WEB_KB_ARBITRATION`` in
+    ``src.agents.prompts``), and Qwen3 4B called ``web_search`` instead, then
+    said the information was not in the documents it had not searched.
+
+    Async only: both tools are coroutines, and every turn runs the agent
+    through ``astream``.
+    """
+
+    def __init__(self):
+        super().__init__()
+        self._searches: dict = {}
+
+    @staticmethod
+    def _guarded_query(request) -> Optional[str]:
+        """The query to search the documents with first, or ``None`` when the
+        call goes to the tool node as it is."""
+        call = request.tool_call
+        if call.get("name") != _WEB_TOOL:
+            return None
+        query = (call.get("args") or {}).get("query")
+        if not isinstance(query, str) or not query.strip():
+            return None
+        if _kb_searched_this_turn(list((request.state or {}).get("messages", []))):
+            return None
+        return query
+
+    def _kb_search(self, query: str, ctx):
+        """The documents' search for ``query``, shared by the calls of this
+        turn that carry the same query."""
+        from src.agents.tools import run_kb_search
+
+        if query not in self._searches:
+            self._searches[query] = asyncio.ensure_future(run_kb_search(query, ctx))
+        return self._searches[query]
+
+    async def awrap_tool_call(self, request, handler):
+        query = self._guarded_query(request)
+        if query is None:
+            return await handler(request)
+        from src.agents.tools import kb_then_web_result, run_web_search
+
+        logger.info(
+            "KB-first guard: web_search called before any knowledge base search "
+            f"this turn, searching the knowledge base first (query={truncate_for_log(query, 200)})"
+        )
+        ctx = request.runtime.context
+        excerpts = await self._kb_search(query, ctx)
+        web_results = await run_web_search(query, ctx)
+        call = request.tool_call
+        return ToolMessage(
+            content=kb_then_web_result(query, excerpts, web_results, ctx.web_token_budget),
+            name=_WEB_TOOL,
+            tool_call_id=call["id"],
+            artifact=KB_FIRST_ARTIFACT,
+        )

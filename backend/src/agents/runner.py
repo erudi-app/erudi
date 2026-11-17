@@ -1930,6 +1930,20 @@ def _parse_tool_args(raw: str) -> dict:
     return parsed if isinstance(parsed, dict) else {"raw": raw}
 
 
+def _fallback_text(message: Any, text: str) -> str:
+    """What the #90 empty-answer fallback shows for a tool result: its text,
+    except for a web result the KB-before-web guard framed (#707), whose
+    content is shown without the headers and instructions written for the
+    model (``kb_then_web_answer``) -- the excerpts and snippets, with their
+    sources, are what the model had to answer from."""
+    from src.agents.middleware import KB_FIRST_ARTIFACT
+    from src.agents.tools import kb_then_web_answer
+
+    if getattr(message, "artifact", None) == KB_FIRST_ARTIFACT:
+        return kb_then_web_answer(text)
+    return text
+
+
 def _drain_tool_calls(pending: dict) -> list:
     """Emit one complete ``tool_call`` event per accumulated call (index order),
     then clear the buffer so the next agent step accumulates fresh."""
@@ -2190,6 +2204,7 @@ class AgentRunner:
 
         from src.agents.middleware import (
             _FoldSystemIntoUserMiddleware,
+            _KbBeforeWebMiddleware,
             _KbContextMiddleware,
             _StripImagesForTextModel,
         )
@@ -2287,6 +2302,12 @@ class AgentRunner:
                         *middleware,
                         _KbContextMiddleware(kb_context_block, kb_language_line),
                     ]
+                tool_names = {getattr(t, "name", None) for t in effective_tools}
+                if {"search_knowledge_base", "web_search"} <= tool_names:
+                    # A Knowledge Base assistant with web search on searches
+                    # its documents before the web (#707): the guard wraps
+                    # tool execution only, so its place in the list is free.
+                    middleware = [*middleware, _KbBeforeWebMiddleware()]
                 if supports_vision is not True:
                     # Unless the model is POSITIVELY vision-capable, strip images
                     # (#212): unknown capability (None) is treated like False, so
@@ -2462,7 +2483,7 @@ class AgentRunner:
                                 # Keep the latest non-blank result for the #90 fallback.
                                 tool_text = getattr(token, "text", "") or ""
                                 if tool_text.strip():
-                                    last_tool_result = tool_text
+                                    last_tool_result = _fallback_text(token, tool_text)
                                 # Defensive (#297): narration not yet reclassified (tool
                                 # calls that arrived without streamed chunks) goes out
                                 # as thinking BEFORE the tool_call events.

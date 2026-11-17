@@ -1,0 +1,110 @@
+{
+  "description": "Fixed question set for a Knowledge Base assistant with web search on (#707). The Knowledge Base is nimbus_contract.txt alone. kind=kb: answered only by the document; kind=web: answered only by the web; kind=both: needs the document and the web. kb_fact is a substring of the document the answer must carry (null when the document has nothing to say). web_result is the scripted search result the CI test returns for the question: its body is placeholder text for the test, not a real fact; a real-model run judges the web part by a web_search call and a cited URL.",
+  "document": "nimbus_contract.txt",
+  "questions": [
+    {
+      "id": "kb-notice",
+      "kind": "kb",
+      "question": "Quel est le préavis de résiliation du contrat Nimbus ?",
+      "kb_fact": "90 jours",
+      "web_result": null
+    },
+    {
+      "id": "kb-sla",
+      "kind": "kb",
+      "question": "Quel taux de disponibilité le contrat Nimbus garantit-il ?",
+      "kb_fact": "99,7",
+      "web_result": null
+    },
+    {
+      "id": "kb-penalty",
+      "kind": "kb",
+      "question": "Quelle pénalité s'applique quand Nimbus ne tient pas sa disponibilité ?",
+      "kb_fact": "5 pourcent",
+      "web_result": null
+    },
+    {
+      "id": "kb-support",
+      "kind": "kb",
+      "question": "Sous quel délai le support Nimbus répond-il aux tickets ?",
+      "kb_fact": "48 heures",
+      "web_result": null
+    },
+    {
+      "id": "kb-critical-en",
+      "kind": "kb",
+      "question": "How quickly are critical incidents handled under the Nimbus contract?",
+      "kb_fact": "4 heures",
+      "web_result": null
+    },
+    {
+      "id": "kb-billing-en",
+      "kind": "kb",
+      "question": "On which day of the month is the Nimbus invoice issued?",
+      "kb_fact": "premier jour ouvré",
+      "web_result": null
+    },
+    {
+      "id": "kb-late-payment",
+      "kind": "kb",
+      "question": "Que se passe-t-il si je paie Nimbus avec plus d'un mois de retard ?",
+      "kb_fact": "suspension du service",
+      "web_result": null
+    },
+    {
+      "id": "web-ecb-rate",
+      "kind": "web",
+      "question": "Quel est le taux de dépôt actuel de la Banque centrale européenne ?",
+      "kb_fact": null,
+      "web_result": {
+        "title": "Taux directeurs de la BCE",
+        "href": "https://www.ecb.europa.eu/stats/policy_and_exchange_rates/key_ecb_interest_rates/html/index.fr.html",
+        "body": "SCRIPTED-WEB-ECB: taux de la facilité de dépôt (placeholder)."
+      }
+    },
+    {
+      "id": "web-python-release",
+      "kind": "web",
+      "question": "What is the latest stable release of Python?",
+      "kb_fact": null,
+      "web_result": {
+        "title": "Python Releases",
+        "href": "https://www.python.org/downloads/",
+        "body": "SCRIPTED-WEB-PYTHON: latest stable release (placeholder)."
+      }
+    },
+    {
+      "id": "web-weather",
+      "kind": "web",
+      "question": "Quel temps fera-t-il à Lyon demain ?",
+      "kb_fact": null,
+      "web_result": {
+        "title": "Météo Lyon",
+        "href": "https://meteofrance.com/previsions-meteo-france/lyon/69000",
+        "body": "SCRIPTED-WEB-WEATHER: prévisions pour Lyon (placeholder)."
+      }
+    },
+    {
+      "id": "both-notice-law",
+      "kind": "both",
+      "question": "Le préavis de résiliation du contrat Nimbus respecte-t-il ce que la loi française impose aux contrats de services en ligne ?",
+      "kb_fact": "90 jours",
+      "web_result": {
+        "title": "Résiliation des contrats - Service-Public.fr",
+        "href": "https://www.service-public.fr/particuliers/vosdroits/F10485",
+        "body": "SCRIPTED-WEB-LAW: règles de résiliation (placeholder)."
+      }
+    },
+    {
+      "id": "both-sla-compare",
+      "kind": "both",
+      "question": "Is the Nimbus availability guarantee better than the Amazon EC2 SLA?",
+      "kb_fact": "99,7",
+      "web_result": {
+        "title": "Amazon Compute Service Level Agreement",
+        "href": "https://aws.amazon.com/compute/sla/",
+        "body": "SCRIPTED-WEB-EC2: EC2 monthly uptime commitment (placeholder)."
+      }
+    }
+  ]
+}
