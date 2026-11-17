@@ -29,9 +29,10 @@ folders and the stdout capture, and empties the Electron profile's storage
 (the profile folder itself stays): the full list is in `docs/privacy.md`,
 "What Clear All Data removes". Pasted images live in the backend data folder
 (`.../prod/data/pasted-images/`). A folder is deleted only when it carries
-`.erudi-owned`; a file still held is retried at the next start of the same app
-(the marker is `clear-all-data-pending.json` in the profile folder, at most
-three starts).
+`.erudi-owned` (deleted last); a file still held is retried at the next start of
+the same app (the marker is `clear-all-data-pending.json` in the profile folder,
+at most three starts, then a message). A run from source never offers Clear All
+Data: test it on a packaged build.
 
 ## Confirm nothing is running
 

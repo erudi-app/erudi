@@ -22,7 +22,11 @@
       "detail": "这将永久删除：\n• 所有已下载的 AI 模型\n• 对话历史和粘贴的图片\n• 知识库\n• 设置和界面偏好\n• 日志（其中包含你的对话内容）\n\n此操作无法撤销。\n\n删除后应用将退出。",
       "confirm": "删除所有数据",
       "failedWithError": "无法清除数据：{{error}}",
-      "rootRefused": "无法使用“清除所有数据”：ERUDI_DATA_ROOT 指向 {{root}}，这是你的主文件夹、其上级文件夹或磁盘根目录。未删除任何内容。"
+      "rootRefused": "无法使用“清除所有数据”：ERUDI_DATA_ROOT 指向 {{root}}，这是你的主文件夹、其上级文件夹或磁盘根目录。未删除任何内容。",
+      "gaveUp": {
+        "message": "“清除所有数据”未能完成",
+        "detail": "以下内容在三次启动后仍被占用，已保留未动。关闭 Erudi 后可自行删除：\n{{files}}"
+      }
     },
     "dataCleared": {
       "title": "数据已清除",

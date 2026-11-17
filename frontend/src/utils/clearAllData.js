@@ -23,15 +23,17 @@
 // exactly those paths, with the kind of run that wrote it (installed or dev,
 // and its ERUDI_DATA_ROOT). The next start of the same kind of run deletes
 // those paths -- only those still among its own targets -- before it opens a
-// window or starts the backend, at most MAX_PENDING_ATTEMPTS times. Any other
-// run ignores the marker and removes it: a dev run and the installed app
-// share the user data folder on macOS and Windows.
+// window or starts the backend, at most MAX_PENDING_ATTEMPTS times, then
+// says once what is left. Any other run ignores the marker and leaves it for
+// its own run: a run from source and the installed app share the user data
+// folder on macOS and Windows.
 //
 // Pure apart from the file system: main.js passes the steps that need
 // Electron.
 
 import fs from "node:fs";
 import path from "node:path";
+import { OWNERSHIP_SENTINEL } from "./dataLocations";
 
 export const PENDING_CLEAR_FILE = "clear-all-data-pending.json";
 export const MAX_PENDING_ATTEMPTS = 3;
@@ -44,8 +46,46 @@ const RM_RETRY_DELAY_MS = 250;
 
 const PERMISSION_CODES = new Set(["EACCES", "EPERM"]);
 
+const RM_OPTIONS = {
+  recursive: true,
+  force: true,
+  maxRetries: RM_MAX_RETRIES,
+  retryDelay: RM_RETRY_DELAY_MS,
+};
+
+// Delete everything in `dir` but the ownership files, depth first. Throws on
+// the first entry that cannot go, leaving every ownership file in place.
+async function removeAllButOwnership(dir, rm) {
+  for (const entry of await fs.promises.readdir(dir, { withFileTypes: true })) {
+    const child = path.join(dir, entry.name);
+    if (entry.name === OWNERSHIP_SENTINEL && entry.isFile()) continue;
+    if (entry.isDirectory()) {
+      await removeAllButOwnership(child, rm);
+      if ((await fs.promises.readdir(child)).length === 0) await rm(child, RM_OPTIONS);
+    } else {
+      await rm(child, RM_OPTIONS);
+    }
+  }
+}
+
+// Delete one target. A folder loses its ownership file last: a clear that
+// stops halfway (a file still held) leaves the folder marked as Erudi's.
+async function removeTarget(target, rm) {
+  let stats;
+  try {
+    stats = await fs.promises.lstat(target);
+  } catch (error) {
+    if (error.code === "ENOENT") return;
+    throw error;
+  }
+  if (stats.isDirectory()) await removeAllButOwnership(target, rm);
+  await rm(target, RM_OPTIONS);
+}
+
 /**
- * @param {{path: string, owner: string|null}[]} targets
+ * @param {{path: string, owner: string|null}[]} targets `owner` is the
+ *   folder whose ownership file must be present, or null when the target is
+ *   Erudi's by its path alone (or was checked already: a pending entry).
  * @param {object} deps
  * @param {(target: string) => boolean} deps.isSafe Last guard before a delete.
  * @param {(dir: string) => boolean} deps.isOwned Whether a folder carries
@@ -72,12 +112,7 @@ export async function removeTargets(targets, { isSafe, isOwned, isForeign, rm = 
       continue;
     }
     try {
-      await rm(target.path, {
-        recursive: true,
-        force: true,
-        maxRetries: RM_MAX_RETRIES,
-        retryDelay: RM_RETRY_DELAY_MS,
-      });
+      await removeTarget(target.path, rm);
       removed.push(target.path);
     } catch (error) {
       const code = (error && error.code) || "UNKNOWN";
@@ -97,7 +132,7 @@ const sameContext = (a, b) =>
 /**
  * @param {object} deps
  * @param {{isPackaged: boolean, instanceRoot: string|null}} deps.context
- * @param {boolean} deps.available False in a dev run without ERUDI_DATA_ROOT.
+ * @param {boolean} deps.available False in a run from source.
  * @param {boolean} deps.rootRefused ERUDI_DATA_ROOT is the home folder or above.
  * @param {() => Promise<boolean>} deps.confirm
  * @param {() => void} deps.markQuitting
@@ -112,6 +147,8 @@ const sameContext = (a, b) =>
  * @param {string} deps.markerPath
  * @param {(result: {complete: boolean, leftInPlace: string[]}) => Promise<void>} deps.showResult
  * @param {() => Promise<void>} deps.showRootRefused
+ * @param {(left: string[]) => Promise<void>} deps.showGaveUp Tells the user,
+ *   once, what a pending clear gave up on.
  * @param {(error: Error) => Promise<void>} deps.showError
  * @param {() => void} deps.quit
  * @param {Function} [deps.rm]
@@ -203,11 +240,12 @@ export function createClearAllDataFlow(deps) {
       return;
     }
     if (marker?.version !== MARKER_VERSION || !sameContext(marker.context, context)) {
+      // Kept: it is that run's to finish (a run from source and the
+      // installed app share the user data folder on macOS and Windows).
       logWarn(
         "Clear All Data: the pending-clear file belongs to another kind of run " +
-          "(installed or dev, or another ERUDI_DATA_ROOT); ignored and dropped"
+          "(installed or from source, or another ERUDI_DATA_ROOT); ignored and kept"
       );
-      dropMarker();
       return;
     }
     if (deps.rootRefused) {
@@ -223,7 +261,10 @@ export function createClearAllDataFlow(deps) {
     for (const stranger of strangers) {
       logWarn(`Clear All Data: ${stranger} is no longer one of this run's targets; left in place`);
     }
-    const targets = wanted.filter((p) => current.has(p)).map((p) => current.get(p));
+    // Ownership was checked when the clear ran and the entry recorded then; the
+    // folder may have lost its ownership file since (a pass interrupted before
+    // the file went), and the backend has not marked it again yet.
+    const targets = wanted.filter((p) => current.has(p)).map((p) => ({ path: p, owner: null }));
 
     log("Finishing the Clear All Data of the previous session...");
     const storageError = marker.storage ? await clearStorageSafely() : null;
@@ -247,6 +288,7 @@ export function createClearAllDataFlow(deps) {
         ...(storageError ? [storageError] : [])
       );
       dropMarker();
+      await deps.showGaveUp(result.pending.map((p) => p.path));
       return;
     }
     logWarn(`Clear All Data: still in use, retried at the next start: ${still || "storage"}`);

@@ -22,7 +22,11 @@
       "detail": "Esto eliminará de forma permanente:\n• Todos los modelos de IA descargados\n• El historial de conversaciones y las imágenes pegadas\n• Las bases de conocimiento\n• Los ajustes y las preferencias de la interfaz\n• Los registros (contienen el texto de tus conversaciones)\n\nEsta acción no se puede deshacer.\n\nLa aplicación se cerrará tras la eliminación.",
       "confirm": "Eliminar todos los datos",
       "failedWithError": "No se pudieron borrar los datos: {{error}}",
-      "rootRefused": "Borrar todos los datos no está disponible: ERUDI_DATA_ROOT apunta a {{root}}, que es tu carpeta personal, una carpeta superior o la raíz de un disco. No se ha eliminado nada."
+      "rootRefused": "Borrar todos los datos no está disponible: ERUDI_DATA_ROOT apunta a {{root}}, que es tu carpeta personal, una carpeta superior o la raíz de un disco. No se ha eliminado nada.",
+      "gaveUp": {
+        "message": "Borrar todos los datos no pudo terminar",
+        "detail": "Estos elementos seguían en uso después de tres inicios y se han dejado en su sitio. Puedes eliminarlos tú mismo cuando Erudi esté cerrado:\n{{files}}"
+      }
     },
     "dataCleared": {
       "title": "Datos borrados",

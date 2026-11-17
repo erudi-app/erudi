@@ -22,7 +22,11 @@
       "detail": "This will permanently delete:\n• All downloaded AI models\n• Conversation history and pasted images\n• Knowledge bases\n• Settings and interface preferences\n• Logs (they contain the text of your conversations)\n\nThis action cannot be undone.\n\nThe application will quit after deletion.",
       "confirm": "Delete All Data",
       "failedWithError": "Failed to clear data: {{error}}",
-      "rootRefused": "Clear All Data is not available: ERUDI_DATA_ROOT points at {{root}}, which is your home folder, a folder above it or the root of a disk. Nothing was deleted."
+      "rootRefused": "Clear All Data is not available: ERUDI_DATA_ROOT points at {{root}}, which is your home folder, a folder above it or the root of a disk. Nothing was deleted.",
+      "gaveUp": {
+        "message": "Clear All Data could not finish",
+        "detail": "These were still in use after three starts and were left in place. You can delete them yourself once Erudi is closed:\n{{files}}"
+      }
     },
     "dataCleared": {
       "title": "Data Cleared",

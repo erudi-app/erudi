@@ -63,10 +63,17 @@ describe("main.js delegates Clear All Data", () => {
     expect(preload).not.toMatch(/electronAPI/);
   });
 
-  it("is hidden in a dev run without ERUDI_DATA_ROOT", () => {
-    expect(source).toMatch(
-      /const clearAllDataAvailable = app\.isPackaged \|\| Boolean\(dataLocations\.instanceRoot\);/
-    );
+  it("takes its decisions from utils/clearAllDataSetup.js, where they are tested", () => {
+    for (const name of [
+      "isClearAllDataAvailable",
+      "isInstanceRootRefused",
+      "createClearTargetGuard",
+      "isForeignFile",
+      "claimInstalledLogsFolder",
+    ]) {
+      expect(source).toMatch(new RegExp(`\\b${name}\\(`));
+    }
+    expect(source).not.toMatch(/function isForeignFile|function claimElectronFolders/);
   });
 
   it("opens the first window through openFirstWindow, which finishes a pending clear first", () => {
@@ -79,10 +86,7 @@ describe("main.js delegates Clear All Data", () => {
     expect(ready[1]).not.toMatch(/\bcreateWindow\(\)/);
   });
 
-  it("guards every deletion with the home folder, the instance root and the profile folder", () => {
-    expect(source).toMatch(
-      /protectedDirs: \[dataLocations\.instanceRoot, app\.getPath\("userData"\)\]/
-    );
+  it("checks ownership on every deletion", () => {
     expect(source).toMatch(/isOwned: isOwnedFolder/);
   });
 });

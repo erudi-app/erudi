@@ -10,6 +10,13 @@ import {
 } from "./clearAllData.js";
 import { OWNERSHIP_SENTINEL } from "./dataLocations.js";
 
+// Every test deletes real files in a temporary folder with the real fs.rm. A
+// folder the test makes read-only stands for a file Windows still holds: its
+// contents cannot be deleted until the permission comes back. Read-only
+// folders do not stop root, nor anyone on Windows.
+const canHoldFiles =
+  process.platform !== "win32" && !(typeof process.getuid === "function" && process.getuid() === 0);
+
 const fsError = (code) => Object.assign(new Error(code), { code });
 
 let root;
@@ -17,6 +24,9 @@ beforeEach(() => {
   root = fs.realpathSync(fs.mkdtempSync(path.join(os.tmpdir(), "erudi-clear-")));
 });
 afterEach(() => {
+  // Give back whatever a test made read-only, then clean up.
+  for (const dir of held) fs.chmodSync(dir, 0o755);
+  held.length = 0;
   fs.rmSync(root, { recursive: true, force: true });
 });
 
@@ -29,9 +39,19 @@ function seed(relative, content = "x") {
 }
 const own = (relative) => seed(path.join(relative, OWNERSHIP_SENTINEL), "");
 const exists = (relative) => fs.existsSync(at(relative));
+const held = [];
+const hold = (relative) => {
+  fs.chmodSync(at(relative), 0o555);
+  held.push(at(relative));
+};
+const release = (relative) => {
+  fs.chmodSync(at(relative), 0o755);
+  held.splice(held.indexOf(at(relative)), 1);
+};
 const allowAll = () => true;
 const isOwned = (dir) => fs.existsSync(path.join(dir, OWNERSHIP_SENTINEL));
 const notForeign = () => false;
+const options = { isSafe: allowAll, isOwned, isForeign: notForeign };
 
 describe("removeTargets", () => {
   it("deletes an owned folder and a file, and a target already gone is not a failure", async () => {
@@ -44,85 +64,103 @@ describe("removeTargets", () => {
         { path: at("erudi-backend.log"), owner: null },
         { path: at("never-created"), owner: null },
       ],
-      { isSafe: allowAll, isOwned, isForeign: notForeign }
+      options
     );
     expect(result).toMatchObject({ pending: [], refused: [], skipped: [] });
     expect(exists("data")).toBe(false);
     expect(exists("erudi-backend.log")).toBe(false);
   });
 
+  it("deletes a folder whose ownership file sits deeper (backend/prod/data)", async () => {
+    seed("backend/prod/data/postgres/PG_VERSION");
+    own("backend/prod/data");
+    const result = await removeTargets(
+      [{ path: at("backend"), owner: at("backend/prod/data") }],
+      options
+    );
+    expect(result.pending).toEqual([]);
+    expect(exists("backend")).toBe(false);
+  });
+
   it("skips a folder without Erudi's ownership file (ERUDI_DATA_ROOT at the user's own folder)", async () => {
     seed("data/thesis.docx");
-    const result = await removeTargets([{ path: at("data"), owner: at("data") }], {
-      isSafe: allowAll,
-      isOwned,
-      isForeign: notForeign,
-    });
+    const result = await removeTargets([{ path: at("data"), owner: at("data") }], options);
     expect(result.skipped).toEqual([at("data")]);
     expect(exists("data/thesis.docx")).toBe(true);
   });
 
-  it("asks fs.rm to retry a file another process still holds (Windows EBUSY)", async () => {
-    const rm = vi.fn(async () => {});
-    await removeTargets([{ path: "/x/data", owner: null }], {
-      isSafe: allowAll,
-      isOwned,
-      isForeign: notForeign,
-      rm,
-    });
+  it.skipIf(!canHoldFiles)(
+    "keeps the ownership file while something in the folder is still held",
+    async () => {
+      seed("data/postgres/base/1");
+      seed("data/models/weights.bin");
+      own("data");
+      hold("data/postgres/base");
+      const result = await removeTargets([{ path: at("data"), owner: at("data") }], options);
+      expect(result.pending).toEqual([{ path: at("data"), code: "EACCES" }]);
+      expect(exists("data/models")).toBe(false);
+      expect(exists(`data/${OWNERSHIP_SENTINEL}`)).toBe(true);
+    }
+  );
+
+  it("passes fs.rm the retry options for a file another process holds (Windows EBUSY)", async () => {
+    seed("erudi-backend.log");
+    const rm = vi.fn((target, opts) => fs.promises.rm(target, opts));
+    await removeTargets([{ path: at("erudi-backend.log"), owner: null }], { ...options, rm });
     expect(rm.mock.calls[0][1]).toMatchObject({ recursive: true, force: true });
     expect(rm.mock.calls[0][1].maxRetries).toBeGreaterThan(0);
   });
 
   it("goes on when one target is still held, and reports it as pending", async () => {
-    const rm = vi.fn(async (target) => {
-      if (target === "/x/logs") throw fsError("EBUSY");
-    });
-    const result = await removeTargets(
-      ["/x/data", "/x/logs", "/x/more"].map((p) => ({ path: p, owner: null })),
-      { isSafe: allowAll, isOwned, isForeign: notForeign, rm }
+    for (const name of ["a.log", "b.log", "c.log"]) seed(name);
+    const rm = vi.fn((target, opts) =>
+      target.endsWith("b.log") ? Promise.reject(fsError("EBUSY")) : fs.promises.rm(target, opts)
     );
-    expect(rm).toHaveBeenCalledTimes(3);
-    expect(result.removed).toEqual(["/x/data", "/x/more"]);
-    expect(result.pending).toEqual([{ path: "/x/logs", code: "EBUSY" }]);
+    const result = await removeTargets(
+      ["a.log", "b.log", "c.log"].map((name) => ({ path: at(name), owner: null })),
+      { ...options, rm }
+    );
+    expect(result.removed).toEqual([at("a.log"), at("c.log")]);
+    expect(result.pending).toEqual([{ path: at("b.log"), code: "EBUSY" }]);
+    expect(exists("b.log")).toBe(true);
   });
 
   it("refuses, rather than retries, a file another user owns that it may not delete", async () => {
-    const rm = vi.fn(async () => {
-      throw fsError("EPERM");
-    });
-    const result = await removeTargets([{ path: "/tmp/erudi-backend.log", owner: null }], {
-      isSafe: allowAll,
-      isOwned,
-      isForeign: (p) => p === "/tmp/erudi-backend.log",
-      rm,
+    seed("erudi-backend.log");
+    const result = await removeTargets([{ path: at("erudi-backend.log"), owner: null }], {
+      ...options,
+      isForeign: () => true,
+      rm: () => Promise.reject(fsError("EPERM")),
     });
     expect(result.pending).toEqual([]);
-    expect(result.refused).toEqual([{ path: "/tmp/erudi-backend.log", why: "foreign" }]);
+    expect(result.refused).toEqual([{ path: at("erudi-backend.log"), why: "foreign" }]);
   });
 
   it("never deletes a target the guard refuses", async () => {
-    const rm = vi.fn(async () => {});
+    seed("qa/data/x");
+    own("qa/data");
     const result = await removeTargets(
       [
-        { path: "/srv/qa", owner: null },
-        { path: "/srv/qa/data", owner: null },
+        { path: at("qa"), owner: null },
+        { path: at("qa/data"), owner: at("qa/data") },
       ],
-      { isSafe: (p) => p !== "/srv/qa", isOwned, isForeign: notForeign, rm }
+      { ...options, isSafe: (target) => target !== at("qa") }
     );
-    expect(rm).toHaveBeenCalledTimes(1);
-    expect(result.refused).toEqual([{ path: "/srv/qa", why: "unsafe" }]);
+    expect(result.refused).toEqual([{ path: at("qa"), why: "unsafe" }]);
+    expect(exists("qa")).toBe(true);
+    expect(exists("qa/data")).toBe(false);
   });
 });
 
 // The flow behind Help > Clear All Data and the start that finishes it, with
-// fakes for everything Electron does.
+// fakes for everything Electron does and the real fs.rm.
 function makeFlow(overrides = {}) {
   const order = [];
   const record = (name) =>
     vi.fn(async () => {
       order.push(name);
     });
+  const realRm = overrides.rm ?? ((target, opts) => fs.promises.rm(target, opts));
   const deps = {
     context: { isPackaged: true, instanceRoot: null },
     available: true,
@@ -146,6 +184,7 @@ function makeFlow(overrides = {}) {
     markerPath: at("userData", PENDING_CLEAR_FILE),
     showResult: vi.fn(async () => order.push("showResult")),
     showRootRefused: vi.fn(async () => order.push("showRootRefused")),
+    showGaveUp: vi.fn(async () => order.push("showGaveUp")),
     showError: vi.fn(async () => order.push("showError")),
     quit: vi.fn(() => order.push("quit")),
     log: vi.fn(),
@@ -153,22 +192,26 @@ function makeFlow(overrides = {}) {
     logError: vi.fn(),
     ...overrides,
   };
-  const rm = deps.rm;
-  if (rm) {
-    deps.rm = vi.fn(async (target, opts) => {
-      order.push(`rm ${path.basename(target)}`);
-      return rm(target, opts);
-    });
-  } else {
-    deps.rm = vi.fn(async (target, opts) => {
-      order.push(`rm ${path.basename(target)}`);
-      return fs.promises.rm(target, opts);
-    });
-  }
+  deps.rm = vi.fn(async (target, opts) => {
+    if (!order.includes(`rm ${path.basename(target)}`)) order.push(`rm ${path.basename(target)}`);
+    return realRm(target, opts);
+  });
   return { flow: createClearAllDataFlow(deps), deps, order };
 }
 
 const readMarker = (deps) => JSON.parse(fs.readFileSync(deps.markerPath, "utf8"));
+const writeMarker = (deps, marker) => {
+  fs.mkdirSync(path.dirname(deps.markerPath), { recursive: true });
+  fs.writeFileSync(deps.markerPath, JSON.stringify(marker));
+};
+const marker = (extra = {}) => ({
+  version: 1,
+  context: { isPackaged: true, instanceRoot: null },
+  attempts: 0,
+  storage: false,
+  targets: [],
+  ...extra,
+});
 
 describe("clearFromMenu", () => {
   beforeEach(() => {
@@ -181,18 +224,22 @@ describe("clearFromMenu", () => {
   it("confirms, marks the app quitting, stops the backend, blanks the window, clears the storage, silences the log, deletes, reports, quits", async () => {
     const { flow, order, deps } = makeFlow();
     await flow.clearFromMenu();
-    expect(order).toEqual([
+    expect(order.filter((step) => !step.startsWith("rm "))).toEqual([
       "confirm",
       "markQuitting",
       "stopBackend",
       "quietRenderer",
       "clearStorage",
       "silenceAppLog",
-      "rm data",
-      "rm logs",
       "showResult",
       "quit",
     ]);
+    expect(order.indexOf("silenceAppLog")).toBeLessThan(
+      order.findIndex((s) => s.startsWith("rm "))
+    );
+    expect(order.findLastIndex((s) => s.startsWith("rm "))).toBeLessThan(
+      order.indexOf("showResult")
+    );
     expect(exists("data")).toBe(false);
     expect(exists("logs")).toBe(false);
     expect(fs.existsSync(deps.markerPath)).toBe(false);
@@ -206,7 +253,7 @@ describe("clearFromMenu", () => {
     expect(exists("data")).toBe(true);
   });
 
-  it("does nothing where it is not available (a dev run without ERUDI_DATA_ROOT)", async () => {
+  it("does nothing where it is not available (a run from source)", async () => {
     const { flow, deps } = makeFlow({ available: false });
     await flow.clearFromMenu();
     expect(deps.confirm).not.toHaveBeenCalled();
@@ -228,23 +275,24 @@ describe("clearFromMenu", () => {
     expect(deps.showResult.mock.calls[0][0].leftInPlace).toEqual([at("logs")]);
   });
 
-  it("records exactly the targets still held, with its context, for the next start", async () => {
-    const { flow, deps } = makeFlow({
-      rm: async (target, opts) => {
-        if (target.endsWith("logs")) throw fsError("EBUSY");
-        return fs.promises.rm(target, opts);
-      },
-    });
-    await flow.clearFromMenu();
-    expect(readMarker(deps)).toEqual({
-      version: 1,
-      context: { isPackaged: true, instanceRoot: null },
-      attempts: 0,
-      storage: false,
-      targets: [at("logs")],
-    });
-    expect(deps.showResult.mock.calls[0][0].complete).toBe(false);
-  });
+  it.skipIf(!canHoldFiles)(
+    "records exactly the targets still held, with its context, for the next start",
+    async () => {
+      seed("logs/held/backend.log.1");
+      hold("logs/held");
+      const { flow, deps } = makeFlow();
+      await flow.clearFromMenu();
+      expect(readMarker(deps)).toEqual({
+        version: 1,
+        context: { isPackaged: true, instanceRoot: null },
+        attempts: 0,
+        storage: false,
+        targets: [at("logs")],
+      });
+      expect(exists("data")).toBe(false);
+      expect(deps.showResult.mock.calls[0][0].complete).toBe(false);
+    }
+  );
 
   it("still deletes the files when the storage cannot be cleared, and records the storage", async () => {
     const { flow, deps } = makeFlow({
@@ -258,15 +306,15 @@ describe("clearFromMenu", () => {
   });
 
   it("writes nothing to the log once the deletion started", async () => {
-    const { flow, deps } = makeFlow();
-    deps.log.mockClear();
     let silenced = false;
-    deps.silenceAppLog.mockImplementation(() => {
-      silenced = true;
-    });
     const written = [];
-    deps.log.mockImplementation((line) => written.push({ line, silenced }));
-    deps.logWarn.mockImplementation((line) => written.push({ line, silenced }));
+    const { flow } = makeFlow({
+      silenceAppLog: vi.fn(() => {
+        silenced = true;
+      }),
+      log: vi.fn((line) => written.push({ line, silenced })),
+      logWarn: vi.fn((line) => written.push({ line, silenced })),
+    });
     await flow.clearFromMenu();
     expect(written.filter((w) => w.silenced)).toEqual([]);
   });
@@ -284,19 +332,6 @@ describe("clearFromMenu", () => {
 });
 
 describe("finishPending (next start)", () => {
-  const writeMarker = (deps, marker) => {
-    fs.mkdirSync(path.dirname(deps.markerPath), { recursive: true });
-    fs.writeFileSync(deps.markerPath, JSON.stringify(marker));
-  };
-  const marker = (extra = {}) => ({
-    version: 1,
-    context: { isPackaged: true, instanceRoot: null },
-    attempts: 0,
-    storage: false,
-    targets: [],
-    ...extra,
-  });
-
   beforeEach(() => {
     seed("data/postgres/PG_VERSION");
     own("data");
@@ -311,6 +346,27 @@ describe("finishPending (next start)", () => {
     expect(exists("data")).toBe(true);
   });
 
+  it.skipIf(!canHoldFiles)(
+    "deletes at the next start what the clear could not, before the backend marks the folder again",
+    async () => {
+      seed("logs/held/backend.log.1");
+      hold("logs/held");
+      const first = makeFlow();
+      await first.flow.clearFromMenu();
+      expect(exists("logs/held/backend.log.1")).toBe(true);
+
+      // Whatever the first pass managed to delete -- including, at worst, the
+      // ownership file -- the marker's entry is still deleted at the next start.
+      fs.rmSync(at("logs", OWNERSHIP_SENTINEL), { force: true });
+      release("logs/held");
+      const next = makeFlow();
+      await next.flow.finishPending();
+
+      expect(exists("logs")).toBe(false);
+      expect(fs.existsSync(next.deps.markerPath)).toBe(false);
+    }
+  );
+
   it("deletes only the targets the marker names, then removes the marker", async () => {
     const { flow, deps, order } = makeFlow();
     writeMarker(deps, marker({ targets: [at("logs")] }));
@@ -321,19 +377,20 @@ describe("finishPending (next start)", () => {
     expect(fs.existsSync(deps.markerPath)).toBe(false);
   });
 
-  it("ignores and removes a marker another kind of run left (dev and installed app share it)", async () => {
+  it("ignores, but keeps, a marker another kind of run left (dev and installed app share it)", async () => {
     const { flow, deps } = makeFlow();
-    writeMarker(
-      deps,
-      marker({ context: { isPackaged: false, instanceRoot: null }, targets: [at("data")] })
-    );
+    const theirs = marker({
+      context: { isPackaged: false, instanceRoot: null },
+      targets: [at("data")],
+    });
+    writeMarker(deps, theirs);
     await flow.finishPending();
     expect(exists("data/postgres/PG_VERSION")).toBe(true);
-    expect(fs.existsSync(deps.markerPath)).toBe(false);
+    expect(readMarker(deps)).toEqual(theirs);
     expect(deps.logWarn).toHaveBeenCalled();
   });
 
-  it("ignores a marker from another ERUDI_DATA_ROOT", async () => {
+  it("ignores, but keeps, a marker from another ERUDI_DATA_ROOT", async () => {
     const { flow, deps } = makeFlow({ context: { isPackaged: true, instanceRoot: "/srv/a" } });
     writeMarker(
       deps,
@@ -341,6 +398,7 @@ describe("finishPending (next start)", () => {
     );
     await flow.finishPending();
     expect(exists("data/postgres/PG_VERSION")).toBe(true);
+    expect(fs.existsSync(deps.markerPath)).toBe(true);
   });
 
   it("never deletes a path the marker names that is not one of this run's targets", async () => {
@@ -361,26 +419,22 @@ describe("finishPending (next start)", () => {
   });
 
   it("keeps the marker, counting the attempt, while a target is still held", async () => {
-    const { flow, deps } = makeFlow({
-      rm: async () => {
-        throw fsError("EBUSY");
-      },
-    });
+    const { flow, deps } = makeFlow({ rm: () => Promise.reject(fsError("EBUSY")) });
     writeMarker(deps, marker({ targets: [at("logs")] }));
     await flow.finishPending();
     expect(readMarker(deps)).toMatchObject({ attempts: 1, targets: [at("logs")] });
+    expect(deps.showGaveUp).not.toHaveBeenCalled();
   });
 
-  it(`gives up after ${MAX_PENDING_ATTEMPTS} starts with a warning, so no start re-wipes new data forever`, async () => {
-    const { flow, deps } = makeFlow({
-      rm: async () => {
-        throw fsError("EBUSY");
-      },
-    });
+  it(`gives up after ${MAX_PENDING_ATTEMPTS} starts: tells the user once what is left, and the log`, async () => {
+    const { flow, deps } = makeFlow({ rm: () => Promise.reject(fsError("EBUSY")) });
     writeMarker(deps, marker({ attempts: MAX_PENDING_ATTEMPTS - 1, targets: [at("logs")] }));
     await flow.finishPending();
     expect(fs.existsSync(deps.markerPath)).toBe(false);
     expect(deps.logWarn).toHaveBeenCalledWith(expect.stringContaining("giving up"));
+    expect(deps.showGaveUp).toHaveBeenCalledTimes(1);
+    expect(deps.showGaveUp).toHaveBeenCalledWith([at("logs")]);
+    expect(exists("logs/backend.log")).toBe(true);
   });
 
   it("drops a marker it cannot read", async () => {

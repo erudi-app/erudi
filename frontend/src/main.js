@@ -35,13 +35,18 @@ const { configureUpdater, createUpdaterWiring } = require("./utils/updaterWiring
 const {
   resolveDataLocations,
   listClearTargets,
-  isSafeToDelete,
-  isUnsafeInstanceRoot,
   UPDATE_NOTES_FILE,
   LAST_SEEN_VERSION_FILE,
 } = require("./utils/dataLocations");
 const { createClearAllDataFlow, PENDING_CLEAR_FILE } = require("./utils/clearAllData");
 const { claimFolder, isOwnedFolder } = require("./utils/folderOwnership");
+const {
+  isClearAllDataAvailable,
+  isInstanceRootRefused,
+  createClearTargetGuard,
+  isForeignFile,
+  claimInstalledLogsFolder,
+} = require("./utils/clearAllDataSetup");
 const { setUpElectronPaths, openFirstWindow } = require("./utils/appStartup");
 const { readImageAsDataUrl } = require("./utils/imageReader");
 const { savePastedImage } = require("./utils/pastedImage");
@@ -251,11 +256,24 @@ const log = (message) => {
 const logWarn = (message, error) => log(formatMainRecord("WARN", message, error));
 const logError = (message, error) => log(formatMainRecord("ERROR", message, error));
 
-// The Electron folders Clear All Data may delete carry the ownership file:
-// marked before anything creates them (Chromium creates the user data folder,
-// the single-instance lock below writes in it), so a folder Erudi creates is
-// recognised as its own.
-claimElectronFolders();
+// The Electron folders Clear All Data may delete carry the ownership file
+// (utils/clearAllDataSetup.js). Under ERUDI_DATA_ROOT, setUpElectronPaths
+// marked them above, before Electron created them.
+if (electronClaimError) {
+  // Clear All Data then leaves these folders in place and names them.
+  logWarn("Could not mark the Electron folders as Erudi's", electronClaimError);
+}
+{
+  const error = claimInstalledLogsFolder({
+    isPackaged: app.isPackaged,
+    electronDir: dataLocations.electronDir,
+    logsDir: app.getPath("logs"),
+  });
+  if (error) {
+    // Same: the folder is then left in place and named.
+    logWarn("Could not mark the Electron logs folder as Erudi's", error);
+  }
+}
 
 // One Erudi at a time. A second launch would spawn a second backend on the
 // same data folder while the first still runs (#706): it hands over to the
@@ -741,7 +759,7 @@ const createApplicationMenu = () => {
         {
           label: t("menu.help.clearAllData"),
           click: clearAllDataFromMenu,
-          // Hidden in a dev run without ERUDI_DATA_ROOT (clearAllDataAvailable).
+          // Hidden in a run from source (clearAllDataAvailable).
           visible: clearAllDataAvailable,
         },
         { type: "separator" },
@@ -1084,64 +1102,22 @@ function clearTargets() {
   });
 }
 
-// Never a root Erudi does not own: the ERUDI_DATA_ROOT folder (a user may
-// point it at a shared folder) and the Electron user data folder itself (the
-// running Chromium's profile) are protected, with the home folder; compared
-// on real paths, case-folded where the file system ignores case.
-const isSafeClearTarget = (target) =>
-  isSafeToDelete(target, {
-    platform: process.platform,
-    home: os.homedir(),
-    protectedDirs: [dataLocations.instanceRoot, app.getPath("userData")],
-  });
-
-// A file another user owns (a shared /tmp/erudi-backend.log on a multi-user
-// Linux machine) is not Erudi's to delete: a permission error on it is final.
-// Windows reports no owner here; there a permission error is a held file.
-function isForeignFile(target) {
-  if (typeof process.getuid !== "function") return false;
-  try {
-    return fs.lstatSync(target).uid !== process.getuid();
-  } catch {
-    // Gone or unreadable: nothing to call foreign; the retry decides.
-    return false;
-  }
-}
-
-// Clear All Data in a dev run would delete the repository's backend/data
-// under the dev Postgres main does not run, and clear the Chromium storage
-// the installed app shares on macOS and Windows (same app name, `erudi` and
-// `Erudi`, on a case-insensitive disk): only with an ERUDI_DATA_ROOT
-// instance of its own.
-const clearAllDataAvailable = app.isPackaged || Boolean(dataLocations.instanceRoot);
-
-// An ERUDI_DATA_ROOT that is the home folder, above it, or a file system
-// root: Clear All Data refuses to run at all.
-const instanceRootRefused =
-  Boolean(dataLocations.instanceRoot) &&
-  isUnsafeInstanceRoot(dataLocations.instanceRoot, {
-    platform: process.platform,
-    home: os.homedir(),
-  });
-
-// The Electron folders Clear All Data deletes carry the ownership file too.
-// Under ERUDI_DATA_ROOT, setUpElectronPaths claimed them before Electron
-// created them. Otherwise the installed app's logs folder is Erudi's by name
-// (`Erudi` in the platform's log location, or in its user data folder) and is
-// claimed here, on every start; a dev run has no Electron logs to clear.
-function claimElectronFolders() {
-  if (electronClaimError) {
-    // Clear All Data then leaves these folders in place and names them.
-    logWarn("Could not mark the Electron folders as Erudi's", electronClaimError);
-  }
-  if (dataLocations.electronDir || !app.isPackaged) return;
-  try {
-    claimFolder(app.getPath("logs"), { namespaced: true });
-  } catch (error) {
-    // Same: the folder is then left in place and named.
-    logWarn("Could not mark the Electron logs folder as Erudi's", error);
-  }
-}
+// The decisions about Clear All Data that are not the flow itself live in
+// utils/clearAllDataSetup.js (tested): offered by the installed app only, an
+// ERUDI_DATA_ROOT of the home folder or above refused, the guard of every
+// deletion, and whether a file is another user's.
+const clearAllDataAvailable = isClearAllDataAvailable({ isPackaged: app.isPackaged });
+const instanceRootRefused = isInstanceRootRefused({
+  instanceRoot: dataLocations.instanceRoot,
+  platform: process.platform,
+  home: os.homedir(),
+});
+const isSafeClearTarget = createClearTargetGuard({
+  platform: process.platform,
+  home: os.homedir(),
+  instanceRoot: dataLocations.instanceRoot,
+  userData: app.getPath("userData"),
+});
 
 // The interface's own storage (local storage, IndexedDB, caches...), cleared
 // through Chromium rather than by deleting its profile folder under it.
@@ -1207,7 +1183,7 @@ const clearAllDataFlow = createClearAllDataFlow({
   targets: clearTargets,
   isSafe: isSafeClearTarget,
   isOwned: isOwnedFolder,
-  isForeign: isForeignFile,
+  isForeign: (target) => isForeignFile(target),
   markerPath: path.join(app.getPath("userData"), PENDING_CLEAR_FILE),
   showResult: async (result) => {
     await dialog.showMessageBox({
@@ -1216,6 +1192,15 @@ const clearAllDataFlow = createClearAllDataFlow({
       title: t("dialogs.dataCleared.title"),
       message: t("dialogs.dataCleared.message"),
       detail: clearResultDetail(result),
+    });
+  },
+  showGaveUp: async (left) => {
+    await dialog.showMessageBox({
+      type: "warning",
+      buttons: [t("dialogs.ok")],
+      title: t("dialogs.clearAll.title"),
+      message: t("dialogs.clearAll.gaveUp.message"),
+      detail: t("dialogs.clearAll.gaveUp.detail", { files: left.join("\n") }),
     });
   },
   showRootRefused: async () => {
