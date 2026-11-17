@@ -93,8 +93,10 @@ class UserSettings(Base):
             model stays loaded once unused before it is unloaded, 0 for never
             (#619). 5 by default, the delay every row that predates the column
             holds. Applied to the running engine at boot and on every change,
-            without a relaunch. The knowledge-base embedding model ignores it:
-            once used, it stays loaded until the backend stops.
+            without a relaunch. The knowledge-base embedder ignores it: on
+            macOS its dedicated child is released after a fixed 5 minutes
+            unused (#594); on Windows and Linux the in-process model stays
+            loaded until the backend stops (until F3 of #594).
 
     Constraints:
         - web_search_enabled must be a Boolean (enforced by validator).

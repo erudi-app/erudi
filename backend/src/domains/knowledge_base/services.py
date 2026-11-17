@@ -27,10 +27,12 @@ from typing import Any, Dict, List, Tuple
 
 from sqlalchemy.orm import Session
 
-from src.core.exceptions import StateConflictException
+from src.core.exceptions import EmbeddingModelMissingException, StateConflictException
 from src.domains.knowledge_base.repository import KB_Repository
 from src.entities.KBJob import KBJobModel
 from src.ingestion.chunking import chunk_document
+from src.ingestion.embedder_child import ingestion_lease
+from src.ingestion.embeddings import embedding_artifact_missing
 from src.ingestion.reader import DocumentReader
 from src.ingestion.vector_store import add_kb_chunks
 from src.core.logging import logger
@@ -272,6 +274,13 @@ class KB_Service:
             if not kb:
                 raise ValueError(f"KnowledgeBase {kb_job.kb_id} not found")
 
+            # Refuse UP FRONT when the platform's embedder cannot run without
+            # the e5 artifact (#594): one clear job failure with the state's
+            # message, instead of parsing every file and failing them one by
+            # one at the embed step.
+            if embedding_artifact_missing():
+                raise EmbeddingModelMissingException()
+
             logger.info(
                 f"KB job {kb_job_id} started "
                 f"({'update' if is_update else 'creation'}, kb_id={kb.id}, "
@@ -283,18 +292,22 @@ class KB_Service:
                 del _UNRECORDED_FAILURES[next(iter(_UNRECORDED_FAILURES))]
 
             indexed, pending, skipped, empty, failed = 0, 0, 0, 0, 0
-            for raw_path in file_paths:
-                outcome = self._ingest_one_file(db, kb.id, raw_path, unrecorded)
-                if outcome == "indexed":
-                    indexed += 1
-                elif outcome == "pending_vision":
-                    pending += 1
-                elif outcome == "skipped":
-                    skipped += 1
-                elif outcome == "empty":
-                    empty += 1
-                else:
-                    failed += 1
+            # The lease keeps the dedicated embedding child alive for the
+            # whole job (#594): its idle reaper never terminates it between
+            # two files, however long a file takes to parse.
+            with ingestion_lease():
+                for raw_path in file_paths:
+                    outcome = self._ingest_one_file(db, kb.id, raw_path, unrecorded)
+                    if outcome == "indexed":
+                        indexed += 1
+                    elif outcome == "pending_vision":
+                        pending += 1
+                    elif outcome == "skipped":
+                        skipped += 1
+                    elif outcome == "empty":
+                        empty += 1
+                    else:
+                        failed += 1
 
             duration_ms = (time.perf_counter() - start_s) * 1000
             logger.info(

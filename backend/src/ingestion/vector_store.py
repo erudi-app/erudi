@@ -43,8 +43,8 @@ from src.launcher.postgres_settings import (
 )
 from src.ingestion.embeddings import (
     EMBEDDING_DIMENSIONS,
-    E5Embeddings,
     build_embedding_text,
+    get_embeddings,
 )
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -154,7 +154,7 @@ def init_kb_store(handle: "PostgresHandle") -> PGVectorStore:
         engine=engine,
         table_name=TABLE_NAME,
         schema_name=SCHEMA_NAME,
-        embedding_service=E5Embeddings(),
+        embedding_service=get_embeddings(),
         metadata_columns=METADATA_COLUMNS,
         hybrid_search_config=_hybrid_config(),
     )
@@ -223,7 +223,7 @@ def add_kb_chunks(
     embedding_texts = [
         build_embedding_text(file_name=source_file, chunk_text=chunk.text) for chunk in chunks
     ]
-    vectors = E5Embeddings().embed_documents(embedding_texts)
+    vectors = get_embeddings().embed_documents(embedding_texts)
     texts = [chunk.text for chunk in chunks]
     metadatas = [
         {
@@ -281,7 +281,7 @@ def search_kb_chunks_scored(
     once and shared by the search and the similarity read.
     """
     start_s = time.perf_counter()
-    query_vector = E5Embeddings().embed_query(query)
+    query_vector = get_embeddings().embed_query(query)
     documents = get_kb_store().similarity_search_by_vector(
         query_vector,
         k=pool_k,
