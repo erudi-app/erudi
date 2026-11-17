@@ -445,8 +445,8 @@ class ConversationService:
         One JSON object per line: ``answer`` (streamed answer text), ``thinking``
         (streamed reasoning), ``tool_call`` / ``tool_result`` (agent activity),
         ``compaction`` (#614: ``phase: "start"`` while earlier messages are being
-        summarized, ``phase: "done"`` with ``summarized``, ``reason``, ``summary``
-        and ``summary_lost`` once they were), ``memory_reload``
+        summarized, ``phase: "done"`` with ``summarized``, ``reason`` and ``summary``
+        once they were), ``memory_reload``
         (the model reloads; ``reason`` says why: ``memory`` the memory brake
         unloaded or restarted it, ``idle`` the idle delay unloaded it,
         ``manual`` the user did) / ``memory_warning`` (this

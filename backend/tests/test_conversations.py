@@ -1198,7 +1198,6 @@ class TestConversationService:
             "summarized": 12,
             "reason": "length",
             "summary": "Ada lives in Lyon.",
-            "summary_lost": False,
         }
 
         async def fake_stream(**kwargs):
@@ -1235,7 +1234,6 @@ class TestConversationService:
             "summarized": 3,
             "reason": "memory",
             "summary": "S.",
-            "summary_lost": False,
         }
 
         async def fake_stream(**kwargs):
@@ -1270,7 +1268,6 @@ class TestConversationService:
             "summarized": 3,
             "reason": "memory",
             "summary": "S.",
-            "summary_lost": False,
         }
 
         async def fake_stream(**kwargs):
@@ -1644,7 +1641,6 @@ class TestTraceHelpers:
             "summarized": 8,
             "reason": "length",
             "summary": "s" * 4000,
-            "summary_lost": False,
         }
         second = {**done, "summarized": 2, "summary": "t" * 100}
         events = (

@@ -24,6 +24,7 @@
 // record, unfiltered.
 
 import { isHiddenFromDiagnostics } from "./bugCounter";
+import { messageIdentity } from "./foldIdentity";
 
 /** Entries kept in the merged timeline. */
 export const DEFAULT_ENTRY_LIMIT = 200;
@@ -83,6 +84,9 @@ const UNCAUGHT_NAMESPACE = "[renderer:renderer:uncaught]";
  *   records and the echoes are dropped; when it did not answer, the echoes
  *   are the only copy of its last words and are kept.
  *
+ * Records that say the same thing are then folded into one entry carrying a
+ * repeat count — see `collapseRepeats` below.
+ *
  * @param {object} sources - The three sources.
  * @param {object} [sources.backend] - `/erudi/diagnostics/` response, or null.
  * @param {Array} [sources.appLog] - Records from `diagnostics:appLogTail`.
@@ -105,7 +109,8 @@ export function mergeRecentErrors({
       source: "backend",
       requestId: record.request_id ?? null,
       message: record.message,
-      count: 1,
+      // The reader already folded identical records (#534).
+      count: record.count ?? 1,
     });
   }
 
@@ -119,7 +124,7 @@ export function mergeRecentErrors({
       source: "app",
       requestId: null,
       message,
-      count: 1,
+      count: record.count ?? 1,
     };
     appEntries.push(entry);
     entries.push(entry);
@@ -150,8 +155,72 @@ export function mergeRecentErrors({
   // environmental record never occupies a slot a real error could otherwise
   // hold within `limit`. WARNINGs are untouched -- see the file banner above.
   const visible = entries.filter((entry) => !isHiddenFromDiagnostics(entry));
-  visible.sort((a, b) => (timeKey(a) < timeKey(b) ? -1 : timeKey(a) > timeKey(b) ? 1 : 0));
-  return limit ? visible.slice(-limit) : visible;
+  const collapsed = collapseRepeats(visible);
+  collapsed.sort((a, b) => (timeKey(a) < timeKey(b) ? -1 : timeKey(a) > timeKey(b) ? 1 : 0));
+  return limit ? collapsed.slice(-limit) : collapsed;
+}
+
+/**
+ * Fold records that say the same thing into one entry carrying a repeat count.
+ *
+ * A backend that retries something noisy writes the same line several times
+ * (three identical "Xet Storage is enabled for this repo" warnings in one
+ * session, for instance). Listed one per row they push real errors out of
+ * `limit` and out of the copied report, and they read as three problems
+ * instead of one thing happening three times.
+ *
+ * Identity is `source` + `level` + `message` + `stack`, where the message of
+ * a backend line echoed into the app log leaves out the backend's own
+ * timestamp and request id (`messageIdentity`): those differ on every
+ * occurrence, and kept in, they would list the same warning echoed three
+ * times while the backend did not answer as three consecutive rows. A record
+ * is only
+ * folded into a record of the same kind, so a backend line never absorbs the
+ * app's echo of it, and a WARNING never merges into an ERROR of the same text.
+ * The stack is part of it because a session entry keeps its stack OUTSIDE the
+ * message, where backend and app-log records carry the distinguishing text
+ * inside it: two different bugs throwing the same generic text ("Cannot read
+ * properties of undefined") from two components must stay two rows, while
+ * two occurrences of the same bug (same build, same stack) still fold.
+ * Counts are summed rather than maxed, so the session buffer's own count
+ * (already folded into its app-log twin above) keeps contributing what it is
+ * worth.
+ *
+ * The surviving entry carries the NEWEST timestamp and that record's request
+ * id and message: the question a reader asks of a repeated error is when it
+ * last happened, and the id and the text have to name the occurrence the
+ * timestamp does or they point at different turns.
+ *
+ * The readers fold the same way before their own cap (`log_reader.py`,
+ * `appLogTail.js`), so a record can arrive with a count above 1; it is summed.
+ *
+ * Collapsing happens before the `limit` slice so folding actually frees slots.
+ *
+ * @param {Array<object>} entries - Visible entries, any order.
+ * @returns {Array<object>} One entry per distinct record, `count` summed.
+ */
+function collapseRepeats(entries) {
+  const byIdentity = new Map();
+  for (const entry of entries) {
+    const identity = JSON.stringify([
+      entry.source,
+      entry.level,
+      messageIdentity(entry.message),
+      entry.stack ?? null,
+    ]);
+    const seen = byIdentity.get(identity);
+    if (!seen) {
+      byIdentity.set(identity, { ...entry, count: entry.count ?? 1 });
+      continue;
+    }
+    seen.count += entry.count ?? 1;
+    if (timeKey(entry) > timeKey(seen)) {
+      seen.timestamp = entry.timestamp;
+      seen.requestId = entry.requestId ?? null;
+      seen.message = entry.message;
+    }
+  }
+  return [...byIdentity.values()];
 }
 
 /**

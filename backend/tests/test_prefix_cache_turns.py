@@ -31,6 +31,7 @@ from src.agents.runner import AgentRunner, GenParams
 from src.core import config
 from src.engines.base_engine import BaseEngine
 from tests._helpers import ToolableFakeChatModel
+from tests.test_compaction_keep import SUMMARY
 
 _PARAMS = GenParams(temperature=0.5, top_p=0.9, max_tokens=64)
 
@@ -354,8 +355,8 @@ async def test_an_engine_without_prefix_hooks_never_starts_a_reset(monkeypatch):
 
     monkeypatch.setattr(config, "LLM_Engine", _PlainEngine)
     monkeypatch.setattr(runner_module, "run_reset_shielded", _spy)
-    monkeypatch.setattr(_PlainEngine, "window", 50)
-    summary = ToolableFakeChatModel(messages=iter([AIMessage(content="A summary.")]))
+    monkeypatch.setattr(_PlainEngine, "window", 2000)
+    summary = ToolableFakeChatModel(messages=iter([AIMessage(content=SUMMARY)]))
     _patch_model(
         monkeypatch,
         ToolableFakeChatModel(messages=iter([AIMessage(content="one"), AIMessage(content="two")])),
@@ -363,18 +364,18 @@ async def test_an_engine_without_prefix_hooks_never_starts_a_reset(monkeypatch):
     )
     runner = AgentRunner(checkpointer=InMemorySaver())
 
-    _ = [e async for e in _stream(runner, question="x" * 400)]
-    _ = [e async for e in _stream(runner, question="y" * 400)]
+    _ = [e async for e in _stream(runner, question="x" * 3000)]
+    _ = [e async for e in _stream(runner, question="y" * 3000)]
 
     assert calls == []
     assert BaseEngine._pending_reset is None
-    # The second turn did compact (the window is tiny): the hook was skipped,
+    # The second turn did compact (the window is small): the hook was skipped,
     # not the compaction.
     probe = create_agent(
         ToolableFakeChatModel(messages=iter([])), tools=[], checkpointer=runner.checkpointer
     )
     state = await probe.aget_state({"configurable": {"thread_id": "1"}})
-    assert "A summary." in state.values["messages"][0].content
+    assert SUMMARY in state.values["messages"][0].content
 
 
 # ===================== the generator chain =====================
@@ -670,7 +671,7 @@ async def test_a_disconnect_during_the_compaction_reset_holds_every_next_acquire
     _RecEngine.block_on = "rewrite"
     _RecEngine.window = 10_000
     first = ToolableFakeChatModel(messages=iter([AIMessage(content="answer after compaction")]))
-    summary = ToolableFakeChatModel(messages=iter([AIMessage(content="A summary.")]))
+    summary = ToolableFakeChatModel(messages=iter([AIMessage(content=SUMMARY)]))
     builder = _NextModel(first)
 
     def _build(llm, **kw):

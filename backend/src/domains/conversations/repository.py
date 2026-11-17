@@ -365,7 +365,8 @@ class MessageRepository:
             conversation_id: ID of the conversation
 
         Returns:
-            List of starred message contents. A failed turn (its content holds the
+            List of starred message contents, in the conversation's order
+            (insertion: the prompt's star budget favours the oldest). A failed turn (its content holds the
             error sentinel) is never one: its apology is not context for the model.
         """
         try:
@@ -375,6 +376,7 @@ class MessageRepository:
                     Message.conversation_id == conversation_id,
                     Message.starred == True,  # noqa: E712
                 )
+                .order_by(Message.id)
                 .all()
             )
             return [msg.content for msg in messages if ERROR_SENTINEL not in msg.content]

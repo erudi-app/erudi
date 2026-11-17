@@ -52,6 +52,22 @@ export function formatMainRecord(level, message, error) {
   return detail ? `${head}\n${detail}` : head;
 }
 
+/** ANSI SGR sequences (colours, bold, reset). */
+// eslint-disable-next-line no-control-regex -- the ESC of a colour code is what is matched
+const ANSI_SGR_RE = /\x1b\[[0-9;]*m/g;
+
+/**
+ * The text without its terminal colour codes. The backend's console formatter
+ * colours its lines even when stdout is a pipe; main strips them before
+ * echoing the backend's stdout/stderr into the app log, which is read as text
+ * and pasted into bug reports.
+ * @param {string} text - A line as the backend wrote it.
+ * @returns {string} The same line, uncoloured.
+ */
+export function stripAnsi(text) {
+  return String(text ?? "").replace(ANSI_SGR_RE, "");
+}
+
 /**
  * Describe a Chromium process that is gone (`child-process-gone`,
  * `render-process-gone`), naming the kind, the reason and the exit code.
