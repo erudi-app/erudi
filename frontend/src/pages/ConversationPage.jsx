@@ -675,13 +675,17 @@ export default function ConversationPage() {
               }
             }, ANSWER_FLUSH_MS);
           };
-          const flushAnswer = () => {
-            if (flushWindow !== null) {
+          // `immediate` flushes inside a window already open and leaves it
+          // running, so the tokens that follow still coalesce.
+          const flushAnswer = (immediate = false) => {
+            if (flushWindow !== null && !immediate) {
               flushPending = true;
               return;
             }
             flushNow();
-            openFlushWindow();
+            if (flushWindow === null) {
+              openFlushWindow();
+            }
           };
 
           const handleEvent = (evt) => {
@@ -824,11 +828,8 @@ export default function ConversationPage() {
             // (a reasoning model streams thousands of thinking tokens);
             // anything else changes what the bubble shows besides text, so it
             // flushes now (and carries the text received so far with it).
-            if (
-              !startsAnswer &&
-              ((evt.t === "answer" && !evt.curated_error) || evt.t === "thinking")
-            ) {
-              flushAnswer();
+            if ((evt.t === "answer" && !evt.curated_error) || evt.t === "thinking") {
+              flushAnswer(startsAnswer);
             } else {
               flushNow();
             }
