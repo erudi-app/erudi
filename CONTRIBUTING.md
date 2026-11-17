@@ -330,16 +330,22 @@ Main process exposes handlers in `main.js` via `ipcMain.handle(...)`. The render
 
 ```javascript
 // preload.js — exposed to renderer
-contextBridge.exposeInMainWorld('electronAPI', {
-  openDirectory: () => ipcRenderer.invoke('dialog:openDirectory'),
+contextBridge.exposeInMainWorld('diagnosticsAPI', {
+  getAppInfo: () => ipcRenderer.invoke('app:getInfo'),
   // ...
 })
 
+// main.js
+ipcMain.handle('app:getInfo', () => ({ version: app.getVersion(), /* ... */ }))
+
 // In renderer
-const path = await window.electronAPI.openDirectory()
+const info = await window.diagnosticsAPI.getAppInfo()
 ```
 
-Don't call Node APIs directly from renderer code.
+Don't call Node APIs directly from renderer code. A handler that takes a path or
+other input from the renderer checks it in the main process before acting on it
+(`fs:readImageAsDataURL` and `logs:reveal` are examples), and the decision lives in
+a tested module under `frontend/src/utils/`.
 
 ---
 
