@@ -48,6 +48,7 @@
     "library": "Library: {{library}}",
     "parameters": "Parameters: {{parameters}}",
     "lastUpdate": "Last update: {{date}}",
+    "published": "Published {{date}}",
     "info": "Info",
     "chatBlocked": "Model weights missing - re-bind to chat",
     "rebindTitle": "Re-bind to another installed model",

@@ -49,6 +49,28 @@ fetches, or an estimate when Hugging Face does not answer.
 (`false`). The UI splits the catalog on that flag alone — there is no hand-maintained list of base
 model names.
 
+### Publication date
+
+`LLMResponse.published_at` (and `published_at` on each Hugging Face search hit) is an ISO-8601
+date, or `null` when it is unknown. Cards print it as "Published <month year>" in the interface
+language, and print nothing for `null`. It is computed at response time from the `Created:` line of
+the row's stored `model_metadata`, so there is no column and no network call at render time. The
+card shows when the **publisher** released the model, never a quant's upload date, and the date is
+the creation of the base repository on Hugging Face, which can precede the public release.
+
+- A curated base row holds its base repo's creation date.
+- A derived or community row resolves its base through the `base_model:*` card tag
+  (`resolve_base_repo`) when the catalog is built (snapshot generation), with one `model_info` call,
+  and stores the base's date. A base that cannot be read leaves no date; a repo with no
+  `base_model:` tag is its own publisher.
+- A Hugging Face search hit carries a date only when it is itself a base (no `base_model:` tag);
+  a quant hit carries `null`, since resolving its base would cost a Hub call per hit.
+- A by-link download sends the hit's `published_at` in `HFDownloadRequest`, and the placeholder row
+  stores it as a `Created:` line, so the installed card keeps the date.
+
+A row whose metadata has no `Created:` line, such as a snapshot entry built before the date was
+resolved, shows no date; the next snapshot regeneration fills it in.
+
 ### Hardware-aware ordering
 
 `GET /erudi/hardware/app_startup` returns the machine's recommended model-size window, in billions of
@@ -114,7 +136,7 @@ curl -X POST http://127.0.0.1:27182/erudi/llms/download/huggingface \
 ```
 
 `HFDownloadRequest` fields: `link` (required), `name`, `type`, `param_size`, `quantized`
-(default `true`), `category` (default `general`).
+(default `true`), `category` (default `general`), `published_at` (ISO date of the hit, optional).
 
 ### The format gate
 
@@ -203,7 +225,7 @@ curl 'http://127.0.0.1:27182/erudi/llms/search/huggingface?q=uncensored&limit=30
 ```
 
 Hugging Face hits (`HFSearchResult`: `link`, `name`, `param_size`, `category`, `downloads`, `likes`,
-`gated`, `pipeline_tag`, `quantized`) are ephemeral. Download a chosen one through
+`gated`, `pipeline_tag`, `quantized`, `published_at`) are ephemeral. Download a chosen one through
 `POST /llms/download/huggingface`.
 
 ## Installed models

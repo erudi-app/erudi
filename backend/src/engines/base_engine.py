@@ -524,11 +524,12 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         quality floor needs) in the one call, so the non-chat task filter (#242)
         can gate ASR/embedding/OCR/media-gen repos out of the derived catalog,
         plus ``gated`` so a repo the token-less app cannot download is dropped
-        (``model_resolver.is_gated``).
+        (``model_resolver.is_gated``), and ``createdAt`` so the card can show
+        the repo's publication date (#561).
         """
         kwargs = {
             "filter": cls.FORMAT_TAG,
-            "expand": ["pipeline_tag", "tags", "downloads", "likes", "gated"],
+            "expand": ["pipeline_tag", "tags", "downloads", "likes", "gated", "createdAt"],
         }
         if term:
             kwargs["search"] = term

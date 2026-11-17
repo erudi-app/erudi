@@ -48,6 +48,7 @@
     "library": "Biblioteca: {{library}}",
     "parameters": "Parámetros: {{parameters}}",
     "lastUpdate": "Última actualización: {{date}}",
+    "published": "Publicado en {{date}}",
     "info": "Información",
     "chatBlocked": "Faltan los pesos del modelo - vuelve a vincularlo para chatear",
     "rebindTitle": "Vincular a otro modelo instalado",

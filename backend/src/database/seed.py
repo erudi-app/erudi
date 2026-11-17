@@ -825,10 +825,27 @@ class Model_Seeder:
         else:
             param_size = None
 
-        # Format metadata
-        metadata = format_model_info_metadata(model_info, size_estimate, quantized=False)
-
         tags = list(getattr(model_info, "tags", None) or [])
+        # The date a card shows is the publisher's (#561): a quant or finetune
+        # takes its BASE repo's creation date, resolved here at build time only
+        # (one model_info call), never at render time. A base that cannot be
+        # read leaves no date rather than the quant's upload date; a repo with
+        # no base_model tag is its own publisher.
+        base_repo = resolve_base_repo(model_info.id, tags)
+        if base_repo == model_info.id:
+            created_at = getattr(model_info, "created_at", None)
+        else:
+            try:
+                created_at = getattr(self.hf_api.model_info(base_repo), "created_at", None)
+            except Exception as e:
+                logger.warning(f"No creation date for base {base_repo} of {model_info.id}: {e}")
+                created_at = None
+
+        # Format metadata
+        metadata = format_model_info_metadata(
+            model_info, size_estimate, quantized=False, created_at=created_at
+        )
+
         return Llm(
             name=humanize_model_name(model_info.id),
             local=0,
