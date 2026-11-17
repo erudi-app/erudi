@@ -115,3 +115,50 @@ class TestChunkDocument:
         assert [c.chunk_index for c in chunks] == list(range(len(chunks)))
         page2 = [c for c in chunks if c.page_number == 2]
         assert len(page2) == 1 and "Une page courte." in page2[0].text
+
+
+class TestTruncateToTokens:
+    """Erudi-side 512-token bound for the embedding child (#594): inputs are
+    truncated with the frozen tokenizer at 510 content tokens (512 minus
+    ``<s>``/``</s>``), so every input fits the window the in-process embedder
+    enforced. The bound, not boundary identity, is the contract: the cut
+    prefix can re-tokenize its last token differently (parity stays within
+    cosine 0.9999, pinned by the mlx_only test)."""
+
+    def test_short_text_is_returned_unchanged(self):
+        from src.ingestion.chunking import truncate_to_tokens
+
+        text = "passage: un texte court."
+        assert truncate_to_tokens(text) == text
+
+    def test_long_text_is_bounded_and_a_prefix_of_the_original(self):
+        from src.ingestion.chunking import E5_MAX_CONTENT_TOKENS, truncate_to_tokens
+
+        text = "query: " + _long_paragraphs(200)
+        truncated = truncate_to_tokens(text)
+        assert text.startswith(truncated)
+        kept = count_tokens(truncated)
+        # Bounded, and cut at the limit rather than far below it.
+        assert kept <= E5_MAX_CONTENT_TOKENS
+        assert kept >= E5_MAX_CONTENT_TOKENS - 1
+
+    def test_default_bound_is_e5_window_minus_specials(self):
+        from src.ingestion.chunking import E5_MAX_CONTENT_TOKENS
+
+        assert E5_MAX_CONTENT_TOKENS == 510
+
+    def test_custom_bound_is_honored(self):
+        from src.ingestion.chunking import truncate_to_tokens
+
+        text = "Un texte avec suffisamment de mots pour être coupé proprement."
+        truncated = truncate_to_tokens(text, max_tokens=5)
+        assert count_tokens(truncated) <= 5
+        assert text.startswith(truncated)
+        assert truncated
+
+    def test_exact_bound_is_untouched(self):
+        from src.ingestion.chunking import truncate_to_tokens
+
+        text = "Bonjour le monde"
+        exact = count_tokens(text)
+        assert truncate_to_tokens(text, max_tokens=exact) == text

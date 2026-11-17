@@ -62,7 +62,10 @@
     "doneTitle": "Modelo de embeddings descargado",
     "doneBody": "El modelo de embeddings se descargó correctamente. La Base de conocimiento está lista para usarse.",
     "errorTitle": "La descarga falló",
-    "errorBody": "No se pudo descargar el modelo de embeddings. Comprueba tu conexión e inténtalo de nuevo."
+    "errorBody": "No se pudo descargar el modelo de embeddings. Comprueba tu conexión e inténtalo de nuevo.",
+    "bannerMissing": "La Base de conocimiento de este asistente necesita su modelo de embeddings, que no está descargado. La búsqueda en los documentos está inactiva hasta entonces.",
+    "bannerDownloading": "Descargando el modelo de embeddings… La búsqueda en los documentos funcionará cuando termine.",
+    "bannerError": "No se pudo descargar el modelo de embeddings."
   },
   "waitingForInstall": "Esperando a que termine de instalarse la descarga…"
 }

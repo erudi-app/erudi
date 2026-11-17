@@ -566,6 +566,41 @@ class KnowledgeBaseCorruptedException(AppBaseException):
         )
 
 
+class EmbeddingModelMissingException(AppBaseException):
+    """Exception raised when a KB operation needs the embedding model and its
+    on-disk artifact is absent.
+
+    The Knowledge Base embeds with ``intfloat/multilingual-e5-small``,
+    downloaded on demand behind the #146 gate. A KB that exists while the
+    artifact does not (a cleared ``models_cache``) is a STATE the interface
+    surfaces (the gate on the Knowledge Base page, the banner in a
+    conversation or the Arena), never a turn error — this type is what lets
+    the callers tell that state apart from a real failure.
+
+    Examples:
+        from src.core.exceptions import EmbeddingModelMissingException
+        raise EmbeddingModelMissingException()
+
+    """
+
+    def __init__(self, trace: Optional[str] = None):
+        """Initialize exception for the absent embedding artifact.
+
+        Args:
+            trace: Optional additional context.
+
+        """
+        super().__init__(
+            message=(
+                "The Knowledge Base embedding model is not downloaded — "
+                "open the Knowledge Base page to download it"
+            ),
+            status_code=status.HTTP_409_CONFLICT,
+            erudi_code="EMBEDDING_MODEL_MISSING",
+            trace=trace,
+        )
+
+
 class ConversationNotFoundException(AppBaseException):
     """Exception raised when a conversation cannot be found.
 

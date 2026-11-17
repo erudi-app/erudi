@@ -14,6 +14,7 @@ import apiClient from "../services/api/client";
 import { createLogger } from "../utils/logger";
 import { baseName, getDisplayContent, isGenericFailure } from "../utils/messageContent";
 import { withCuratedTurn } from "../utils/curatedTurns";
+import KbEmbeddingBanner from "../components/KbEmbeddingBanner";
 
 const log = createLogger("ArenaPage");
 
@@ -530,6 +531,14 @@ export default function ArenaPage() {
       <div className="fixed bottom-0 left-0 right-0 flex justify-center align-center z-30">
         <div className="max-w-lg w-full mb-8 px-4 py-2 flex items-center gap-3">
           <div className="flex-1">
+            {/* "KB present, embedding model missing" is a state, not a turn
+                error (#594): shown when any selected panel model carries a
+                Knowledge Base while the embedding model is off disk. */}
+            <KbEmbeddingBanner
+              active={panels.some(
+                (p) => models.find((m) => m.name === p.selectedModel)?.is_attached_to_kb
+              )}
+            />
             {/* Panels can run mixed models: attaching is allowed as soon as ANY
                 selected panel model supports vision — the backend safety net
                 (#133) strips images per model for the text-only panels. */}

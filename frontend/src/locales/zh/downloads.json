@@ -62,7 +62,10 @@
     "doneTitle": "嵌入模型已下载",
     "doneBody": "嵌入模型已成功下载。知识库已可以使用。",
     "errorTitle": "下载失败",
-    "errorBody": "无法下载嵌入模型。请检查网络连接后重试。"
+    "errorBody": "无法下载嵌入模型。请检查网络连接后重试。",
+    "bannerMissing": "该助手的知识库需要其嵌入模型，但尚未下载。在下载完成之前，文档搜索不可用。",
+    "bannerDownloading": "正在下载嵌入模型… 完成后文档搜索即可使用。",
+    "bannerError": "嵌入模型下载失败。"
   },
   "waitingForInstall": "正在等待下载完成安装…"
 }
