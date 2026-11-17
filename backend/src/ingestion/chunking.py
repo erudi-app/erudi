@@ -62,8 +62,8 @@ DEFAULT_OVERLAP_TOKENS = 27  # ~15 %
 # re-tokenized prefix can end on a different final token than the id-level
 # cut (measured: 27 of 300 long texts differ there; the embedding server
 # truncates at 512 itself too, and vector parity stays >= 0.9999). The bound
-# exists Erudi-side because llama-server (F3 of #594) refuses, not truncates,
-# past 512.
+# exists Erudi-side because llama-server (the Windows/Linux embedding child,
+# #594) refuses, not truncates, past 512 -- and fails the whole batch.
 E5_MAX_CONTENT_TOKENS = 510
 
 HEADERS_TO_SPLIT_ON = [

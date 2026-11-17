@@ -19,7 +19,7 @@ from src.database.core import get_db, SessionLocal
 from src.domains.knowledge_base.services import KB_Service
 from src.domains.knowledge_base.schemas import KnowledgeBaseCreate, KnowledgeBaseResponse
 from src.core.logging import logger
-from src.ingestion.embedding_model import download_state, start_download
+from src.ingestion.embeddings import embedding_artifact_status, start_embedding_artifact_download
 from src.core.exceptions import (
     AppBaseException,
     KnowledgeBaseNotFoundException,
@@ -34,19 +34,22 @@ router = APIRouter(prefix="/knowledge_base", tags=["knowledge_base"])
 
 
 # Declared BEFORE the parametric /{llm_id}/status so "embedding-model" is not
-# captured as an llm_id (which would 422). The KB needs the e5 embedding model;
-# these gate its on-demand download so a fresh/offline install doesn't fail its
-# first KB use silently. #146.
+# captured as an llm_id (which would 422). The KB needs the e5 embedding
+# artifact of the platform's backend (#146, #594): the snapshot downloaded on
+# demand on macOS, the GGUF bundled in the Windows/Linux installers — the
+# status reflects whichever the selected backend needs, so a fresh install
+# whose artifact ships in the app is never gated on a pointless download.
 @router.get("/embedding-model/status")
 def get_embedding_model_status():
-    """On-disk presence of the KB embedding model + any in-flight download."""
-    return download_state()
+    """On-disk presence of the KB embedding artifact + any in-flight download."""
+    return embedding_artifact_status()
 
 
 @router.post("/embedding-model/download")
 def post_embedding_model_download():
-    """Kick off the embedding-model download in the background (idempotent)."""
-    return start_download()
+    """Kick off the embedding-model download in the background (idempotent).
+    A no-op where the artifact ships with the installation."""
+    return start_embedding_artifact_download()
 
 
 @router.get("/{llm_id}/status")

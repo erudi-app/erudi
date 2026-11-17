@@ -65,6 +65,9 @@ def make_adapter(tmp_path: Path):
     adapter.spawns = []  # (port, api_key, model_path, log_path)
     adapter.terminated = []
     adapter.model_path = Path("/fake/snapshot")
+    adapter.artifact_available = lambda: True
+    adapter.artifact_downloadable = True
+    adapter.exit_code = lambda proc: getattr(proc, "exitcode", None)
     adapter.resolve_model = lambda: adapter.model_path
     adapter.model_value = lambda path: str(path)
     adapter.prepare_log = lambda port: str(tmp_path / f"embedder-child-{port}.log")
@@ -595,16 +598,15 @@ class TestParentWatch:
 
 
 class TestPlatformSelection:
-    def test_supported_on_darwin_arm_only(self, monkeypatch):
+    def test_supported_on_every_platform_since_f3(self, monkeypatch):
+        # F3 (#594): Windows and Linux resolve the llama-server adapter, so
+        # no platform is without a child. The per-platform adapter choice is
+        # covered by tests/test_llama_embedder.py::TestPlatformDispatch.
         monkeypatch.setattr(embedder_child, "_adapter_override", embedder_child._PLATFORM)
-        monkeypatch.setattr(embedder_child.platform, "system", lambda: "Darwin")
-        monkeypatch.setattr(embedder_child.platform, "machine", lambda: "arm64")
-        assert embedder_child.embedder_child_supported()
-        monkeypatch.setattr(embedder_child.platform, "machine", lambda: "x86_64")
-        assert not embedder_child.embedder_child_supported()
-        monkeypatch.setattr(embedder_child.platform, "system", lambda: "Linux")
-        monkeypatch.setattr(embedder_child.platform, "machine", lambda: "arm64")
-        assert not embedder_child.embedder_child_supported()
+        for system, machine in (("Darwin", "arm64"), ("Linux", "x86_64"), ("Windows", "AMD64")):
+            monkeypatch.setattr(embedder_child.platform, "system", lambda s=system: s)
+            monkeypatch.setattr(embedder_child.platform, "machine", lambda m=machine: m)
+            assert embedder_child.embedder_child_supported()
 
     def test_darwin_arm_resolves_the_mlx_adapter(self, monkeypatch):
         monkeypatch.setattr(embedder_child, "_adapter_override", embedder_child._PLATFORM)

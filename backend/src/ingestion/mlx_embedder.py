@@ -38,16 +38,25 @@ from src.core.exceptions import EmbeddingModelMissingException, EngineException
 from src.core.logging import logger
 from src.engines import mlx_child_log as child_log
 from src.engines._mlx_vlm_server_runner import run_mlx_vlm_server
-from src.ingestion.embedding_model import embedding_snapshot_path
+from src.ingestion.embedding_model import embedding_model_available, embedding_snapshot_path
 from src.launcher import ensure_runtime_paths_initialized
 
 SERVER_NAME = "mlx_vlm.server (embedding child)"
 server_name = SERVER_NAME
 
+#: The #146 gate downloads the snapshot this child serves: one gate covers
+#: the in-process and the child backend alike on macOS.
+artifact_downloadable = True
+
 #: One file per spawn beside ``backend.log``, named after the child's port —
 #: distinct from the chat child's ``mlx-child-<port>.log`` prefix so the two
 #: processes never share a file.
 EMBEDDER_LOG_PREFIX = "embedder-child-"
+
+
+def artifact_available() -> bool:
+    """Whether the e5 snapshot the child serves is fully on disk (#146)."""
+    return embedding_model_available()
 
 
 def resolve_model() -> Path:
@@ -181,6 +190,11 @@ def is_alive(proc: Any) -> bool:
         return bool(proc.is_alive())
     except Exception:
         return False
+
+
+def exit_code(proc: Any) -> Optional[int]:
+    """The dead child's exit code (``mp.Process`` spells it ``exitcode``)."""
+    return getattr(proc, "exitcode", None)
 
 
 def read_tail(log_path: Optional[str], since: Optional[float]) -> str:

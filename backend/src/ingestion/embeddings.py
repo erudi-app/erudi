@@ -10,16 +10,19 @@ two are interchangeable vector-for-vector (measured cosine 0.9999999,
 inputs past 512 tokens included) — existing macOS Knowledge Bases keep
 their vectors with no re-indexing.
 
-- ``ChildE5Embeddings`` (macOS ARM): the dedicated `mlx_vlm.server` child
-  (``src.ingestion.embedder_child``). Nothing resident in the backend; the
-  child is released after 5 minutes unused. Inputs are bounded at e5's
-  512-token window Erudi-side (``chunking.truncate_to_tokens``, prefix
-  included) before the call.
-- ``E5Embeddings`` (Windows and Linux, until F3 of #594): the resident
-  in-process sentence-transformers singleton (the FAISS-era embedder
-  reloaded ~470 MB from disk on every single operation). F3 moves these
-  platforms onto a ``llama-server --embedding`` child; F4 then deletes this
-  class and the sentence-transformers/torch stack with it.
+- ``ChildE5Embeddings`` (every platform): the dedicated embedding child
+  (``src.ingestion.embedder_child``) — `mlx_vlm.server` over the local e5
+  snapshot on macOS ARM (``mlx_embedder``), the bundled CPU ``llama-server
+  --embedding`` over the e5 GGUF on Windows and Linux (``llama_embedder``,
+  F3 of #594). Nothing resident in the backend; the child is released after
+  5 minutes unused. Inputs are bounded at e5's 512-token window Erudi-side
+  (``chunking.truncate_to_tokens``, prefix included) before the call —
+  llama-server REFUSES a longer input (HTTP 500, the whole batch).
+- ``E5Embeddings``: the resident in-process sentence-transformers singleton
+  (the FAISS-era embedder reloaded ~470 MB from disk on every single
+  operation). Unused on every platform since F3 — it remains only as the
+  test suite's deterministic backend; F4 deletes it and the
+  sentence-transformers/torch stack with it.
 
 ``get_embeddings()`` is the only selection point: `vector_store` calls it
 per operation, so the choice stays out of the KB business layer.
@@ -40,7 +43,7 @@ from langchain_core.embeddings import Embeddings
 
 from src.core import config
 from src.core.logging import logger
-from src.ingestion import embedder_child
+from src.ingestion import embedder_child, embedding_model
 from src.ingestion.chunking import truncate_to_tokens
 from src.ingestion.embedding_model import embedding_model_available, load_sentence_transformer
 
@@ -68,20 +71,62 @@ def get_embeddings() -> Embeddings:
 
 
 def embedding_artifact_missing() -> bool:
-    """Whether the selected backend NEEDS the e5 artifact and it is absent.
+    """Whether the selected backend NEEDS its embedding artifact and it is
+    absent.
 
-    True only on the child backend (the child serves the snapshot by path
-    and cannot download): the "KB present, embedding model missing" state
-    the interface surfaces, and what lets an ingestion refuse its job up
-    front instead of failing file by file. The in-process backend still
-    fetches lazily on first use (pre-#146 behaviour, gone with F4), so it
-    never reports missing.
+    True only on the child backend (the child serves a local artifact and
+    cannot download — the e5 snapshot on macOS, the bundled GGUF on
+    Windows/Linux): the "KB present, embedding model missing" state the
+    interface surfaces, and what lets an ingestion refuse its job up front
+    instead of failing file by file. The in-process backend (test seam only
+    since F3) still fetches lazily on first use, so it never reports
+    missing.
     """
     if _forced_backend == "in-process":
         return False
     if _forced_backend == "child" or embedder_child.embedder_child_supported():
-        return not embedding_model_available()
+        return not embedder_child.artifact_available()
     return False
+
+
+def embedding_artifact_status() -> dict:
+    """What the interface's gate and banner poll: the SELECTED backend's
+    artifact state, in the #146 shape (``available``/``downloading``/
+    ``error``).
+
+    Where the artifact is downloadable (macOS: the child serves the same
+    snapshot the gate downloads) this is the #146 download state verbatim.
+    Where it ships with the installation (Windows/Linux: the bundled GGUF)
+    only its on-disk presence speaks — a packaged install always has it; a
+    dev tree without it runs ``scripts/dev/backend/build_e5_gguf.py``.
+    """
+    if _forced_backend != "in-process" and (
+        _forced_backend == "child" or embedder_child.embedder_child_supported()
+    ):
+        if not embedder_child.artifact_downloadable():
+            return {
+                "available": embedder_child.artifact_available(),
+                "downloading": False,
+                "error": None,
+            }
+    return embedding_model.download_state()
+
+
+def start_embedding_artifact_download() -> dict:
+    """The gate's download action, backend-aware: starts the #146 download
+    where it can produce the selected backend's artifact, and is a NO-OP —
+    one INFO, the current state returned — where the artifact ships with the
+    installation (downloading the snapshot would not produce the GGUF)."""
+    if _forced_backend != "in-process" and (
+        _forced_backend == "child" or embedder_child.embedder_child_supported()
+    ):
+        if not embedder_child.artifact_downloadable():
+            logger.info(
+                "Embedding model download skipped: the artifact ships with the "
+                "installation (dev: produce it with scripts/dev/backend/build_e5_gguf.py)"
+            )
+            return embedding_artifact_status()
+    return embedding_model.start_download()
 
 
 def build_embedding_text(*, file_name: str, chunk_text: str) -> str:

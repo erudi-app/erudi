@@ -190,7 +190,7 @@ including everything MLX and Metal write from native code, into a file beside
 | File | Where |
 |------|-------|
 | `mlx-child-<port>.log` | Development: `backend/logs/` · Packaged app: next to `backend.log` (the table at the top of this page) |
-| `embedder-child-<port>.log` | Same place — the Knowledge Base **embedding child** (#594), a second `mlx_vlm.server` process on Apple Silicon (ports 27400-27499), captured the same way |
+| `embedder-child-<port>.log` | Same place — the Knowledge Base **embedding child** (#594, ports 27400-27499): a second `mlx_vlm.server` process on Apple Silicon, the bundled CPU `llama-server --embedding` on Windows and Linux (its stdout/stderr redirected there by the backend), captured the same way |
 
 - One file per spawn, named after the port that child serves. The previous
   spawn's file is kept as `mlx-child-<port>.log.1`; older ones are removed, so

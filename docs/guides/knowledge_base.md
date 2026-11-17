@@ -73,16 +73,23 @@ Ingestion runs as a FastAPI background task, one file at a time
    (cosine >= 0.9999 measured, 1.0000000 on the parity set, inputs past 512 tokens included; past
    the window the truncation boundary token may differ), so a Knowledge Base never needs
    re-indexing across platforms or updates:
-   - **Apple Silicon** — `ChildE5Embeddings`: a dedicated `mlx_vlm.server` child
-     (`src/ingestion/embedder_child.py` + `src/ingestion/mlx_embedder.py`) serves the local e5
-     snapshot over `POST /v1/embeddings`, on its own port slice (27400-27499) with a per-spawn API
-     key. Nothing stays resident in the backend: the child spawns on first use (or ahead, when a
-     conversation with a Knowledge Base opens), an ingestion holds a lease so it is never stopped
-     mid-job, and it is released after a fixed 5 minutes unused (no setting). Inputs are bounded at
-     e5's 512-token window Erudi-side (`chunking.truncate_to_tokens`, prefix included) before the
-     call.
-   - **Windows and Linux** — `E5Embeddings`: the resident in-process sentence-transformers
-     singleton, until the `llama-server --embedding` child of #594 replaces it.
+   - **Every platform** — `ChildE5Embeddings`: a dedicated embedding child
+     (`src/ingestion/embedder_child.py`) serves `POST /v1/embeddings` on its own port slice
+     (27400-27499) with a per-spawn API key. On Apple Silicon the child is a second
+     `mlx_vlm.server` over the local e5 snapshot (`src/ingestion/mlx_embedder.py`); on Windows and
+     Linux it is the bundled CPU `llama-server --embedding` over the e5 Q8_0 GGUF that ships
+     inside the installers (`src/ingestion/llama_embedder.py`; the GGUF is produced at build time
+     — see BUILD.md — and never downloaded at runtime; worst measured cosine vs
+     sentence-transformers 0.99981, so existing Knowledge Bases keep their vectors). Nothing stays
+     resident in the backend: the child spawns on first use (or ahead, when a conversation with a
+     Knowledge Base opens), an ingestion holds a lease so it is never stopped mid-job, and it is
+     released after a fixed 5 minutes unused (no setting). Inputs are bounded at e5's 512-token
+     window Erudi-side (`chunking.truncate_to_tokens`, prefix included) before the call —
+     llama-server refuses longer inputs rather than truncating them. On a CUDA install the child
+     runs the CPU binary with every GPU masked and is read by none of the CUDA gauges (see
+     `docs/dev/architecture/engines.md`).
+   - `E5Embeddings` — the in-process sentence-transformers singleton: unused on every platform
+     since F3 of #594 (the test suite's deterministic backend only, removed with F4).
 
    The asymmetric prefixes are mandatory on both backends: `passage: ` for indexed chunks,
    `query: ` for searches. Vectors are L2-normalized, so cosine similarity is a dot product. The
@@ -248,10 +255,17 @@ not lose it; the UI polls the status route.
 On Apple Silicon the same snapshot is what the dedicated embedding child serves (by LOCAL path,
 never by repo id — `embedding_snapshot_path()`), so one gate covers both backends.
 
-A Knowledge Base whose embedding model has left the disk (a cleared `models_cache`) is a **state**,
-not a turn error: a conversation or Arena panel whose assistant carries a Knowledge Base shows a
-banner naming it, with the same download the gate offers (`KbEmbeddingBanner`); a turn asked
-meanwhile degrades to answering without the documents, as any Knowledge Base search failure does.
+On Windows and Linux the artifact the child needs is the bundled GGUF, not the snapshot: the
+status route answers its on-disk presence (always there in a packaged install — no download is
+ever offered or needed), and the download route is a no-op for it. A development tree without the
+file produces it with `python scripts/dev/backend/build_e5_gguf.py`; until then the missing-model
+state below applies.
+
+A Knowledge Base whose embedding artifact has left the disk (a cleared `models_cache` on macOS, a
+dev tree without the GGUF elsewhere) is a **state**, not a turn error: a conversation or Arena
+panel whose assistant carries a Knowledge Base shows a banner naming it
+(`KbEmbeddingBanner`); a turn asked meanwhile degrades to answering without the documents, as any
+Knowledge Base search failure does.
 
 ## API
 
