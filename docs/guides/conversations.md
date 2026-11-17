@@ -199,6 +199,17 @@ What the conversation *stores* is only a `[file_path:/abs/path]` marker per atta
 as message content, so a reloaded conversation shows which documents a turn carried without dragging
 their contents through history forever.
 
+A reloaded conversation shows its images again by reading each `[image_path:...]` file through the
+Electron main process (`fs:readImageAsDataURL`, `frontend/src/utils/imageReader.js`). The reader
+takes any folder, since an image may have been attached from anywhere on the disk, but only an image:
+the extension of the real path (symlinks resolved) must be one the composer accepts (PNG, JPEG, WebP,
+GIF, BMP), the file is opened once (without following a symlink, where the system allows it) and
+that handle must be a regular file of at most 20 MB, the composer's own limit
+(`frontend/src/utils/imageLimits.js`), whose first bytes are one of those formats' signatures; the
+MIME type is taken from those bytes. Pasting writes only those five formats. A refused file shows "Image not shown" with the reason where the
+image was; a file that is gone shows the plain image placeholder. Pasted images are written to
+`pasted-images/` in the data folder.
+
 ### Event types
 
 | `t` | Payload | Meaning |

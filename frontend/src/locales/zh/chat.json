@@ -185,6 +185,10 @@
     "manualReload": "您已卸载模型；正在重新加载…",
     "compacting": "正在总结之前的消息以腾出空间…",
     "imagePlaceholder": "🖼 图片附件",
+    "imageRefused": {
+      "tooLarge": "未显示图片：文件超过 20 MB。",
+      "notImage": "未显示图片：该文件不是图片。"
+    },
     "attachmentAlt": "附件 {{index}}",
     "copy": "复制消息",
     "star": "收藏消息"

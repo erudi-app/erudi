@@ -19,15 +19,21 @@
     "clearAll": {
       "title": "Effacer toutes les données",
       "message": "Voulez-vous vraiment supprimer toutes les données ?",
-      "detail": "Cette action supprimera définitivement :\n• Tous les modèles d'IA téléchargés\n• L'historique des conversations\n• Les paramètres personnalisés\n• Les bases de connaissances\n\nCette action est irréversible.\n\nL'application se fermera après la suppression.",
+      "detail": "Cette action supprimera définitivement :\n• Tous les modèles d'IA téléchargés\n• L'historique des conversations et les images collées\n• Les bases de connaissances\n• Les paramètres et les préférences de l'interface\n• Les journaux (ils contiennent le texte de vos conversations)\n\nCette action est irréversible.\n\nL'application se fermera après la suppression.",
       "confirm": "Supprimer toutes les données",
-      "failed": "Impossible d'effacer les données",
-      "failedWithError": "Impossible d'effacer les données : {{error}}"
+      "failedWithError": "Impossible d'effacer les données : {{error}}",
+      "rootRefused": "Effacer toutes les données n'est pas disponible : ERUDI_DATA_ROOT désigne {{root}}, qui est votre dossier personnel, un dossier au-dessus ou la racine d'un disque. Rien n'a été supprimé.",
+      "gaveUp": {
+        "message": "Effacer toutes les données n'a pas pu se terminer",
+        "detail": "Ces éléments étaient encore utilisés après trois démarrages et ont été laissés en place. Vous pouvez les supprimer vous-même une fois Erudi fermé :\n{{files}}"
+      }
     },
     "dataCleared": {
       "title": "Données effacées",
       "message": "Toutes les données ont été supprimées.",
-      "detail": "L'application va maintenant se fermer."
+      "detail": "L'application va maintenant se fermer.",
+      "detailPending": "Quelques fichiers étaient encore utilisés et n'ont pas pu être supprimés tout de suite. Erudi les supprime au prochain démarrage.\n\nL'application va maintenant se fermer.",
+      "leftInPlace": "Ces éléments ont été laissés en place, car Erudi ne les a pas créés ou n'a pas le droit de les supprimer :\n{{folders}}"
     },
     "exportConversation": {
       "title": "Exporter la conversation",

@@ -142,6 +142,7 @@ from src.utils.hf_model_metadata import (
     BYTES_PER_GB,
     humanize_model_name,
     measure_dir_size_bytes,
+    published_at_from_metadata,
     rewrite_size_in_metadata,
 )
 
@@ -1197,6 +1198,16 @@ async def download_llm_route(
         raise DatabaseException("Failed to start download", trace=str(e))
 
 
+def _created_metadata(published_at: Optional[str]) -> Optional[str]:
+    """A ``Created:`` metadata line for a by-link download, or None.
+
+    Only a value that reads back as a date is stored, so a bad client value
+    never becomes a wrong card date."""
+    if published_at_from_metadata(f"Created: {published_at}") is None:
+        return None
+    return f"Created: {published_at}"
+
+
 @router.post(
     "/download/huggingface",
     response_model=DownloadJobResponse,
@@ -1231,7 +1242,8 @@ async def download_huggingface_route(
             name=name,
             type=type_,
             description=None,
-            model_metadata=None,
+            # The date the search hit showed stays on the downloaded card (#561).
+            model_metadata=_created_metadata(payload.published_at),
             quantized=payload.quantized,
             param_size=payload.param_size,
             category=payload.category,

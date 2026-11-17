@@ -1,9 +1,9 @@
 """On-demand availability + download of the KB embedding model (#146).
 
-The Knowledge Base needs ``intfloat/multilingual-e5-small`` for BOTH embeddings
-(``E5Embeddings``) and token-accurate chunking (``chunking._get_tokenizer``).
-Both load it from ``config.CACHE_DIR`` (``data/models_cache``), so a single
-download serves both consumers.
+The Knowledge Base needs ``intfloat/multilingual-e5-small`` for its embeddings
+(``E5Embeddings``), loaded from ``config.CACHE_DIR`` (``data/models_cache``).
+Token-accurate chunking does not wait for it: its tokenizer ships frozen in
+the app (``chunking.E5_TOKENIZER_FILE``).
 
 This module gates that download behind an explicit user action instead of the
 implicit lazy Hugging Face fallback, so a fresh/offline install no longer fails
@@ -19,8 +19,8 @@ Design invariants:
 - **A complete cache means OFFLINE loads** (#164). Without ``local_files_only=True``
   huggingface_hub HEAD-revalidates every file against the hub on each load —
   offline, the failed DNS probe surfaces as a bogus load error despite a fully
-  pre-downloaded model, defeating the whole point of the gate. Consumers
-  (``E5Embeddings``, ``chunking._get_tokenizer``) apply the same rule.
+  pre-downloaded model, defeating the whole point of the gate.
+  ``E5Embeddings`` applies the same rule.
 - **Download == the real load path** (``SentenceTransformer(..., cache_folder=CACHE_DIR)``),
   not a parallel ``snapshot_download`` — so the download target is ISO with where
   the app loads from, by construction, and it warms the resident singleton.

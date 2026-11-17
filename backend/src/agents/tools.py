@@ -273,10 +273,9 @@ def map_web_search_error(exc: BaseException) -> str:
 def _estimate_web_tokens(text: str) -> int:
     """Network-free token estimate: ``ceil(UTF-8 byte length / 3)``.
 
-    The web tool cannot use the e5 tokenizer from ``src.ingestion.chunking``:
-    that tokenizer is only on disk once the user has accepted the knowledge-base
-    embedding-model download, and loading it otherwise fetches it from Hugging
-    Face — a request docs/privacy.md says only happens for that download. Bytes
+    The web tool does not use the e5 tokenizer from ``src.ingestion.chunking``:
+    it is not the chat model's tokenizer either, and loading it holds about
+    250 MB and half a second for what is a soft ceiling. Bytes
     over 3 overestimates natural language in every script, CJK included, so it
     stays a conservative (fewer-results) ceiling there; it can undercount
     punctuation- or code-heavy text by roughly a third, which a soft budget

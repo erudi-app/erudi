@@ -106,6 +106,7 @@ export default function HuggingFaceSearchPanel({
         downloads: m.downloads ? String(m.downloads) : "Unknown",
         likes: m.likes ? String(m.likes) : "Unknown",
         pipeline: m.pipeline_tag || "Unknown",
+        publishedAt: m.published_at ?? null,
       }));
       setResults(rankByFit(mapped, range));
     } catch (err) {

@@ -55,7 +55,9 @@ const conversationDetail = {
 
 beforeEach(() => {
   Element.prototype.scrollTo = () => {};
-  window.fsAPI = { readImageAsDataURL: vi.fn(async () => RESTORED_DATA_URL) };
+  window.fsAPI = {
+    readImageAsDataURL: vi.fn(async () => ({ ok: true, dataUrl: RESTORED_DATA_URL })),
+  };
   apiClient.get.mockReset();
   apiClient.get.mockImplementation(async () => messages);
   tracedFetchMock.mockReset();
@@ -107,5 +109,38 @@ describe("ConversationPage pasted-image restore (#136)", () => {
     const img = await screen.findByAltText("attachment 1");
     expect(img.getAttribute("src")).toBe(RESTORED_DATA_URL);
     expect(screen.queryByText(/image attachment/)).toBeNull();
+  });
+});
+
+describe("ConversationPage image the main process refuses to read", () => {
+  it.each([
+    ["too_large", "Image not shown: it is larger than 20 MB."],
+    ["not_image", "Image not shown: the file is not an image."],
+  ])(
+    "says why (%s) where the image would be, instead of a bare placeholder",
+    async (reason, text) => {
+      window.fsAPI.readImageAsDataURL.mockImplementation(async () => ({ ok: false, reason }));
+
+      render(<ConversationPage />);
+      await waitFor(() => expect(apiClient.get).toHaveBeenCalled());
+      await act(async () => {});
+
+      expect(await screen.findByText(text)).toBeTruthy();
+      expect(screen.queryByAltText("attachment 1")).toBeNull();
+      expect(screen.queryByText(/image attachment/)).toBeNull();
+    }
+  );
+
+  it("keeps the plain placeholder for an image that is no longer on disk", async () => {
+    window.fsAPI.readImageAsDataURL.mockImplementation(async () => ({
+      ok: false,
+      reason: "unreadable",
+    }));
+
+    render(<ConversationPage />);
+    await waitFor(() => expect(apiClient.get).toHaveBeenCalled());
+    await act(async () => {});
+
+    expect(await screen.findByText(/image attachment/)).toBeTruthy();
   });
 });

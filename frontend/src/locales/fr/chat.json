@@ -185,6 +185,10 @@
     "manualReload": "Vous avez déchargé le modèle ; rechargement…",
     "compacting": "Résumé des messages précédents pour faire de la place…",
     "imagePlaceholder": "🖼 image jointe",
+    "imageRefused": {
+      "tooLarge": "Image non affichée : elle dépasse 20 Mo.",
+      "notImage": "Image non affichée : ce fichier n'est pas une image."
+    },
     "attachmentAlt": "pièce jointe {{index}}",
     "copy": "Copier le message",
     "star": "Mettre le message en favori"

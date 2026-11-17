@@ -220,6 +220,10 @@ def add_kb_chunks(
             "source_file": source_file,
             "page": chunk.page_number,
             "chunk_index": chunk.chunk_index,
+            # Not a typed column: it lands in the langchain_metadata JSON and
+            # comes back in Document.metadata, where retrieval's token budget
+            # reads it instead of tokenizing every candidate on every turn.
+            "token_count": chunk.token_count,
         }
         for chunk in chunks
     ]

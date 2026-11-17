@@ -62,6 +62,12 @@ Ingestion runs as a FastAPI background task, one file at a time
    splitter (paragraph > line > sentence > word); prefix each chunk with its heading breadcrumb
    (`# A > ## B`) and re-attach Markdown table headers lost mid-split.
    Defaults: `DEFAULT_TARGET_TOKENS = 180`, `DEFAULT_OVERLAP_TOKENS = 27` (about 15 %).
+   The tokenizer ships with the app, frozen in `src/ingestion/e5_tokenizer.json.gz`: the e5
+   tokenizer as `transformers` builds it (`backend_tokenizer.to_str()`, gzipped), loaded with the
+   `tokenizers` package alone. It needs no download and no `transformers`;
+   `tests/test_e5_tokenizer.py` checks it gives `transformers`' ids and the same chunks.
+   Loaded, it holds about 250 MB and stays resident once an ingestion, or a retrieval that counts an
+   older chunk, has used it.
 6. **Embed.** `E5Embeddings` (`src/ingestion/embeddings.py`) holds a resident
    `multilingual-e5-small` (384 dimensions, 512-token window). The asymmetric prefixes are
    mandatory: `passage: ` for indexed chunks, `query: ` for searches. Vectors are L2-normalized, so
@@ -70,7 +76,8 @@ Ingestion runs as a FastAPI background task, one file at a time
    retrieval but is **not** stored: the stored content is the clean chunk, which is what goes into
    the prompt.
 7. **Store.** `add_kb_chunks` writes the vectors plus the metadata columns
-   (`kb_id`, `document_id`, `source_file`, `page`, `chunk_index`) into `rag.kb_chunks`.
+   (`kb_id`, `document_id`, `source_file`, `page`, `chunk_index`) into `rag.kb_chunks`, and the
+   chunk's e5 token count as `token_count` in the `langchain_metadata` JSON column.
 
 A document that extracts fine but yields zero chunks (blank file, parser that returned no text) is
 marked `empty`, never `active`.
@@ -121,7 +128,11 @@ vectors (the fusion overwrites per-row scores with rank harmonics, which have no
    purely relative cut from starving recall: a widest gap sitting right after the top hit is honored
    only when it is a true outlier, and a recall floor (`K_MIN_EXCERPTS = 2`) re-extends the pool from
    candidates within `RECALL_BAND = 0.05` of the top similarity.
-3. **Token budget**: keep whole chunks best-first until the model's budget is spent.
+3. **Token budget**: keep whole chunks best-first until the model's budget is spent. Each chunk
+   costs its stored `token_count`; a chunk without one is counted on the fly.
+
+Chunks ingested before Erudi stored token counts have none: they are counted with the tokenizer when
+they are retrieved, and keep no count afterwards.
 
 Each excerpt keeps its `source_file` so the prompt can attribute it (`[Document: report.pdf]`).
 
@@ -163,9 +174,10 @@ Every turn logs the decision, including which gate decided it (`Turn mode: agent
 
 ## The embedding-model gate
 
-The KB needs `intfloat/multilingual-e5-small` for both embeddings and token-accurate chunking. It is
-**not** bundled: it is downloaded on demand into the app's own cache directory
-(`config.CACHE_DIR`, i.e. `data/models_cache`), so a single download serves both consumers.
+The KB needs `intfloat/multilingual-e5-small` for its embeddings. The model is **not** bundled: it is
+downloaded on demand into the app's own cache directory (`config.CACHE_DIR`, i.e.
+`data/models_cache`). Chunking does not use that download: its tokenizer ships with the app (see
+step 5 of the ingestion pipeline).
 
 Presence is filesystem-driven, never a database flag: `embedding_model_available()` checks every file
 a `SentenceTransformer` load touches, so a partial download reads as unavailable and the gate
