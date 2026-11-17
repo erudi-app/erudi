@@ -171,10 +171,19 @@ POSTMASTER_LOG_NAME = "log"
 POSTMASTER_LOG_TAIL_LINES = 40
 POSTMASTER_LOG_TAIL_CHARS = 4000
 
-# Nothing rotates that file: it grows for the life of the cluster. Read a
-# window from its end rather than the whole thing -- quoting 40 lines must not
-# load megabytes at the moment the app is already failing to start.
+# pg_ctl appends to that file and Postgres never rotates it, so a start that
+# launches a postmaster moves it aside first (`_rotate_postmaster_log`), keeping
+# this one previous file. Still read a window from its end rather than the whole
+# thing -- quoting 40 lines must not load megabytes at the moment the app is
+# already failing to start, and a single run can write a lot.
+POSTMASTER_LOG_PREVIOUS_NAME = "log.1"
 POSTMASTER_LOG_WINDOW_BYTES = 64 * 1024
+
+# How pgserver introduces the postmaster log it quotes after a failed or timed
+# out ``pg_ctl start`` (postgres_server.py, ``ensure_postgres_running``):
+#     Timeout starting server.\nShowing contents of postgres server log (<path>) below:\n<whole file>
+_PGSERVER_LOG_QUOTE_HEADS = ("Timeout starting server.", "Failed to start server.")
+_PGSERVER_LOG_QUOTE_SEPARATOR = ") below:\n"
 
 # ``PASSWORD '<literal>'`` in any statement PostgreSQL echoed into its log.
 # `log_min_error_statement` defaults to ERROR, so a REFUSED
@@ -223,6 +232,82 @@ def postmaster_log_tail(data_dir: Path | str, max_lines: int = POSTMASTER_LOG_TA
     lines = [line for line in text.splitlines() if line.strip()]
     tail = _redact_passwords("\n".join(lines[-max_lines:]))
     return tail[-POSTMASTER_LOG_TAIL_CHARS:] if len(tail) > POSTMASTER_LOG_TAIL_CHARS else tail
+
+
+def _postmaster_log_size(data_dir: Path) -> int:
+    """Current size of the postmaster log in bytes, 0 when there is none."""
+    try:
+        return (Path(data_dir) / POSTMASTER_LOG_NAME).stat().st_size
+    except OSError:
+        return 0
+
+
+def postmaster_log_since(data_dir: Path | str, offset: int) -> str:
+    """What the postmaster wrote to its log after byte ``offset``.
+
+    The lines of one start: ``offset`` is the file's size before that start.
+    Bounded to the last ``POSTMASTER_LOG_WINDOW_BYTES`` of that stretch,
+    decoded defensively and redacted like :func:`postmaster_log_tail`. A file
+    now shorter than ``offset`` was replaced in between and is read whole.
+    Never raises.
+    """
+    log_file = Path(data_dir) / POSTMASTER_LOG_NAME
+    try:
+        size = log_file.stat().st_size
+        if size < offset:
+            offset = 0
+        start = max(offset, size - POSTMASTER_LOG_WINDOW_BYTES)
+        with log_file.open("rb") as handle:
+            handle.seek(start)
+            raw = handle.read(size - start)
+    except OSError:
+        return ""
+    text = raw.decode("utf-8", errors="replace")
+    if start > offset:
+        # Cut by the window, not at this start's first byte: mid-line.
+        _, _, text = text.partition("\n")
+    return _redact_passwords(text.rstrip("\n"))
+
+
+def _quote_only_this_start(record: logging.LogRecord, data_dir: Path, offset: int) -> None:
+    """Make a pgserver record that quotes the whole postmaster log quote this start only.
+
+    pgserver follows ``Timeout starting server.`` (or ``Failed to start
+    server.``) with ``self.log.read_text()``: every line every start ever
+    appended -- days of "database system was not properly shut down" when the
+    file was not rotated, or when this start joined a postmaster that kept it.
+    The quoted text is replaced with what was written after ``offset``, the
+    file's size when this start began. Any other record is left as it is.
+    The record is held (never handled yet), so it is safe to rewrite.
+    """
+    message = record.getMessage()
+    if not message.startswith(_PGSERVER_LOG_QUOTE_HEADS):
+        return
+    head, separator, _ = message.partition(_PGSERVER_LOG_QUOTE_SEPARATOR)
+    if not separator:
+        return
+    since = postmaster_log_since(data_dir, offset)
+    record.msg = f"{head}{separator}{since}" if since else f"{head}{separator}(nothing)"
+    record.args = None
+
+
+def _rotate_postmaster_log(data_dir: Path) -> None:
+    """Start a fresh postmaster log, keeping the previous one as ``log.1``.
+
+    Only when no live postmaster holds the file: a start that joins a
+    surviving postmaster (a crash recovery still running, another backend's
+    cluster) leaves the file it is writing alone. A rename that fails costs
+    the rotation, never the start.
+    """
+    log_file = data_dir / POSTMASTER_LOG_NAME
+    if not log_file.exists() or _live_postmaster(data_dir) is not None:
+        return
+    try:
+        os.replace(log_file, data_dir / POSTMASTER_LOG_PREVIOUS_NAME)
+    except OSError as exc:
+        # The file keeps growing and only this start's lines are quoted
+        # anyway (`_quote_only_this_start`): degraded, not failed.
+        logger.warning(f"Could not set the postmaster log aside, it keeps growing: {exc}")
 
 
 def _attach_postmaster_log(exc: BaseException, data_dir: Path) -> None:
@@ -681,7 +766,9 @@ def _get_server_with_recovery(data_dir: Path):
     today's failure path after real patience and clear logs.
 
     pgserver logs its own ``ERROR`` before raising -- ``Timeout starting
-    server.`` followed by the postmaster's whole log and its absolute path --
+    server.`` followed by the postmaster's whole log and its absolute path,
+    which is cut down to the lines this start wrote
+    (:func:`_quote_only_this_start`) whatever its fate --
     and at that moment nothing knows yet whether the start will happen. So
     pgserver's ``ERROR`` and ``CRITICAL`` records are held back for the whole
     call (:class:`_HeldPgserverErrors`; its lower levels pass through) and
@@ -699,6 +786,9 @@ def _get_server_with_recovery(data_dir: Path):
     pg_logger = logging.getLogger("pgserver")
     held = _HeldPgserverErrors()
     recovered = False
+    # Where this start's lines begin in the postmaster log (see
+    # `_quote_only_this_start`).
+    log_offset = _postmaster_log_size(data_dir)
     pg_logger.addFilter(held)
     try:
         try:
@@ -738,6 +828,7 @@ def _get_server_with_recovery(data_dir: Path):
         # logger's filters, so a replay with the filter attached is held again.
         pg_logger.removeFilter(held)
         for record in held.records:
+            _quote_only_this_start(record, data_dir, log_offset)
             if recovered:
                 logger.info(
                     "pgserver reported this during a start that crash recovery "
@@ -764,6 +855,7 @@ def start_postgres(data_dir: Path | str) -> PostgresHandle:
         data_dir.mkdir(parents=True, exist_ok=True)
         _prune_stale_handle_pids(data_dir)
         _recover_corrupt_pgdata(data_dir)
+        _rotate_postmaster_log(data_dir)
 
         server = _get_server_with_recovery(data_dir)
         # After initdb (the secret file must not pre-exist in PGDATA) and before

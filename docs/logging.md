@@ -228,8 +228,17 @@ only place the server's answer is written. So when starting or joining the
 cluster fails, the backend attaches the last 40 lines of it to the failure —
 they travel inside the single `ERROR` the startup writes to `backend.log`, and
 therefore appear on the **Diagnostics** page and in a copied report. Only a
-window at the end of the file is read: nothing rotates it, and it grows for the
-life of the cluster.
+window at the end of the file is read.
+
+PostgreSQL appends to that file and never rotates it. Erudi does, at a start
+that launches the server: the file becomes `log.1` (replacing the one before)
+and the server writes a fresh `log`. A start that joins a server still running
+— one finishing a crash recovery — leaves the file it writes to alone. When
+`pgserver` quotes the file after a start that timed out or failed (see
+[What the libraries say](#what-the-libraries-say)), it quotes all of it; Erudi
+cuts that record down to the lines written since this start began, whichever
+level it is then written at, so a recovery never replays days of earlier
+starts.
 
 PostgreSQL writes the statement that failed into that log, and exactly one
 statement in Erudi carries a secret — the one that sets the database password

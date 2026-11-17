@@ -1007,11 +1007,15 @@ class TestPostmasterLog:
             encoding="utf-8",
         )
         boom = subprocess.TimeoutExpired(cmd="pg_ctl", timeout=10)
-        monkeypatch.setattr(
-            postgres_runtime,
-            "_get_server_with_recovery",
-            lambda data_dir: (_ for _ in ()).throw(boom),
-        )
+
+        def failed_start(data_dir):
+            # The postmaster writes this start's lines into a fresh file.
+            (data_dir / "log").write_text(
+                "FATAL:  could not write to file: No space left on device\n", encoding="utf-8"
+            )
+            raise boom
+
+        monkeypatch.setattr(postgres_runtime, "_get_server_with_recovery", failed_start)
 
         with pytest.raises(subprocess.TimeoutExpired) as excinfo:
             start_postgres(tmp_path)
@@ -1432,10 +1436,12 @@ class TestPgserverRecordsDuringRecovery:
         self, tmp_path, monkeypatch, caplog
     ):
         def fake_get_server(path):
+            log = tmp_path / "log"
+            log.write_text("FATAL:  could not write to file: No space left on device\n")
             logging.getLogger("pgserver").error(
                 "Failed to start server.\n"
-                f"Showing contents of postgres server log ({tmp_path / 'log'}) below:\n"
-                "FATAL:  could not write to file: No space left on device"
+                f"Showing contents of postgres server log ({log}) below:\n"
+                f"{log.read_text()}"
             )
             raise subprocess.CalledProcessError(1, "pg_ctl")
 
@@ -1487,6 +1493,200 @@ class TestPgserverRecordsDuringRecovery:
             assert postgres_runtime._get_server_with_recovery(tmp_path) is sentinel
 
         assert seen_during_call == ["running pg_ctl... pg_ctl_args=['-w', 'start']"]
+
+
+_OLD_POSTMASTER_LINES = (
+    "LOG:  database system was not properly shut down; automatic recovery in progress\n"
+) * 13
+_THIS_START_LINES = (
+    "LOG:  database system was interrupted; last known up at 2026-11-17 10:00:00 UTC\n"
+    "LOG:  redo done at 0/1A2B3C4\n"
+)
+
+
+def _start_that_writes_and_quotes_the_whole_log(data_dir: Path, *, then):
+    """A get_server that behaves like pgserver's pg_ctl timeout: the postmaster
+    appends this start's lines to `<pgdata>/log`, then pgserver logs the WHOLE
+    file (`self.log.read_text()`) at ERROR and raises. `then` decides what the
+    second call does."""
+    calls = {"n": 0}
+    log = data_dir / "log"
+
+    def fake_get_server(path):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            with log.open("a", encoding="utf-8") as handle:
+                handle.write(_THIS_START_LINES)
+            logging.getLogger("pgserver").error(
+                "Timeout starting server.\n"
+                f"Showing contents of postgres server log ({log.absolute()}) below:\n"
+                f"{log.read_text()}"
+            )
+            raise subprocess.TimeoutExpired(cmd="pg_ctl", timeout=10)
+        return then()
+
+    return fake_get_server
+
+
+class TestOnlyThisStartsPostmasterLines:
+    """#690 item 14 - pgserver quotes the postmaster's WHOLE log after a pg_ctl
+    timeout, and that file is appended to by every start. Only the lines this
+    start wrote may reach backend.log, at INFO after a completed recovery and
+    at ERROR when the start failed."""
+
+    @pytest.fixture(autouse=True)
+    def _filters_are_restored(self):
+        pg_logger = logging.getLogger("pgserver")
+        before = list(pg_logger.filters)
+        yield
+        pg_logger.filters[:] = before
+
+    @pytest.mark.unit
+    def test_a_completed_recovery_quotes_only_this_starts_lines(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        (tmp_path / "log").write_text(_OLD_POSTMASTER_LINES, encoding="utf-8")
+        sentinel = object()
+        monkeypatch.setattr(
+            postgres_runtime.pgserver,
+            "get_server",
+            _start_that_writes_and_quotes_the_whole_log(tmp_path, then=lambda: sentinel),
+        )
+        monkeypatch.setattr(postgres_runtime, "_wait_for_postmaster_ready", lambda d, s: True)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            assert postgres_runtime._get_server_with_recovery(tmp_path) is sentinel
+
+        (record,) = [
+            r
+            for r in caplog.records
+            if r.name == "erudi" and "Timeout starting server" in r.getMessage()
+        ]
+        assert record.levelno == logging.INFO
+        assert "redo done at 0/1A2B3C4" in record.getMessage()
+        assert "not properly shut down" not in record.getMessage()
+        assert "Showing contents of postgres server log" in record.getMessage()
+
+    @pytest.mark.unit
+    def test_a_failed_start_replays_only_this_starts_lines_at_error(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        (tmp_path / "log").write_text(_OLD_POSTMASTER_LINES, encoding="utf-8")
+        monkeypatch.setattr(
+            postgres_runtime.pgserver,
+            "get_server",
+            _start_that_writes_and_quotes_the_whole_log(tmp_path, then=lambda: None),
+        )
+        monkeypatch.setattr(postgres_runtime, "_wait_for_postmaster_ready", lambda d, s: False)
+
+        with pytest.raises(subprocess.TimeoutExpired):
+            postgres_runtime._get_server_with_recovery(tmp_path)
+
+        (record,) = _pgserver_errors(caplog)
+        assert record.levelno == logging.ERROR
+        assert record.getMessage().startswith("Timeout starting server.\n")
+        assert "redo done at 0/1A2B3C4" in record.getMessage()
+        assert "not properly shut down" not in record.getMessage()
+
+    @pytest.mark.unit
+    def test_a_quoted_password_literal_is_redacted(self, tmp_path, monkeypatch, caplog):
+        log = tmp_path / "log"
+
+        def fake_get_server(path):
+            with log.open("a", encoding="utf-8") as handle:
+                handle.write("STATEMENT:  ALTER ROLE \"postgres\" PASSWORD 'S3cretToken123'\n")
+            logging.getLogger("pgserver").error(
+                "Failed to start server.\n"
+                f"Showing contents of postgres server log ({log.absolute()}) below:\n"
+                f"{log.read_text()}"
+            )
+            raise subprocess.CalledProcessError(1, "pg_ctl")
+
+        monkeypatch.setattr(postgres_runtime.pgserver, "get_server", fake_get_server)
+
+        with pytest.raises(subprocess.CalledProcessError):
+            postgres_runtime._get_server_with_recovery(tmp_path)
+
+        (record,) = _pgserver_errors(caplog)
+        assert "S3cretToken123" not in record.getMessage()
+        assert "PASSWORD '[redacted]'" in record.getMessage()
+
+
+class TestPostmasterLogRotation:
+    """#690 item 14 - nothing else rotates `<pgdata>/log`: every start appends
+    to it for the life of the cluster. A start that launches a postmaster
+    begins a fresh file and keeps one previous; a start that joins a live
+    postmaster never touches the file it is writing."""
+
+    @pytest.mark.unit
+    def test_a_start_with_no_live_postmaster_keeps_one_previous_file(self, tmp_path, monkeypatch):
+        (tmp_path / "log").write_text("LOG:  the previous run\n", encoding="utf-8")
+        (tmp_path / "log.1").write_text("LOG:  the run before\n", encoding="utf-8")
+        monkeypatch.setattr(postgres_runtime, "_live_postmaster", lambda data_dir: None)
+
+        postgres_runtime._rotate_postmaster_log(tmp_path)
+
+        assert not (tmp_path / "log").exists()
+        assert (tmp_path / "log.1").read_text(encoding="utf-8") == "LOG:  the previous run\n"
+        assert sorted(p.name for p in tmp_path.iterdir()) == ["log.1"]
+
+    @pytest.mark.unit
+    def test_a_live_postmaster_keeps_its_file(self, tmp_path, monkeypatch):
+        (tmp_path / "log").write_text("LOG:  written by the live postmaster\n", encoding="utf-8")
+        monkeypatch.setattr(postgres_runtime, "_live_postmaster", lambda data_dir: object())
+
+        postgres_runtime._rotate_postmaster_log(tmp_path)
+
+        assert (tmp_path / "log").read_text(encoding="utf-8") == (
+            "LOG:  written by the live postmaster\n"
+        )
+        assert not (tmp_path / "log.1").exists()
+
+    @pytest.mark.unit
+    def test_no_log_is_left_alone(self, tmp_path, monkeypatch):
+        monkeypatch.setattr(postgres_runtime, "_live_postmaster", lambda data_dir: None)
+
+        postgres_runtime._rotate_postmaster_log(tmp_path)
+
+        assert list(tmp_path.iterdir()) == []
+
+    @pytest.mark.unit
+    def test_a_rename_that_fails_is_a_warning_not_a_failed_start(
+        self, tmp_path, monkeypatch, caplog
+    ):
+        (tmp_path / "log").write_text("LOG:  held by another program\n", encoding="utf-8")
+        monkeypatch.setattr(postgres_runtime, "_live_postmaster", lambda data_dir: None)
+
+        def refuse(src, dst):
+            raise PermissionError(13, "The process cannot access the file")
+
+        monkeypatch.setattr(postgres_runtime.os, "replace", refuse)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            postgres_runtime._rotate_postmaster_log(tmp_path)
+
+        assert (tmp_path / "log").exists()
+        (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert "postmaster log" in warning.getMessage()
+
+    @pytest.mark.unit
+    def test_start_postgres_rotates_before_starting_the_server(self, tmp_path, monkeypatch):
+        (tmp_path / "PG_VERSION").write_text("16\n")
+        (tmp_path / "log").write_text("LOG:  the previous run\n", encoding="utf-8")
+        monkeypatch.setattr(postgres_runtime, "_live_postmaster", lambda data_dir: None)
+        seen = {}
+
+        def fake_start(data_dir):
+            seen["log"] = (data_dir / "log").exists()
+            seen["log.1"] = (data_dir / "log.1").read_text(encoding="utf-8")
+            raise AssertionError("stop here")
+
+        monkeypatch.setattr(postgres_runtime, "_get_server_with_recovery", fake_start)
+
+        with pytest.raises(AssertionError):
+            start_postgres(tmp_path)
+
+        assert seen == {"log": False, "log.1": "LOG:  the previous run\n"}
 
 
 class TestConsoleIsolation:
