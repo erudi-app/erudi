@@ -211,7 +211,11 @@ class TestSummaryPromptLanguage:
                 return super()._call(messages, *args, **kwargs)
 
         middleware = object.__new__(runner_module._summarization_middleware_class())
-        middleware.model = _Model(responses=["Resume."])
+        middleware.model = _Model(
+            responses=[
+                "L'utilisateur a pose une question en francais sur son contrat de travail ; l'assistant a explique les conditions de resiliation et les delais de preavis applicables."
+            ]
+        )
         middleware.summary_prompt = runner_module.SUMMARY_PROMPT
         middleware._attempt_failures = []
         out = await middleware._summarize(None, [HumanMessage(content=FRENCH)], attempt="first")

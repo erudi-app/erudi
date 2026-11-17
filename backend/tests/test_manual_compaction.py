@@ -211,7 +211,6 @@ async def test_a_manual_compaction_summarizes_everything_before_the_previous_ans
         "reason": COMPACTION_REASON_LENGTH,
         "summarized": 1,
         "summary": "Ada lives in Lyon.",
-        "summary_lost": False,
     }
     assert marker.events == [event]
 
@@ -543,7 +542,7 @@ async def test_a_tool_round_survives_a_manual_compaction(monkeypatch):
 async def test_the_next_turn_on_a_tool_carrying_graph_after_a_compaction(monkeypatch):
     from src.agents.tools import calculator
 
-    _Builds(monkeypatch, _ScriptedSummaryModel(messages=iter([]), script=["Ada, Lyon."]))
+    _Builds(monkeypatch, _ScriptedSummaryModel(messages=iter([]), script=["Ada lives in Lyon."]))
     cp = InMemorySaver()
     await _seed(cp, "g1", _two_exchanges())
     runner = AgentRunner(checkpointer=cp)
@@ -587,7 +586,7 @@ async def test_the_next_turn_on_a_tool_carrying_graph_after_a_compaction(monkeyp
     ]
     assert "".join(e["text"] for e in events if e["t"] == "answer") == "Four, Ada."
     state = await _state(cp, "g1")
-    assert "Ada, Lyon." in state[0].content
+    assert "Ada lives in Lyon." in state[0].content
     _assert_alternates(state)
     assert [m.type for m in state[-4:]] == ["human", "ai", "tool", "ai"]
 

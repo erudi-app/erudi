@@ -49,6 +49,7 @@ from src.agents.token_accounting import (
 from src.core import config
 from src.engines.base_engine import BaseEngine
 from tests.test_compaction_keep import (  # noqa: F401  (``_engine`` is an autouse fixture)
+    SUMMARY,
     _PARAMS,
     _Llm,
     _ScriptedSummaryModel,
@@ -332,7 +333,7 @@ async def test_an_overhead_larger_than_the_trim_budget_never_empties_the_summary
     # the truncation retry), and the summary written into the state.
     (prompt,) = summary.prompts
     assert "my name is Ada" in prompt
-    assert "A short summary." in after[0].content
+    assert SUMMARY in after[0].content
 
 
 # ===================== character helpers by the message's own weight =====================
@@ -349,16 +350,6 @@ def test_the_truncated_copy_fits_the_trim_at_its_own_weight():
         [huge], 1000, counter, lambda m: weights.get(m.id, counter_weight(m))
     )
     assert counter(out) <= 1000
-
-
-def test_the_placeholder_carries_at_most_the_cap_in_real_tokens():
-    previous = _summary("长城" * 5000)
-    text = runner_module._summary_placeholder(previous, 500)
-    carried = text[: -len(runner_module.SUMMARY_LATER_LOST)].rstrip()
-    weight = counter_weight(HumanMessage(carried))
-    assert math.ceil(weight * len(carried) / 4) <= 500
-    # chars/4 alone would have carried four times the cap in real tokens.
-    assert len(carried) < 500 * 4 / 3
 
 
 def test_the_trims_allocated_term_uses_the_heterogeneity_factor_2():

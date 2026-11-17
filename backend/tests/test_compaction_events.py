@@ -5,7 +5,7 @@ stream: ``{"t": "compaction", "phase": "start"}`` before the summary call,
 then ``{"t": "compaction", "phase": "done", ...}`` once the history is
 rewritten -- how many messages a user would recognise were summarized, why
 (the conversation's length or the computer's memory), the summary itself and
-whether it was lost. The runner turns those into turn events without touching
+the summary itself. The runner turns those into turn events without touching
 the message stream; a missing channel is silent and a failing one never fails
 the turn.
 """
@@ -25,8 +25,8 @@ from src.agents import runner as runner_module
 from src.agents.runner import ERROR_SENTINEL, AgentRunner
 from src.core import config
 from tests.test_compaction_keep import (
+    SUMMARY,
     _PARAMS,
-    _PREVIOUS,
     _Llm,
     _ScriptedSummaryModel,
     _WindowEngine,
@@ -35,7 +35,6 @@ from tests.test_compaction_keep import (
     _conversation,
     _middleware,
     _models,
-    _overflow_400,
     _previous_summary_message,
     _request,
     _seed,
@@ -92,7 +91,7 @@ def _compacting_state() -> list:
 
 
 async def test_a_compaction_announces_start_before_the_summary_call_then_done():
-    summary = _ProbeSummaryModel(messages=iter([]), script=["The summary."])
+    summary = _ProbeSummaryModel(messages=iter([]), script=[SUMMARY])
     mw = _middleware(summary, window=10_000)
 
     await mw.abefore_model({"messages": _compacting_state()}, _runtime(summary.written))
@@ -115,12 +114,12 @@ async def test_no_compaction_announces_nothing():
 
 
 async def test_without_a_runtime_a_compaction_runs_silently():
-    summary = _ProbeSummaryModel(messages=iter([]), script=["The summary."])
+    summary = _ProbeSummaryModel(messages=iter([]), script=[SUMMARY])
     mw = _middleware(summary, window=10_000)
 
     after = _after(await mw.abefore_model({"messages": _compacting_state()}, None))
 
-    assert "The summary." in after[0].content
+    assert SUMMARY in after[0].content
     assert summary.written == []
 
 
@@ -144,8 +143,8 @@ def test_the_count_is_what_a_user_recognises_as_their_rows():
     assert runner_module.summarized_message_count(messages) == 4
 
 
-async def test_done_carries_the_count_the_summary_and_no_loss():
-    summary = _ProbeSummaryModel(messages=iter([]), script=["Ada lives in Lyon."])
+async def test_done_carries_the_count_and_the_summary():
+    summary = _ProbeSummaryModel(messages=iter([]), script=[SUMMARY])
     mw = _middleware(summary, window=None)
     # No window: 21 messages trigger and the last ten are kept, so eleven
     # plain messages are summarized.
@@ -155,66 +154,52 @@ async def test_done_carries_the_count_the_summary_and_no_loss():
 
     done = summary.written[-1]
     assert done["summarized"] == 11
-    assert done["summary"] == "Ada lives in Lyon."
-    assert done["summary_lost"] is False
+    assert done["summary"] == SUMMARY
+    assert "summary_lost" not in done
 
 
 async def test_a_summary_written_with_inline_thinking_keeps_only_its_answer():
     """A model that thinks in its content even at effort "none": the stored
     summary and the marker carry the answer part alone."""
-    summary = _ProbeSummaryModel(
-        messages=iter([]), script=["<think>Let me see.</think>Ada lives in Lyon."]
-    )
+    summary = _ProbeSummaryModel(messages=iter([]), script=[f"<think>Let me see.</think>{SUMMARY}"])
     mw = _middleware(summary, window=10_000)
 
     after = _after(
         await mw.abefore_model({"messages": _compacting_state()}, _runtime(summary.written))
     )
 
-    assert (
-        after[0].content == "Here is a summary of the conversation to date:\n\nAda lives in Lyon."
-    )
-    assert summary.written[-1]["summary"] == "Ada lives in Lyon."
+    assert after[0].content == f"Here is a summary of the conversation to date:\n\n{SUMMARY}"
+    assert summary.written[-1]["summary"] == SUMMARY
 
 
 async def test_a_summary_that_only_thinks_is_a_failure_and_is_retried():
-    summary = _ProbeSummaryModel(messages=iter([]), script=["<think>It never closes", "Recovered."])
+    summary = _ProbeSummaryModel(messages=iter([]), script=["<think>It never closes", SUMMARY])
     mw = _middleware(summary, window=10_000)
 
     after = _after(
         await mw.abefore_model({"messages": _compacting_state()}, _runtime(summary.written))
     )
 
-    assert after[0].content.endswith("Recovered.")
+    assert after[0].content.endswith(SUMMARY)
     assert "It never closes" not in after[0].content
-    assert summary.written[-1]["summary"] == "Recovered."
+    assert summary.written[-1]["summary"] == SUMMARY
 
 
-async def test_a_lost_summary_sends_the_carried_summary_without_the_closing_sentence():
-    summary = _ProbeSummaryModel(messages=iter([]), script=[_overflow_400(), _overflow_400()])
-    mw = _middleware(summary, window=10_000)
-    state = [_previous_summary_message()] + _compacting_state()[1:]
+async def test_a_summary_that_cannot_be_written_announces_start_and_no_done():
+    """No usable summary: the history is kept, so no separator says otherwise."""
+    summary = _ProbeSummaryModel(messages=iter([]), script=["Bonjour.", "Bonjour."])
+    mw = _middleware(summary, window=20_000)
 
-    await mw.abefore_model({"messages": state}, _runtime(summary.written))
+    result = await mw.abefore_model({"messages": _compacting_state()}, _runtime(summary.written))
 
-    done = summary.written[-1]
-    assert done["summary_lost"] is True
-    assert done["summary"] == _PREVIOUS
-
-
-async def test_a_lost_summary_without_a_previous_one_sends_no_text():
-    summary = _ProbeSummaryModel(messages=iter([]), script=[_overflow_400(), _overflow_400()])
-    mw = _middleware(summary, window=10_000)
-
-    await mw.abefore_model({"messages": _compacting_state()}, _runtime(summary.written))
-
-    done = summary.written[-1]
-    assert done["summary_lost"] is True
-    assert done["summary"] == ""
+    assert "messages" not in result
+    assert [e["phase"] for e in summary.written] == ["start"]
 
 
 async def test_two_compactions_on_one_middleware_announce_twice_each_with_its_own_facts():
-    summary = _ProbeSummaryModel(messages=iter([]), script=["First.", "Second."])
+    summary = _ProbeSummaryModel(
+        messages=iter([]), script=[f"First. {SUMMARY}", f"Second. {SUMMARY}"]
+    )
     mw = _middleware(summary, window=10_000)
     runtime = _runtime(summary.written)
 
@@ -226,13 +211,13 @@ async def test_two_compactions_on_one_middleware_announce_twice_each_with_its_ow
 
     assert [e["phase"] for e in summary.written] == ["start", "done", "start", "done"]
     assert [e["summary"] for e in summary.written if e["phase"] == "done"] == [
-        "First.",
-        "Second.",
+        f"First. {SUMMARY}",
+        f"Second. {SUMMARY}",
     ]
 
 
 async def test_a_failing_stream_writer_never_fails_the_turn_and_warns_once(caplog):
-    summary = _ScriptedSummaryModel(messages=iter([]), script=["The summary."])
+    summary = _ScriptedSummaryModel(messages=iter([]), script=[SUMMARY])
     mw = _middleware(summary, window=10_000)
 
     def broken(_event):
@@ -245,7 +230,7 @@ async def test_a_failing_stream_writer_never_fails_the_turn_and_warns_once(caplo
             )
         )
 
-    assert "The summary." in after[0].content
+    assert SUMMARY in after[0].content
     warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert len(warnings) == 1
     assert warnings[0].getMessage().isascii()
@@ -319,7 +304,7 @@ async def test_the_compact_asap_clamp_says_memory():
 
 async def test_a_compacting_turn_streams_start_done_then_the_answer(monkeypatch):
     _WindowEngine.window = 10_000
-    summary = _ScriptedSummaryModel(messages=iter([]), script=["The new summary."])
+    summary = _ScriptedSummaryModel(messages=iter([]), script=[SUMMARY])
     _models(monkeypatch, ["the answer"], summary)
     cp = InMemorySaver()
     await _seed(cp, "e1", _seed_messages())
@@ -329,8 +314,8 @@ async def test_a_compacting_turn_streams_start_done_then_the_answer(monkeypatch)
     assert _kinds(events) == [("compaction", "start"), ("compaction", "done"), ("answer", None)]
     done = events[1]
     assert done["reason"] == "length"
-    assert done["summary"] == "The new summary."
-    assert done["summary_lost"] is False
+    assert done["summary"] == SUMMARY
+    assert "summary_lost" not in done
     assert done["summarized"] > 0
     # The summarizer's own tokens never reach the answer.
     assert "".join(e["text"] for e in events if e["t"] == "answer") == "the answer"
@@ -493,6 +478,5 @@ def test_a_long_summary_fits_the_trace_cap():
         "summarized": 999,
         "reason": "memory",
         "summary": _text(cap, "é"),
-        "summary_lost": False,
     }
     assert len(json.dumps(event)) < TRACE_MAX_BYTES

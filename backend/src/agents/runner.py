@@ -60,6 +60,7 @@ import contextlib
 import functools
 import json
 import logging
+import math
 import time
 from dataclasses import dataclass
 from functools import lru_cache
@@ -86,7 +87,7 @@ from src.agents.token_accounting import (
     STALE_TOOL_RESULT_MARKERS,
     SUMMARY_SOURCE_MARKER,
     RequestOverhead,
-    fresh_weight,
+    counter_weight,
     last_human_index,
     message_weights,
     overhead_tokens,
@@ -284,10 +285,33 @@ _TRIM_FALLBACK_MESSAGE_COUNT = 15
 # The summary message LangChain inserts (``_build_new_messages``, pinned in
 # tests/test_compaction_keep.py) and the marker it carries.
 SUMMARY_MESSAGE_PREFIX = "Here is a summary of the conversation to date:\n\n"
-# The placeholder a compaction writes when the summary could not be produced
-# (see ``_summary_placeholder``). ASCII, addressed to the model.
-SUMMARY_LATER_LOST = "Later messages of this conversation could not be summarized."
-SUMMARY_EARLIER_LOST = "Earlier messages of this conversation could not be summarized."
+# When a summary is too short to stand for what the summarizer read
+# (``summary_rejection``), in the counter's tokens of their text: below
+# ``max(SUMMARY_MIN_TOKENS, min(SUMMARY_MIN_RATIO * read,
+# SUMMARY_SHORT_CEILING_TOKENS))``. Measured on the summaries stored in local
+# conversation backups: healthy ones run 388 to 1,060 characters, at least 0.6
+# of what they read on small pools; the degenerate ones are 8 to 41 characters
+# ("Bonjour.", "None of the above messages were provided.", 0.001 to 0.038 of
+# what they read). The floor (about 13 Latin characters, 4 Chinese ones) lets
+# the short summary of a one- or two-message pool through; the ceiling (about
+# 80 Latin characters, twice the longest degenerate one) keeps a large pool
+# from asking more than a short summary can carry.
+SUMMARY_MIN_TOKENS = 4
+SUMMARY_MIN_RATIO = 0.05
+SUMMARY_SHORT_CEILING_TOKENS = 24
+# How similar to the last question or answer it read a summary may be before
+# it counts as a copy of it (difflib ratio of the normalized texts).
+SUMMARY_COPY_SIMILARITY = 0.9
+# After an automatic compaction whose summary failed or was rejected, the next
+# ``COMPACTION_PAUSE_MESSAGES`` user messages run without one: a failing
+# summary is not retried on every turn (one model call each, reading the whole
+# pool), and by the retry the pool has grown by four exchanges, so the
+# summarizer reads a different input. The pause lives in the thread state,
+# under ``COMPACTION_PAUSE_KEY``: the id of the user message whose compaction
+# failed. A history rewritten since (``/compact``) no longer holds it, which
+# ends the pause.
+COMPACTION_PAUSE_MESSAGES = 4
+COMPACTION_PAUSE_KEY = "erudi_compaction_paused_at"
 
 
 def summarization_triggers(working_window: Optional[int], pct: int) -> list:
@@ -469,12 +493,6 @@ def _is_marker(message: Any) -> bool:
     return getattr(message, "type", None) == "tool" and getattr(
         message, "content", None
     ) == STALE_TOOL_RESULT_MARKERS.get(getattr(message, "name", None))
-
-
-def counter_weight(message: Any) -> float:
-    """The counter's weight for a message nothing was frozen for (rule 2 with
-    the counter's settings: CJK one token per character, floor 1.2)."""
-    return fresh_weight(message, dense=COUNTER_DENSE_TOKENS, weight_floor=COUNTER_WEIGHT_FLOOR)
 
 
 def frozen_weights(messages: Any) -> tuple[dict, Optional[float]]:
@@ -892,19 +910,6 @@ def _is_previous_summary(message: Any) -> bool:
     return kwargs.get("lc_source") == SUMMARY_SOURCE_MARKER
 
 
-def _previous_summary_text(previous: Any) -> str:
-    """The previous summary's own text: LangChain's prefix and a closing
-    placeholder sentence stripped, so neither is ever repeated."""
-    if previous is None:
-        return ""
-    text = getattr(previous, "text", None)
-    if not isinstance(text, str):
-        text = str(getattr(previous, "content", "") or "")
-    if text.startswith(SUMMARY_MESSAGE_PREFIX):
-        text = text[len(SUMMARY_MESSAGE_PREFIX) :]
-    return _without_lost_tail(text)
-
-
 def _answer_part(text: str) -> str:
     """``text`` without its inline ``<think>`` blocks: a model that thinks in
     its content even at effort "none" must not store its reasoning as the
@@ -914,36 +919,99 @@ def _answer_part(text: str) -> str:
     return "".join(e["text"] for e in events if e["t"] == "answer").strip()
 
 
-def _without_lost_tail(text: str) -> str:
-    """``text`` without a closing placeholder sentence (``SUMMARY_*_LOST``)."""
-    text = text.strip()
-    for tail in (SUMMARY_LATER_LOST, SUMMARY_EARLIER_LOST):
-        if text.endswith(tail):
-            text = text[: -len(tail)].rstrip()
+def content_tokens(text: str) -> int:
+    """The counter's tokens of ``text`` alone (its weight times chars/4, no
+    per-message overhead): what a summary and what it read are compared in."""
+    from langchain_core.messages import HumanMessage
+
+    if not text:
+        return 0
+    return math.ceil(counter_weight(HumanMessage(text)) * len(text) / _APPROX_CHARS_PER_TOKEN)
+
+
+def _message_body(message: Any) -> str:
+    """A message's text, a previous summary's without LangChain's prefix."""
+    text = getattr(message, "text", None)
+    if not isinstance(text, str):
+        text = str(getattr(message, "content", "") or "")
+    if _is_previous_summary(message) and text.startswith(SUMMARY_MESSAGE_PREFIX):
+        text = text[len(SUMMARY_MESSAGE_PREFIX) :]
     return text
 
 
-def _summary_placeholder(previous: Any, max_tokens: Optional[int] = None) -> str:
-    """What a compaction writes when no summary could be produced: the
-    previous summary, carried over, plus one honest sentence. Bounded loss --
-    the earlier memory survives -- and no compaction dead-lock.
+def _normalized(text: str) -> str:
+    """``text`` compared as a copy: case folded, whitespace collapsed, the
+    punctuation and spaces at both ends dropped."""
+    return " ".join(text.casefold().split()).strip(" .,;:!?¡¿。，！？…\"'«»")
 
-    ``max_tokens`` (``summary_cap(W)`` when the window is known) caps the
-    carried text in REAL tokens -- ``cap * 4 / w`` characters, ``w`` the
-    counter's weight of that text, head kept: a summary written under a larger
-    window would otherwise keep the state above a smaller window's trigger
-    forever, and a CJK summary capped at ``cap * 4`` characters would carry
-    several times ``cap`` real tokens while the keep reserves ``cap``.
+
+def summary_rejection(summary: str, read: list) -> Optional[str]:
+    """Why ``summary`` cannot stand for the messages the summarizer ``read``
+    (the previous summary and the trimmed pool), or ``None``.
+
+    * ``"too_short"``: fewer tokens than ``max(SUMMARY_MIN_TOKENS,
+      min(SUMMARY_MIN_RATIO * read, SUMMARY_SHORT_CEILING_TOKENS))``, both
+      counted with the compaction counter (``content_tokens``), so a Chinese
+      summary is not held to a Latin length;
+    * ``"copy"``: with more than one message read, the summary is the last
+      question or the last answer it read, normalized (``_normalized``), or
+      within ``SUMMARY_COPY_SIMILARITY`` of it. A single message has nothing a
+      copy of it drops.
     """
-    text = _previous_summary_text(previous)
-    if text and max_tokens is not None:
-        from langchain_core.messages import HumanMessage
+    import difflib
 
-        weight = counter_weight(HumanMessage(text))
-        text = text[: int(max_tokens * _APPROX_CHARS_PER_TOKEN / weight)].rstrip()
-    if text:
-        return f"{text}\n\n{SUMMARY_LATER_LOST}"
-    return SUMMARY_EARLIER_LOST
+    bodies = [_message_body(m) for m in read]
+    read_tokens = sum(content_tokens(body) for body in bodies)
+    floor = max(
+        SUMMARY_MIN_TOKENS,
+        min(SUMMARY_MIN_RATIO * read_tokens, SUMMARY_SHORT_CEILING_TOKENS),
+    )
+    if content_tokens(summary.strip()) < floor:
+        return "too_short"
+    if len(read) > 1:
+        wanted = _normalized(summary)
+        last_of = {}
+        for message, body in zip(read, bodies):
+            kind = getattr(message, "type", None)
+            if kind in ("human", "ai") and not _is_previous_summary(message) and body.strip():
+                last_of[kind] = _normalized(body)
+        for last in last_of.values():
+            if wanted == last or (
+                difflib.SequenceMatcher(None, wanted, last).quick_ratio() >= SUMMARY_COPY_SIMILARITY
+                and difflib.SequenceMatcher(None, wanted, last).ratio() >= SUMMARY_COPY_SIMILARITY
+            ):
+                return "copy"
+    return None
+
+
+def _refusal_figures(
+    request_tokens: int, allocated_window: Optional[int]
+) -> Optional[tuple[int, int]]:
+    """``(needed, allocated)`` when a request of ``request_tokens`` (``O`` +
+    the messages, in the counter's tokens) leaves the allocated window less
+    than the output budget's floor -- ``needed`` is the request plus that
+    floor --, else ``None``. The allocated window is the limit the engine
+    refuses on (the memory bound itself when memory bounds the child); the
+    working window is not one: the memory ceiling it folds in is an estimate,
+    clamped to 1 token when the model alone fills the budget (compact as early
+    as possible, never refuse everything). Nothing without a known
+    allocation."""
+    if not _known_window(allocated_window):
+        return None
+    needed = request_tokens + OUTPUT_BUDGET_FLOOR_TOKENS
+    return (needed, allocated_window) if needed > allocated_window else None
+
+
+class TurnRefused(Exception):
+    """A turn the compaction middleware refuses before any model call: its
+    curated ``kind`` and numbers, and the thread-state values the refusal
+    must still write (the compaction pause), which a raised hook cannot."""
+
+    def __init__(self, kind: str, *, state_update: Optional[dict] = None, **params: int):
+        super().__init__(kind)
+        self.kind = kind
+        self.params = params
+        self.state_update = state_update or {}
 
 
 # The turn event a compaction becomes (#614). The middleware writes it on
@@ -1092,12 +1160,39 @@ def _is_rejection(exc: BaseException) -> bool:
     )
 
 
+def _pause_anchor(messages: list) -> Optional[str]:
+    """The id of the user message a failed compaction pauses from: the last
+    one (the question of the turn whose compaction failed)."""
+    last = last_human_index(messages)
+    return getattr(messages[last], "id", None) if last is not None else None
+
+
+def _compaction_paused(messages: list, paused_at: Optional[str]) -> bool:
+    """Whether automatic compaction is paused: ``paused_at`` (the
+    ``COMPACTION_PAUSE_KEY`` value) is still in the history and at most
+    ``COMPACTION_PAUSE_MESSAGES`` user messages came after it. A history that
+    no longer holds it (``/compact`` rewrote it) is not paused."""
+    if paused_at is None:
+        return False
+    for index, message in enumerate(messages):
+        if getattr(message, "id", None) == paused_at:
+            later = sum(
+                1
+                for m in messages[index + 1 :]
+                if getattr(m, "type", None) == "human" and not _is_previous_summary(m)
+            )
+            return later <= COMPACTION_PAUSE_MESSAGES
+    return False
+
+
 @lru_cache(maxsize=1)
 def _summarization_middleware_class():
     """The per-turn compaction middleware class, built lazily (LangChain is
     not imported at boot, #160) and cached."""
     from langchain.agents.middleware import SummarizationMiddleware
     from langchain_core.messages.utils import get_buffer_string, trim_messages
+
+    from src.agents.middleware import CompactionState
 
     class _Logged_Summarization_Middleware(SummarizationMiddleware):
         """The stock middleware, with what Erudi changes about compaction:
@@ -1118,8 +1213,14 @@ def _summarization_middleware_class():
           (``run_reset_shielded``): the old prefix is garbage once the
           history is rewritten;
         * the summarizer input always carries the previous summary, reads
-          past tool results as their markers, and a failed summary call never
-          erases memory (``_acreate_summary``);
+          past tool results as their markers, and a summary that fails or is
+          rejected (``summary_rejection``) never touches the history
+          (``_acreate_summary``);
+        * a new message that cannot fit the window on its own refuses the
+          turn before any summary call (``_refuse_a_message_too_long``), and
+          a failed automatic compaction pauses the next ones
+          (``COMPACTION_PAUSE_KEY``), letting the turn go ahead when the
+          request fits and refusing it otherwise (``TurnRefused``);
         * the trigger, the keep and the futility guard are sized at the
           conversation's ``compaction_threshold`` (#607);
         * the ONE aggregate log line the QA spec promises ("backend.log
@@ -1131,10 +1232,12 @@ def _summarization_middleware_class():
         * ``manual=True`` (``/compact``, ``AgentRunner.acompact``): the
           caller picks the cutoff and writes the rewrite itself
           (``asummarize_head``), and a summary that cannot be written raises
-          ``CompactionFailedException`` instead of degrading to a
-          placeholder -- the user asked for a summary, nothing changes
-          without one.
+          ``CompactionFailedException`` -- the user asked for a summary,
+          nothing changes without one.
         """
+
+        # The compaction pause rides the thread state (``CompactionState``).
+        state_schema = CompactionState
 
         # The turn's runtime, stored by ``abefore_model`` (one instance per
         # turn): its ``stream_writer`` is the channel the announcements take.
@@ -1217,15 +1320,93 @@ def _summarization_middleware_class():
             raise NotImplementedError("compaction runs through abefore_model only")
 
         async def abefore_model(self, state, runtime):
+            """LangChain's compaction, in this order: a new message too long
+            on its own refuses the turn; a paused compaction is skipped (the
+            turn goes ahead if the request fits, else is refused); the
+            trigger and the cutoff decide; a summary that fails or is
+            rejected keeps the history and starts a pause (the turn goes
+            ahead if the request fits, else is refused); otherwise the
+            history is rewritten, the prefix cache reset and ``done``
+            announced. Returns the state update, or ``None``."""
+            from langchain_core.messages import RemoveMessage
+            from langgraph.graph.message import REMOVE_ALL_MESSAGES
+
             self._runtime = runtime
             self._last_compaction = None
-            self._freeze(state["messages"])
-            # Non-None exactly when the history was rewritten.
-            result = await super().abefore_model(state, runtime)
-            if result is not None:
-                await reset_prefix_after_rewrite(self.engine)
-                self._announce_done()
-            return result
+            messages = state["messages"]
+            self._freeze(messages)
+            self._refuse_a_message_too_long(messages)
+            paused_at = state.get(COMPACTION_PAUSE_KEY)
+            paused = _compaction_paused(messages, paused_at)
+            # A pause that ran its course is cleared with whatever this call writes.
+            update = {COMPACTION_PAUSE_KEY: None} if paused_at is not None and not paused else {}
+            total = self._real_count(messages)
+            if paused:
+                self._refuse_unless_it_fits(total)
+                return None
+            if not self._should_summarize(messages, total):
+                return update or None
+            cutoff = self._determine_cutoff_index(messages)
+            if cutoff <= 0:
+                return update or None
+            messages_to_summarize, preserved = self._partition_messages(messages, cutoff)
+            summary = await self._acreate_summary(messages_to_summarize)
+            if summary is None:
+                pause = {COMPACTION_PAUSE_KEY: _pause_anchor(messages)}
+                logger.info(
+                    f"Automatic compaction paused for the next {COMPACTION_PAUSE_MESSAGES} "
+                    f"user messages: no usable summary, history kept "
+                    f"({len(messages_to_summarize)} message(s) not summarized)"
+                )
+                self._refuse_unless_it_fits(total, state_update=pause)
+                return pause
+            await reset_prefix_after_rewrite(self.engine)
+            self._announce_done()
+            return {
+                "messages": [
+                    RemoveMessage(id=REMOVE_ALL_MESSAGES),
+                    *self._build_new_messages(summary),
+                    *preserved,
+                ],
+                **update,
+            }
+
+        def _refuse_a_message_too_long(self, messages) -> None:
+            """Raise ``TurnRefused`` when the new message (the last user
+            message) does not fit the allocated window on its own, with the
+            request's overhead and the answer's floor (``_refusal_figures``):
+            no compaction can make room for it, so none runs. The memory kind
+            when that window is the child's memory bound. When the overhead
+            alone does not fit, the message is not what is too long: the
+            engine's own overflow says so."""
+            last = last_human_index(messages)
+            if last is None or _is_previous_summary(messages[last]):
+                return
+            if _refusal_figures(self._overhead, self.allocated_window) is not None:
+                return
+            alone = self._overhead + self._real_count([messages[last]])
+            figures = _refusal_figures(alone, self.allocated_window)
+            if figures is None:
+                return
+            needed, limit = figures
+            memory = _memory_bound_of(self.engine) == limit
+            kind = "message_too_long_memory" if memory else "message_too_long"
+            raise TurnRefused(kind, prompt_tokens=needed, context_tokens=limit)
+
+        def _refuse_unless_it_fits(self, total, *, state_update=None) -> None:
+            """Raise ``TurnRefused`` (``summary_failed``) when the whole
+            request -- ``O`` + ``total`` -- does not fit the allocated window
+            (``_refusal_figures``), no compaction having made room;
+            ``state_update`` is what the refusal still writes."""
+            figures = _refusal_figures(self._overhead + total, self.allocated_window)
+            if figures is not None:
+                needed, limit = figures
+                raise TurnRefused(
+                    "summary_failed",
+                    state_update=state_update,
+                    prompt_tokens=needed,
+                    context_tokens=limit,
+                )
 
         async def asummarize_head(self, messages, cutoff: int) -> tuple[list, dict]:
             """The manual compaction of ``messages`` at ``cutoff``
@@ -1286,10 +1467,12 @@ def _summarization_middleware_class():
             trimmed to the budget, and the previous summary is prepended
             back. A transient failure of the summary call is RAISED: the
             turn fails with the history intact and the next turn retries. A
-            deterministic one -- or a pool where no user turn fits the budget
-            because one answer alone exceeds it -- takes the size path: one
-            retry with oversized messages truncated (the budget halved after
-            a rejection), then a placeholder carrying the previous summary.
+            deterministic one, a summary ``summary_rejection`` turns down --
+            or a pool where no user turn fits the budget because one answer
+            alone exceeds it -- takes the size path: one retry with oversized
+            messages truncated (the budget halved after a failed attempt).
+            When that fails too: ``None`` (automatic: the caller keeps the
+            history and pauses) or ``CompactionFailedException`` (manual).
             One WARNING per failed attempt; an unexpected error is one ERROR
             with its traceback (``_attempt_failed``; in manual mode those
             records are DEBUG and the causes ride the raised
@@ -1333,12 +1516,7 @@ def _summarization_middleware_class():
             if summary is None and self.manual:
                 raise CompactionFailedException(trace="; ".join(self._attempt_failures))
             if summary is None:
-                cap = (
-                    summary_cap(self.working_window) if _known_window(self.working_window) else None
-                )
-                return self._compacted(
-                    messages_to_summarize, _summary_placeholder(previous, cap), lost=True
-                )
+                return None
             return self._compacted(messages_to_summarize, summary)
 
         def _trim_for_summary(self, messages, budget, *, start_on):
@@ -1408,6 +1586,17 @@ def _summarization_middleware_class():
                     cause=f"{attempt} attempt: no text",
                 )
                 return None
+            reason = summary_rejection(summary, messages)
+            if reason is not None:
+                self._attempt_failed(
+                    logging.WARNING,
+                    f"Compaction summary rejected ({attempt} attempt): {reason}, "
+                    f"summary_chars={len(summary)}, "
+                    f"read_chars={sum(len(_message_body(m)) for m in messages)}, "
+                    f"read_messages={len(messages)}",
+                    cause=f"{attempt} attempt: summary rejected ({reason})",
+                )
+                return None
             return summary
 
         def _attempt_failed(self, level, message, *, cause, exc_info=False) -> None:
@@ -1421,11 +1610,9 @@ def _summarization_middleware_class():
             else:
                 logger.log(level, message, exc_info=exc_info)
 
-        def _compacted(self, messages_to_summarize, summary, *, lost=False):
+        def _compacted(self, messages_to_summarize, summary):
             """Log the compaction (with the threshold it ran at) and record its
-            facts for ``done``. A lost summary is announced as what it
-            carries -- the previous summary, its closing placeholder sentence
-            stripped -- flagged as lost."""
+            facts for ``done``."""
             logger.info(
                 f"Conversation compacted: {len(messages_to_summarize)} message(s) "
                 f"summarized into {len(summary or '')} chars, "
@@ -1434,8 +1621,7 @@ def _summarization_middleware_class():
             )
             self._last_compaction = {
                 "summarized": summarized_message_count(messages_to_summarize),
-                "summary": _without_lost_tail(summary) if lost else summary,
-                "summary_lost": lost,
+                "summary": summary,
             }
             return summary
 
@@ -2444,6 +2630,29 @@ class AgentRunner:
                             f"reasoning_chars={reasoning_chars}, answer_chars={char_count}, "
                             f"finish_reason={finish_reason or 'unknown'}"
                         )
+                    except TurnRefused as refusal:
+                        # #690: the compaction middleware refused the turn
+                        # before any model call (a message too long on its
+                        # own, or a request that does not fit with its
+                        # summary failed or paused). The app degraded on its
+                        # own: one WARNING with the numbers, no traceback.
+                        logger.warning(
+                            f"Agent turn refused before generation: kind={refusal.kind}, "
+                            f"llm={getattr(llm, 'id', '?')} ({getattr(llm, 'name', '?')}), "
+                            f"thread_id={thread_id}, "
+                            f"prompt_tokens={refusal.params.get('prompt_tokens')}, "
+                            f"context_tokens={refusal.params.get('context_tokens')}"
+                        )
+                        if stateful:
+                            await self._repair_alternation(agent, run_config)
+                            if refusal.state_update:
+                                await self._write_compaction_state(
+                                    agent, run_config, refusal.state_update
+                                )
+                        for text in hop_text_buffer:
+                            yield _record({"t": "answer", "text": text})
+                        hop_text_buffer.clear()
+                        yield _record(curated_answer(refusal.kind, **refusal.params))
                     except GraphRecursionError:
                         # #277: the agent hit AGENT_RECURSION_LIMIT (a small model looping
                         # on the same tool call). Degrade gracefully instead of surfacing a
@@ -2711,7 +2920,7 @@ class AgentRunner:
         """Summarize the conversation's history now (``/compact``, #585).
 
         Returns the compaction's ``done`` event -- the automatic one's keys
-        (``reason``, ``summarized``, ``summary``, ``summary_lost``) plus
+        (``reason``, ``summarized``, ``summary``) plus
         ``manual: True`` -- or ``{"summarized": 0}`` when there is nothing
         to compact. ``store`` is the conversation's own store
         (``CompactionStore``).
@@ -3405,6 +3614,19 @@ class AgentRunner:
             # no better recovery than proceeding -- retrying here would block
             # the turn on a checkpointer that just failed.
             logger.exception("Failed to write the curated empty-answer turn into the thread state")
+
+    async def _write_compaction_state(self, agent, run_config, values: dict) -> None:
+        """Write the compaction's own state values (the pause) that a refused
+        turn's middleware could not return. A failure costs the pause only:
+        the next turn retries the compaction."""
+        try:
+            await agent.aupdate_state(run_config, values, as_node="model")
+        except Exception:
+            logger.warning(
+                "Recording the compaction pause in the thread state failed; "
+                "the next turn retries the compaction",
+                exc_info=True,
+            )
 
     async def _repair_alternation(self, agent, run_config) -> None:
         """Preserve role alternation in the checkpointer after a failed turn.
