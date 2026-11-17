@@ -9,6 +9,8 @@
 #   3. Run PyInstaller with backend-mac-silicon.spec  → backend/dist/backend/
 #   4. Copy backend bundle into frontend/             → frontend/backend/
 #   5. Run `npm run dist:mac` in frontend/            → electron-builder DMG + zip
+#   6. Unsigned build only: re-sign the app ad hoc as a whole, verify it, and
+#      repackage the DMG + zip from it (see BUILD.md, "Local unsigned build")
 #
 # Usage (from repo root):
 #   bash scripts/build/build-mac-silicon.sh
@@ -116,6 +118,30 @@ step "Building Electron app and DMG (electron-builder)..."
 cd "$FRONTEND_ROOT"
 npm run dist:mac || fail "npm run dist:mac failed."
 cd "$REPO_ROOT"
+
+# ── Unsigned build: sign the whole app ad hoc ──────────────────────────────────
+# Without a signing identity electron-builder leaves an ad hoc signature on the
+# main executable only; `codesign --verify --deep --strict` rejects it and
+# macOS 26 kills the app at launch (#690). The check script re-signs an app that
+# carries no signing authority as a whole and verifies it; a signed app is only
+# verified, never re-signed. The DMG and zip electron-builder already wrote hold
+# the broken copy, so they are packed again from the re-signed app (--prepackaged
+# skips electron-builder's own pack and signing steps).
+APP_PATH="$(find "$FRONTEND_ROOT/dist" -maxdepth 2 -name "Erudi.app" -type d | head -1)"
+[ -n "$APP_PATH" ] || fail "Erudi.app not found under $FRONTEND_ROOT/dist."
+step "Verifying the app signature..."
+SIGNATURE_RESULT="$(bash "$REPO_ROOT/scripts/ci/check_mac_app_signature.sh" "$APP_PATH" | tail -1)" \
+    || fail "The app signature does not verify (codesign --verify --deep --strict). See output above."
+if [ "$SIGNATURE_RESULT" = "adhoc-resigned" ]; then
+    ok "App re-signed ad hoc as a whole and verified"
+    step "Repackaging the DMG and zip from the re-signed app..."
+    cd "$FRONTEND_ROOT"
+    npx electron-builder --mac --config electron-builder.yml --prepackaged "$APP_PATH" --publish never \
+        || fail "Repackaging the re-signed app failed."
+    cd "$REPO_ROOT"
+else
+    ok "App signature verified"
+fi
 
 # ── Report output ──────────────────────────────────────────────────────────────
 echo ""

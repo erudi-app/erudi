@@ -99,6 +99,18 @@ jobs:
           npm ci
           npm run ${{ matrix.dist_script }} -- --publish never
 
+      # An unsigned build carries an ad hoc signature on the main executable
+      # only, which `codesign --verify --deep --strict` rejects and macOS 26
+      # refuses to launch (#690). The script re-signs the app ad hoc as a whole,
+      # as scripts/build/build-mac-silicon.sh does, and fails when the bundle
+      # still does not verify.
+      - name: Check the macOS app signature
+        if: runner.os == 'macOS'
+        run: |
+          APP=$(find frontend/dist -maxdepth 2 -name "Erudi.app" -type d | head -1)
+          test -n "$APP"
+          bash scripts/ci/check_mac_app_signature.sh "$APP"
+
       - name: Locate the bundled backend executable
         id: locate
         run: |

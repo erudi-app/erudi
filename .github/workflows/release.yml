@@ -366,3 +366,12 @@ jobs:
         # `-- ${{ matrix.eb_extra_args }}` forwards per-leg overrides to
         # electron-builder (empty for mac/win-cpu; channel + artifactName for win-cuda).
         run: npm run ${{ matrix.release_script }} -- ${{ matrix.eb_extra_args }}
+
+      # electron-builder signed and notarized the app: it must verify as a whole.
+      # Verify only, never a re-sign.
+      - name: Verify the macOS app signature
+        if: matrix.variant == 'mac-arm'
+        run: |
+          APP=$(find frontend/dist -maxdepth 2 -name "Erudi.app" -type d | head -1)
+          test -n "$APP"
+          bash scripts/ci/check_mac_app_signature.sh --verify-only "$APP"

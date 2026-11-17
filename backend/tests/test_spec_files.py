@@ -283,3 +283,54 @@ def test_release_and_smoke_check_the_frozen_bundle_ships_the_docx_parts():
             i for i, s in enumerate(steps) if "pyinstaller backend/" in str(s.get("run", ""))
         )
         assert freeze < names.index(step["name"]), workflow
+
+
+@pytest.mark.unit
+def test_mac_app_signature_is_checked_after_the_build_in_smoke_and_release():
+    # An unsigned build only carries an ad hoc signature on the main executable,
+    # which `codesign --verify --deep --strict` rejects and macOS 26 refuses to
+    # launch (#690). The smoke leg re-signs ad hoc as a whole and verifies; the
+    # release verifies the signed app and never re-signs.
+    import yaml
+
+    root = _BACKEND.parent
+    script = "scripts/ci/check_mac_app_signature.sh"
+    smoke = yaml.safe_load(
+        (root / ".github/workflows/app-build-smoke.yml").read_text(encoding="utf-8")
+    )
+    steps = next(iter(smoke["jobs"].values()))["steps"]
+    names = [s.get("name") for s in steps]
+    step = _step(steps, "Check the macOS app signature")
+    assert step["if"] == "runner.os == 'macOS'"
+    assert script in step["run"]
+    assert "--verify-only" not in step["run"]
+    build = names.index("Build packaged app (unsigned, no publish)")
+    assert build < names.index(step["name"])
+
+    release = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    steps = release["jobs"]["build"]["steps"]
+    names = [s.get("name") for s in steps]
+    step = _step(steps, "Verify the macOS app signature")
+    assert "mac-arm" in step["if"]
+    assert f"{script} --verify-only" in step["run"]
+    assert names.index("Build, sign and publish (electron-builder)") < names.index(step["name"])
+
+
+@pytest.mark.unit
+def test_mac_signature_script_only_resigns_an_app_without_signing_authority():
+    root = _BACKEND.parent
+    text = (root / "scripts/ci/check_mac_app_signature.sh").read_text(encoding="utf-8")
+    check = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    assert "codesign --force --deep --sign -" in check
+    assert "codesign --verify --deep --strict" in check
+    # The re-sign sits behind the "no Authority" test and the --verify-only flag.
+    assert check.index("--verify-only") < check.index("^Authority=")
+    assert check.index("^Authority=") < check.index("codesign --force --deep --sign -")
+    assert check.index("codesign --force --deep --sign -") < check.index(
+        "codesign --verify --deep --strict"
+    )
+
+    build = (root / "scripts/build/build-mac-silicon.sh").read_text(encoding="utf-8")
+    assert "scripts/ci/check_mac_app_signature.sh" in build
+    assert build.index("npm run dist:mac") < build.index("check_mac_app_signature.sh")
+    assert "--prepackaged" in build

@@ -123,6 +123,25 @@ bash scripts/build/build-mac-silicon.sh
 runs, and the script warns that the app is unsigned and macOS may block it on
 first launch.
 
+#### Local unsigned build
+
+Without a signing identity electron-builder leaves an ad hoc signature on the
+main executable only. `codesign --verify --deep --strict` rejects that app
+("code has no resources but signature indicates they must be present") and
+macOS 26 kills it at launch (exit 137). After electron-builder, the script
+therefore runs `scripts/ci/check_mac_app_signature.sh` on `Erudi.app`: an app
+that carries no signing authority is re-signed ad hoc as a whole
+(`codesign --force --deep --sign -`), then `codesign --verify --deep --strict`
+must pass or the script fails. The DMG and zip electron-builder had already
+written hold the unfixed copy, so the script packs them again from the re-signed
+app (`electron-builder --prepackaged`, which skips its own pack and signing
+steps). An app signed with an identity is only verified, never re-signed.
+
+The macOS leg of `app-build-smoke.yml` builds unsigned and runs the same script
+after electron-builder, so a regression fails the pull request. `release.yml`
+runs it with `--verify-only` after the signed build: a signed and notarized app
+must verify as it is, and nothing re-signs it.
+
 ### Windows (CUDA)
 
 ```powershell
