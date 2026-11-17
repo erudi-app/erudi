@@ -601,7 +601,7 @@ the card only appears where the setting does something.*
 - [ ] When the backend dies **after** load, then API calls fail per-screen with a visible error.
 - [ ] When the interface throws an **uncaught error** while rendering, then the window shows a recoverable screen (title, explanation, **Reload**, the report block) instead of going white, the error is in `erudi-backend.log` under `renderer:uncaught`, and it is listed on the Diagnostics page.
 - [ ] When something fails **repeatedly** — a poll that keeps rejecting, a render loop — then the log gains **one** entry with a repeat count, not thousands of identical lines, and the app stays responsive.
-- [ ] *(not built yet: v1.3.0, #620 — record as not applicable)* When the app boots, then backend.log at boot shows the server settings passed at start (shared_buffers, max_connections computed from the pools), and an existing data folder from a **previous version** still boots and migrates without loss.
+- [ ] When the app boots, then backend.log at boot shows the server settings passed at start (`Starting the embedded PostgreSQL with server settings: max_connections=..., shared_buffers=32MB, ...`), and an existing data folder from a **previous version** still boots and migrates without loss.
 
 **Graphics card Erudi cannot use**
 

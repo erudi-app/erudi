@@ -458,6 +458,63 @@ shares the cluster, so its backend's entry is kept and the cluster is left runni
 Both steps run under `pgserver`'s own inter-process lock. Without them the postmaster would
 die with the backend at every quit, and every start would run a crash recovery.
 
+### Server settings
+
+The cluster runs with settings sized for one user, not with the server defaults `initdb`
+writes. They live in `src/launcher/postgres_settings.py` and travel on the command line:
+`postgres_runtime.py` wraps pgserver's `pg_ctl`, and every `pg_ctl start` it runs carries
+one `-o "-c name=value"` per setting. A first boot, a normal start, the start a crash
+recovery follows and a DB watchdog restart therefore all run with them, and no
+configuration file is written (`postgresql.conf` keeps what `initdb` wrote). A start that
+joins a postmaster already running — one an older version started, or a crash recovery
+that finished in the background — does not restart it: that postmaster keeps its
+settings until its next start, and `backend.log` says so in one `INFO` line naming each
+difference. Every start `backend.log` records begins with
+`Starting the embedded PostgreSQL with server settings: ...`.
+
+| Setting | Value | Why |
+|---|---|---|
+| `max_connections` | computed | The sum of every connection the backend can hold at once — the business SQLAlchemy pool and its overflow, the Knowledge Base `PGEngine` pool and its overflow, the checkpointer, the migration engine, `pg_dump`, the direct `psycopg.connect` calls — plus a margin of 5 for a `psql` and a watchdog restart. Both pools are created from the same constants, so a pool and the limit cannot drift apart. |
+| `shared_buffers` | `32MB` | See the measurements below: same search latency as 128 MB on a 15,000-chunk Knowledge Base, 16 MB is slower there. |
+| `wal_level` | `minimal` | Nothing reads this cluster's WAL: no replica, no point-in-time recovery; the only backup is `pg_dump`, a logical dump. Index builds and tables loaded in the transaction that created them skip the WAL. |
+| `max_wal_senders` | `0` | Required by `wal_level = minimal`, and no WAL sender slot is reserved. |
+| `max_logical_replication_workers` | `0` | No subscription runs here; without workers the logical replication launcher is not started, one process fewer. |
+| `autovacuum_max_workers` | `1` | One writer and a handful of tables: one vacuum at a time is enough, and a burst after an ingestion starts one process instead of three. |
+| `min_wal_size` / `max_wal_size` | `32MB` / `256MB` | WAL kept on disk between checkpoints; after a large ingestion the folder settles lower (below). |
+
+`work_mem`, `maintenance_work_mem` (what an HNSW build uses) and `effective_cache_size`
+keep their defaults: nothing measured here says they cost anything, and
+`maintenance_work_mem` would slow ingestion. The bundled server has no JIT
+(`pg_jit_available()` is false), so `jit` changes nothing.
+
+Measured on an Apple Silicon Mac, three runs per value, each on a freshly started
+postmaster, 20 Knowledge Base questions asked three times (database side of the hybrid
+search: the HNSW + full-text query and the similarity read, without the query
+embedding):
+
+| | Server defaults | Erudi's settings |
+|---|---|---|
+| Shared memory segment (`shared_memory_size`) | 143 MB | 38 MB |
+| Processes at idle (postmaster, helpers, 2 clients) | 7 | 6 |
+| Footprint after boot, shared memory counted once (`footprint`) | 27 MB | 18 MB |
+| Footprint after the searches, 3,774 chunks | 39 MB | 30 MB |
+| Footprint after the searches, 15,096 chunks | 61 MB | 49 MB |
+| `pg_wal` after ingesting 15,096 chunks and 40 checkpoints | 80 MB | 64 MB |
+
+| `shared_buffers` | 3,774 chunks, median | 15,096 chunks, median (series 1 / series 2) | 15,096 chunks, first query |
+|---|---|---|---|
+| 128 MB | 4.9 ms | 12.9 / 10.5 ms | 24-35 ms |
+| 64 MB | 5.4 ms | 13.4 ms | 21 ms |
+| 32 MB | 4.9 ms | 13.2 / 11.6 ms | 34-48 ms |
+| 16 MB | 4.9 ms | 12.4 / 15.1 ms | 48-71 ms |
+
+The Knowledge Base table and its indexes are read through the operating system's file
+cache as well, which the system can reclaim, so a smaller `shared_buffers` costs little
+until the hot part of the HNSW index no longer fits; on the larger Knowledge Base
+16 MB crossed that line in one of two series. The WAL an ingestion writes is the same
+under both levels (17.9 MB against 18.4 MB for 3,774 chunks): rows added to an existing
+table are logged either way.
+
 One database, three tenants:
 
 | Tenant | Location | Owner |
