@@ -33,7 +33,11 @@ six behaviours, each on the narrowest hook that expresses it:
    its HTTP response at once, and a call that did not end normally then calls
    ``abandon_hook`` -- bound by the factory to the engine handle the client was
    built against -- so the MLX engine sends a barrier before its next prefix
-   cache reset (``src.engines.mlx_engine``).
+   cache reset (``src.engines.mlx_engine``). A call that ends normally (a
+   preflight retry that completes included) calls ``complete_hook`` instead,
+   with the time it started: the engine then lifts a flag raised before that
+   start, since the child, running one sequence at a time, ran the cancelled
+   request first.
 6. **The request stamp**, also in ``_astream``: every client asks for usage
    (``stream_usage=True``), and the chunk carrying it is stamped with the
    estimate of the request this call sent (``erudi_request_est``), whether it
@@ -103,6 +107,7 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
+import time
 from functools import lru_cache
 from typing import Any, AsyncIterator, Callable, Iterable, Optional
 
@@ -515,15 +520,25 @@ def erudi_chat_openai_class():
         preflight_retry: bool = True
 
         # Called when a model call's stream did not end normally (closed by
-        # its consumer, cancelled, timed out, failed -- or rejected by the
-        # preflight and retried, which costs one barrier and is accepted for
-        # simplicity), AFTER the inner HTTP stream is closed. The factory binds
+        # its consumer, cancelled, timed out, failed), AFTER the inner HTTP
+        # stream is closed. A call whose preflight rejection was retried and
+        # completed ended normally: the rejection came before any prefill, so
+        # nothing was cancelled on the child. The factory binds
         # it to the engine handle captured at build time
         # (``engine.note_stream_abandoned(handle)``), so a finalizer that runs
         # after a model swap still flags the child the stream ran against.
         # The MLX engine then sends a barrier request before its next prefix
         # cache reset (``src.engines.mlx_engine``). ``None``: nothing to tell.
         abandon_hook: Optional[Callable[[], None]] = Field(default=None, exclude=True)
+
+        # Called when a model call's stream ended normally, with the
+        # ``time.monotonic()`` taken before its request was sent. Bound like
+        # ``abandon_hook`` (``engine.note_stream_completed(handle, started)``):
+        # the MLX engine lifts the handle's abandoned flag when it was raised
+        # before that start -- the child runs one sequence at a time, so a
+        # request sent after the cancelled one and complete ran after it, the
+        # proof a barrier would give. ``None``: nothing to tell.
+        complete_hook: Optional[Callable[[float], None]] = Field(default=None, exclude=True)
 
         # Called once per model call with the server-reported usage
         # ``(input_tokens, output_tokens, cached_tokens, has_images)``. The
@@ -581,6 +596,17 @@ def erudi_chat_openai_class():
                 # The runner flags the same handle again when its turn ends
                 # abnormally; this record says the client-level flag was lost.
                 logger.warning("Flagging an abandoned model stream failed", exc_info=True)
+
+        def _notify_completed(self, started_at: float) -> None:
+            hook = self.complete_hook
+            if hook is None:
+                return
+            try:
+                hook(started_at)
+            except Exception:
+                # The answer is complete: losing this costs one barrier before
+                # the next prefix-cache reset, never the call.
+                logger.warning("Noting a completed model stream failed", exc_info=True)
 
         def _budgeted_stream(self, messages, estimated, *args, **kwargs):
             """One attempt at the model call, under both watchdog budgets."""
@@ -678,6 +704,7 @@ def erudi_chat_openai_class():
             usage_seen = False
             try:
                 yielded = 0
+                started_at = time.monotonic()
                 try:
                     async with contextlib.aclosing(
                         self._budgeted_stream(messages, estimated, *args, **kwargs)
@@ -688,6 +715,7 @@ def erudi_chat_openai_class():
                                 usage_seen = self._stamp_usage_chunk(chunk, stamp)
                             yield chunk
                     ended_normally = True
+                    self._notify_completed(started_at)
                     return
                 except Exception as exc:
                     # The budget was sized from an estimate; mlx_vlm.server
@@ -721,6 +749,7 @@ def erudi_chat_openai_class():
                     )
 
                 kwargs["max_tokens"] = retry_budget
+                started_at = time.monotonic()
                 # A FRESH watchdog clock on purpose: the rejection came from
                 # the preflight, before any prefill, so the first attempt
                 # spent essentially none of its budget. The retry is the
@@ -735,6 +764,8 @@ def erudi_chat_openai_class():
                         if not usage_seen:
                             usage_seen = self._stamp_usage_chunk(chunk, stamp)
                         yield chunk
+                ended_normally = True
+                self._notify_completed(started_at)
             finally:
                 if not ended_normally:
                     self._notify_abandoned()

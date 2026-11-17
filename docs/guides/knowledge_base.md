@@ -347,6 +347,10 @@ Deleting the **base** model of an assistant is guarded: without `?orphan_depende
 - The adaptive cut runs on **dense cosine similarities**, never on RRF scores.
 - `langchain_text_splitters` is imported in function scope only: its package `__init__` eagerly
   imports `sentence_transformers`, which would tax every backend start.
+- `pypdf`, `python-docx` (with `lxml`) and `openpyxl` are imported in function scope only, inside
+  the extractor that needs them: the backend loads none of them at boot, and the first PDF, DOCX or
+  XLSX read (an ingestion or a file attached to a question) pays the import. The PyInstaller specs
+  pin them as hidden imports as a precaution, like the other function-scope imports.
 - Related pages: [LLMs](llms.md), [Conversations](conversations.md),
   [API reference](../reference/knowledge_base.md), and the retrieval-quality evaluation notes in
   [`docs/dev/rag-quality-eval.md`](../dev/rag-quality-eval.md).

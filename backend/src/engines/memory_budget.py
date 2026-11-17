@@ -26,11 +26,17 @@ The prediction above base for a conversation of N tokens is
 with named priors measured on one M4 16 GB (cold prefills, three models up to
 4B): ``c0`` (the marginal cost in KV units: the KV cache, its prefix-cache
 copy, MLX's buffer cache), ``t0`` (the bounded prefill transient) and ``m``
-(margin over the rep-to-rep noise). They are PROVISIONAL: a measurement
-campaign confirms or replaces them before release. Nothing is learned at
-runtime; every turn's real peak is recorded next to its prediction
+(margin over the rep-to-rep noise). They were fitted with MLX's default
+buffer cache and are recorded as is for the cache limit the child runs with
+(0), where they are conservative by about 2x (median measured/predicted 0.48
+on the clean cache-limit-0 points). Nothing is learned at runtime; every
+turn's real peak is recorded next to its prediction
 (``src.engines.memory_observations``) and a peak above the prediction is one
-WARNING. Requests that carry images are outside the predictor's scope (a
+WARNING, the memory the previous turn left in the child at the start of the
+turn (its residue) being set aside: a small turn right after a large one can
+exceed the prediction at its own size by that residue, never the prediction
+of the large turn the window was sized for. The residue is kept out of the
+admission. Requests that carry images are outside the predictor's scope (a
 vision tower's activations do not scale with kv).
 
 The ceiling the compaction and the output budget plan against is the token
@@ -69,17 +75,21 @@ from src.engines._mlx_vlm_server_runner import MLX_BUFFER_CACHE_LIMIT_BYTES
 
 _GIB = 1024**3
 
-# --- The measured prior (PROVISIONAL) ---------------------------------------
+# --- The measured prior -------------------------------------------------------
 #
 # Fitted on ONE machine (M4 16 GB, mlx 0.32.2 / mlx-vlm 0.6.17, prefill steps
 # 2048 and 512, MLX's default buffer cache): with these values all 107 points of the
-# campaign stay under ``predict`` (minimum ratio 1.20, minimum slack 0.35 GiB;
-# ``tests/fixtures/memory_prior_bench5.json``). The gate campaign of plan 3.2b
-# Part II confirms or replaces them before release. The child now runs with the
-# buffer cache bounded at 0, whose measured peaks are 1.25-1.8 GiB lower than
-# those of the default cache the fit includes: the prior is registered for that
-# configuration as provisional and conservative, and the gate campaign's
-# cache-limit-0 block confirms or replaces it.
+# fit stay under ``predict`` (minimum ratio 1.20, minimum slack 0.35 GiB;
+# ``tests/fixtures/memory_prior_bench5.json``). The child runs with the buffer
+# cache bounded at 0, whose measured peaks are 1.25-1.8 GiB lower than those of
+# the default cache: the prior is recorded as is for that configuration, where
+# it is conservative by about 2x. On the 244 clean cache-limit-0 points of the
+# same machine (three models up to 4B, ``memory_prior_gate_cl0.json``) the
+# median measured/predicted is 0.48; every point stays under ``predict`` of
+# its window (the larger of its size and the previous turn's), and under
+# ``predict`` of its own size once the residue the previous turn left is set
+# aside. Phi-3.5 (MHA), 7B models and windows of 32k and more were not
+# measured at cache limit 0.
 #
 # t0 and c0 belong to a runtime configuration of the child (its prefill step
 # and buffer-cache limit): ``MEMORY_PRIORS`` is keyed by it, and a child whose
