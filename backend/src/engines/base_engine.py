@@ -400,8 +400,9 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     #
     # The MLX child keeps a prefix cache that must hold ONLY the current
     # conversation; the llama.cpp engines manage theirs elsewhere and write
-    # nothing here. All three hooks are synchronous (they may do blocking
-    # HTTP): the agent layer runs the first two through ``run_reset_shielded``.
+    # nothing here. All four hooks are synchronous (the first two may do
+    # blocking HTTP): the agent layer runs the first two through
+    # ``run_reset_shielded``.
 
     @classmethod
     def claim_prefix(cls, owner: str) -> None:
@@ -420,6 +421,12 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     def note_stream_abandoned(cls, handle: Any) -> None:
         """A model stream against ``handle`` (the child it was built for) did
         not end normally. No-op here."""
+        return None
+
+    @classmethod
+    def note_stream_completed(cls, handle: Any, started_at: float) -> None:
+        """A model stream against ``handle``, whose request was sent after
+        ``started_at`` (``time.monotonic()``), ended normally. No-op here."""
         return None
 
     # The MLX child's memory is MEASURED around every conversation and Arena

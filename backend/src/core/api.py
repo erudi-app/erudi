@@ -57,6 +57,7 @@ Note:
 """
 
 import asyncio
+import gc
 import os
 import time
 
@@ -476,6 +477,10 @@ async def _start_services(app: FastAPI, _phase) -> None:
         run_in_threadpool(backfill_wire_tools_startup)
     )
     app.state.wire_backfill_task.add_done_callback(_log_background_task_failure)
+    # Boot is over: park every object it built (catalog, ORM metadata, routers) in the
+    # permanent generation so the collector never scans them again (fewer, shorter
+    # full collections; no effect on resident memory) (#621).
+    gc.freeze()
 
 
 # How long the shutdown waits for interrupted downloads before it stops the
@@ -544,8 +549,10 @@ async def lifespan(app: FastAPI):
         7. Open the LangGraph checkpointer (app.state.checkpointer)
         8. Start the cleanup background task (30s interval) and the memory
            pressure monitor (60s interval)
-        9. **[YIELD]** → Application handles requests
-        10. Shutdown: active downloads interrupted and their tasks awaited
+        9. Freeze the GC generations (``gc.freeze()``): boot objects are never
+           scanned again
+        10. **[YIELD]** → Application handles requests
+        11. Shutdown: active downloads interrupted and their tasks awaited
             (bounded) → then, in reverse order: cleanup task → pressure
             monitor (awaited) → pending prefix-cache reset drained → engine
             → checkpointer → embedded PostgreSQL cluster last; finally

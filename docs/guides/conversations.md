@@ -1083,12 +1083,17 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
      per-token KV-cache cost (`2 × layers × kv_heads × head_dim × 2 bytes f16`, read from the local
      artifact's `config.json`), `step × vocab × 2 bytes` the last prefill chunk's logits, and three
      named priors measured on an M4 16 GB (`c0 = 3.5` KV units per token — the cache, its
-     prefix-cache copy and MLX's buffer cache as measured with its default limit; the child now bounds it at 0, which only lowers the peak —, `t0 = 1 GiB`, a margin `m = 1.10`; provisional
-     until the release measurement campaign). The ceiling reserves the output budget's 512-token
+     prefix-cache copy and MLX's buffer cache as measured with its default limit —, `t0 = 1 GiB`,
+     a margin `m = 1.10`). The child bounds that cache at 0 and the prior is recorded as is for
+     that limit, where it is conservative by about 2× (median measured/predicted 0.48 on the
+     clean limit-0 points; Phi-3.5, 7B models and windows of 32k and more were not measured at
+     limit 0). The ceiling reserves the output budget's 512-token
      floor and stacks no further margin. Nothing is learned while the app runs: every turn's real
      peak is recorded next to its prediction in `memory_calibration.json` in the data folder, and a
-     peak above the prediction writes one warning to `backend.log`, the memory the previous turn left in the child at the start of the turn being set aside (see
-     [Privacy](../privacy.md)). Requests that carry images are outside the prediction (a vision
+     peak above the prediction writes one warning to `backend.log`, the memory the previous turn left in the child at the start of the turn (its residue) being set aside (see
+     [Privacy](../privacy.md)). The residue is set aside for that warning only and kept out of
+     the admission: on the measured limit-0 points a turn's peak, residue included, stays under
+     the prediction for the larger of its own size and the previous turn's. Requests that carry images are outside the prediction (a vision
      tower's activations do not scale with the conversation). The ceiling exists only on MLX because only
      MLX grows its KV cache lazily with usage; on both llama.cpp engines (CPU and CUDA) the cache is
      allocated **in full at load**, for a window sized to fit at spawn (the CPU engine's own RAM
@@ -1310,7 +1315,11 @@ the prompt names it
    `memory_reload` with `reason: "memory"` (after the idle delay's own unload it carries
    `reason: "idle"` and the copy names the pause instead of memory; after the Unload button,
    `reason: "manual"`) and the renderer shows a reload state in the pending answer until the model
-   speaks, an error arrives or the turn ends; the model reloads with the reduced window. On the CPU
+   speaks, an error arrives or the turn ends; the model reloads with the reduced window. On Apple
+   Silicon the brake unloads the model either after two idle samples under critical pressure or,
+   under warning or critical, when its memory release gets no answer while the user is away
+   (30 s for its one-token requests, 5 s for the prefix-cache reset) (the model is swapped out, and every request would page it back in); both carry the
+   same `reason: "memory"`. On the CPU
    engine a smaller window means restarting the model with it (about 1-2 s, then the
    conversation is read again): under critical pressure at the next turn boundary — a restart at
    the start of a turn sends `memory_reload` in that same turn —, under warning once the user has

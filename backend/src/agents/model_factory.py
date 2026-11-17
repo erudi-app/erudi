@@ -174,6 +174,11 @@ def build_chat_model(
     # must flag its own child, not whichever child is loaded by then.
     note_abandoned = getattr(engine, "note_stream_abandoned", None)
     abandon_hook = functools.partial(note_abandoned, handle) if callable(note_abandoned) else None
+    # A stream that ends normally tells the same child, bound the same way
+    # (``Erudi_Chat_OpenAI.complete_hook``): the MLX engine lifts an abandoned
+    # flag raised before that stream started.
+    note_completed = getattr(engine, "note_stream_completed", None)
+    complete_hook = functools.partial(note_completed, handle) if callable(note_completed) else None
     # Same binding for the usage a call reports: it belongs to the turn's
     # measurement window on THIS child.
     note_usage = getattr(engine, "note_call_usage", None)
@@ -230,6 +235,7 @@ def build_chat_model(
         digit_tokens=digit_tokens,
         preflight_retry=preflight_retry,
         abandon_hook=abandon_hook,
+        complete_hook=complete_hook,
         usage_hook=usage_hook,
         call_start_hook=call_start_hook,
         streaming=True,

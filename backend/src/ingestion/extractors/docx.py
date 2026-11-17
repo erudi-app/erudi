@@ -11,9 +11,6 @@ from __future__ import annotations
 import re
 from pathlib import Path
 
-import docx
-from docx.table import Table
-
 from src.core.logging import logger
 from src.ingestion.cleaning import clean_extracted_text
 from src.ingestion.markdown import rows_to_markdown_table
@@ -32,6 +29,11 @@ def _heading_prefix(style_name: str | None) -> str:
 
 class DocxExtractor:
     def extract(self, path: Path) -> ExtractedDocument:
+        # Function scope: python-docx (and lxml) stay out of the boot heap until
+        # the first DOCX (#621).
+        import docx
+        from docx.table import Table
+
         document = docx.Document(str(path))
         parts: list[str] = []
 

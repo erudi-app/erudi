@@ -340,6 +340,71 @@ def test_the_carry_holds_the_episode_and_the_cap():
     }
 
 
+# ===================== a release that timed out =====================
+
+
+@pytest.mark.parametrize("level", [WARNING, CRITICAL])
+def test_a_release_that_timed_out_at_idle_unloads(level):
+    state = BrakeState(in_episode=True, episode_level=level, critical_idle_at=900.0, cap=24_576)
+    decision = mb.release_timed_out(state, point=mb.POINT_IDLE, level=level, now=1000.0)
+    assert decision.unload
+    assert decision.actions == ("unload",)
+    assert decision.level == level
+    assert decision.state.unloaded_this_episode
+    assert decision.state.critical_idle_at is None
+    # The carry holds the episode and the cap for the next spawn.
+    assert decision.state.carry()["cap"] == 24_576
+    # The input state is never modified.
+    assert not state.unloaded_this_episode
+
+
+@pytest.mark.parametrize("point", [mb.POINT_TURN_START, mb.POINT_TURN_END])
+def test_a_release_that_timed_out_at_a_turn_point_never_unloads(point):
+    state = BrakeState(in_episode=True)
+    decision = mb.release_timed_out(state, point=point, level=CRITICAL, now=1000.0)
+    assert not decision.unload
+    assert decision.actions == ()
+    assert decision.state == state
+
+
+def test_a_release_that_timed_out_unloads_once_per_episode():
+    state = BrakeState(in_episode=True, unloaded_this_episode=True)
+    decision = mb.release_timed_out(state, point=mb.POINT_IDLE, level=CRITICAL, now=1000.0)
+    assert not decision.unload
+
+
+def test_the_reload_grace_blocks_the_unload_of_a_release_that_timed_out():
+    state = BrakeState(in_episode=True, reloaded_at=500.0)
+    within = mb.release_timed_out(
+        state, point=mb.POINT_IDLE, level=WARNING, now=500.0 + RELOAD_GRACE_S - 1
+    )
+    assert not within.unload
+    after = mb.release_timed_out(
+        state, point=mb.POINT_IDLE, level=WARNING, now=500.0 + RELOAD_GRACE_S
+    )
+    assert after.unload
+
+
+def test_a_brake_reload_after_a_timed_out_release_takes_no_second_unload():
+    """No loop: the reload carries the episode, so neither a second timed-out
+    release nor two idle criticals unload it again within the episode."""
+    first = mb.release_timed_out(
+        BrakeState(in_episode=True, episode_level=WARNING),
+        point=mb.POINT_IDLE,
+        level=WARNING,
+        now=100.0,
+    )
+    assert first.unload
+    reloaded = BrakeState.reloaded(first.state.carry(), now=200.0)
+    late = 200.0 + RELOAD_GRACE_S + 60.0
+    assert not mb.release_timed_out(reloaded, point=mb.POINT_IDLE, level=CRITICAL, now=late).unload
+    child = _Child(state=reloaded)
+    child.last_used = 200.0
+    for i in range(1, 4):
+        child.sample(mb.POINT_IDLE, late + 60.0 * i, CRITICAL)
+    assert child.count("unload") == 0
+
+
 # ===================== the release =====================
 
 
