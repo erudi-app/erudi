@@ -414,16 +414,18 @@ non-functional behavior.
 - [ ] When I add a `.docx` saved by **TextEdit** (no styles part) to a Knowledge Base in the **packaged** app, then it is indexed like a Word document. When any file of a batch fails, the end of the job names that file, and points to Diagnostics for the reason, instead of a plain success; adding the same file again later indexes it (a failed file never blocks its own re-ingestion).
 
 **Embeddings run without the torch stack (footprint)**
-- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When I create an assistant and ask a document question, then ingestion and retrieval work exactly as before — embeddings now come from a **dedicated child** (`llama-server --embeddings` on Windows/Linux, `mlx_vlm.server` on Apple Silicon), not from the in-process sentence-transformers stack.
-- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When retrieval is compared to the previous version on the **same KB** (golden questions), then answers ground on the same passages — no regression from the engine swap.
-- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When the embedding child has been **idle**, then it is unloaded after 5 minutes unused (no setting), and the next KB operation transparently reloads it.
+- [ ] *(Apple Silicon)* When I create an assistant and ask a document question, then ingestion and retrieval work exactly as before — embeddings come from a **dedicated child** (`mlx_vlm.server`, ports 27400-27499, visible in Activity Monitor while a KB operation runs), not from the in-process sentence-transformers stack.
+- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* *(Windows/Linux)* When I create an assistant and ask a document question, then embeddings come from a dedicated `llama-server --embeddings` child, not from the in-process sentence-transformers stack.
+- [ ] When retrieval is compared to the previous version on the **same KB** (golden questions), then answers ground on the same passages — no regression from the engine swap.
+- [ ] *(Apple Silicon)* When the embedding child has been **idle**, then it is unloaded after 5 minutes unused (no setting), and the next KB operation transparently reloads it.
+- [ ] *(Apple Silicon)* When a conversation or Arena panel uses a KB assistant while the **embedding model is not on disk** (cleared `models_cache`), then a banner names the state and offers the download — a document question is answered without the documents, never a red error turn.
 - [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When I inspect the installed app, then on Windows/Linux the **torch/transformers tree is gone**, and on Apple Silicon torch/sklearn/sentence-transformers are gone (transformers stays as an mlx-vlm dependency) — with no loss of KB function.
-- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* *(Apple Silicon)* When the KB embeds, then the app serves `intfloat/multilingual-e5-small` **as-is** through mlx_vlm — vectors match the previous output, so **no reindex** is needed.
+- [ ] *(Apple Silicon)* When the KB embeds, then the app serves `intfloat/multilingual-e5-small` **as-is** through mlx_vlm — vectors match the previous output, so **no reindex** is needed.
 - [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* *(Windows/Linux)* When the KB embeds, then the app serves the **GGUF shipped in the installer** through `llama-server --embeddings` — 384-dim, mean-pooled, L2-normalized, with the `query:`/`passage:` prefixes applied.
 - [ ] When chunking counts tokens, then it uses the pure `tokenizers` package (no HF `transformers`) and produces the same chunk boundaries as before.
 - [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* *(Windows/Linux)* When I open Knowledge Base on a fresh install while offline, then no download is offered and an assistant can be created at once.
 - [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When existing Knowledge Bases are re-embedded at first start (only if the shipped vectors differ), then they stay usable meanwhile and the log says when it is done.
-- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When a conversation with a Knowledge Base opens, then the embedder starts ahead; the first Knowledge Base use after a start is at most 1-2 s slower.
+- [ ] *(Apple Silicon)* When a conversation with a Knowledge Base opens, then the embedder starts ahead (`Embedding child ready` in `backend.log` within seconds of opening); the first Knowledge Base use after a start is at most 1-2 s slower.
 - [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* *(Windows)* When I install 1.3.0 over 1.2.0, then the install succeeds and leaves no torch tree.
 
 ## Settings — `/erudi/settings`
@@ -592,6 +594,14 @@ the card only appears where the setting does something.*
 - [ ] When I request `http://127.0.0.1:<port>/health` without a key, then it answers **401** too — and the app keeps chatting normally, which proves the backend's own probe presents the key.
 - [ ] When I send the same chat request with a made-up key (`-H 'Authorization: Bearer nope'`), then it is still **401**.
 - [ ] When I grep `$TMPDIR/erudi-backend.log`, `~/Library/Logs/erudi/backend.log` and the child's own log `~/Library/Logs/erudi/mlx-child-<port>.log` for `api-key`, `api_key`, `MLX_VLM_SERVER_API_KEY` and `Bearer`, then no line carries a key value (the key exists only in the backend's and the child's memory; that it changes on every load is pinned by the unit tests in `backend/tests/test_mlx_engine_server.py`, `TestSpawnApiKey`, and cannot be observed from outside the processes).
+
+### The embedding child requires a key (Apple Silicon)
+
+*The Knowledge Base embedder (#594) is a SECOND `mlx_vlm.server` process, spawned with its own per-process `--api-key` on ports 27400-27499 (`lsof -nP -iTCP:27400-27499 -sTCP:LISTEN` while a KB operation runs, or `Embedding child ready: ... port=...` in `backend.log`). Same key discipline as the chat child: the argv travels by pickle, not on a command line.*
+
+- [ ] When I ask a KB assistant a document question, then the answer grounds on the documents (proof the backend authenticates itself to its own embedding child; a broken key shows up as a spawn failure in Diagnostics, never a bad answer).
+- [ ] When the embedding child runs and I send it an **unauthenticated** request, then it is refused: `curl -s -o /dev/null -w "%{http_code}" http://127.0.0.1:<port>/v1/embeddings -H 'Content-Type: application/json' -d '{"input":["x"]}'` answers **401**, and `/health` without a key answers **401** too.
+- [ ] When I grep `$TMPDIR/erudi-backend.log`, `~/Library/Logs/erudi/backend.log` and `~/Library/Logs/erudi/embedder-child-<port>.log` for `api-key`, `api_key`, `MLX_VLM_SERVER_API_KEY` and `Bearer`, then no line carries a key value (that the key is fresh per spawn is pinned by `backend/tests/test_embedder_child.py`).
 
 ### The embedded database requires a password (Windows)
 

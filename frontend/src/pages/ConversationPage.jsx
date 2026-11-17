@@ -18,6 +18,7 @@ import { trackTurn } from "../utils/conversationTurns";
 import UnloadModelButton from "../components/UnloadModelButton";
 import CommandPopups from "../components/CommandPopups";
 import CommandNotice from "../components/CommandNotice";
+import KbEmbeddingBanner from "../components/KbEmbeddingBanner";
 import ContextUsagePanel from "../components/ContextUsagePanel";
 import EngineFailureModal from "../components/modals/EngineFailureModal";
 import ErrorModal from "../components/modals/ErrorModal";
@@ -1673,6 +1674,11 @@ export default function ConversationPage() {
         </div>
         <div className="sticky bottom-0 left-0 right-0 px-10 py-10 backdrop-blur-md flex justify-center w-full">
           <div className="w-full max-w-lg">
+            {/* "KB present, embedding model missing" is a state, not a turn
+                error (#594): the assistant's document search cannot embed
+                until the model is back on disk, so say it here, with the
+                download at hand. */}
+            <KbEmbeddingBanner active={Boolean(assignedModel?.is_attached_to_kb)} />
             {/* Amber memory warning, by reason, one at a time (the backend's
                 precedence: a brake notice, then `gpu_contention`, then
                 `bound`): the computer's memory bounds this conversation and

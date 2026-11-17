@@ -1346,6 +1346,16 @@ class MLX_Engine(BaseChatServerEngine):
         handle["brake"] = decision.state
         if not decision.actions:
             return BrakeOutcome()
+        if decision.level == memory_brake.LEVEL_CRITICAL:
+            # Before acting on the chat child under CRITICAL pressure, give
+            # back the KB embedding child's memory (#594, ~1.2 GB): it is not
+            # an engine and no gauge sees it, but it shares the machine. Only
+            # when idle -- never under an ingestion lease or a request in
+            # flight -- and a respawn costs ~5 s on the next KB use, far less
+            # than shrinking or unloading the chat model.
+            from src.ingestion import embedder_child
+
+            embedder_child.release_now(reason="memory pressure")
         if decision.unload:
             cls._brake_unload(handle, decision, point, excess)
             return BrakeOutcome(acted=True, action="unload")

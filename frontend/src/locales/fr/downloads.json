@@ -62,7 +62,10 @@
     "doneTitle": "Modèle d'embedding téléchargé",
     "doneBody": "Le modèle d'embedding a été téléchargé avec succès. La Base de connaissances est prête à l'emploi.",
     "errorTitle": "Échec du téléchargement",
-    "errorBody": "Le modèle d'embedding n'a pas pu être téléchargé. Vérifiez votre connexion et réessayez."
+    "errorBody": "Le modèle d'embedding n'a pas pu être téléchargé. Vérifiez votre connexion et réessayez.",
+    "bannerMissing": "La Base de connaissances de cet assistant a besoin de son modèle d'embedding, qui n'est pas téléchargé. La recherche dans les documents est inactive d'ici là.",
+    "bannerDownloading": "Téléchargement du modèle d'embedding… La recherche dans les documents fonctionnera une fois terminé.",
+    "bannerError": "Le modèle d'embedding n'a pas pu être téléchargé."
   },
   "waitingForInstall": "En attente de la fin de l'installation du téléchargement…"
 }

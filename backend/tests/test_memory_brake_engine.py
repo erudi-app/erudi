@@ -411,6 +411,30 @@ def test_a_claim_barrier_keeps_its_own_text(child, http, caplog):
 # ===================== unload and the carry =====================
 
 
+def test_a_critical_action_releases_the_embedding_child_first(child, http, sensors, monkeypatch):
+    # #594: before the brake acts on the chat child under CRITICAL pressure,
+    # the idle, unleased embedding child is released — ~1.2 GB back for a
+    # ~5 s respawn on the next KB use, far cheaper than shrinking the model.
+    calls = []
+    monkeypatch.setattr(
+        "src.ingestion.embedder_child.release_now", lambda reason: calls.append(reason) or True
+    )
+    sensors.level = 4
+    outcome = MLX_Engine.brake_point("turn_end")
+    assert outcome.acted
+    assert calls == ["memory pressure"]
+
+
+def test_a_warning_action_leaves_the_embedding_child_alone(child, http, sensors, monkeypatch):
+    calls = []
+    monkeypatch.setattr(
+        "src.ingestion.embedder_child.release_now", lambda reason: calls.append(reason) or True
+    )
+    outcome = MLX_Engine.brake_point("turn_end")  # sensors default: warning
+    assert outcome.acted
+    assert calls == []
+
+
 def test_two_idle_criticals_unload_and_carry_the_episode(child, http, sensors, caplog):
     sensors.level = 4
     child["last_request_tokens"] = 10
