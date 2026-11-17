@@ -680,3 +680,25 @@ def test_alembic_ini_is_pure_ascii():
             f"(0x{raw[exc.start]:02x}); it must stay pure ASCII so it loads under an "
             f"ASCII locale (macOS Finder launch). See #149."
         )
+
+
+@pytest.mark.unit
+def test_the_migration_engine_keeps_no_pool(monkeypatch):
+    # run_migrations opens its engine beside the business one at boot: with
+    # NullPool each connection closes when released, so it holds at most the
+    # one connection the budget counts (MIGRATION_CONNECTIONS) and none after.
+    from sqlalchemy.pool import NullPool
+
+    import src.database.migrations as migrations
+
+    recorded = {}
+
+    def fake_create_engine(url, **kwargs):
+        recorded.update(kwargs)
+        raise RuntimeError("stop here")
+
+    monkeypatch.setattr(migrations, "create_engine", fake_create_engine)
+    handle = type("H", (), {"sqlalchemy_url": "postgresql+psycopg://x@h/erudi"})()
+    with pytest.raises(RuntimeError, match="stop here"):
+        migrations.run_migrations(handle)
+    assert recorded.get("poolclass") is NullPool

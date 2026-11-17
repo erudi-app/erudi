@@ -71,6 +71,12 @@ const joinFailure = (partial, failure) => {
 // Presentation-only tokens kept out of the JSX tree (they are class names and
 // CSS, not copy).
 const HIDE_SCROLLBAR_CSS = "::-webkit-scrollbar { display: none; }";
+// Streamed answer and thinking text reaches the page at most once per this many
+// milliseconds (about 30 renders a second): a burst of tokens costs one render
+// of the message being written (#618). A timer rather than an animation frame
+// so that a hidden or minimized window, where frames stop, keeps receiving.
+const ANSWER_FLUSH_MS = 33;
+
 // The amber memory warning's copy, by the `reason` the backend sends.
 const MEMORY_WARNING_KEYS = {
   bound: "chat:memoryWarning.bound",
@@ -643,6 +649,45 @@ export default function ConversationPage() {
             );
           };
 
+          // Answer and thinking text are pushed to the page at most once per
+          // ANSWER_FLUSH_MS (#618): the first token shows at once, tokens
+          // that arrive inside the window wait for its end, and one render
+          // carries them all. The accumulators above already hold the
+          // events in order, so a late flush loses nothing; every other
+          // event, the end of the turn and a dropped connection flush
+          // immediately.
+          let flushWindow = null; // timer of the window in progress
+          let flushPending = false; // answer text received inside the window
+          const flushNow = () => {
+            flushPending = false;
+            flushMessage();
+          };
+          const closeFlushWindow = () => {
+            clearTimeout(flushWindow);
+            flushWindow = null;
+          };
+          const openFlushWindow = () => {
+            flushWindow = setTimeout(() => {
+              flushWindow = null;
+              if (flushPending) {
+                flushNow();
+                openFlushWindow();
+              }
+            }, ANSWER_FLUSH_MS);
+          };
+          // `immediate` flushes inside a window already open and leaves it
+          // running, so the tokens that follow still coalesce.
+          const flushAnswer = (immediate = false) => {
+            if (flushWindow !== null && !immediate) {
+              flushPending = true;
+              return;
+            }
+            flushNow();
+            if (flushWindow === null) {
+              openFlushWindow();
+            }
+          };
+
           const handleEvent = (evt) => {
             if (!evt || typeof evt !== "object") {
               return;
@@ -769,13 +814,25 @@ export default function ConversationPage() {
               }
               return;
             }
+            // The first answer text of the turn ends the live trace strip (it
+            // collapses) and replaces the typing indicator: a state change the
+            // user sees at once, whatever window thinking opened.
+            const startsAnswer = evt.t === "answer" && answerText === "";
             handleEvent(evt);
             if (!gotFirstEvent) {
               gotFirstEvent = true;
               setLoading(false);
               setFirstReplyPending(false);
             }
-            flushMessage();
+            // Plain answer text and reasoning text are the high-rate events
+            // (a reasoning model streams thousands of thinking tokens);
+            // anything else changes what the bubble shows besides text, so it
+            // flushes now (and carries the text received so far with it).
+            if ((evt.t === "answer" && !evt.curated_error) || evt.t === "thinking") {
+              flushAnswer(startsAnswer);
+            } else {
+              flushNow();
+            }
           };
 
           try {
@@ -808,8 +865,12 @@ export default function ConversationPage() {
               `${ERROR_SENTINEL} ${t("chat:errors.connectionInterrupted")}`
             );
             sawError = true;
-            flushMessage();
+            flushNow();
           } finally {
+            // The final update below carries everything received: the
+            // window in progress has nothing left to say.
+            closeFlushWindow();
+            flushPending = false;
             assistantMessage.content = answerText;
             // A completed turn that carried no memory warning clears the amber
             // block: the margin recovered (compaction sufficed, or the model

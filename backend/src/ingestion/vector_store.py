@@ -36,6 +36,11 @@ from langchain_postgres.v2.indexes import DistanceStrategy, HNSWIndex
 
 from src.core.logging import logger
 from src.core.logutils import truncate_for_log
+from src.launcher.postgres_settings import (
+    KB_STORE_POOL_MAX_OVERFLOW,
+    KB_STORE_POOL_SIZE,
+    POOL_TIMEOUT_SECONDS,
+)
 from src.ingestion.embeddings import (
     EMBEDDING_DIMENSIONS,
     build_embedding_text,
@@ -105,7 +110,14 @@ def init_kb_store(handle: "PostgresHandle") -> PGVectorStore:
             (SCHEMA_NAME, TABLE_NAME),
         ).fetchone()
 
-    engine = PGEngine.from_connection_string(handle.sqlalchemy_url)
+    # Sized by the connection budget the cluster's max_connections is
+    # computed from (src/launcher/postgres_settings.py).
+    engine = PGEngine.from_connection_string(
+        handle.sqlalchemy_url,
+        pool_size=KB_STORE_POOL_SIZE,
+        max_overflow=KB_STORE_POOL_MAX_OVERFLOW,
+        pool_timeout=POOL_TIMEOUT_SECONDS,
+    )
 
     if not table_exists:
         engine.init_vectorstore_table(

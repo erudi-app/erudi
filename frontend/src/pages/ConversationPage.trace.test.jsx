@@ -118,6 +118,13 @@ const renderAndSettle = async () => {
 };
 
 // Resolve a queued read and let the reader loop drain + re-render.
+// Answer text that follows within ~33 ms of the previous chunk is painted when
+// that window ends (#618).
+const answerWindow = () =>
+  act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  });
+
 const settle = async () => {
   await act(async () => {
     await Promise.resolve();
@@ -137,6 +144,7 @@ beforeEach(() => {
 });
 afterEach(() => {
   cleanup();
+  vi.useRealTimers();
 });
 
 describe("NDJSON reader (#90)", () => {
@@ -156,6 +164,7 @@ describe("NDJSON reader (#90)", () => {
     expect(screen.getByTestId("answer").textContent).toBe("Hello ");
 
     await pushAndSettle(ctrl, 'wer","text":"world"}\n');
+    await answerWindow();
     expect(screen.getByTestId("answer").textContent).toBe("Hello world");
 
     // Answer-only turn: no reasoning strip is ever mounted.
@@ -174,7 +183,15 @@ describe("NDJSON reader (#90)", () => {
     tracedFetchMock.mockImplementation(makeRoute({ queryResponse: ctrl.response }));
 
     await renderAndSettle();
+    // The 33 ms window opened by the thinking text must stay open for the whole
+    // test: the clock is faked and never advanced past the send, so the first
+    // answer event lands inside it every time, not by timing luck (#618).
+    vi.useFakeTimers({ toFake: ["setTimeout", "clearTimeout"] });
     fireEvent.click(screen.getByText("SEND"));
+    await act(async () => {
+      vi.advanceTimersByTime(500);
+      await Promise.resolve();
+    });
     await settle();
 
     // Thinking streams first -> strip is the only content, expanded by default.
