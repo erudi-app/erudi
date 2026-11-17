@@ -38,7 +38,12 @@ from fastapi.concurrency import run_in_threadpool
 from langchain.tools import ToolRuntime
 from langchain_core.tools import tool
 
-from src.agents.prompts import answer_language_line, build_kb_context_block
+from src.agents.prompts import (
+    ANSWER_LANGUAGE_LINES,
+    KB_EXCERPT_HEADERS,
+    answer_language_line,
+    build_kb_context_block,
+)
 from src.core.logging import logger
 from src.core.logutils import truncate_for_log
 from src.utils.kb_utils import KbExcerpt, retrieve_kb_excerpts
@@ -165,6 +170,17 @@ class TurnToolContext:
     web_token_budget: int = WEB_SEARCH_DEFAULT_TOKEN_BUDGET
 
 
+# What an empty Knowledge Base search returns: the fact, then the order to
+# tell the user. ``kb_then_web_result`` keeps the fact alone: beside web
+# results the order would contradict them.
+KB_NO_EXCERPTS_FACT = "No relevant excerpts were found in the user's documents for this query."
+KB_NO_EXCERPTS_TEXT = (
+    f"{KB_NO_EXCERPTS_FACT} Tell the user the information is not in their documents."
+)
+# What a Knowledge Base search that failed returns (the store is down).
+KB_SEARCH_FAILED_TEXT = "The knowledge base could not be searched right now."
+
+
 def format_kb_tool_result(excerpts: List[KbExcerpt], query: str) -> str:
     """Grounded ToolMessage payload: attributed excerpts + grounding reminder +
     the localized answer-language line, LAST (close to generation — the spot
@@ -172,12 +188,31 @@ def format_kb_tool_result(excerpts: List[KbExcerpt], query: str) -> str:
     block builder so both KB paths ground identically. Empty pool -> an explicit
     "not in the documents" instruction rather than silence."""
     if not excerpts:
-        return (
-            "No relevant excerpts were found in the user's documents for this "
-            "query. Tell the user the information is not in their documents."
-        )
+        return KB_NO_EXCERPTS_TEXT
     block = build_kb_context_block(excerpts=excerpts, question=query)
     return f"{block}\n\n{answer_language_line(query)}"
+
+
+async def run_kb_search(query: str, ctx: TurnToolContext) -> Optional[List[KbExcerpt]]:
+    """The Knowledge Base search behind ``search_knowledge_base`` and the
+    KB-before-web guard: the excerpts, or ``None`` when the store could not
+    be searched (logged here with its traceback, never raised: a broken
+    vector store must not crash the agent loop)."""
+    logger.info(
+        f"Tool invoked: search_knowledge_base(query={truncate_for_log(query, 200)}, "
+        f"kb_id={ctx.kb_id}, token_budget={ctx.kb_token_budget})"
+    )
+    try:
+        excerpts = await run_in_threadpool(
+            retrieve_kb_excerpts, query, ctx.kb_id, ctx.kb_token_budget
+        )
+    except Exception:
+        logger.exception("search_knowledge_base tool failed (degrading gracefully)")
+        return None
+    logger.info(
+        f"Tool search_knowledge_base returned {len(excerpts)} excerpt(s) " f"(kb_id={ctx.kb_id})"
+    )
+    return excerpts
 
 
 @tool
@@ -191,22 +226,9 @@ async def search_knowledge_base(query: str, runtime: ToolRuntime[TurnToolContext
     Args:
         query: A focused natural-language search query for the documents.
     """
-    ctx = runtime.context
-    logger.info(
-        f"Tool invoked: search_knowledge_base(query={truncate_for_log(query, 200)}, "
-        f"kb_id={ctx.kb_id}, token_budget={ctx.kb_token_budget})"
-    )
-    try:
-        excerpts = await run_in_threadpool(
-            retrieve_kb_excerpts, query, ctx.kb_id, ctx.kb_token_budget
-        )
-    except Exception:
-        # A broken vector store must not crash the agent loop.
-        logger.exception("search_knowledge_base tool failed (degrading gracefully)")
-        return "The knowledge base could not be searched right now."
-    logger.info(
-        f"Tool search_knowledge_base returned {len(excerpts)} excerpt(s) " f"(kb_id={ctx.kb_id})"
-    )
+    excerpts = await run_kb_search(query, runtime.context)
+    if excerpts is None:
+        return KB_SEARCH_FAILED_TEXT
     return format_kb_tool_result(excerpts, query)
 
 
@@ -286,16 +308,11 @@ def _estimate_web_tokens(text: str) -> int:
     return math.ceil(len(text.encode("utf-8", errors="surrogatepass")) / 3)
 
 
-def format_web_tool_result(results: list, query: str, token_budget: int) -> str:
-    """ToolMessage payload for a web search: attributed snippets with SOURCE
-    URLS (``title - href`` + snippet) so the model can cite, kept whole and
-    best-first within ``token_budget`` tokens as measured by
+def format_web_blocks(results: list, token_budget: int) -> str:
+    """The attributed snippets of a web search (``[title - href]`` + snippet),
+    kept whole and best-first within ``token_budget`` tokens as measured by
     ``_estimate_web_tokens`` (the first result always survives — mirroring the
-    KB budget rule), a citation reminder, and the localized answer-language
-    line LAST (the spot small local models honor, same as
-    ``format_kb_tool_result``). Empty results are NOT an error."""
-    if not results:
-        return _WEB_NO_RESULTS_TEXT
+    KB budget rule); no frame, no instruction."""
     blocks: List[str] = []
     spent = 0
     for result in results:
@@ -308,10 +325,22 @@ def format_web_tool_result(results: list, query: str, token_budget: int) -> str:
             break
         blocks.append(block)
         spent += cost
-    joined = "\n\n".join(blocks)
+    return "\n\n".join(blocks)
+
+
+def format_web_tool_result(results: list, query: str, token_budget: int) -> str:
+    """ToolMessage payload for a web search: attributed snippets with SOURCE
+    URLS (``title - href`` + snippet) so the model can cite, kept whole and
+    best-first within ``token_budget`` tokens as measured by
+    ``_estimate_web_tokens`` (the first result always survives — mirroring the
+    KB budget rule), a citation reminder, and the localized answer-language
+    line LAST (the spot small local models honor, same as
+    ``format_kb_tool_result``). Empty results are NOT an error."""
+    if not results:
+        return _WEB_NO_RESULTS_TEXT
     return (
         "Web search results:\n\n"
-        f"{joined}\n\n"
+        f"{format_web_blocks(results, token_budget)}\n\n"
         "Ground your answer on these results and cite the source URLs of the "
         "results you use.\n\n"
         f"{answer_language_line(query)}"
@@ -330,6 +359,16 @@ async def web_search(query: str, runtime: ToolRuntime[TurnToolContext]) -> str:
         query: A focused natural-language web search query.
     """
     ctx = runtime.context
+    results = await run_web_search(query, ctx)
+    if isinstance(results, str):
+        return results
+    return format_web_tool_result(results, query, ctx.web_token_budget)
+
+
+async def run_web_search(query: str, ctx: TurnToolContext):
+    """The web search behind ``web_search`` and the KB-before-web guard: the
+    results (a list, empty when nothing matched), or the locked error text
+    (#310) when the search failed -- never raised."""
     logger.info(
         f"Tool invoked: web_search(query={truncate_for_log(query, 200)}, "
         f"max_results={ctx.web_max_results}, token_budget={ctx.web_token_budget})"
@@ -351,4 +390,75 @@ async def web_search(query: str, runtime: ToolRuntime[TurnToolContext]) -> str:
         )
         return map_web_search_error(exc)
     logger.info(f"Tool web_search returned {len(results)} result(s)")
-    return format_web_tool_result(results, query, ctx.web_token_budget)
+    return results
+
+
+# ===================== Documents before the web (issue #707) =====================
+
+# The frame of a web result the guard preceded with a Knowledge Base search
+# (``src.agents.middleware._KbBeforeWebMiddleware``): the documents' excerpts,
+# then the web's snippets, then the ONE instruction -- which of the two
+# answers what -- and the answer-language line LAST, close to generation.
+# Neither tool's own instructions ride along: the KB reminder ("answer from
+# your own knowledge when unrelated", "say it is not in the documents") and
+# the web grounding line would compete with the arbitration.
+KB_THEN_WEB_DOCUMENTS_HEADER = "The user's documents were searched first, with the same query:"
+KB_THEN_WEB_WEB_HEADER = "Then the web:"
+KB_THEN_WEB_ARBITRATION = (
+    "When the document excerpts answer the question, answer from them and name "
+    "the source document; use the web results only for what the documents do "
+    "not cover, and cite their source URLs."
+)
+
+
+def _kb_part(excerpts: Optional[List[KbExcerpt]], query: str) -> str:
+    if excerpts is None:
+        return KB_SEARCH_FAILED_TEXT
+    if not excerpts:
+        return KB_NO_EXCERPTS_FACT
+    return build_kb_context_block(excerpts=excerpts, question=query, reminder=False)
+
+
+def _web_part(results, token_budget: int) -> str:
+    if isinstance(results, str):
+        return results
+    if not results:
+        return _WEB_NO_RESULTS_TEXT
+    return format_web_blocks(results, token_budget)
+
+
+def kb_then_web_result(
+    query: str, excerpts: Optional[List[KbExcerpt]], web_results, web_token_budget: int
+) -> str:
+    """The one tool result that answers a ``web_search`` call the guard
+    preceded with a Knowledge Base search: the documents' part (excerpts, or
+    the fact that there were none, or that the store failed), the web's part
+    (snippets, no results, or the error text), the arbitration, and the
+    answer-language line, once, last. Paragraphs are separated by a blank
+    line, which ``kb_then_web_answer`` relies on to drop the frame."""
+    return "\n\n".join(
+        [
+            KB_THEN_WEB_DOCUMENTS_HEADER,
+            _kb_part(excerpts, query),
+            KB_THEN_WEB_WEB_HEADER,
+            _web_part(web_results, web_token_budget),
+            KB_THEN_WEB_ARBITRATION,
+            answer_language_line(query),
+        ]
+    )
+
+
+def kb_then_web_answer(result_text: str) -> str:
+    """What the user is shown when the model answers a guarded turn with no
+    text (#90 fallback): the result's content -- the attributed excerpts and
+    snippets, or what stood for them -- without the frame written for the
+    model (headers, arbitration, excerpt header, answer-language line)."""
+    frame = {
+        KB_THEN_WEB_DOCUMENTS_HEADER,
+        KB_THEN_WEB_WEB_HEADER,
+        KB_THEN_WEB_ARBITRATION,
+        *KB_EXCERPT_HEADERS,
+        *ANSWER_LANGUAGE_LINES,
+    }
+    paragraphs = [p for p in result_text.split("\n\n") if p.strip() not in frame]
+    return "\n\n".join(paragraphs).strip()

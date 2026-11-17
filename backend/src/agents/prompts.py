@@ -116,6 +116,8 @@ _LANGUAGE_LINES = {
     "nl": "Antwoord in het Nederlands.",
 }
 _GENERIC_LANGUAGE_LINE = "Answer in the same language as the user's question."
+# Every line ``answer_language_line`` can return.
+ANSWER_LANGUAGE_LINES = frozenset({*_LANGUAGE_LINES.values(), _GENERIC_LANGUAGE_LINE})
 
 # The per-turn block's scaffolding is LOCALIZED too: runs 3-5 of the eval
 # showed Gemma answers in the language of the scaffolding around the
@@ -165,6 +167,8 @@ _SCAFFOLDS = {
         ),
     },
 }
+# Every header ``build_kb_context_block`` can open with.
+KB_EXCERPT_HEADERS = frozenset(scaffold["header"] for scaffold in _SCAFFOLDS.values())
 
 
 # KB sections APPENDED to the tier persona (#129) — never a replacement.
@@ -231,7 +235,9 @@ _WEB_SECTION_COMPACT = (
 
 # Slotted into the web section only when the KB tool is ALSO on the turn, so
 # the two triggers stay coherent: document questions go to the documents,
-# fresh/external facts go to the web.
+# fresh/external facts go to the web. Small models do not always follow it
+# (#707: Qwen3 4B searched the web on document questions), so the agent loop
+# enforces the order: ``src.agents.middleware._KbBeforeWebMiddleware``.
 _WEB_KB_ARBITRATION = (
     "For questions about the user's documents, use search_knowledge_base, " "not web_search."
 )
@@ -425,7 +431,9 @@ def build_kb_agentic_system_prompt(
     )
 
 
-def build_kb_context_block(*, excerpts: List["KbExcerpt"], question: str) -> str:
+def build_kb_context_block(
+    *, excerpts: List["KbExcerpt"], question: str, reminder: bool = True
+) -> str:
     """Per-turn KB block: attributed excerpts + grounding reminder, with
     the scaffolding LOCALIZED to the question's language.
 
@@ -437,11 +445,17 @@ def build_kb_context_block(*, excerpts: List["KbExcerpt"], question: str) -> str
     question (``answer_language_line``) — run-4 eval showed the model
     treats pre-question lines as document-block metadata and ignores
     them, while user-voiced post-question requests are followed.
+
+    ``reminder=False`` leaves the grounding reminder out (header and excerpts
+    only): the KB-before-web result (``src.agents.tools.kb_then_web_result``)
+    carries its own single instruction, which the reminder would contradict.
     """
     scaffold = _SCAFFOLDS.get(detect_language(question), _SCAFFOLDS["en"])
     blocks = "\n\n".join(
         f"[Document: {excerpt.source_file}]\n{excerpt.text}" for excerpt in excerpts
     )
+    if not reminder:
+        return f"{scaffold['header']}\n\n{blocks}"
     return f"{scaffold['header']}\n\n{blocks}\n\n{scaffold['reminder']}"
 
 
