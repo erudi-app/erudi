@@ -168,17 +168,32 @@ instructions say document questions go to the documents, but small models do not
 them, so the order is enforced in the agent loop (`_KbBeforeWebMiddleware`,
 `backend/src/agents/middleware.py`): when the model calls `web_search` and the turn has not
 searched the Knowledge Base yet, the Knowledge Base is searched first with the same query, then the
-web search runs, and the model's `web_search` call gets one result holding both — the document
-excerpts first, then the web results, then a line saying to answer from the documents when they
-contain the answer and to use the web for the rest. `backend.log` shows
+web search runs, and the model's `web_search` call gets one result holding both: the document
+excerpts, then the web results, then a single instruction — answer from the documents when they
+contain the answer, use the web for the rest and cite its URLs — and the answer-language line last.
+Neither tool's own instructions are repeated in it. A search that finds nothing or fails is said in
+its place ("No relevant excerpts were found…", "The knowledge base could not be searched right
+now.", `Error during Web Search: …`), and the other result is still delivered. `backend.log` shows
 `KB-first guard: web_search called before any knowledge base search this turn, ...` followed by
 `Tool invoked: search_knowledge_base` and `Tool invoked: web_search`.
 
 The guard never blocks the web: once the turn has searched the documents — the model called
 `search_knowledge_base` earlier in the turn or in the same message, or the guard already did —
-every `web_search` runs as it is. It acts on web searches only: a turn where the model calls no
-tool at all is answered without any search. The fixed question set that measures this behaviour,
-and the manual procedure for a real model, are in `backend/tests/fixtures/kb/README.md`.
+every `web_search` runs as it is. When the model calls `web_search` several times in one message,
+each call searches the documents first, and calls with the same query share one search. It acts on
+web searches only: a turn where the model calls no tool at all is answered without any search. When
+the model ends such a turn with no text, the answer shown is the excerpts and web results with
+their sources, without the instructions written for the model.
+
+The cost: a Knowledge Base search (local: one query embedding and one database search, no network)
+before the first web search of every turn that has not searched the documents, and a
+tool result of up to the Knowledge Base budget plus the web budget of the model's size tier (both
+are the tier's `kb_token_budget`, see [Token budget per model size](#token-budget-per-model-size))
+instead of the web budget alone. Like every past web result, it shrinks to the `web_search`
+placeholder on later turns.
+
+The fixed question set that measures this behaviour, and the manual procedure for a real model,
+are in `backend/tests/fixtures/kb/README.md`.
 
 ## The embedding-model gate
 

@@ -9,6 +9,7 @@ and the whole LangChain agent stack only loads on the first turn, not at boot
 
 from __future__ import annotations
 
+import asyncio
 from typing import Annotated, Optional
 
 from langchain.agents.middleware import AgentMiddleware
@@ -349,32 +350,53 @@ class _KbBeforeWebMiddleware(AgentMiddleware):
 
     On a turn that carries both ``search_knowledge_base`` and ``web_search``,
     a ``web_search`` call made before any Knowledge Base search of the turn
-    runs ``search_knowledge_base`` first, with the same query, then the web
-    search, and answers the model's call with ONE tool result holding both
-    (``kb_then_web_result``: the documents first, the arbitration last). The
-    model's one call gets its one result under its own id and name, so the
-    ``AIMessage(tool_calls) -> ToolMessage`` pairing the chat template needs
-    is untouched and the history holds no call the model did not make.
+    is run by the guard itself: the Knowledge Base search first, with the
+    same query, then the web search (``run_kb_search`` / ``run_web_search``,
+    the bodies of the two tools, so the log reads ``Tool invoked:
+    search_knowledge_base`` then ``Tool invoked: web_search``). The model's
+    call gets ONE tool result under its own id and name holding both
+    (``kb_then_web_result``: the excerpts, the snippets, one arbitration
+    line, the answer-language line last), so the ``AIMessage(tool_calls) ->
+    ToolMessage`` pairing the chat template needs is untouched and the
+    history holds no call the model did not make. Neither search raises:
+    a failed one stands as its text beside the other's result.
 
     Never a block: the web search the model asked for always runs, and once
     the documents were searched in the turn -- by the model, beside the web
-    call or on an earlier hop, or by this guard -- every ``web_search`` runs
-    as it is. A call with no query has nothing to search the documents with
-    and runs as it is too.
+    call or on an earlier hop, or by this guard -- every ``web_search`` goes
+    to the tool node as it is. So does a call with no query (nothing to
+    search the documents with: the tool's own validation answers it).
+
+    Several ``web_search`` calls in one message run side by side, each
+    unaware of the others' results: each searches the documents first, and
+    calls with the same query share one search (``_searches``, keyed by
+    query; the middleware is built per turn, so the sharing never outlives
+    it).
+
+    On a later turn this result, like every past web result, is replaced by
+    the ``web_search`` marker of ``STALE_TOOL_RESULT_MARKERS`` ("call
+    web_search again"): the document excerpts it carried go with it, and the
+    model is pointed at the web, not at the documents. The guard searches the
+    documents again on that turn's first web search, and the KB section of
+    the system prompt tells the model to search again for document facts.
 
     Why a guard and not words: the system prompt already says document
     questions go to ``search_knowledge_base`` (``_WEB_KB_ARBITRATION`` in
     ``src.agents.prompts``), and Qwen3 4B called ``web_search`` instead, then
     said the information was not in the documents it had not searched.
+
+    Async only: both tools are coroutines, and every turn runs the agent
+    through ``astream``.
     """
 
-    def __init__(self, kb_tool):
+    def __init__(self):
         super().__init__()
-        self.kb_tool = kb_tool
+        self._searches: dict = {}
 
-    def _kb_request(self, request):
-        """The Knowledge Base search to run first, or ``None`` when the call
-        runs as it is."""
+    @staticmethod
+    def _guarded_query(request) -> Optional[str]:
+        """The query to search the documents with first, or ``None`` when the
+        call goes to the tool node as it is."""
         call = request.tool_call
         if call.get("name") != _WEB_TOOL:
             return None
@@ -383,41 +405,34 @@ class _KbBeforeWebMiddleware(AgentMiddleware):
             return None
         if _kb_searched_this_turn(list((request.state or {}).get("messages", []))):
             return None
+        return query
+
+    def _kb_search(self, query: str, ctx):
+        """The documents' search for ``query``, shared by the calls of this
+        turn that carry the same query."""
+        from src.agents.tools import run_kb_search
+
+        if query not in self._searches:
+            self._searches[query] = asyncio.ensure_future(run_kb_search(query, ctx))
+        return self._searches[query]
+
+    async def awrap_tool_call(self, request, handler):
+        query = self._guarded_query(request)
+        if query is None:
+            return await handler(request)
+        from src.agents.tools import kb_then_web_result, run_web_search
+
         logger.info(
             "KB-first guard: web_search called before any knowledge base search "
             f"this turn, searching the knowledge base first (query={truncate_for_log(query, 200)})"
         )
-        return request.override(
-            tool_call={**call, "name": _KB_TOOL, "args": {"query": query}},
-            tool=self.kb_tool,
+        ctx = request.runtime.context
+        excerpts = await self._kb_search(query, ctx)
+        web_results = await run_web_search(query, ctx)
+        call = request.tool_call
+        return ToolMessage(
+            content=kb_then_web_result(query, excerpts, web_results, ctx.web_token_budget),
+            name=_WEB_TOOL,
+            tool_call_id=call["id"],
+            artifact=KB_FIRST_ARTIFACT,
         )
-
-    @staticmethod
-    def _combine(kb_result, web_result):
-        """The web result, carrying the documents' result before its own."""
-        from src.agents.tools import kb_then_web_result
-
-        if not isinstance(kb_result, ToolMessage) or not isinstance(web_result, ToolMessage):
-            # Not a tool's text (a ``Command``, which neither tool returns):
-            # nothing to fold, the web call keeps its own result.
-            return web_result
-        return web_result.model_copy(
-            update={
-                "content": kb_then_web_result(kb_result.text, web_result.text),
-                "artifact": KB_FIRST_ARTIFACT,
-            }
-        )
-
-    def wrap_tool_call(self, request, handler):
-        kb_request = self._kb_request(request)
-        if kb_request is None:
-            return handler(request)
-        kb_result = handler(kb_request)
-        return self._combine(kb_result, handler(request))
-
-    async def awrap_tool_call(self, request, handler):
-        kb_request = self._kb_request(request)
-        if kb_request is None:
-            return await handler(request)
-        kb_result = await handler(kb_request)
-        return self._combine(kb_result, await handler(request))
