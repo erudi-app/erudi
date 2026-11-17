@@ -19,15 +19,21 @@
     "clearAll": {
       "title": "Clear All Data",
       "message": "Are you sure you want to delete all data?",
-      "detail": "This will permanently delete:\n• All downloaded AI models\n• Conversation history\n• Custom settings\n• Knowledge bases\n\nThis action cannot be undone.\n\nThe application will quit after deletion.",
+      "detail": "This will permanently delete:\n• All downloaded AI models\n• Conversation history and pasted images\n• Knowledge bases\n• Settings and interface preferences\n• Logs (they contain the text of your conversations)\n\nThis action cannot be undone.\n\nThe application will quit after deletion.",
       "confirm": "Delete All Data",
-      "failed": "Failed to clear data",
-      "failedWithError": "Failed to clear data: {{error}}"
+      "failedWithError": "Failed to clear data: {{error}}",
+      "rootRefused": "Clear All Data is not available: ERUDI_DATA_ROOT points at {{root}}, which is your home folder, a folder above it or the root of a disk. Nothing was deleted.",
+      "gaveUp": {
+        "message": "Clear All Data could not finish",
+        "detail": "These were still in use after three starts and were left in place. You can delete them yourself once Erudi is closed:\n{{files}}"
+      }
     },
     "dataCleared": {
       "title": "Data Cleared",
       "message": "All data has been deleted successfully.",
-      "detail": "The application will now quit."
+      "detail": "The application will now quit.",
+      "detailPending": "A few files were still in use and could not be deleted yet. Erudi deletes them the next time it starts.\n\nThe application will now quit.",
+      "leftInPlace": "These were left in place, because Erudi did not create them or may not delete them:\n{{folders}}"
     }
   }
 }
