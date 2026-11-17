@@ -16,10 +16,14 @@ import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-libra
 //  - the notice carries "Free the graphics card", which unloads the
 //    conversation's model (`POST /llms/loaded/unload`), is disabled while an
 //    answer is written, says why on a 409, and hides the notice once the
-//    model is unloaded.
+//    model is unloaded (the header's Unload button then reads the loaded
+//    model again);
+//  - a notice said before the answer leaves the typing indicator up;
+//  - changing the conversation's model drops the notice.
 
-const { tracedFetchMock, navigateMock, locationMock, paramsMock, statusMock, postMock } =
+const { tracedFetchMock, navigateMock, locationMock, paramsMock, statusMock, postMock, patchMock } =
   vi.hoisted(() => ({
+    patchMock: vi.fn(),
     tracedFetchMock: vi.fn(),
     navigateMock: vi.fn(),
     locationMock: { pathname: "/conversation/7", state: null },
@@ -32,7 +36,7 @@ const STATUS_PATH = "/hardware/gpu_contention/status";
 
 vi.mock("../services/api/client", () => {
   const get = vi.fn(async (path) => (path === STATUS_PATH ? statusMock() : []));
-  const client = { get, post: postMock };
+  const client = { get, post: postMock, patch: patchMock };
   return { default: client, apiClient: client, tracedFetch: tracedFetchMock };
 });
 
@@ -44,8 +48,20 @@ vi.mock("react-router-dom", () => ({
 
 vi.mock("../components/Sidebar", () => ({ default: () => null }));
 vi.mock("../components/ChatCollapsibleSection", () => ({ default: () => null }));
-vi.mock("../components/ConversationHeader", () => ({ default: () => null }));
-vi.mock("../components/TypingIndicator", () => ({ default: () => null }));
+vi.mock("../components/ConversationHeader", () => ({
+  default: ({ children, onPickModel }) => (
+    <div>
+      <button onClick={() => onPickModel({ id: 2 })}>PICK</button>
+      {children}
+    </div>
+  ),
+}));
+vi.mock("../components/UnloadModelButton", () => ({
+  default: ({ refreshKey }) => <span data-testid="unload-key">{refreshKey}</span>,
+}));
+vi.mock("../components/TypingIndicator", () => ({
+  default: () => <span data-testid="typing" />,
+}));
 vi.mock("../components/TraceStrip", () => ({ default: () => null }));
 vi.mock("../components/MarkdownRenderer", () => ({
   default: ({ content }) => <div data-testid="answer">{content}</div>,
@@ -171,6 +187,8 @@ const httpError = (status, type) =>
 beforeEach(() => {
   vi.clearAllMocks();
   postMock.mockReset();
+  patchMock.mockReset();
+  patchMock.mockImplementation(async (path, body) => ({ ...conversationDetail, ...body }));
   paramsMock.id = "7";
   statusMock.mockImplementation(async () => ({ active: true }));
   Element.prototype.scrollTo = () => {};
@@ -425,5 +443,51 @@ describe("ConversationPage gpu contention notice", () => {
     ]);
     await screen.findByRole("alert");
     expect(screen.queryByRole("button", { name: FREE })).toBeNull();
+  });
+
+  it("keeps the typing indicator up when the notice comes before the answer", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await act(async () => {
+      turn.push('{"t":"memory_warning","reason":"gpu_contention"}\n');
+    });
+    await screen.findByRole("alert");
+    expect(screen.getByTestId("typing")).toBeTruthy();
+
+    await runTurn(turn, ['{"t":"answer","text":"Slow."}\n', '{"t":"done"}\n']);
+    await waitFor(() => expect(screen.queryByTestId("typing")).toBeNull());
+  });
+
+  it("drops the notice when the conversation's model changes", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await contendedTurn(turn);
+    await screen.findByRole("alert");
+
+    fireEvent.click(screen.getByText("PICK"));
+    await waitFor(() => expect(patchMock).toHaveBeenCalled());
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+  });
+
+  it("has the header's Unload button read the loaded model again once freed", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    postMock.mockResolvedValue(undefined);
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await contendedTurn(turn);
+    await waitFor(() => expect(screen.getByRole("button", { name: FREE }).disabled).toBe(false));
+    const before = screen.getByTestId("unload-key").textContent;
+
+    fireEvent.click(screen.getByRole("button", { name: FREE }));
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(screen.getByTestId("unload-key").textContent).not.toBe(before);
   });
 });

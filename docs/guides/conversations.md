@@ -1288,7 +1288,7 @@ the prompt names it
    engine's eviction gauge (sampled at the start of a turn and while the model is idle, see
    [the eviction gauge](../dev/architecture/engines.md#the-memory-brake-cuda)) makes every turn
    carry `memory_warning` with `reason: "gpu_contention"` for as long as it lasts. When the
-   gauge's cached reading already says so at the start of a turn (right after the turn's start
+   gauge's cached reading already says so at the start of a turn whose model is the one loaded (right after the turn's start
    sample; nothing more is read), the event goes out then, before the answer the user would
    otherwise wait for unwarned, and the turn end does not send it again; otherwise the turn end
    sends it — after a brake notice, before `bound`, which is then not evaluated. A brake notice
@@ -1299,7 +1299,10 @@ the prompt names it
    (`POST /erudi/llms/loaded/unload` with its `llm_id`, the request of the header's Unload
    button), is disabled while an answer is being written, says why on a `409` ("The model is
    busy; try again in a moment." or "Another model is loaded now.") and keeps the notice then,
-   and drops the notice once the model is unloaded. The next message shows the reload state
+   and drops the notice once the model is unloaded (the header's Unload button then reads the
+   loaded model again). Said before the answer, the notice leaves the typing indicator up for
+   the prefill (a `memory_warning` is not the model's first reply), and picking another model
+   for the conversation drops it. The next message shows the reload state
    (`reason: "manual"`), and that load sizes the model against the card's free memory at that
    moment, so llama.cpp's fit places on the card only the layers that fit. Erudi never unloads
    the model on its own for a contention.
