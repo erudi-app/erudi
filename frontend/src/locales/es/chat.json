@@ -230,6 +230,9 @@
     "notes": {
       "reducedByMemory": "El modelo admite hasta {{trained}} tokens; la memoria de este ordenador limita esta conversación a {{working}}.",
       "reducedByMemoryNoTrained": "La memoria de este ordenador limita esta conversación a {{working}} tokens.",
+      "cutByEstimate": "El modelo admite hasta {{trained}} tokens; esta conversación trabaja con {{working}}. Erudi dimensiona la ventana de este modelo con una estimación prudente de sus necesidades de memoria, por lo que puede usar menos de lo que este ordenador podría albergar.",
+      "reducedByBrake": "El modelo admite hasta {{trained}} tokens; el freno de memoria redujo la ventana de esta conversación a {{working}} para liberar memoria.",
+      "reducedByBrakeNoTrained": "El freno de memoria redujo la ventana de esta conversación a {{working}} tokens para liberar memoria.",
       "notLoaded": "El modelo no está cargado: esta es la ventana para la que se entrenó. La ventana que permite este ordenador se conoce una vez cargado el modelo.",
       "unknownWindow": "No se conoce la ventana del modelo, así que no se muestra ningún porcentaje.",
       "kbExcluded": "Los recuentos no incluyen los fragmentos de la base de conocimiento que recupera cada pregunta.",

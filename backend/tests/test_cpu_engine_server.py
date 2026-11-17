@@ -78,6 +78,7 @@ class TestSpawnContextAndArgv:
                 trained=40_960,
                 static_window=40_960,
                 memory_bound=False,
+                cut_by_estimate=True,
                 kv_token_bytes=114_688,
                 static_anonymous_bytes=123,
                 weights_bytes=456,
@@ -101,6 +102,7 @@ class TestSpawnContextAndArgv:
         assert ctx["static_anonymous_bytes"] == 123
         assert ctx["weights_bytes"] == 456
         assert ctx["spawn_memory_bound"] is False
+        assert ctx["spawn_cut_by_estimate"] is True
         argv = [
             str(a)
             for a in CPU_Engine._build_spawn_argv(
@@ -166,6 +168,7 @@ class TestSpawnContextAndArgv:
                 static_anonymous_bytes=1,
                 weights_bytes=1,
                 memory_bound=True,
+                cut_by_estimate=False,
             )
             monkeypatch.setattr(gguf_memory, "spawn_window", lambda *a, **kw: window)
         ctx = CPU_Engine._prepare_spawn_context(
