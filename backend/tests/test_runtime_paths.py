@@ -408,6 +408,21 @@ def test_the_sentinel_name_is_the_one_shared_with_electron():
     assert rp.OWNERSHIP_SENTINEL == _SHARED_TABLE["ownership_sentinel"]
 
 
+def test_the_pasted_images_folder_is_the_one_electron_writes_to():
+    # Electron writes a pasted image there (frontend/src/utils/pastedImage.js);
+    # a conversation's delete removes only the files inside it.
+    assert rp.PASTED_IMAGES_FOLDER == _SHARED_TABLE["pasted_images_folder"]
+
+
+def test_pasted_images_dir_is_in_the_data_folder(monkeypatch, tmp_path):
+    paths = rp.RuntimePaths(
+        mode="dev", backend_root=tmp_path, data_dir=tmp_path / "data", log_dir=tmp_path / "logs"
+    )
+    monkeypatch.setattr(rp, "_RUNTIME_PATHS", paths)
+
+    assert rp.pasted_images_dir() == tmp_path / "data" / _SHARED_TABLE["pasted_images_folder"]
+
+
 @pytest.mark.unit
 class TestOwnershipSentinel:
     def test_prod_folders_are_marked_even_when_they_already_exist(self, monkeypatch, tmp_path):

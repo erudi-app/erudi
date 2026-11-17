@@ -536,6 +536,47 @@ def test_idle_unload_delay_lands_at_five_minutes_on_a_populated_database(fresh_c
 
 
 @pytest.mark.integration
+def test_ephemeral_flag_lands_off_on_a_populated_database(fresh_cluster):
+    # #428: a conversation that predates ephemeral conversations is a regular
+    # one -- kept, listed -- so the column is NOT NULL with a false default.
+    url = fresh_cluster.sqlalchemy_url
+    cfg = _alembic_config(url)
+    command.upgrade(cfg, "c4d9e2a7f318")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO llms (name, local, link, type, quantized, is_base, category, "
+                    "is_attached_to_kb) VALUES ('Old', 1, 'org/old', 'qwen', true, false, "
+                    "'general', false)"
+                )
+            )
+            conn.execute(
+                text(
+                    "INSERT INTO conversations (llm_id, name, web_search_enabled) "
+                    "SELECT id, 'Old chat', false FROM llms WHERE link='org/old'"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    run_migrations(fresh_cluster)
+
+    assert _alembic_version(url) == _head_revision(cfg)
+    command.check(cfg)
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            assert conn.execute(text("SELECT ephemeral FROM conversations")).scalar() is False
+            column = {c["name"]: c for c in inspect(conn).get_columns("conversations")}["ephemeral"]
+    finally:
+        engine.dispose()
+    assert column["nullable"] is False
+    assert str(column["type"]) == "BOOLEAN"
+
+
+@pytest.mark.integration
 def test_backup_database_writes_a_dump(fresh_cluster):
     # pg_dump (custom format) of the LIVE cluster produces a non-empty snapshot.
     engine = create_engine(fresh_cluster.sqlalchemy_url)

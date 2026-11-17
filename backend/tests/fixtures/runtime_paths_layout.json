@@ -1,6 +1,7 @@
 {
-  "_comment": "Where a packaged backend keeps its data and its logs, per platform, and the name of the file that marks a folder as Erudi's. Read by backend/tests/test_runtime_paths.py (against src/launcher/runtime_paths.py) and by frontend/src/utils/dataLocations.test.js (against the Electron side, which opens and clears these folders): the two implementations cannot drift apart without one of them failing. Every path is relative to the home folder; so is an env value, except an empty one (the variable is set but empty) and one starting with ~ (passed as is).",
+  "_comment": "Where a packaged backend keeps its data and its logs, per platform, the name of the file that marks a folder as Erudi's, and the name of the folder, inside the data folder, where a pasted image is written (the only folder whose files a conversation's delete removes). Read by backend/tests/test_runtime_paths.py (against src/launcher/runtime_paths.py) and by frontend/src/utils/dataLocations.test.js (against the Electron side, which opens and clears these folders): the two implementations cannot drift apart without one of them failing. Every path is relative to the home folder; so is an env value, except an empty one (the variable is set but empty) and one starting with ~ (passed as is).",
   "ownership_sentinel": ".erudi-owned",
+  "pasted_images_folder": "pasted-images",
   "cases": [
     {
       "name": "macOS",

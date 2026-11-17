@@ -54,6 +54,12 @@
     "unloadFailed": "无法卸载模型。",
     "unloadModelChanged": "现在加载的是另一个模型。"
   },
+  "ephemeral": {
+    "toggle": "临时对话",
+    "toggleHint": "离开此对话时，它会被删除。",
+    "badge": "临时",
+    "badgeHint": "离开此对话时，它会被删除。它不会出现在你的历史记录中。"
+  },
   "commands": {
     "listLabel": "命令",
     "config": {

@@ -13,6 +13,8 @@ import ChatCollapsibleSection from "../components/ChatCollapsibleSection";
 import QuestionInput from "../components/QuestionInput";
 import ConversationHeader from "../components/ConversationHeader";
 import { exportConversation } from "../utils/conversationExport";
+import { isEphemeral, markEphemeral } from "../utils/ephemeralConversations";
+import { trackTurn } from "../utils/conversationTurns";
 import UnloadModelButton from "../components/UnloadModelButton";
 import CommandPopups from "../components/CommandPopups";
 import CommandNotice from "../components/CommandNotice";
@@ -260,6 +262,9 @@ export default function ConversationPage() {
   const [loadAttempt, setLoadAttempt] = useState(0);
   const [collapsed, setCollapsed] = useState(false);
   const [firstReplyPending, setFirstReplyPending] = useState(false);
+  // An ephemeral conversation (#428): badged, never exported, never titled,
+  // deleted when the route leaves it (EphemeralConversationGuard).
+  const [ephemeral, setEphemeral] = useState(false);
   // The amber memory warning (1.1.2): the LATEST turn's `memory_warning`
   // stream event, or null. Transient by design — never persisted, never in
   // the message content — and cleared by the next turn that carries none.
@@ -311,6 +316,7 @@ export default function ConversationPage() {
     setLoadFailed(false);
     setCommandNotice(null);
     setContextPanels([]);
+    setEphemeral(false);
   }
   useEffect(() => {
     contextEpochRef.current += 1;
@@ -525,6 +531,13 @@ export default function ConversationPage() {
 
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
 
+      // Leaving an ephemeral conversation, or deleting this one, aborts this
+      // answer (#428): the user asked for it, so the abort is neither an error
+      // nor a red bubble.
+      const turnController = new AbortController();
+      const untrackTurn = trackTurn(id, turnController);
+      const leftByUser = () => turnController.signal.aborted;
+
       try {
         // A change made just before sending (a slider still within its save
         // delay, a save on its way) is saved first, so this turn runs on it.
@@ -539,7 +552,7 @@ export default function ConversationPage() {
         // only the title's own time (the prefill of the question, plus the
         // model load when the model is cold) before the chat request starts
         // its attachment and Knowledge Base preparation.
-        if (isFirstMessage) {
+        if (isFirstMessage && !isEphemeral(id)) {
           await (async () => {
             try {
               const titleRes = await tracedFetch(
@@ -582,6 +595,7 @@ export default function ConversationPage() {
         // Stream response using fetch + ReadableStream
         const responseRes = await tracedFetch(`${API_BASE_URL}/conversations/${id}/query`, {
           method: "POST",
+          signal: turnController.signal,
           headers: { "Content-Type": "application/json" },
           body: JSON.stringify({
             question,
@@ -859,13 +873,17 @@ export default function ConversationPage() {
               buffer = "";
             }
           } catch (streamError) {
-            log.error("Streaming error during response generation", streamError);
-            answerText = joinFailure(
-              answerText,
-              `${ERROR_SENTINEL} ${t("chat:errors.connectionInterrupted")}`
-            );
-            sawError = true;
-            flushNow();
+            if (leftByUser()) {
+              log.info(`Answer of conversation ${id} abandoned: the user left or deleted it`);
+            } else {
+              log.error("Streaming error during response generation", streamError);
+              answerText = joinFailure(
+                answerText,
+                `${ERROR_SENTINEL} ${t("chat:errors.connectionInterrupted")}`
+              );
+              sawError = true;
+              flushNow();
+            }
           } finally {
             // The final update below carries everything received: the
             // window in progress has nothing left to say.
@@ -926,7 +944,13 @@ export default function ConversationPage() {
           );
         }
       } catch (err) {
-        log.error("Failed to send message", err);
+        if (leftByUser()) {
+          log.info(`Message to conversation ${id} abandoned: the user left or deleted it`);
+        } else {
+          log.error("Failed to send message", err);
+        }
+      } finally {
+        untrackTurn();
       }
 
       isStreamingRef.current = false;
@@ -1018,6 +1042,8 @@ export default function ConversationPage() {
         const conversation = await convDetailRes.json();
         if (cancelled) return;
         adopt(conversation, stamp);
+        if (conversation.ephemeral) markEphemeral(id);
+        setEphemeral(Boolean(conversation.ephemeral));
         setLoadFailed(false);
       } catch (err) {
         log.error("Failed to fetch conversations", err);
@@ -1431,7 +1457,8 @@ export default function ConversationPage() {
               compactingHere ? ALL_COMMAND_NAMES : loading ? COMMANDS_DISABLED_WHILE_ANSWERING : []
             }
             onCommand={runCommand}
-            onExport={exportThisConversation}
+            onExport={ephemeral ? undefined : exportThisConversation}
+            ephemeral={ephemeral}
             exportDisabled={loading || compactingHere}
             saveFailed={conversationSettings.saveFailed}
           >

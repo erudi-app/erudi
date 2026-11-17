@@ -287,4 +287,34 @@ describe("ConversationHeader", () => {
       screen.getByRole("button", { name: "Conversation settings" })
     );
   });
+
+  it("shows the ephemeral badge, saying what happens, only on an ephemeral conversation", () => {
+    const { rerender } = render(
+      <ConversationHeader
+        models={MODELS}
+        onPickModel={noop}
+        modelName="Qwen3-4B"
+        commands={COMMANDS}
+        onCommand={vi.fn()}
+      />
+    );
+    expect(screen.queryByText("Ephemeral")).toBeNull();
+
+    rerender(
+      <ConversationHeader
+        models={MODELS}
+        onPickModel={noop}
+        modelName="Qwen3-4B"
+        commands={COMMANDS}
+        onCommand={vi.fn()}
+        ephemeral
+      />
+    );
+    const badge = screen.getByText("Ephemeral");
+    expect(badge.getAttribute("title")).toBe(
+      "This conversation is deleted when you leave it. It is not in your history."
+    );
+    // The heading still reads the model line alone.
+    expect(screen.getByRole("heading").textContent).toBe("You are chatting with Qwen3-4B");
+  });
 });

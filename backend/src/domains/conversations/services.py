@@ -41,23 +41,27 @@ from src.domains.conversations.repository import ConversationRepository, Message
 from src.domains.llms.conversation_defaults import SOURCE_SAVED, read_conversation_defaults
 from src.domains.llms.repository import detect_supports_vision
 from src.domains.conversations.schemas import ConversationQuery
+from src.domains.conversations.turns import conversation_turns
 from src.entities.Conversation import Conversation
 from src.entities.Llm import Llm
 from src.entities.Message import Message
 from src.core.exceptions import (
     CompactionSeparatorException,
+    ConversationNotFoundException,
     DatabaseException,
     EmbeddingModelMissingException,
     ModelNotFoundException,
     StateConflictException,
 )
 from src.core.request_context import get_request_id
+from src.launcher.runtime_paths import pasted_images_dir
 from src.utils.attachment_utils import (
     build_attachment_notice,
     prepend_attachment_block,
     resolve_attachments,
 )
 from src.utils.kb_utils import KbExcerpt, retrieve_kb_excerpts
+from src.utils.pasted_images import PastedImage, pasted_images_in, remove_pasted_images
 from src.utils.prompt_utils import get_prompting_strategy
 
 
@@ -243,6 +247,7 @@ class ConversationService:
         web_search_enabled: Optional[bool] = None,
         reasoning_effort: Optional[str] = None,
         compaction_threshold: Optional[int] = None,
+        ephemeral: bool = False,
     ) -> Conversation:
         """Create a new conversation with the given LLM and generation params.
 
@@ -254,6 +259,7 @@ class ConversationService:
         from the model's own defaults (#388). An explicit value always wins.
         The conversation owns its values afterwards -- later changes to the
         model's saved values or to the settings never retro-affect it.
+        ``ephemeral`` (#428) is set here and never changed.
 
         Raises:
             ModelNotFoundException: If ``llm_id`` does not exist.
@@ -279,6 +285,7 @@ class ConversationService:
             llm_id=llm_id,
             name=DEFAULT_CONVERSATION_NAME,
             max_tokens=max_tokens,
+            ephemeral=ephemeral,
             **values,
         )
 
@@ -372,17 +379,59 @@ class ConversationService:
             )
         return updated
 
-    # ===================== Deletion (DB + checkpointer thread) =====================
+    # ============ Deletion (DB + checkpointer thread + pasted images) ============
     async def delete_conversation(self, conversation_id: int) -> None:
-        """Delete a conversation and purge its checkpointer thread.
+        """Delete a conversation, its checkpointer thread and its pasted images.
 
         Both stores must be cleared: ids can be reused after a fresh start or a
         sequence reset, so a stale checkpointer thread would otherwise leak a deleted
         conversation's agent context into a future one with the same id (BLOCKER B3).
+
+        The pasted images its messages reference go too: only files whose real
+        path is inside the app's pasted-images folder
+        (``src.utils.pasted_images``), never a file the user picked from the
+        disk, and never one another conversation still references.
+
+        Nothing is deleted while a turn, a title or a compaction still writes
+        to the conversation: the delete closes it first
+        (``src.domains.conversations.turns``), waiting for that work to end and
+        refusing new work, so no write lands after it -- an ephemeral
+        conversation left mid-answer included, whose turn persists its partial
+        answer after the generation lock is released.
         """
         logger.info(f"Deleting conversation {conversation_id}")
-        await run_in_threadpool(self._delete_conversation_db, conversation_id)
-        await self._purge_thread(conversation_id)
+        async with conversation_turns.closing(conversation_id):
+            images = await run_in_threadpool(self._pasted_images_of, conversation_id)
+            await run_in_threadpool(self._delete_conversation_db, conversation_id)
+            await self._purge_thread(conversation_id)
+            if images:
+                await run_in_threadpool(self._remove_pasted_images, conversation_id, images)
+
+    def _pasted_images_of(self, conversation_id: int) -> list[PastedImage]:
+        contents = [
+            m.content
+            for m in self.message_repo.get_messages_by_conversation(conversation_id)
+            if m.sender == "user"
+        ]
+        if not any("[image_path:" in c for c in contents):
+            return []
+        return pasted_images_in(contents, pasted_images_dir())
+
+    def _remove_pasted_images(self, conversation_id: int, images: list[PastedImage]) -> None:
+        """Remove the images no remaining message references (read after the
+        conversation's own rows are gone)."""
+        unshared = [
+            image
+            for image in images
+            if not self.db.query(Message.id)
+            .filter(Message.content.contains(image.marker, autoescape=True))
+            .first()
+        ]
+        removed = remove_pasted_images(unshared, conversation_id)
+        logger.info(
+            f"Pasted images of conversation {conversation_id} deleted: {removed} "
+            f"(kept, still shown elsewhere: {len(images) - len(unshared)})"
+        )
 
     def _delete_conversation_db(self, conversation_id: int) -> None:
         self.conversation_repo.delete_conversation(conversation_id)
@@ -445,6 +494,35 @@ class ConversationService:
             return []
 
     async def query_and_respond_stream(
+        self,
+        conversation_id: int,
+        payload: ConversationQuery,
+    ) -> AsyncGenerator[str, None]:
+        """The turn of ``_stream_turn``, registered as work on the
+        conversation from its first statement to its last persistence
+        (``src.domains.conversations.turns``): a delete waits for it to end.
+
+        A conversation being deleted takes no new turn: the stream is the
+        ``error`` event and ``done``, and nothing is written.
+        """
+        turn = conversation_turns.begin(conversation_id)
+        if turn is None:
+            # The user left it (an ephemeral conversation) or deleted it: an
+            # outcome the client asked for, not a defect.
+            logger.info(f"Query refused: conversation {conversation_id} is being deleted")
+            yield _ndjson({"t": "error", "text": ERROR_MESSAGE, "request_id": get_request_id()})
+            yield _ndjson({"t": "done"})
+            return
+        try:
+            # ``aclosing``: closing this generator closes the turn's first, so
+            # its ``finally`` (the persistence) has run when the turn ends.
+            async with contextlib.aclosing(self._stream_turn(conversation_id, payload)) as lines:
+                async for line in lines:
+                    yield line
+        finally:
+            conversation_turns.end(conversation_id, turn)
+
+    async def _stream_turn(
         self,
         conversation_id: int,
         payload: ConversationQuery,
@@ -755,7 +833,29 @@ class ConversationService:
         conversation_id: int,
         question: str,
     ) -> AsyncGenerator[str, None]:
-        """Stream an auto-generated 2–4 word title (stateless one-shot)."""
+        """Stream an auto-generated 2-4 word title (stateless one-shot).
+
+        Registered as work on the conversation like a turn: a delete waits
+        for the title to be saved, and a conversation being deleted gets no
+        title. An ephemeral conversation (#428) never gets one."""
+        turn = conversation_turns.begin(conversation_id)
+        if turn is None:
+            logger.info(
+                f"Title generation skipped: conversation {conversation_id} is being deleted"
+            )
+            return
+        try:
+            async with contextlib.aclosing(self._title_stream(conversation_id, question)) as chunks:
+                async for chunk in chunks:
+                    yield chunk
+        finally:
+            conversation_turns.end(conversation_id, turn)
+
+    async def _title_stream(
+        self,
+        conversation_id: int,
+        question: str,
+    ) -> AsyncGenerator[str, None]:
         start_s = time.perf_counter()
         logger.info(
             f"Generating title for conversation {conversation_id}: "
@@ -774,6 +874,12 @@ class ConversationService:
                 exc_info=True,
             )
             await run_in_threadpool(self._save_title, conversation_id, DEFAULT_CONVERSATION_NAME)
+            return
+
+        if _conversation.ephemeral:
+            # Never named (#428): an ephemeral conversation is never listed,
+            # and a title written as it is deleted would land on no row.
+            logger.info(f"Title generation skipped: conversation {conversation_id} is ephemeral")
             return
 
         if not question or not question.strip():
@@ -998,7 +1104,19 @@ class ConversationService:
         last answer read under the guard, once the checkpoint is rewritten. A
         separator that cannot be saved then raises
         ``CompactionSeparatorException`` (the history stays summarized).
+
+        Registered as work on the conversation like a turn: a delete waits
+        for it, and a conversation being deleted is a 404.
         """
+        turn = conversation_turns.begin(conversation_id)
+        if turn is None:
+            raise ConversationNotFoundException(conversation_id)
+        try:
+            return await self._compact(conversation_id)
+        finally:
+            conversation_turns.end(conversation_id, turn)
+
+    async def _compact(self, conversation_id: int) -> dict:
         conversation, llm = await run_in_threadpool(
             self._load_conversation_and_llm_read_only, conversation_id
         )

@@ -25,6 +25,10 @@ from src.engines.mlx_engine import MLX_Engine
 pytestmark = pytest.mark.unit
 
 
+async def _no_sweep(_checkpointer):
+    return None
+
+
 @pytest.fixture(autouse=True)
 def _restore_engine():
     """The selected engine is process-global; put it back after every test."""
@@ -196,6 +200,9 @@ def _stub_startup(monkeypatch):
     monkeypatch.setattr(api, "init_kb_store", lambda *_: None)
     monkeypatch.setattr(api, "close_kb_store", lambda *_a, **_k: None)
     monkeypatch.setattr(api, "open_checkpointer", lambda *_: _FakeCheckpointerCM())
+    # The ephemeral sweeps (#428) need a database; not under test here.
+    monkeypatch.setattr(api, "sweep_at_start", _no_sweep)
+    monkeypatch.setattr(api, "purge_at_shutdown", _no_sweep)
 
     async def _fake_populate():
         return {}

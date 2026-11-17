@@ -15,6 +15,7 @@ import UpdateBanner from "./components/UpdateBanner";
 import UpdateNoticeDialog from "./components/modals/UpdateNoticeDialog";
 import EngineFailureModal from "./components/modals/EngineFailureModal";
 import InteractionLogger from "./components/InteractionLogger";
+import EphemeralConversationGuard from "./components/EphemeralConversationGuard";
 import { apiClient } from "./services/api/client";
 import { setBackendPort } from "./config/api";
 import { syncLanguageWithBackend } from "./i18n/sync";
@@ -189,6 +190,8 @@ export default function App() {
         <Router>
           {/* Mounted-once UI interaction tracer (needs the Router for useLocation). */}
           <InteractionLogger />
+          {/* Deletes an ephemeral conversation when the route leaves it (#428). */}
+          <EphemeralConversationGuard />
           <Routes>
             <Route path="/" element={<Navigate to="/erudi/models" replace />} />
             <Route path="/erudi" element={<Navigate to="/erudi/models" replace />} />

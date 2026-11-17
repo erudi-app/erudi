@@ -10,6 +10,7 @@ import {
   isUnsafeInstanceRoot,
   instanceRootFrom,
   OWNERSHIP_SENTINEL,
+  PASTED_IMAGES_FOLDER,
 } from "./dataLocations.js";
 
 // The table the backend's runtime_paths.py is checked against too
@@ -47,6 +48,14 @@ function locate(platform, env, extra = {}) {
 describe("resolveDataLocations: the backend's layout", () => {
   it("uses the ownership file name the backend writes", () => {
     expect(OWNERSHIP_SENTINEL).toBe(TABLE.ownership_sentinel);
+  });
+
+  it("writes pasted images in the folder whose files the backend deletes with a conversation", () => {
+    expect(PASTED_IMAGES_FOLDER).toBe(TABLE.pasted_images_folder);
+    const locations = locate("darwin", {});
+    expect(locations.pastedImagesDir).toBe(
+      path.posix.join(locations.dataDir, TABLE.pasted_images_folder)
+    );
   });
 
   it.each(TABLE.cases.map((c) => [c.name, c]))("%s", (_name, c) => {

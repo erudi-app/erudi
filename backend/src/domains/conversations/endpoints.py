@@ -96,7 +96,11 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 from fastapi.responses import StreamingResponse
 
-from src.core.exceptions import CompactionFailedException, app_error_response
+from src.core.exceptions import (
+    CompactionFailedException,
+    ConversationNotFoundException,
+    app_error_response,
+)
 from src.core.logging import logger
 from src.database.core import get_db
 from src.agents.checkpoint import get_checkpointer
@@ -113,6 +117,7 @@ from src.domains.conversations.schemas import (
 )
 from src.domains.conversations.repository import ConversationRepository, MessageRepository
 from src.domains.conversations.services import ConversationService
+from src.domains.conversations.turns import conversation_turns
 from src.entities.Llm import Llm
 from src.ingestion.embedder_child import prewarm_embedder
 
@@ -361,6 +366,10 @@ async def get_conversation_by_id(
     Fetch a single conversation by its ID, including messages.
     """
     logger.debug(f"Fetching conversation {conversation_id}")
+    if conversation_turns.is_closing(conversation_id):
+        # Being deleted (an ephemeral conversation the user just left): it is
+        # gone for the reader, whose page must not reload it.
+        raise ConversationNotFoundException(conversation_id)
     # Read-only operation, no commit needed
     conversation = await run_in_threadpool(
         conversation_repo.get_conversation_by_id,
@@ -427,10 +436,12 @@ async def create_conversation(
             web_search_enabled=payload.web_search_enabled,
             reasoning_effort=payload.reasoning_effort,
             compaction_threshold=payload.compaction_threshold,
+            ephemeral=payload.ephemeral,
         )
         db.commit()
         logger.info(
             f"Conversation created: id={conv.id}, llm_id={payload.llm_id}, "
+            f"ephemeral={conv.ephemeral}, "
             f"temperature={conv.temperature}, top_p={conv.top_p}, "
             f"max_tokens={conv.max_tokens}, "
             f"web_search_enabled={conv.web_search_enabled}, "
@@ -452,7 +463,12 @@ async def delete_conversation(
     service: ConversationService = Depends(get_conversation_service),
     db: Session = Depends(get_db),
 ):
-    """Delete a conversation and all associated messages (cascade delete).
+    """Delete a conversation, its messages (cascade), its checkpointer thread
+    and its pasted images (``ConversationService.delete_conversation``).
+
+    Waits for a turn, a title or a compaction still writing to the
+    conversation before deleting anything; the renderer sends this, without
+    confirmation, when the user leaves an ephemeral conversation (#428).
 
     Args:
         conversation_id: ID of the conversation to delete.

@@ -41,6 +41,10 @@ BASE = 2 * GIB
 TOTAL = 10 * GIB
 
 
+async def _no_sweep(_checkpointer):
+    return None
+
+
 class _Proc:
     def __init__(self):
         self.alive = True
@@ -1254,6 +1258,9 @@ async def test_shutdown_stops_the_monitor_and_drains_before_cleanup(monkeypatch)
     monkeypatch.setattr(api, "init_kb_store", lambda *_: None)
     monkeypatch.setattr(api, "close_kb_store", lambda *_a, **_k: None)
     monkeypatch.setattr(api, "open_checkpointer", lambda *_: _Checkpointer())
+    # The ephemeral sweeps (#428) need a database; not under test here.
+    monkeypatch.setattr(api, "sweep_at_start", _no_sweep)
+    monkeypatch.setattr(api, "purge_at_shutdown", _no_sweep)
 
     async def _populate():
         return {}

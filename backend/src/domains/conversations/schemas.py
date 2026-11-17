@@ -155,6 +155,8 @@ class ConversationCreate(ConversationBase):
         custom_prompt: Custom system prompt (no character cap).
         web_search_enabled, reasoning_effort, compaction_threshold: The
             conversation's own settings.
+        ephemeral: Whether the conversation is deleted when the user leaves
+            it (#428); False when omitted.
 
         Every field but ``llm_id`` is optional; one left out (None) is
         resolved per model, see the field comments below.
@@ -223,6 +225,15 @@ class ConversationCreate(ConversationBase):
             "value wins."
         ),
     )
+    # Set here only (#428): no update changes it, so a conversation is
+    # ephemeral from its first message or never.
+    ephemeral: bool = Field(
+        default=False,
+        description=(
+            "Ephemeral conversation (#428): never listed or searched, no generated "
+            "title, deleted when the user leaves it or the app stops."
+        ),
+    )
 
 
 class ConversationUpdate(ConversationBase):
@@ -276,6 +287,7 @@ class ConversationResponse(ConversationBase):
         top_p: Current top_p setting.
         max_tokens: Current max_tokens setting.
         custom_prompt: Current system prompt.
+        ephemeral: Whether the conversation is deleted when the user leaves it.
     """
 
     id: int
@@ -293,6 +305,7 @@ class ConversationResponse(ConversationBase):
     web_search_enabled: bool
     reasoning_effort: ReasoningEffort
     compaction_threshold: CompactionThreshold
+    ephemeral: bool
 
     class Config:
         from_attributes = True

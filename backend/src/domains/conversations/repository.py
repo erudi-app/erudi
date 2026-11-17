@@ -60,17 +60,20 @@ class ConversationRepository:
 
     def get_all_conversations(self) -> List[Conversation]:
         """
-        Retrieve all conversations.
+        Retrieve every conversation the history lists: all but the ephemeral
+        ones (#428), which the user never finds again.
 
         Returns:
-            List of all Conversation objects
+            List of the listed Conversation objects
 
         Raises:
             DatabaseException: If database query fails
         """
         try:
             logger.debug("Retrieving all conversations")
-            conversations = self.db.query(Conversation).all()
+            conversations = (
+                self.db.query(Conversation).filter(Conversation.ephemeral.is_(False)).all()
+            )
             logger.debug(f"Retrieved {len(conversations)} conversations")
             return conversations
         except SQLAlchemyError as e:
@@ -83,8 +86,9 @@ class ConversationRepository:
         The match is a case-insensitive substring (``ILIKE``, the query's own
         ``%`` / ``_`` / ``\\`` escaped). Only ``messages.content`` is searched, minus its hidden attachment markers:
         the model's reasoning lives in ``messages.trace`` and never matches, and
-        a failed turn (``ERROR_SENTINEL``) is not conversation text. Newest
-        first, at most ``limit``; a blank query matches nothing.
+        a failed turn (``ERROR_SENTINEL``) is not conversation text. An
+        ephemeral conversation (#428) is never found. Newest first, at most
+        ``limit``; a blank query matches nothing.
 
         Raises:
             DatabaseException: If database query fails
@@ -104,6 +108,7 @@ class ConversationRepository:
             )
             return (
                 self.db.query(Conversation)
+                .filter(Conversation.ephemeral.is_(False))
                 .filter(or_(Conversation.name.ilike(pattern, escape=_LIKE_ESCAPE), in_a_message))
                 .order_by(Conversation.id.desc())
                 .limit(limit)
@@ -182,6 +187,7 @@ class ConversationRepository:
         web_search_enabled: bool = False,
         reasoning_effort: str = DEFAULT_REASONING_EFFORT,
         compaction_threshold: int = DEFAULT_COMPACTION_THRESHOLD,
+        ephemeral: bool = False,
     ) -> Conversation:
         """
         Create a new conversation.
@@ -200,6 +206,7 @@ class ConversationRepository:
                 lifecycle as the web-search toggle
             compaction_threshold: Per-conversation compaction threshold in
                 percent (#607), same lifecycle
+            ephemeral: Deleted when the user leaves it (#428), set here only
 
         Returns:
             The created Conversation
@@ -218,6 +225,7 @@ class ConversationRepository:
                 web_search_enabled=web_search_enabled,
                 reasoning_effort=reasoning_effort,
                 compaction_threshold=compaction_threshold,
+                ephemeral=ephemeral,
             )
             self.db.add(conversation)
             self.db.flush()  # Flush to get ID, no commit
@@ -320,6 +328,23 @@ class ConversationRepository:
             raise
         except SQLAlchemyError as e:
             raise DatabaseException("Could not update conversation", trace=str(e))
+
+    def get_ephemeral_conversation_ids(self) -> List[int]:
+        """The ids of every ephemeral conversation (#428), for the sweeps.
+
+        Raises:
+            DatabaseException: If database query fails
+        """
+        try:
+            rows = (
+                self.db.query(Conversation.id)
+                .filter(Conversation.ephemeral.is_(True))
+                .order_by(Conversation.id)
+                .all()
+            )
+            return [row.id for row in rows]
+        except SQLAlchemyError as e:
+            raise DatabaseException("Could not list ephemeral conversations", trace=str(e))
 
     def delete_conversation(self, conversation_id: int) -> None:
         """
