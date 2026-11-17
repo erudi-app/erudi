@@ -25,6 +25,9 @@ jobs:
     # Skip on draft PRs: the heavy build runs once the PR is marked ready (and in
     # the merge queue once enabled), not on every work-in-progress commit.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    # Explicit name: the required checks on main are these four matrix values,
+    # so a matrix key added later (eb_sign_args) must not reach the check name.
+    name: app-smoke (${{ matrix.os }}, ${{ matrix.reqs }}, ${{ matrix.spec }}, ${{ matrix.dist_script }})
     strategy:
       fail-fast: false
       matrix:
@@ -33,6 +36,10 @@ jobs:
             reqs: mac-silicon-prod.txt
             spec: backend-mac-silicon.spec
             dist_script: dist:mac
+            # No certificate on this leg: electron-builder signs every file ad
+            # hoc (hardened runtime and entitlements included) instead of
+            # leaving a signature on the main executable only (#690).
+            eb_sign_args: "-c.mac.identity=-"
           - os: windows-latest # x64 CPU
             reqs: win-cpu-prod.txt
             spec: backend-cpu.spec
@@ -125,9 +132,20 @@ jobs:
 
       - name: Build packaged app (unsigned, no publish)
         working-directory: frontend
+        env:
+          # electron-builder skips signing on a pull request (GITHUB_BASE_REF)
+          # unless this is set. This leg holds no secret and signs ad hoc.
+          CSC_FOR_PULL_REQUEST: "true"
         run: |
           npm ci
-          npm run ${{ matrix.dist_script }} -- --publish never
+          npm run ${{ matrix.dist_script }} -- --publish never ${{ matrix.eb_sign_args }}
+
+      # The app must verify as a whole and carry the hardened runtime: an ad hoc
+      # signature on the main executable only fails the check and macOS 26
+      # refuses to launch it (#690).
+      - name: Check the macOS app signature
+        if: runner.os == 'macOS'
+        run: bash scripts/ci/check_mac_app_signature.sh frontend/dist/mac-arm64/Erudi.app
 
       - name: Locate the bundled backend executable
         id: locate
