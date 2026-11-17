@@ -17,6 +17,8 @@ backend/build/
 
 # SQLite runtime files
 backend/data/
+# Ownership file a dev backend writes in backend/data and backend/logs
+.erudi-owned
 *.db
 *.db-shm
 *.db-wal

@@ -168,6 +168,10 @@
     "manualReload": "Liberaste el modelo; recargándolo…",
     "compacting": "Resumiendo los mensajes anteriores para hacer espacio…",
     "imagePlaceholder": "🖼 imagen adjunta",
+    "imageRefused": {
+      "tooLarge": "Imagen no mostrada: supera los 20 MB.",
+      "notImage": "Imagen no mostrada: el archivo no es una imagen."
+    },
     "attachmentAlt": "adjunto {{index}}",
     "copy": "Copiar mensaje",
     "star": "Destacar mensaje"

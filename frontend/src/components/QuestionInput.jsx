@@ -3,14 +3,9 @@ import PropTypes from "prop-types";
 import { ArrowRight, FileText, ImagePlus, Paperclip, Plus, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { matchCommands, parseSlashCommand } from "../utils/slashCommands";
+import { IMAGE_EXTENSIONS, MAX_IMAGE_BYTES, SUPPORTED_IMAGE_TYPES } from "../utils/imageLimits";
 
 const DEFAULT_MAX_IMAGES = 4;
-// Raster formats the vision pipeline can actually decode. SVG and other vector
-// or exotic types are rejected up front: the backend image decoder can't read
-// them, so letting one through would fail the whole turn.
-const SUPPORTED_IMAGE_TYPES = ["image/jpeg", "image/png", "image/webp", "image/gif", "image/bmp"];
-const IMAGE_EXTENSIONS = [".jpg", ".jpeg", ".png", ".webp", ".gif", ".bmp"];
-const MAX_IMAGE_BYTES = 20 * 1024 * 1024; // 20 MB per image
 
 // Documents (#492): exactly the set the Knowledge Base parser handles, so a
 // file accepted here is a file the backend's DocumentReader can read.
