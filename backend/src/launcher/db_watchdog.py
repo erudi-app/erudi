@@ -91,19 +91,51 @@ def get_db_state() -> str:
 # ---- detection: the SQLAlchemy disconnect hook -----------------------------
 
 
+# SQLSTATE classes and codes of an OperationalError that a LIVE server sent
+# about one statement or one connection: a restart cures none of them, and a
+# full connection table (53300) restarted would refill and trip again.
+# Class 53: insufficient resources (too many connections, disk full, out of
+# memory); class 40: transaction rollback (deadlock, serialization failure);
+# 57014: query cancelled.
+_LIVE_SERVER_SQLSTATE_CLASSES = ("53", "40")
+_LIVE_SERVER_SQLSTATES = frozenset({"57014"})
+
+# psycopg reports a connection the server refused with no sqlstate (measured
+# on the bundled PostgreSQL 16): the server's message is the only evidence
+# that the table is full rather than the server gone.
+_FULL_CONNECTION_TABLE_MESSAGES = (
+    "too many clients already",
+    "remaining connection slots are reserved",
+)
+
+
+def _is_live_server_refusal(error: BaseException) -> bool:
+    """Whether ``error`` was sent by a running server about one request."""
+    sqlstate = getattr(error, "sqlstate", None)
+    if sqlstate is not None:
+        return sqlstate in _LIVE_SERVER_SQLSTATES or sqlstate.startswith(
+            _LIVE_SERVER_SQLSTATE_CLASSES
+        )
+    message = str(error)
+    return any(marker in message for marker in _FULL_CONNECTION_TABLE_MESSAGES)
+
+
 def _is_disconnect(exc_ctx) -> bool:
     """True for a connection-level disconnect (dead/closed cluster).
 
     Primary signal is SQLAlchemy's own ``is_disconnect`` (set by the psycopg
     dialect for "server closed the connection unexpectedly" and friends). We
-    also treat any raw ``psycopg.OperationalError`` as a disconnect so a
-    connect-time failure (cluster fully down, nothing to close) still trips.
-    Non-connection errors (ProgrammingError, IntegrityError, ...) return False.
+    also treat a raw ``psycopg.OperationalError`` as a disconnect so a
+    connect-time failure (cluster fully down, nothing to close) still trips --
+    except one a running server sent about a single request
+    (:func:`_is_live_server_refusal`: a full connection table, a cancelled
+    query, a deadlock), which the request reports on its own. Non-connection
+    errors (ProgrammingError, IntegrityError, ...) return False.
     """
     if getattr(exc_ctx, "is_disconnect", False):
         return True
     original = getattr(exc_ctx, "original_exception", None)
-    return isinstance(original, psycopg.OperationalError)
+    return isinstance(original, psycopg.OperationalError) and not _is_live_server_refusal(original)
 
 
 def _on_db_error(exc_ctx) -> None:

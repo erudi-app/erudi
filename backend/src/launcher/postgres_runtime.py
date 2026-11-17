@@ -39,6 +39,7 @@ POSIX test suites exercise it too; only the TCP refusal itself is Windows-only.
 
 from __future__ import annotations
 
+import functools
 import hashlib
 import json
 import logging
@@ -64,6 +65,7 @@ from psycopg import sql
 
 from src.core.logging import logger
 from src.core.subprocess_flags import hidden_console_creationflags
+from src.launcher import postgres_settings
 from src.launcher.events import emit_phase
 
 DB_NAME = "erudi"
@@ -152,10 +154,69 @@ def _console_isolated(orig_command):
     return command
 
 
+def _with_server_settings(orig_pg_ctl):
+    """Wrap ``pg_ctl`` so every ``start`` passes Erudi's server settings (#620).
+
+    pgserver starts the postmaster with ``pg_ctl ... start`` and its own
+    ``-o`` options (socket dir, listen address, port). The settings of
+    ``postgres_settings.server_settings()`` are inserted before the action as
+    more ``-o "-c name=value"`` options, so they apply to every postmaster
+    this backend starts -- first boot, normal start, the start a crash
+    recovery follows, a watchdog restart -- with no configuration file
+    written. Any other action (``stop``, ``reload``) goes through unchanged.
+    Idempotent via a guard attribute; ``functools.wraps`` carries the
+    console-isolation guard of the wrapped function along.
+    """
+    if getattr(orig_pg_ctl, "_erudi_server_settings", False):
+        return orig_pg_ctl
+
+    @functools.wraps(orig_pg_ctl)
+    def pg_ctl(args, pgdata=None, **kwargs):
+        if "start" in args:
+            settings = postgres_settings.server_settings()
+            at = list(args).index("start")
+            args = [*args[:at], *postgres_settings.postmaster_options(settings), *args[at:]]
+            listed = ", ".join(f"{name}={value}" for name, value in settings.items())
+            logger.info(f"Starting the embedded PostgreSQL with server settings: {listed}")
+        return orig_pg_ctl(args, pgdata=pgdata, **kwargs)
+
+    pg_ctl._erudi_server_settings = True
+    return pg_ctl
+
+
 # Same call-time lookup as the socket-dir patch: postgres_server resolves both
 # names on its own module, so rebind them there.
-_pg_server_mod.pg_ctl = _console_isolated(_pg_server_mod.pg_ctl)
+_pg_server_mod.pg_ctl = _with_server_settings(_console_isolated(_pg_server_mod.pg_ctl))
 _pg_server_mod.initdb = _console_isolated(_pg_server_mod.initdb)
+
+
+def _report_kept_server_settings(conn: psycopg.Connection) -> None:
+    """Log the settings a joined postmaster runs with that differ from Erudi's.
+
+    A start that joins a postmaster already running (another start of this
+    backend, a crash recovery that finished, a cluster an older version
+    started) does not restart it, so it keeps the settings it was started
+    with until its next start. Harmless -- they are PostgreSQL's defaults or
+    an older version's -- and said once so a ``SHOW`` that disagrees with
+    the code is explained.
+    """
+    wanted = postgres_settings.server_settings()
+    running = dict(
+        conn.execute(
+            "SELECT name, current_setting(name) FROM unnest(%s::text[]) AS name",
+            (list(wanted),),
+        ).fetchall()
+    )
+    differ = [
+        f"{name}={running[name]} (next start: {value})"
+        for name, value in wanted.items()
+        if running.get(name) != value
+    ]
+    if differ:
+        logger.info(
+            "Embedded PostgreSQL was already running and keeps the server settings it was "
+            f"started with until it restarts: {', '.join(differ)}"
+        )
 
 
 # pgserver starts the postmaster with ``pg_ctl -l <pgdata>/log``
@@ -888,6 +949,7 @@ def start_postgres(data_dir: Path | str) -> PostgresHandle:
             ).fetchone()
             if not exists:
                 conn.execute(f'CREATE DATABASE "{DB_NAME}"')
+            _report_kept_server_settings(conn)
 
         psycopg_url = _uri_for_db(admin_uri, DB_NAME)
 

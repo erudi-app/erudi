@@ -71,6 +71,47 @@ class TestDisconnectDetection:
         assert db_watchdog._is_disconnect(ctx) is True
 
     @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "error",
+        [
+            psycopg.errors.TooManyConnections("sorry, too many clients already"),
+            psycopg.errors.QueryCanceled("canceling statement due to user request"),
+            psycopg.errors.DeadlockDetected("deadlock detected"),
+            psycopg.errors.SerializationFailure("could not serialize access"),
+            psycopg.errors.DiskFull("could not extend file"),
+        ],
+        ids=["53300", "57014", "40P01", "40001", "53100"],
+    )
+    def test_is_disconnect_false_for_a_live_server_refusing_one_statement(self, error):
+        # The server is up and answered: restarting it would cure nothing,
+        # and on a full connection table it would loop.
+        ctx = _ctx(is_disconnect=False, original=error)
+        assert db_watchdog._is_disconnect(ctx) is False
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "message",
+        [
+            'connection failed: connection to server on socket "/tmp/x/.s.PGSQL.5432" '
+            "failed: FATAL:  sorry, too many clients already",
+            "connection failed: FATAL:  remaining connection slots are reserved for "
+            "roles with the SUPERUSER attribute",
+        ],
+    )
+    def test_is_disconnect_false_for_a_full_connection_table_at_connect(self, message):
+        # psycopg reports a refused connect with no sqlstate (measured on the
+        # bundled server): only the server's message says the table is full.
+        ctx = _ctx(is_disconnect=False, original=psycopg.OperationalError(message))
+        assert db_watchdog._is_disconnect(ctx) is False
+
+    @pytest.mark.unit
+    def test_hook_does_not_restart_on_too_many_clients(self):
+        db_watchdog._on_db_error(
+            _ctx(original=psycopg.errors.TooManyConnections("sorry, too many clients already"))
+        )
+        assert db_watchdog.db_state == db_watchdog.DB_OK
+
+    @pytest.mark.unit
     def test_is_disconnect_false_for_non_connection_error(self):
         ctx = _ctx(is_disconnect=False, original=psycopg.ProgrammingError("bad sql"))
         assert db_watchdog._is_disconnect(ctx) is False
