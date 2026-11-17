@@ -9,8 +9,12 @@ and the whole LangChain agent stack only loads on the first turn, not at boot
 
 from __future__ import annotations
 
+from typing import Annotated, Optional
+
 from langchain.agents.middleware import AgentMiddleware
+from langchain.agents.middleware.types import AgentState, PrivateStateAttr
 from langchain_core.messages import HumanMessage
+from typing_extensions import NotRequired
 
 # One substitution helper and one marker table, shared with the real-token
 # counters (``src.agents.token_accounting``); re-exported here for the
@@ -20,6 +24,15 @@ from src.agents.token_accounting import (
     last_human_index,
     stale_result_copy,
 )
+
+
+class CompactionState(AgentState):
+    """The agent state of a compacting turn: the messages, plus the
+    compaction pause (``src.agents.runner.COMPACTION_PAUSE_KEY``), the id of
+    the user message whose automatic compaction failed. Private to the
+    compaction middleware, persisted with the thread by the checkpointer."""
+
+    erudi_compaction_paused_at: NotRequired[Annotated[Optional[str], PrivateStateAttr]]
 
 
 def _split_multimodal(content):

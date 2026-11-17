@@ -29,13 +29,79 @@ lives in the LangGraph checkpointer (via ``SummarizationMiddleware``).
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, List, Optional
 
 from src.agents.language import detect_language
+from src.agents.token_accounting import counter_weight
 from src.utils.prompt_utils import build_system_prompt, get_prompting_strategy
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from src.utils.kb_utils import KbExcerpt
+
+# What the starred block of the system prompt carries (#659): the beginning
+# of each starred message, at most ``STARRED_MESSAGE_TOKENS`` of it and
+# ``STARRED_TOTAL_TOKENS`` for all of them, in the compaction counter's tokens.
+# The block rides every request and compaction never shortens it, so a long
+# star would otherwise fill the window on every turn. The oldest stars come
+# first: the newer ones are the likelier to still be in the history verbatim,
+# while the early ones (the task, the constraints) are the first a compaction
+# summarizes. A cut message ends with ``STARRED_TRUNCATION_MARK``.
+STARRED_MESSAGE_TOKENS = 500
+STARRED_TOTAL_TOKENS = 2000
+STARRED_TRUNCATION_MARK = " [...]"
+_APPROX_CHARS_PER_TOKEN = 4
+
+
+def _star_tokens(text: str) -> int:
+    """The counter's tokens of ``text``: its own weight times chars/4."""
+    from langchain_core.messages import HumanMessage
+
+    if not text:
+        return 0
+    weight = counter_weight(HumanMessage(text))
+    return math.ceil(weight * len(text) / _APPROX_CHARS_PER_TOKEN)
+
+
+def _head_within(text: str, budget: int) -> str:
+    """The longest head of ``text`` whose OWN count fits ``budget``: cut at
+    ``budget * 4 / w`` characters with the whole text's weight ``w`` first,
+    then shortened while the head's own weight says it is over (a Chinese
+    head of a mostly Latin message weighs far more than the average)."""
+    from langchain_core.messages import HumanMessage
+
+    weight = counter_weight(HumanMessage(text))
+    head = text[: int(budget * _APPROX_CHARS_PER_TOKEN / weight)]
+    while head and _star_tokens(head) > budget:
+        over = _star_tokens(head) - budget
+        head = head[: max(0, len(head) - max(1, over))]
+    return head.rstrip()
+
+
+def bound_starred_messages(messages: List[str]) -> List[str]:
+    """``messages`` (the starred contents, oldest first) as the system prompt
+    carries them: each whole when it fits its budget -- ``min(500, what the
+    2,000-token total leaves)`` -- else its longest head that fits it, counted
+    on the head itself with the compaction counter (``_head_within``), and
+    marked; a star whose head would be empty is skipped; none once the total
+    is spent."""
+    carried: List[str] = []
+    left = STARRED_TOTAL_TOKENS
+    for text in messages:
+        budget = min(STARRED_MESSAGE_TOKENS, left)
+        if budget <= 0:
+            break
+        cost = _star_tokens(text)
+        if cost > budget:
+            text = _head_within(text, budget)
+            if not text:
+                continue
+            cost = _star_tokens(text)
+            text += STARRED_TRUNCATION_MARK
+        carried.append(text)
+        left -= cost
+    return carried
+
 
 # Localized answer-language lines: an instruction written IN the target
 # language is the strongest prompt-level counter to English drift. Codes

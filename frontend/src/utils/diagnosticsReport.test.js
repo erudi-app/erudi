@@ -238,6 +238,266 @@ describe("mergeRecentErrors", () => {
     });
     expect(entries).toHaveLength(1);
   });
+
+  it("folds identical backend records into one entry with a repeat count (#534)", () => {
+    // Observed on the 1.1.2 pass: the same Hugging Face advice line three
+    // times in one session, listed as three rows and three lines of the
+    // copied report.
+    const repeated =
+      "Xet Storage is enabled for this repo, but the 'hf_xet' package is not installed.";
+    const entries = mergeRecentErrors({
+      backend: {
+        recent_errors: [
+          {
+            timestamp: "2026-09-05T10:00:00.000Z",
+            level: "WARNING",
+            request_id: "be-1",
+            message: repeated,
+          },
+          {
+            timestamp: "2026-09-05T10:00:01.000Z",
+            level: "WARNING",
+            request_id: "be-2",
+            message: repeated,
+          },
+          {
+            timestamp: "2026-09-05T10:00:02.000Z",
+            level: "WARNING",
+            request_id: "be-3",
+            message: repeated,
+          },
+        ],
+      },
+      appLog: [],
+      sessionErrors: [],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].count).toBe(3);
+    // The newest occurrence names the entry: "when did this last happen" is
+    // the question, and the request id has to point at the same turn.
+    expect(entries[0].timestamp).toBe("2026-09-05T10:00:02.000Z");
+    expect(entries[0].requestId).toBe("be-3");
+  });
+
+  it("folds only within a source and a level, never across them", () => {
+    const same = "identical text";
+    const entries = mergeRecentErrors({
+      backend: {
+        recent_errors: [
+          {
+            timestamp: "2026-09-05T10:00:00.000Z",
+            level: "WARNING",
+            request_id: "be-1",
+            message: same,
+          },
+          {
+            timestamp: "2026-09-05T10:00:01.000Z",
+            level: "ERROR",
+            request_id: "be-2",
+            message: same,
+          },
+        ],
+      },
+      // Not a "Backend stdout:" echo, so it survives the echo filter and
+      // stands as an app record of its own.
+      appLog: [{ timestamp: "2026-09-05T10:00:02.000Z", level: "WARNING", message: same }],
+      sessionErrors: [],
+    });
+    expect(entries).toHaveLength(3);
+    expect(entries.every((e) => e.count === 1)).toBe(true);
+  });
+
+  it("keeps a single record untouched, count and request id included", () => {
+    const entries = mergeRecentErrors({ backend: BACKEND, appLog: [], sessionErrors: [] });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].count).toBe(1);
+    expect(entries[0].requestId).toBe("be-1");
+  });
+
+  it("folds repeats before the cap, so folding frees slots", () => {
+    const noisy = Array.from({ length: 6 }, (_, i) => ({
+      timestamp: `2026-09-05T10:00:0${i}.000Z`,
+      level: "WARNING",
+      request_id: `be-${i}`,
+      message: "the same noisy line",
+    }));
+    const entries = mergeRecentErrors({
+      backend: {
+        recent_errors: [
+          {
+            timestamp: "2026-09-05T09:00:00.000Z",
+            level: "ERROR",
+            request_id: "be-x",
+            message: "a real error",
+          },
+          ...noisy,
+        ],
+      },
+      appLog: [],
+      sessionErrors: [],
+      limit: 2,
+    });
+    // Without folding the six repeats would fill the cap and push the real
+    // error out; folded, both fit.
+    expect(entries).toHaveLength(2);
+    expect(entries[0].message).toBe("a real error");
+    expect(entries[1].count).toBe(6);
+  });
+
+  it("keeps two different bugs apart when they throw the same text", () => {
+    // A session entry keeps its stack outside the message, so the message
+    // alone cannot tell two components' identical TypeErrors apart. Folding
+    // them would sum their counts under the first stack and lose the second
+    // bug entirely.
+    const entries = mergeRecentErrors({
+      backend: null,
+      appLog: [],
+      sessionErrors: [
+        {
+          timestamp: "2026-09-05T11:00:00.000Z",
+          origin: "window.onerror",
+          message: "Cannot read properties of undefined (reading 'x')",
+          stack: "TypeError: ...\n    at ChatPage",
+          count: 2,
+        },
+        {
+          timestamp: "2026-09-05T11:05:00.000Z",
+          origin: "window.onerror",
+          message: "Cannot read properties of undefined (reading 'x')",
+          stack: "TypeError: ...\n    at ArenaPage",
+          count: 3,
+        },
+      ],
+    });
+    expect(entries).toHaveLength(2);
+    const byStack = Object.fromEntries(entries.map((e) => [e.stack, e]));
+    expect(byStack["TypeError: ...\n    at ChatPage"].count).toBe(2);
+    expect(byStack["TypeError: ...\n    at ArenaPage"].count).toBe(3);
+    expect(byStack["TypeError: ...\n    at ArenaPage"].timestamp).toBe("2026-09-05T11:05:00.000Z");
+  });
+
+  it("sums the members' own counts, not the number of members", () => {
+    // Every member already carries a count above 1, so a fold that counted
+    // rows (2) instead of summing (5) would be caught here.
+    const same = {
+      origin: "window.onerror",
+      message: "render loop",
+      stack: "Error: render loop\n    at Widget",
+    };
+    const entries = mergeRecentErrors({
+      backend: null,
+      appLog: [],
+      sessionErrors: [
+        { ...same, timestamp: "2026-09-05T11:00:00.000Z", count: 2 },
+        { ...same, timestamp: "2026-09-05T11:01:00.000Z", count: 3 },
+      ],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].count).toBe(5);
+    expect(entries[0].timestamp).toBe("2026-09-05T11:01:00.000Z");
+    expect(entries[0].stack).toBe("Error: render loop\n    at Widget");
+  });
+
+  it("keeps the session buffer's count when its app-log twin repeats", () => {
+    // The session entry folds into the file record first (Math.max), then the
+    // fold runs: the surviving count must still carry what the session knew.
+    const message =
+      "[renderer:renderer:uncaught] ERROR window.onerror: render blew up Error: render blew up";
+    const entries = mergeRecentErrors({
+      backend: null,
+      appLog: [{ timestamp: "2026-09-05T11:00:00.120Z", level: "ERROR", message }],
+      sessionErrors: [
+        {
+          timestamp: "2026-09-05T11:00:00.000Z",
+          origin: "window.onerror",
+          message: "render blew up",
+          stack: "Error: render blew up\n    at x",
+          count: 4,
+        },
+      ],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].count).toBe(4);
+    expect(entries[0].source).toBe("app");
+  });
+
+  it("keeps the repeat count a reader already folded (#534)", () => {
+    // The readers fold repeats before their own 200-record cap, so a record
+    // can arrive already standing for several occurrences.
+    const entries = mergeRecentErrors({
+      backend: {
+        recent_errors: [
+          {
+            timestamp: "2026-09-05T10:00:02.000Z",
+            level: "WARNING",
+            request_id: "be-3",
+            message: "the same noisy line",
+            count: 3,
+          },
+        ],
+      },
+      appLog: [
+        { timestamp: "2026-09-05T10:00:03.000Z", level: "ERROR", message: "app err", count: 2 },
+      ],
+      sessionErrors: [],
+    });
+    expect(entries.map((e) => e.count)).toEqual([3, 2]);
+  });
+
+  it("folds the backend's echoed lines that differ only by the backend's own header", () => {
+    // When the backend does not answer, its stdout echoes are kept. Each echo
+    // carries the backend formatter's timestamp and request id inside the
+    // message, so three occurrences of one warning would otherwise list as
+    // three consecutive rows of the same text.
+    const echo = (ts, rid) =>
+      `Backend stdout: [WARNING] ${ts} [${rid}] - erudi - hf.py:12 - Xet Storage is enabled`;
+    const entries = mergeRecentErrors({
+      backend: null,
+      appLog: [
+        {
+          timestamp: "2026-09-13T01:45:36.700Z",
+          level: "WARNING",
+          message: echo("2026-09-13T01:45:36.652Z", "-"),
+        },
+        {
+          timestamp: "2026-09-13T01:45:37.300Z",
+          level: "WARNING",
+          message: echo("2026-09-13T01:45:37.293Z", "be-2"),
+        },
+        {
+          timestamp: "2026-09-13T01:51:04.900Z",
+          level: "WARNING",
+          message: echo("2026-09-13T01:51:04.874Z", "be-3"),
+        },
+      ],
+      sessionErrors: [],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].count).toBe(3);
+    expect(entries[0].timestamp).toBe("2026-09-13T01:51:04.900Z");
+    // The surviving row quotes the newest occurrence, as its timestamp does.
+    expect(entries[0].message).toBe(echo("2026-09-13T01:51:04.874Z", "be-3"));
+  });
+
+  it("never folds two different echoed lines", () => {
+    const entries = mergeRecentErrors({
+      backend: null,
+      appLog: [
+        {
+          timestamp: "2026-09-13T01:45:36.700Z",
+          level: "WARNING",
+          message: "Backend stdout: [WARNING] 2026-09-13T01:45:36.652Z [-] - erudi - a.py:1 - one",
+        },
+        {
+          timestamp: "2026-09-13T01:45:37.300Z",
+          level: "WARNING",
+          message: "Backend stdout: [WARNING] 2026-09-13T01:45:37.293Z [-] - erudi - a.py:1 - two",
+        },
+      ],
+      sessionErrors: [],
+    });
+    expect(entries).toHaveLength(2);
+  });
 });
 
 describe("buildPrefill", () => {

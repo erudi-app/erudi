@@ -8,8 +8,8 @@ last ``SUMMARY_KEEP_MESSAGES`` are kept. The summary client is capped at
 ``summary_cap(W)`` tokens; the
 summarizer input always carries the previous summary; a failed summary call
 either fails the turn with the history intact (transient) or degrades to a
-smaller retry and then to a placeholder that carries the previous summary
-(deterministic). The cutoff rule is one pure function shared by the
+smaller retry, after which the history is kept (deterministic; see
+``test_compaction_refusals``). The cutoff rule is one pure function shared by the
 middleware and the amber-warning projection.
 """
 
@@ -70,6 +70,13 @@ pytestmark = pytest.mark.unit
 
 _PARAMS = GenParams(temperature=0.5, top_p=0.9, max_tokens=64)
 _PREVIOUS = "The user is called Ada and lives in Lyon."
+# What the scripted summarizer writes by default: long enough to stand for any
+# pool these tests build (``summary_rejection`` turns down a summary far
+# shorter than what it read).
+SUMMARY = (
+    "The user is called Ada and lives in Lyon. She asked about trains to Paris; "
+    "the assistant listed the morning departures and their fares."
+)
 
 
 def _text(tokens: int, char: str = "a") -> str:
@@ -192,7 +199,7 @@ class _ScriptedSummaryModel(ToolableFakeChatModel):
 
     def _next(self, messages):
         self.prompts.append("\n".join(str(m.content) for m in messages))
-        outcome = self.script.pop(0) if self.script else "A short summary."
+        outcome = self.script.pop(0) if self.script else SUMMARY
         if isinstance(outcome, BaseException):
             raise outcome
         return outcome
@@ -874,14 +881,17 @@ async def test_the_degenerate_window_does_not_re_summarize_the_summary_alone():
 
 
 async def test_an_oversized_last_message_survives_compaction_whole():
+    """A last message larger than the keep budget, but that fits the window
+    on its own (one that does not is refused, ``test_compaction_refusals``)."""
     summary = _ScriptedSummaryModel(messages=iter([]))
     mw = _middleware(summary, window=10_000)
-    huge = HumanMessage(_text(9000), id="huge")
-    state = [HumanMessage("hi", id="1"), AIMessage("yo", id="2"), huge]
+    huge = HumanMessage(_text(5500), id="huge")
+    state = [HumanMessage(_text(2000, "h"), id="1"), AIMessage(_text(300, "y"), id="2"), huge]
 
     after = _after(await mw.abefore_model({"messages": state}, None))
 
-    assert [m.content for m in after[1:]] == ["yo", huge.content]
+    assert [m.id for m in after[1:]] == ["2", "huge"]
+    assert after[-1].content == huge.content
 
 
 # ===================== the summarizer input and failures =====================
@@ -901,7 +911,7 @@ async def test_the_previous_summary_stays_in_the_summarizer_input_past_the_trim(
 
 
 async def test_a_size_failure_retries_with_the_oversized_message_truncated():
-    summary = _ScriptedSummaryModel(messages=iter([]), script=["Merged summary."])
+    summary = _ScriptedSummaryModel(messages=iter([]), script=[SUMMARY])
     mw = _middleware(summary, window=10_000)
     budget = mw.trim_tokens_to_summarize
     to_summarize = [
@@ -912,7 +922,7 @@ async def test_a_size_failure_retries_with_the_oversized_message_truncated():
 
     result = await mw._acreate_summary(to_summarize)
 
-    assert result == "Merged summary."
+    assert result == SUMMARY
     (prompt,) = summary.prompts
     assert _PREVIOUS in prompt
     assert "zzzz" in prompt
@@ -920,9 +930,7 @@ async def test_a_size_failure_retries_with_the_oversized_message_truncated():
     assert prompt.count("z") <= budget * 4
 
 
-async def test_a_size_failure_that_fails_again_writes_a_placeholder_carrying_the_previous_summary(
-    caplog,
-):
+async def test_a_size_failure_that_fails_again_writes_no_summary(caplog):
     overflow = _overflow_400()
     summary = _ScriptedSummaryModel(messages=iter([]), script=[overflow])
     mw = _middleware(summary, window=10_000)
@@ -936,36 +944,13 @@ async def test_a_size_failure_that_fails_again_writes_a_placeholder_carrying_the
     with caplog.at_level(logging.WARNING):
         result = await mw._acreate_summary(to_summarize)
 
-    assert result == f"{_PREVIOUS}\n\nLater messages of this conversation could not be summarized."
+    assert result is None
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 2
     assert all(r.getMessage().isascii() for r in caplog.records)
 
 
-async def test_a_placeholder_never_repeats_its_closing_sentence():
-    previous = f"{_PREVIOUS}\n\nLater messages of this conversation could not be summarized."
-    summary = _ScriptedSummaryModel(messages=iter([]), script=[_overflow_400(), _overflow_400()])
-    mw = _middleware(summary, window=10_000)
-
-    result = await mw._acreate_summary(
-        [_previous_summary_message(previous), HumanMessage("q", id="h"), AIMessage("a", id="a")]
-    )
-
-    assert result == previous
-
-
-async def test_a_placeholder_without_a_previous_summary_says_so():
-    summary = _ScriptedSummaryModel(messages=iter([]), script=[_overflow_400(), _overflow_400()])
-    mw = _middleware(summary, window=10_000)
-
-    result = await mw._acreate_summary([HumanMessage("q", id="h"), AIMessage("a", id="a")])
-
-    assert result == "Earlier messages of this conversation could not be summarized."
-
-
 async def test_an_unexpected_summary_error_logs_one_error_and_takes_the_size_path(caplog):
-    summary = _ScriptedSummaryModel(
-        messages=iter([]), script=[ValueError("a bug"), "Recovered summary."]
-    )
+    summary = _ScriptedSummaryModel(messages=iter([]), script=[ValueError("a bug"), SUMMARY])
     mw = _middleware(summary, window=10_000)
 
     with caplog.at_level(logging.WARNING):
@@ -973,7 +958,7 @@ async def test_an_unexpected_summary_error_logs_one_error_and_takes_the_size_pat
             [_previous_summary_message(), HumanMessage("q", id="h"), AIMessage("a", id="a")]
         )
 
-    assert result == "Recovered summary."
+    assert result == SUMMARY
     errors = [r for r in caplog.records if r.levelno == logging.ERROR]
     assert len(errors) == 1
     assert errors[0].exc_info is not None
@@ -1042,14 +1027,14 @@ async def test_a_prefill_timeout_takes_the_size_path_with_a_halved_budget(which,
         if which == "watchdog-first-chunk"
         else _child_prefill_timeout()
     )
-    summary = _ScriptedSummaryModel(messages=iter([]), script=[exc, "Smaller summary."])
+    summary = _ScriptedSummaryModel(messages=iter([]), script=[exc, SUMMARY])
     mw = _middleware(summary, window=10_000)
     to_summarize = [_previous_summary_message()] + _alternating(30, 300)
 
     with caplog.at_level(logging.WARNING):
         result = await mw._acreate_summary(to_summarize)
 
-    assert result == "Smaller summary."
+    assert result == SUMMARY
     first, second = summary.prompts
     assert len(second) < len(first)
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 1
@@ -1065,43 +1050,20 @@ async def test_an_empty_summary_is_a_failure_never_an_erased_memory(caplog):
             [_previous_summary_message(), HumanMessage("q", id="h"), AIMessage("a", id="a")]
         )
 
-    assert result == f"{_PREVIOUS}\n\nLater messages of this conversation could not be summarized."
+    assert result is None
     assert len(summary.prompts) == 2
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 2
 
 
 async def test_an_empty_first_summary_is_retried():
-    summary = _ScriptedSummaryModel(messages=iter([]), script=["", "Second try."])
+    summary = _ScriptedSummaryModel(messages=iter([]), script=["", SUMMARY])
     mw = _middleware(summary, window=10_000)
 
     result = await mw._acreate_summary(
         [_previous_summary_message(), HumanMessage("q", id="h"), AIMessage("a", id="a")]
     )
 
-    assert result == "Second try."
-
-
-async def test_the_placeholder_caps_the_carried_summary_to_the_current_window():
-    """A summary written under a large window must not keep the state above
-    a smaller window's trigger forever: the placeholder carries at most
-    ``summary_cap(W)`` tokens of it (its head)."""
-    window = 2000
-    cap = summary_cap(window)
-    big_previous = "F" * 40 + _text(5000, "x")
-    summary = _ScriptedSummaryModel(messages=iter([]), script=[_overflow_400(), _overflow_400()])
-    mw = _middleware(summary, window=window)
-
-    result = await mw._acreate_summary(
-        [
-            _previous_summary_message(big_previous),
-            HumanMessage("q", id="h"),
-            AIMessage("a", id="a"),
-        ]
-    )
-
-    assert result.startswith("F" * 40)
-    assert result.endswith("Later messages of this conversation could not be summarized.")
-    assert approx_token_count([HumanMessage(result)]) <= cap + 32
+    assert result == SUMMARY
 
 
 # ===================== through the runner and the real graph =====================
@@ -1240,7 +1202,7 @@ async def test_without_a_window_a_thread_compacts_on_the_message_count(monkeypat
 async def test_a_transient_summary_failure_fails_the_turn_and_keeps_the_history(monkeypatch):
     _WindowEngine.window = 10_000
     summary = _ScriptedSummaryModel(
-        messages=iter([]), script=[openai.APIConnectionError(request=_request()), "Recovered."]
+        messages=iter([]), script=[openai.APIConnectionError(request=_request()), SUMMARY]
     )
     _models(monkeypatch, ["answer one", "answer two"], summary)
     cp = InMemorySaver()
@@ -1261,27 +1223,28 @@ async def test_a_transient_summary_failure_fails_the_turn_and_keeps_the_history(
     assert not any(e["t"] == "answer" and e["text"].startswith(ERROR_SENTINEL) for e in events)
     assert _WindowEngine.rewrites == ["rewrite"]
     state = await _state(cp, "t1")
-    assert "Recovered." in state[0].content
+    assert SUMMARY in state[0].content
 
 
-async def test_a_summary_overflow_degrades_to_a_placeholder_and_the_turn_succeeds(monkeypatch):
+async def test_a_summary_overflow_keeps_the_history_and_the_turn_succeeds(monkeypatch):
     _WindowEngine.window = 10_000
     summary = _ScriptedSummaryModel(messages=iter([]), script=[_overflow_400(), _overflow_400()])
     _models(monkeypatch, ["the answer"], summary)
     cp = InMemorySaver()
-    await _seed(cp, "o1", _seed_messages())
+    # Over the trigger, and still fitting the window without a compaction.
+    seed = [_previous_summary_message()] + _alternating(24, 300)[1:]
+    await _seed(cp, "o1", seed)
 
     events = await _turn(AgentRunner(checkpointer=cp), "o1")
 
     answers = "".join(e["text"] for e in events if e["t"] == "answer")
     assert answers == "the answer"
-    assert _WindowEngine.rewrites == ["rewrite"]
+    assert _WindowEngine.rewrites == []
     # The retry sent a smaller summarizer input than the first attempt.
     first, second = summary.prompts
     assert len(second) < len(first)
     state = await _state(cp, "o1")
-    assert _PREVIOUS in state[0].content
-    assert "could not be summarized" in state[0].content
+    assert [m.content for m in state[: len(seed)]] == [m.content for m in seed]
 
 
 async def test_the_memory_warning_projects_the_kept_suffix_plus_the_summary_cap(monkeypatch):

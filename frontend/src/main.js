@@ -24,7 +24,12 @@ const { buildBackendSpawnOptions, buildBackendEnv } = require("./utils/backendSp
 const { gracefulShutdown } = require("./utils/backendShutdown");
 const { singleFlight } = require("./utils/singleFlight");
 const { readAppLogTailResult } = require("./utils/appLogTail");
-const { describeProcessGone, formatMainRecord } = require("./utils/mainLog");
+const {
+  appLogSwitchAllowed,
+  appLogVersionLines,
+  switchAppLogForVersion,
+} = require("./utils/appLogVersion");
+const { describeProcessGone, formatMainRecord, stripAnsi } = require("./utils/mainLog");
 const { createBackendStartTracker, requestStop } = require("./utils/backendStartTracker");
 const { configureUpdater, createUpdaterWiring } = require("./utils/updaterWiring");
 
@@ -166,6 +171,37 @@ const log = (message) => {
 const logWarn = (message, error) => log(formatMainRecord("WARN", message, error));
 const logError = (message, error) => log(formatMainRecord("ERROR", message, error));
 
+// One Erudi at a time. A second launch would spawn a second backend on the
+// same data folder while the first still runs (#706): it hands over to the
+// running instance instead, which brings its window forward, and quits before
+// it creates a window or spawns anything. The backend also refuses a data
+// folder another backend holds (DATA_DIR_IN_USE), for the backend still
+// finishing its exit after a quit. Packaged builds only: a dev run and the
+// installed app share the lock's key (the app name), so `npm start` would
+// otherwise quit while the installed app runs; dev does not spawn a backend.
+const hasSingleInstanceLock = !app.isPackaged || app.requestSingleInstanceLock();
+if (!hasSingleInstanceLock) {
+  log("Another Erudi instance is running; handing over to it and quitting");
+  app.quit();
+}
+
+// The app log belongs to the running app version (#576): at the first launch
+// of another version the old file is moved aside before this launch writes
+// anything else. After the single-instance lock, and in the packaged app
+// only: a second instance and a dev run must never move the running app's log.
+const appLogVersionSwitch = appLogSwitchAllowed({
+  isPackaged: app.isPackaged,
+  hasSingleInstanceLock,
+})
+  ? switchAppLogForVersion({
+      fs,
+      logFile,
+      oldLogFile,
+      versionFile: path.join(os.tmpdir(), "erudi-backend.log.version"),
+      version: app.getVersion(),
+    })
+  : null;
+for (const line of appLogVersionLines(appLogVersionSwitch, app.getVersion())) log(line);
 log(`Starting app, log file: ${logFile}`);
 if (updaterLoadError) {
   logWarn("electron-updater could not be loaded; automatic updates are off", updaterLoadError);
@@ -191,20 +227,6 @@ app.on("render-process-gone", (_event, _contents, details) => {
 });
 
 if (require("electron-squirrel-startup")) {
-  app.quit();
-}
-
-// One Erudi at a time. A second launch would spawn a second backend on the
-// same data folder while the first still runs (#706): it hands over to the
-// running instance instead, which brings its window forward, and quits before
-// it creates a window or spawns anything. The backend also refuses a data
-// folder another backend holds (DATA_DIR_IN_USE), for the backend still
-// finishing its exit after a quit. Packaged builds only: a dev run and the
-// installed app share the lock's key (the app name), so `npm start` would
-// otherwise quit while the installed app runs; dev does not spawn a backend.
-const hasSingleInstanceLock = !app.isPackaged || app.requestSingleInstanceLock();
-if (!hasSingleInstanceLock) {
-  log("Another Erudi instance is running; handing over to it and quitting");
   app.quit();
 }
 
@@ -331,8 +353,9 @@ const startRealBackend = () => {
     // buildBackendEnv inherits the parent environment, strips what must never
     // cross into the backend (the LangChain/LangSmith family, which would turn
     // on cloud tracing of every conversation), and adds PYTHONUTF8 and
-    // ERUDI_WATCH_STDIN. See utils/backendSpawn.js for the reasoning.
-    const backendEnv = buildBackendEnv(process.env);
+    // ERUDI_WATCH_STDIN, and ERUDI_APP_VERSION (backend.log belongs to the
+    // running version, #576). See utils/backendSpawn.js for the reasoning.
+    const backendEnv = buildBackendEnv(process.env, { appVersion: app.getVersion() });
 
     backendProcess = spawn(
       backendPath,
@@ -389,7 +412,9 @@ const startRealBackend = () => {
 
     backendProcess.stdout.on("data", (data) => {
       for (const line of data.toString().split(/\r?\n/)) {
-        const trimmed = line.trim();
+        // The backend's console formatter colours its lines even on a pipe;
+        // the app log is text read by people and parsers.
+        const trimmed = stripAnsi(line).trim();
         if (!trimmed) continue;
         log(`Backend stdout: ${trimmed}`);
         let event = null;
@@ -452,7 +477,7 @@ const startRealBackend = () => {
     });
 
     backendProcess.stderr.on("data", (data) => {
-      const output = data.toString().trim();
+      const output = stripAnsi(data.toString()).trim();
       if (!output) return;
       log(`Backend stderr: ${output}`);
       // stderr is advisory only. The backend emits authoritative startup_error

@@ -121,6 +121,23 @@ describe("parseAppLogRecords", () => {
     expect(parseAppLogRecords(null)).toEqual([]);
     expect(parseAppLogRecords("")).toEqual([]);
   });
+
+  it("folds repeats before the cap, so a noisy line cannot push a real error out (#534)", () => {
+    const noisy = Array.from({ length: 10 }, (_, i) =>
+      line(
+        `Backend stdout: [WARNING] 2026-09-05T23:03:1${i}.000Z [be-${i}] - erudi - a.py:1 - noisy`
+      )
+    );
+    const text = [line("[main] ERROR the real failure"), ...noisy].join("\n");
+
+    const records = parseAppLogRecords(text, 2);
+
+    expect(records).toHaveLength(2);
+    expect(records[0].message).toBe("[main] ERROR the real failure");
+    expect(records[0].count).toBe(1);
+    expect(records[1].count).toBe(10);
+    expect(records[1].message).toContain("[be-9]");
+  });
 });
 
 describe("readTailSync", () => {
