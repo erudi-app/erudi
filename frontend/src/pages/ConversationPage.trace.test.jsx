@@ -118,6 +118,13 @@ const renderAndSettle = async () => {
 };
 
 // Resolve a queued read and let the reader loop drain + re-render.
+// Answer text that follows within ~33 ms of the previous chunk is painted when
+// that window ends (#618).
+const answerWindow = () =>
+  act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  });
+
 const settle = async () => {
   await act(async () => {
     await Promise.resolve();
@@ -156,6 +163,7 @@ describe("NDJSON reader (#90)", () => {
     expect(screen.getByTestId("answer").textContent).toBe("Hello ");
 
     await pushAndSettle(ctrl, 'wer","text":"world"}\n');
+    await answerWindow();
     expect(screen.getByTestId("answer").textContent).toBe("Hello world");
 
     // Answer-only turn: no reasoning strip is ever mounted.

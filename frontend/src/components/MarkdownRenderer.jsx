@@ -196,7 +196,71 @@ MarkdownRenderer.defaultProps = {
   className: "",
 };
 
-export default function MarkdownRenderer({ content }) {
+// Module-level so react-markdown receives the same references on every render:
+// a component function recreated per render is a new element type, which
+// remounts every code block, link and table of the message at each token.
+const REHYPE_PLUGINS = [rehypeKatex];
+const MARKDOWN_COMPONENTS = {
+  code({ node: _node, inline, className, children, ...props }) {
+    const match = /language-(\w+)/.exec(className || "");
+    if (inline) {
+      return (
+        <code className="px-1 py-0.5 rounded bg-neutral-800 text-emerald-200" {...props}>
+          {children}
+        </code>
+      );
+    }
+    return (
+      <pre className="p-3 rounded bg-neutral-900 overflow-x-auto">
+        <code className={match ? `language-${match[1]}` : undefined} {...props}>
+          {children}
+        </code>
+      </pre>
+    );
+  },
+  a({ children, ...props }) {
+    return (
+      <a
+        className="text-emerald-300 underline hover:text-emerald-200"
+        target="_blank"
+        rel="noreferrer"
+        {...props}
+      >
+        {children}
+      </a>
+    );
+  },
+  table({ children }) {
+    return (
+      <div className="overflow-x-auto">
+        <table className="table-auto w-full border-collapse border border-neutral-700">
+          {children}
+        </table>
+      </div>
+    );
+  },
+  th({ children }) {
+    return (
+      <th className="border border-neutral-700 bg-neutral-800 px-2 py-1 text-left">{children}</th>
+    );
+  },
+  td({ children }) {
+    return <td className="border border-neutral-700 px-2 py-1">{children}</td>;
+  },
+  ul({ children }) {
+    return <ul className="list-disc pl-6">{children}</ul>;
+  },
+  ol({ children }) {
+    return <ol className="list-decimal pl-6">{children}</ol>;
+  },
+};
+
+// Memoized on `content`, the only prop: a message whose text did not change
+// is not parsed again (remark, remark-gfm, remark-math and rehype-katex run
+// over the whole text), so while an answer streams only the message being
+// written re-renders (#618). A message whose text does change, an edit or a
+// curated sentence translated at display, re-renders as any other.
+function MarkdownRenderer({ content }) {
   const converted = useMemo(() => convertTexDelimiters(content || ""), [content]);
   const remarkPlugins = useMemo(
     () => [remarkGfm, remarkMath, [remarkCurrencyGuard, { trusted: converted.trusted }]],
@@ -206,68 +270,15 @@ export default function MarkdownRenderer({ content }) {
     <div className="prose prose-invert max-w-none whitespace-normal">
       <ReactMarkdown
         remarkPlugins={remarkPlugins}
-        rehypePlugins={[rehypeKatex]}
+        rehypePlugins={REHYPE_PLUGINS}
         // Do not allow raw HTML for safety in LLM outputs
         skipHtml
-        components={{
-          code({ node: _node, inline, className, children, ...props }) {
-            const match = /language-(\w+)/.exec(className || "");
-            if (inline) {
-              return (
-                <code className="px-1 py-0.5 rounded bg-neutral-800 text-emerald-200" {...props}>
-                  {children}
-                </code>
-              );
-            }
-            return (
-              <pre className="p-3 rounded bg-neutral-900 overflow-x-auto">
-                <code className={match ? `language-${match[1]}` : undefined} {...props}>
-                  {children}
-                </code>
-              </pre>
-            );
-          },
-          a({ children, ...props }) {
-            return (
-              <a
-                className="text-emerald-300 underline hover:text-emerald-200"
-                target="_blank"
-                rel="noreferrer"
-                {...props}
-              >
-                {children}
-              </a>
-            );
-          },
-          table({ children }) {
-            return (
-              <div className="overflow-x-auto">
-                <table className="table-auto w-full border-collapse border border-neutral-700">
-                  {children}
-                </table>
-              </div>
-            );
-          },
-          th({ children }) {
-            return (
-              <th className="border border-neutral-700 bg-neutral-800 px-2 py-1 text-left">
-                {children}
-              </th>
-            );
-          },
-          td({ children }) {
-            return <td className="border border-neutral-700 px-2 py-1">{children}</td>;
-          },
-          ul({ children }) {
-            return <ul className="list-disc pl-6">{children}</ul>;
-          },
-          ol({ children }) {
-            return <ol className="list-decimal pl-6">{children}</ol>;
-          },
-        }}
+        components={MARKDOWN_COMPONENTS}
       >
         {converted.text}
       </ReactMarkdown>
     </div>
   );
 }
+
+export default React.memo(MarkdownRenderer);
