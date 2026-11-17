@@ -5,7 +5,14 @@ import path from "node:path";
 import { readImageAsDataUrl } from "./imageReader.js";
 import { MAX_IMAGE_BYTES } from "./imageLimits.js";
 
-const PNG_BYTES = Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]);
+// The first bytes of each accepted format, followed by a little padding.
+const SIGNATURES = {
+  png: Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0]),
+  jpeg: Buffer.from([0xff, 0xd8, 0xff, 0xe0, 0, 0x10, 0x4a, 0x46, 0x49, 0x46, 0, 1]),
+  gif: Buffer.from("GIF89a\x01\x00\x01\x00\x00\x00", "latin1"),
+  webp: Buffer.concat([Buffer.from("RIFF"), Buffer.from([0x24, 0, 0, 0]), Buffer.from("WEBPVP8 ")]),
+  bmp: Buffer.concat([Buffer.from("BM"), Buffer.alloc(10)]),
+};
 
 let dir;
 beforeEach(() => {
@@ -15,9 +22,19 @@ afterEach(() => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
-const file = (name, bytes = PNG_BYTES) => {
+const file = (name, bytes = SIGNATURES.png) => {
   const target = path.join(dir, name);
   fs.writeFileSync(target, bytes);
+  return target;
+};
+
+// A file of `size` bytes that starts with a PNG signature (sparse past it).
+const sized = (name, size) => {
+  const target = path.join(dir, name);
+  const fd = fs.openSync(target, "w");
+  fs.writeSync(fd, SIGNATURES.png);
+  fs.ftruncateSync(fd, size);
+  fs.closeSync(fd);
   return target;
 };
 
@@ -26,18 +43,52 @@ describe("readImageAsDataUrl", () => {
     const result = await readImageAsDataUrl(file("shot.png"));
     expect(result).toEqual({
       ok: true,
-      dataUrl: `data:image/png;base64,${PNG_BYTES.toString("base64")}`,
+      dataUrl: `data:image/png;base64,${SIGNATURES.png.toString("base64")}`,
     });
   });
 
-  it("names a .jpg file image/jpeg, whatever the case of its extension", async () => {
-    const result = await readImageAsDataUrl(file("photo.JPG"));
+  it.each([
+    ["photo.JPG", "jpeg", "image/jpeg"],
+    ["photo.jpeg", "jpeg", "image/jpeg"],
+    ["anim.gif", "gif", "image/gif"],
+    ["pic.webp", "webp", "image/webp"],
+    ["scan.bmp", "bmp", "image/bmp"],
+  ])("reads %s as %s", async (name, format, mime) => {
+    const result = await readImageAsDataUrl(file(name, SIGNATURES[format]));
     expect(result.ok).toBe(true);
+    expect(result.dataUrl.startsWith(`data:${mime};base64,`)).toBe(true);
+  });
+
+  it("names the format from the bytes, not from the extension", async () => {
+    const result = await readImageAsDataUrl(file("really-a-jpeg.png", SIGNATURES.jpeg));
     expect(result.dataUrl.startsWith("data:image/jpeg;base64,")).toBe(true);
   });
 
-  it("refuses a file that is not an image", async () => {
-    expect(await readImageAsDataUrl(file("notes.txt", "secret"))).toEqual({
+  it("refuses a text file named like an image", async () => {
+    expect(await readImageAsDataUrl(file("notes.png", "not an image at all"))).toEqual({
+      ok: false,
+      reason: "not_image",
+    });
+  });
+
+  it("refuses an empty file named like an image", async () => {
+    expect(await readImageAsDataUrl(file("empty.png", ""))).toEqual({
+      ok: false,
+      reason: "not_image",
+    });
+  });
+
+  it("refuses a RIFF file that is not WebP", async () => {
+    const wav = Buffer.concat([
+      Buffer.from("RIFF"),
+      Buffer.from([0, 0, 0, 0]),
+      Buffer.from("WAVE"),
+    ]);
+    expect((await readImageAsDataUrl(file("sound.webp", wav))).reason).toBe("not_image");
+  });
+
+  it("refuses a file whose extension is not an image one, even with image bytes", async () => {
+    expect(await readImageAsDataUrl(file("notes.txt"))).toEqual({
       ok: false,
       reason: "not_image",
     });
@@ -51,7 +102,7 @@ describe("readImageAsDataUrl", () => {
   });
 
   it("follows a symlink to a real image", async () => {
-    const real = file("real.webp");
+    const real = file("real.webp", SIGNATURES.webp);
     const link = path.join(dir, "alias.png");
     fs.symlinkSync(real, link);
     const result = await readImageAsDataUrl(link);
@@ -67,20 +118,15 @@ describe("readImageAsDataUrl", () => {
     });
   });
 
-  it("refuses an image over the size cap without reading it", async () => {
-    const big = path.join(dir, "huge.png");
-    const fd = fs.openSync(big, "w");
-    fs.ftruncateSync(fd, MAX_IMAGE_BYTES + 1);
-    fs.closeSync(fd);
-    expect(await readImageAsDataUrl(big)).toEqual({ ok: false, reason: "too_large" });
+  it("refuses an image over the size cap", async () => {
+    expect(await readImageAsDataUrl(sized("huge.png", MAX_IMAGE_BYTES + 1))).toEqual({
+      ok: false,
+      reason: "too_large",
+    });
   });
 
   it("accepts an image exactly at the cap", async () => {
-    const edge = path.join(dir, "edge.png");
-    const fd = fs.openSync(edge, "w");
-    fs.ftruncateSync(fd, MAX_IMAGE_BYTES);
-    fs.closeSync(fd);
-    expect((await readImageAsDataUrl(edge)).ok).toBe(true);
+    expect((await readImageAsDataUrl(sized("edge.png", MAX_IMAGE_BYTES))).ok).toBe(true);
   });
 
   it("reports a missing file as unreadable", async () => {

@@ -36,6 +36,7 @@ const {
 } = require("./utils/dataLocations");
 const { clearAllData, PENDING_CLEAR_FILE } = require("./utils/clearAllData");
 const { readImageAsDataUrl } = require("./utils/imageReader");
+const { savePastedImage } = require("./utils/pastedImage");
 
 // Where Erudi keeps what it stores: the backend's data and log folders, as
 // backend/src/launcher/runtime_paths.py resolves them (utils/dataLocations.js
@@ -966,32 +967,17 @@ ipcMain.handle("fs:readImageAsDataURL", async (_event, filePath) => {
   return { ok: false, reason: result.reason };
 });
 
-// Persist a pasted (clipboard) image to disk and return its absolute path.
-// The renderer has no fs access, and a clipboard image has no source path, so
-// it would otherwise be stored as a bare [image] placeholder and lost on reload
-// (#136). Writing it in the data folder gives it a real path that flows
-// through the same [image_path:...] persistence + fs:readImageAsDataURL reload
-// pipeline as any file attachment, and Clear All Data deletes it with the rest.
+// Persist a pasted (clipboard) image in the data folder and return its path
+// (utils/pastedImage.js): it then flows through the same [image_path:...]
+// persistence and fs:readImageAsDataURL reload as any file attachment, and
+// Clear All Data deletes it with the rest.
 ipcMain.handle("image:savePasted", async (_event, dataUrl) => {
   try {
-    const match = /^data:image\/([a-zA-Z0-9.+-]+);base64,(.*)$/.exec(dataUrl || "");
-    if (!match) {
-      return null;
+    const saved = savePastedImage(dataUrl, dataLocations.pastedImagesDir);
+    if (!saved) {
+      logWarn("Refused to save a pasted image that is not a supported raster format");
     }
-    let ext = match[1].toLowerCase();
-    if (ext === "jpeg") {
-      ext = "jpg";
-    } else if (ext === "svg+xml") {
-      ext = "svg";
-    }
-    const bytes = Buffer.from(match[2], "base64");
-    fs.mkdirSync(dataLocations.pastedImagesDir, { recursive: true });
-    const filePath = path.join(
-      dataLocations.pastedImagesDir,
-      `paste-${Date.now()}-${Math.random().toString(36).slice(2, 8)}.${ext}`
-    );
-    fs.writeFileSync(filePath, bytes);
-    return filePath;
+    return saved;
   } catch (error) {
     // The pasted image is then kept as a bare placeholder and lost on reload.
     logError("Failed to save the pasted image to disk", error);

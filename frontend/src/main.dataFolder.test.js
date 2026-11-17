@@ -61,9 +61,7 @@ describe("where main looks for Erudi's folders", () => {
   });
 
   it("keeps pasted images in the data folder", () => {
-    expect(source).toMatch(
-      /fs\.mkdirSync\(dataLocations\.pastedImagesDir, \{ recursive: true \}\)/
-    );
+    expect(source).toMatch(/savePastedImage\(dataUrl, dataLocations\.pastedImagesDir\)/);
   });
 
   it("allows revealing a log only in the folders the backend and main write logs to", () => {
