@@ -19,16 +19,23 @@ so Erudi converts its own, reproducibly:
    ``pyi_llama_artifacts`` bundles it and ``src/ingestion/llama_embedder.py``
    serves it (dev runs read the same path).
 
-Run it from the repo root with the backend venv's Python (it needs torch,
-transformers and sentencepiece -- all in the backend requirements):
+Run it from the repo root with the CONVERSION venv, never the app's: the
+converter needs torch, transformers, sentencepiece and protobuf, and the
+app's Windows/Linux locks carry none of the last two (and lose torch with
+the in-process embedder's removal). The venv comes from the per-OS build
+lock (hash-checked, reproducible on a bare runner):
 
-    python scripts/dev/backend/build_e5_gguf.py            # build + verify
-    python scripts/dev/backend/build_e5_gguf.py --print-sha  # after a
-        deliberate change (new revision/patch): print the new hash to pin
+    python3.12 -m venv e5-gguf-venv
+    e5-gguf-venv/bin/pip install -r backend/requirements/lock/linux-e5-gguf.txt \
+        --require-hashes --no-deps          # Windows: Scripts\\pip, win-e5-gguf.txt
+    e5-gguf-venv/bin/python scripts/dev/backend/build_e5_gguf.py   # build + verify
+    ... build_e5_gguf.py --print-sha   # after a deliberate change (new
+        revision/patch): print the new hash to pin
 
-CI (release.yml, app-build-smoke.yml) runs the same script behind an
-``actions/cache`` keyed on this file and the patch, so the conversion is
-paid once per change and OS.
+(A macOS dev venv already carries every dependency and works as-is.) CI
+(release.yml, app-build-smoke.yml) builds that venv and runs this script
+behind an ``actions/cache`` keyed on this file and the patch, so the
+conversion is paid once per change and OS.
 """
 
 from __future__ import annotations
@@ -72,6 +79,24 @@ def sha256_of(path: Path) -> str:
     return digest.hexdigest()
 
 
+def check_conversion_deps() -> None:
+    """Fail up front, naming the venv to build, instead of mid-conversion."""
+    import importlib.util
+
+    missing = [
+        name
+        for name in ("torch", "transformers", "sentencepiece", "google.protobuf")
+        if importlib.util.find_spec(name) is None
+    ]
+    if missing:
+        raise SystemExit(
+            f"[build_e5_gguf] missing conversion dependencies: {', '.join(missing)}. "
+            f"Run this script with the dedicated conversion venv, installed from "
+            f"backend/requirements/lock/<win|linux>-e5-gguf.txt (see the module "
+            f"docstring and BUILD.md)."
+        )
+
+
 def fetch_snapshot() -> Path:
     from huggingface_hub import snapshot_download
 
@@ -103,6 +128,12 @@ def stage_converter(scratch: Path) -> Path:
         scratch / "gguf-py",
         ignore=shutil.ignore_patterns("__pycache__"),
     )
+    # The patch is stored LF (.gitattributes: `*.patch -text`); a Windows
+    # checkout of the submodule can hold bert.py with CRLF endings
+    # (core.autocrlf), where every context line would mismatch. Normalizing
+    # the COPY to LF makes the apply end-of-line-proof and changes no code.
+    target = scratch / "conversion" / "bert.py"
+    target.write_bytes(target.read_bytes().replace(b"\r\n", b"\n"))
     subprocess.run(
         ["git", "apply", "--verbose", str(PATCH_FILE)],
         cwd=scratch,
@@ -151,6 +182,7 @@ def main() -> int:
             return 0
         print(f"[build_e5_gguf] present but stale ({found[:12]}...); rebuilding")
 
+    check_conversion_deps()
     snapshot = fetch_snapshot()
     OUTPUT_FILE.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="e5-gguf-") as scratch_name:

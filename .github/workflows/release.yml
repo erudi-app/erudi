@@ -175,10 +175,13 @@ jobs:
       # ── Windows/Linux: the KB embedding GGUF the installers bundle (#594).
       #    Converted reproducibly from the pinned e5 snapshot with the
       #    converter patch kept in the repo; the script verifies the result
-      #    against its pinned sha256. Cached per OS on the script+patch hash
-      #    so the conversion (snapshot download + torch run) is paid once per
-      #    change; the produce step still runs on a hit — it re-hashes the
-      #    restored file and exits in seconds, so a corrupt cache entry can
+      #    against its pinned sha256. The conversion runs in its OWN venv,
+      #    installed hash-checked from the per-OS build lock
+      #    (lock/{win,linux}-e5-gguf.txt) and never put on PATH: the app's
+      #    prod lock carries neither sentencepiece nor protobuf, and the
+      #    frozen backend must not inherit conversion packages. Cached per OS
+      #    on the script+patch hash; the produce step still runs on a hit —
+      #    it re-hashes the restored file first, so a corrupt cache entry can
       #    never reach a release.
       - name: Restore the KB embedding GGUF (cache)
         if: matrix.llama_build != ''
@@ -189,7 +192,17 @@ jobs:
 
       - name: Produce the KB embedding GGUF
         if: matrix.llama_build != ''
-        run: python scripts/dev/backend/build_e5_gguf.py
+        run: |
+          set -euo pipefail
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            lock=win-e5-gguf.txt; venv_py=e5-gguf-venv/Scripts/python
+          else
+            lock=linux-e5-gguf.txt; venv_py=e5-gguf-venv/bin/python
+          fi
+          python -m venv e5-gguf-venv
+          "$venv_py" -m pip install --quiet --disable-pip-version-check -r "backend/requirements/lock/$lock" --require-hashes --no-deps
+          "$venv_py" scripts/ci/check_backend_lock.py installed "backend/requirements/lock/$lock"
+          "$venv_py" scripts/dev/backend/build_e5_gguf.py
 
       - name: Build backend bundle
         run: pyinstaller backend/${{ matrix.spec }} --distpath backend/dist

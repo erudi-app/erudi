@@ -13,6 +13,9 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+# requirements/entrypoints/build/ is SOURCE (the build-only entrypoints, e.g.
+# the e5-GGUF conversion venv), not a PyInstaller build directory.
+!requirements/entrypoints/build/
 develop-eggs/
 dist/
 downloads/

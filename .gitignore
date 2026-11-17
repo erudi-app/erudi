@@ -72,6 +72,8 @@ venv/
 env/
 ENV/
 .venv/
+# The e5-GGUF conversion venv (scripts/dev/backend/build_e5_gguf.py, BUILD.md).
+e5-gguf-venv/
 
 # Temporary experimental directories (keep but ignore from version control)
 # Used for testing build variants and experimental features

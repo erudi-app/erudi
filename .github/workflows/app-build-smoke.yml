@@ -74,8 +74,10 @@ jobs:
       # ── Windows/Linux: the KB embedding GGUF the installers bundle (#594),
       #    so the smoke freezes and boots what a release ships. Restored from
       #    the cache the release workflow shares; on a miss the conversion
-      #    needs the llama.cpp submodule (converter + gguf-py), fetched only
-      #    then — the smoke checkout skips submodules.
+      #    fetches the llama.cpp submodule (converter + gguf-py — the smoke
+      #    checkout skips submodules) and runs in its OWN venv from the
+      #    per-OS build lock, hash-checked and never on PATH, exactly as in
+      #    release.yml.
       - name: Restore the KB embedding GGUF (cache)
         if: runner.os != 'macOS'
         id: e5-gguf-cache
@@ -87,8 +89,17 @@ jobs:
       - name: Produce the KB embedding GGUF
         if: runner.os != 'macOS' && steps.e5-gguf-cache.outputs.cache-hit != 'true'
         run: |
+          set -euo pipefail
           git submodule update --init backend/forks/llama-cpp
-          python scripts/dev/backend/build_e5_gguf.py
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            lock=win-e5-gguf.txt; venv_py=e5-gguf-venv/Scripts/python
+          else
+            lock=linux-e5-gguf.txt; venv_py=e5-gguf-venv/bin/python
+          fi
+          python -m venv e5-gguf-venv
+          "$venv_py" -m pip install --quiet --disable-pip-version-check -r "backend/requirements/lock/$lock" --require-hashes --no-deps
+          "$venv_py" scripts/ci/check_backend_lock.py installed "backend/requirements/lock/$lock"
+          "$venv_py" scripts/dev/backend/build_e5_gguf.py
 
       - name: Build frozen backend (PyInstaller)
         env:

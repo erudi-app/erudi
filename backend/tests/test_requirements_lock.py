@@ -34,15 +34,17 @@ lock_tool = _load("scripts/dev/lock_backend_requirements.py")
 lock_check = _load("scripts/ci/check_backend_lock.py")
 
 ENTRYPOINTS = lock_tool.prod_entrypoints()
+BUILD_ENTRYPOINTS = lock_tool.build_entrypoints()
+ALL_ENTRYPOINTS = lock_tool.all_entrypoints()
 REGENERATE = lock_tool.REGENERATE_COMMAND
 HASH = "0" * 64
 
 
 @pytest.mark.unit
-def test_every_prod_entrypoint_has_a_lock_and_every_lock_an_entrypoint():
+def test_every_entrypoint_has_a_lock_and_every_lock_an_entrypoint():
     locks = {path.name for path in lock_tool.LOCK_DIR.glob("*.txt")}
-    entrypoints = {path.name for path in ENTRYPOINTS}
-    assert entrypoints, "no prod entrypoint found"
+    entrypoints = {path.name for path in ALL_ENTRYPOINTS}
+    assert {path.name for path in ENTRYPOINTS}, "no prod entrypoint found"
     assert locks == entrypoints, (
         f"locks without entrypoint: {sorted(locks - entrypoints)}, entrypoints without "
         f"lock: {sorted(entrypoints - locks)}. Run `{REGENERATE}`."
@@ -50,7 +52,7 @@ def test_every_prod_entrypoint_has_a_lock_and_every_lock_an_entrypoint():
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("entrypoint", ENTRYPOINTS, ids=lambda path: path.name)
+@pytest.mark.parametrize("entrypoint", ALL_ENTRYPOINTS, ids=lambda path: path.name)
 def test_lock_is_options_then_sorted_hashed_canonical_pins(entrypoint):
     lock = lock_tool.read_lock(lock_tool.lock_path(entrypoint))
     assert lock.pins, "empty lock"
@@ -64,7 +66,7 @@ def test_lock_is_options_then_sorted_hashed_canonical_pins(entrypoint):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("entrypoint", ENTRYPOINTS, ids=lambda path: path.name)
+@pytest.mark.parametrize("entrypoint", ALL_ENTRYPOINTS, ids=lambda path: path.name)
 def test_lock_matches_its_requirement_files_and_was_not_edited(entrypoint):
     lock = lock_tool.read_lock(lock_tool.lock_path(entrypoint))
     target = lock_tool.target_for(entrypoint)
@@ -76,7 +78,7 @@ def test_lock_matches_its_requirement_files_and_was_not_edited(entrypoint):
 
 
 @pytest.mark.unit
-@pytest.mark.parametrize("entrypoint", ENTRYPOINTS, ids=lambda path: path.name)
+@pytest.mark.parametrize("entrypoint", ALL_ENTRYPOINTS, ids=lambda path: path.name)
 def test_every_declared_requirement_is_locked_at_a_version_it_accepts(entrypoint):
     from pip._vendor.packaging.markers import default_environment
 
@@ -123,6 +125,17 @@ def test_lock_pins_the_build_tool(entrypoint):
     assert {"pyinstaller", "pyinstaller-hooks-contrib"} <= set(pins)
 
 
+@pytest.mark.unit
+@pytest.mark.parametrize("entrypoint", BUILD_ENTRYPOINTS, ids=lambda path: path.name)
+def test_build_locks_leave_the_freeze_tool_out(entrypoint):
+    # A build/ entrypoint is a standalone tool venv (the e5-GGUF conversion):
+    # PyInstaller has no business in it, and the conversion deps the app's
+    # locks do not carry must be in it (the whole reason it exists).
+    pins = set(lock_tool.read_lock(lock_tool.lock_path(entrypoint)).pins)
+    assert "pyinstaller" not in pins
+    assert {"torch", "sentencepiece", "protobuf", "transformers"} <= pins
+
+
 def _workflow(name):
     import yaml  # a transformers dependency, installed on every leg
 
@@ -138,9 +151,15 @@ def test_builds_install_only_through_the_locked_script_before_freezing(workflow)
     (freeze,) = [i for i, run in enumerate(runs) if run.startswith("pyinstaller ")]
     # The script puts its venv on PATH for the steps after it, not its own.
     assert install < freeze
-    assert not any(
-        re.search(r"pip install\b", run) for run in runs
-    ), "the backend and PyInstaller come from the lock, through install_backend_requirements.sh"
+    for run in runs:
+        for line in run.splitlines():
+            if not re.search(r"pip install\b", line):
+                continue
+            # The only tolerated install outside the script: a hash-checked
+            # lock into the DEDICATED conversion venv (never on PATH).
+            assert "backend/requirements/lock/" in line and "--require-hashes" in line, (
+                "only install_backend_requirements.sh or a hash-checked lock may install: " + line
+            )
 
 
 @pytest.mark.unit
@@ -155,8 +174,12 @@ def test_backend_ci_installs_within_the_prod_lock_and_checks_the_locks_of_its_os
         prefix = leg["reqs"].split("-")[0]
         names = leg["prod_entrypoints"].split()
         assert names == [path.name for path in ENTRYPOINTS if path.name.startswith(prefix)]
-        checked |= set(names)
-    assert checked == {path.name for path in ENTRYPOINTS}, "every lock is checked on its OS"
+        build_names = leg["build_entrypoints"].split()
+        assert build_names == [
+            path.name for path in BUILD_ENTRYPOINTS if path.name.startswith(prefix)
+        ]
+        checked |= set(names) | set(build_names)
+    assert checked == {path.name for path in ALL_ENTRYPOINTS}, "every lock is checked on its OS"
     runs = "\n".join(step.get("run", "") for step in job["steps"])
     assert "check_backend_lock.py constraints backend/requirements/lock/${{ matrix.lock }}" in runs
     assert "check_backend_lock.py resolution" in runs

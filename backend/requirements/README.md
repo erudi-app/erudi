@@ -17,14 +17,20 @@ requirements/
 │   │   ├── linux-cuda.txt
 │   │   ├── win-cpu.txt
 │   │   └── win-cuda.txt
-│   └── prod/                 # minimal runtime deps (one per platform, *-prod.txt)
+│   ├── prod/                 # minimal runtime deps (one per platform, *-prod.txt)
+│   └── build/                # standalone build-tool venvs, locked WITHOUT meta/build.txt:
+│       ├── win-e5-gguf.txt   #   the e5-GGUF conversion (scripts/dev/backend/build_e5_gguf.py),
+│       └── linux-e5-gguf.txt #   installed into its own venv by the release/smoke produce steps
 ├── lock/                     # GENERATED: the resolved set of each prod entrypoint
-│                             #   + meta/build.txt, same file name (lock/win-cpu-prod.txt, …)
+│                             #   + meta/build.txt, same file name (lock/win-cpu-prod.txt, …);
+│                             #   and of each build entrypoint on its own (lock/win-e5-gguf.txt, …)
 ├── meta/
 │   ├── base.txt              # shared core: FastAPI, SQLAlchemy, pgserver,
 │   │                         #   langchain, sentence-transformers, transformers (pinned 5.14.1), tokenizers
 │   ├── build.txt             # the build tool (PyInstaller); in no entrypoint, locked with each prod one
 │   ├── dev.txt               # pytest / ruff (linter + formatter) / mkdocs
+│   ├── e5-gguf.txt           # the e5-GGUF conversion toolchain (torch CPU, transformers,
+│   │                         #   sentencepiece, protobuf, gguf-py's runtime deps) — build venv only
 │   ├── cpu.txt               # CPU torch (official CPU index) + gguf — REUSED by the CUDA entrypoints
 │   ├── cuda-specs.txt        # CUDA-only non-torch bits (pynvml). No torch+cuXXX.
 │   ├── cuda-win-specs.txt    # Windows CUDA build tools (cmake)

@@ -1,0 +1,30 @@
+# The e5-GGUF conversion toolchain (#594): what scripts/dev/backend/build_e5_gguf.py
+# needs to run the patched llama.cpp converter over the pinned e5 snapshot.
+# Installed into a DEDICATED build venv from lock/{win,linux}-e5-gguf.txt --
+# never into the app's venv: the app's prod locks do not carry sentencepiece or
+# protobuf (and F4 removes torch from them), and the conversion must stay
+# reproducible from scratch on a release runner.
+#
+# gguf-py is NOT here: the converter imports the submodule's own copy through
+# PYTHONPATH (build_e5_gguf.py sets it), so gguf-py's runtime dependencies are
+# declared directly below (numpy/tqdm/pyyaml/requests).
+
+# torch (CPU, module-level import of the converter). Keep in step with meta/cpu.txt.
+--extra-index-url https://download.pytorch.org/whl/cpu
+torch==2.13.0
+# AutoConfig at import, AutoTokenizer on the _xlmroberta_set_vocab path.
+# Keep in step with meta/base.txt.
+transformers==5.14.1
+# snapshot_download of the pinned e5 revision (build_e5_gguf.py itself).
+huggingface_hub==1.10.1
+# _xlmroberta_set_vocab reads sentencepiece.bpe.model...
+sentencepiece==0.2.1
+# ...through sentencepiece_model_pb2, which needs google.protobuf (the
+# converter forces its pure-python implementation).
+protobuf==7.35.0
+# Module-level in the converter, and gguf-py needs >=2.2.6.
+numpy==2.4.6
+# gguf-py runtime dependencies (see header).
+tqdm==4.67.1
+pyyaml==6.0.3
+requests==2.33.0
