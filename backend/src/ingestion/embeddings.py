@@ -1,14 +1,28 @@
-"""E5Embeddings — resident multilingual-e5-small behind the LangChain
-``Embeddings`` interface.
+"""The Knowledge Base embeddings backends behind the LangChain ``Embeddings``
+interface, and the platform factory that picks one (#594).
 
 multilingual-e5-small (384d, MIT, 512-token window) REQUIRES asymmetric
 prefixes: ``query: `` for searches, ``passage: `` for indexed chunks —
-without them retrieval quality collapses. sentence-transformers handles
-mean pooling; vectors are L2-normalized so cosine similarity is a plain
-dot product (pgvector COSINE / HNSW friendly).
+without them retrieval quality collapses. Both backends apply them here,
+Erudi-side, and both produce mean-pooled, L2-normalized vectors, so cosine
+similarity is a plain dot product (pgvector COSINE / HNSW friendly) and the
+two are interchangeable vector-for-vector (measured cosine 0.9999999,
+inputs past 512 tokens included) — existing macOS Knowledge Bases keep
+their vectors with no re-indexing.
 
-The model is a RESIDENT class-level singleton: the FAISS-era embedder
-reloaded ~470 MB from disk on every single operation and freed it after.
+- ``ChildE5Embeddings`` (macOS ARM): the dedicated `mlx_vlm.server` child
+  (``src.ingestion.embedder_child``). Nothing resident in the backend; the
+  child is released after 5 minutes unused. Inputs are bounded at e5's
+  512-token window Erudi-side (``chunking.truncate_to_tokens``, prefix
+  included) before the call.
+- ``E5Embeddings`` (Windows and Linux, until F3 of #594): the resident
+  in-process sentence-transformers singleton (the FAISS-era embedder
+  reloaded ~470 MB from disk on every single operation). F3 moves these
+  platforms onto a ``llama-server --embedding`` child; F4 then deletes this
+  class and the sentence-transformers/torch stack with it.
+
+``get_embeddings()`` is the only selection point: `vector_store` calls it
+per operation, so the choice stays out of the KB business layer.
 
 Embedded-text format [N6], frozen:
     ``passage: [document_name:<file>]\\n<breadcrumb>\\n\\n<chunk>``
@@ -20,12 +34,14 @@ from __future__ import annotations
 
 import threading
 import time
-from typing import TYPE_CHECKING, ClassVar
+from typing import TYPE_CHECKING, ClassVar, Optional
 
 from langchain_core.embeddings import Embeddings
 
 from src.core import config
 from src.core.logging import logger
+from src.ingestion import embedder_child
+from src.ingestion.chunking import truncate_to_tokens
 from src.ingestion.embedding_model import embedding_model_available, load_sentence_transformer
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -34,10 +50,69 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
 E5_MODEL_NAME = "intfloat/multilingual-e5-small"
 EMBEDDING_DIMENSIONS = 384
 
+#: Test seam (set by the suite's conftest): ``"in-process"`` pins
+#: ``E5Embeddings`` so the not-mlx_only suite never reaches a real child,
+#: ``"child"`` pins ``ChildE5Embeddings``; ``None`` selects by platform.
+_forced_backend: Optional[str] = None
+
+
+def get_embeddings() -> Embeddings:
+    """The platform's KB embeddings backend (see module docstring)."""
+    if _forced_backend == "in-process":
+        return E5Embeddings()
+    if _forced_backend == "child":
+        return ChildE5Embeddings()
+    if embedder_child.embedder_child_supported():
+        return ChildE5Embeddings()
+    return E5Embeddings()
+
+
+def embedding_artifact_missing() -> bool:
+    """Whether the selected backend NEEDS the e5 artifact and it is absent.
+
+    True only on the child backend (the child serves the snapshot by path
+    and cannot download): the "KB present, embedding model missing" state
+    the interface surfaces, and what lets an ingestion refuse its job up
+    front instead of failing file by file. The in-process backend still
+    fetches lazily on first use (pre-#146 behaviour, gone with F4), so it
+    never reports missing.
+    """
+    if _forced_backend == "in-process":
+        return False
+    if _forced_backend == "child" or embedder_child.embedder_child_supported():
+        return not embedding_model_available()
+    return False
+
 
 def build_embedding_text(*, file_name: str, chunk_text: str) -> str:
     """Prefix the chunk with its source document name (R&D POC format)."""
     return f"[document_name:{file_name}]\n{chunk_text}"
+
+
+class ChildE5Embeddings(Embeddings):
+    """e5 embeddings served by the dedicated embedding child (#594, macOS).
+
+    Stateless by design: construction touches nothing (``init_kb_store``
+    builds one in the lifespan), the child spawns lazily on the first call
+    and `embedder_child` owns its whole lifecycle. The prefixes and the
+    512-token bound are applied HERE so the transport layer stays a dumb
+    batch pipe F3 reuses unchanged.
+    """
+
+    def embed_documents(self, texts: list[str]) -> list[list[float]]:
+        """Embed indexed chunks (``passage: `` prefix, bounded, L2-normalized)."""
+        start_s = time.perf_counter()
+        vectors = embedder_child.embed_texts(
+            [truncate_to_tokens(f"passage: {text}") for text in texts]
+        )
+        duration_ms = (time.perf_counter() - start_s) * 1000
+        # One line per BATCH — never per text.
+        logger.info(f"Embedded batch via child: {len(texts)} texts in {duration_ms:.0f}ms")
+        return vectors
+
+    def embed_query(self, text: str) -> list[float]:
+        """Embed a search query (``query: `` prefix, bounded, L2-normalized)."""
+        return embedder_child.embed_texts([truncate_to_tokens(f"query: {text}")])[0]
 
 
 class E5Embeddings(Embeddings):

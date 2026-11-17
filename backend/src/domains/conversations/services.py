@@ -47,6 +47,7 @@ from src.entities.Message import Message
 from src.core.exceptions import (
     CompactionSeparatorException,
     DatabaseException,
+    EmbeddingModelMissingException,
     ModelNotFoundException,
     StateConflictException,
 )
@@ -426,6 +427,14 @@ class ConversationService:
 
         try:
             return retrieve_kb_excerpts(query, llm.kb_id, token_budget=strategy["kb_token_budget"])
+        except EmbeddingModelMissingException:
+            # A state the interface owns (#594 banner/gate), not a per-turn
+            # warning: the turn is answered without the documents.
+            logger.info(
+                f"KB retrieval skipped: the embedding model is not downloaded "
+                f"(kb_id={llm.kb_id})"
+            )
+            return []
         except Exception as e:
             # Degraded, not failed: the turn is answered without the excerpts.
             logger.warning(

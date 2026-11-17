@@ -32,6 +32,7 @@ from __future__ import annotations
 
 import threading
 import time
+from pathlib import Path
 from typing import Optional
 
 from huggingface_hub import try_to_load_from_cache
@@ -88,6 +89,25 @@ def embedding_model_available() -> bool:
         if not isinstance(cached, str):
             return False
     return True
+
+
+def embedding_snapshot_path() -> Optional[Path]:
+    """The LOCAL snapshot directory of the embedding model, or ``None``.
+
+    The dedicated embedding child (#594) serves the snapshot BY PATH, never by
+    repo id: a path load never touches the network and cannot resolve to
+    another revision than the one the gate downloaded. ``None`` whenever the
+    gate says the cache is incomplete — the caller surfaces the
+    missing-artifact state instead of spawning a child that cannot load.
+    """
+    if not embedding_model_available():
+        return None
+    cached = try_to_load_from_cache(
+        EMBEDDING_MODEL_ID, "config.json", cache_dir=str(config.CACHE_DIR)
+    )
+    if not isinstance(cached, str):
+        return None
+    return Path(cached).parent
 
 
 def download_state() -> dict:

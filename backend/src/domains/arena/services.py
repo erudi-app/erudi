@@ -48,6 +48,7 @@ from src.domains.arena.schemas import ArenaQueryPayload
 from src.domains.conversations.services import build_stream_error_event
 from src.entities.Llm import Llm
 from src.core.exceptions import (
+    EmbeddingModelMissingException,
     KnowledgeBaseNotFoundException,
     KnowledgeBaseCorruptedException,
     InvalidInputException,
@@ -105,6 +106,14 @@ class ArenaService:
 
         try:
             return retrieve_kb_excerpts(query, llm.kb_id, token_budget=strategy["kb_token_budget"])
+        except EmbeddingModelMissingException:
+            # A state the interface owns (#594 banner/gate), never a 500: the
+            # panel answers without the documents, like an empty search.
+            logger.info(
+                f"Arena KB retrieval skipped: the embedding model is not downloaded "
+                f"(kb_id={llm.kb_id})"
+            )
+            return []
         except (KnowledgeBaseNotFoundException, KnowledgeBaseCorruptedException):
             raise
         except Exception as e:
