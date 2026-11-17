@@ -332,8 +332,9 @@ cause: the model never started on a prompt this size, or it started and went sil
     threadpool, never inside the awaited boot sequence.
 
 Shutdown reverses the order: cancel the backfill task, stop the watchdog, stop the
-cleanup task, clean up the engine, delete the ephemeral conversations still open
-(bounded to 10 s, the rest is left to the next start's sweep), close the checkpointer,
+cleanup task, clean up the engine, try to delete the ephemeral conversations still open
+(best effort, at most 10 s: Electron kills the backend 8 s after asking it to stop; the next
+start's sweep is the guarantee), close the checkpointer,
 close the KB store, and stop the PostgreSQL cluster last.
 
 Startup phase events are informational. Readiness is the launcher's `ready` event or a
