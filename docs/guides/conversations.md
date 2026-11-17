@@ -677,7 +677,10 @@ closes the help alone. An engine failure that opens its dialog closes any comman
   remainders, over what the categories hold together, which is the window while the request fits
   and what is used past it; the grid always has 100 blocks when anything is counted, and a
   category that holds tokens always keeps at least one). Notes say, as they apply, that this
-  computer's memory limits the window the model supports, that a model not loaded is measured
+  computer's memory limits the window the model supports (or, on a sliding-window model
+  on the CUDA or processor engine, that Erudi sizes the window with a cautious estimate of the
+  model's memory needs, so it may use less than this computer could hold; or that the memory
+  brake reduced the window to free memory), that a model not loaded is measured
   against its trained window (the window this computer allows is known once it loads), that a
   knowledge-base assistant's counts leave out the excerpts a question retrieves, that the
   conversation is past its compaction threshold or the next request would not fit the window
@@ -918,7 +921,8 @@ panel renders and never stores:
   "categories": {"system_prompt": 412, "tools": 0, "messages": 2310, "summary": 180,
                  "free": 3651, "autocompaction_buffer": 1639},
   "window": {"working": 8192, "allocated": 8192, "trained": 40960,
-             "reduced_by_memory": false, "model_loaded": true},
+             "reduced_by_memory": false, "cut_by_estimate": false, "reduced_by_brake": false,
+             "model_loaded": true},
   "kb_excerpts_excluded": false,
   "over_window": false
 }
@@ -938,7 +942,13 @@ markers of its earlier searches.
 
 `used` is `system_prompt + tools + messages + summary`. The denominator `W` is the working window
 when this conversation's model is the loaded one — the allocated window, folded with the memory
-ceiling on Apple Silicon; `reduced_by_memory` says this computer's memory bounds it — and the
+ceiling on Apple Silicon; `reduced_by_memory` says this computer's memory bounds it, and
+`cut_by_estimate` says the window is below the trained one because the CUDA or processor engine
+sizes a sliding-window model (Gemma lineage) with a conservative estimate of its memory needs,
+memory not binding, and `reduced_by_brake` says the memory brake's cap put the allocated window
+under the one sized at spawn (`static_window_tokens`; the llama.cpp engines only), neither of the
+other two applying (at most one of the three is true; Apple Silicon never sets the estimate flag:
+its window is the trained one, lowered only by a measured memory bound) — and the
 model's trained window otherwise (`model_loaded: false`; the window this computer allows is known
 once the model loads). With `T` the compaction trigger at the conversation's threshold
 (`trigger_tokens(W, pct)`), `free = max(0, T − used)` and `autocompaction_buffer = max(0, W −
