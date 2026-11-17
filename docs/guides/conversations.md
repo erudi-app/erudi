@@ -71,14 +71,19 @@ What differs from a regular conversation:
 - **No export.** The header offers no **Export as Markdown**, and `conversationExport.js` refuses
   an ephemeral conversation before anything reaches the main process.
 
-**Leaving deletes it.** Leaving is the conversation id of the route changing: another conversation,
-the Chat page, a new chat, any other page. `EphemeralConversationGuard`
+**Leaving deletes it.** Leaving is the conversation id of the route changing (another conversation,
+the Chat page, a new chat, any other page) or the window closing or reloading (`pagehide`; on
+macOS closing the window does not quit the app). `EphemeralConversationGuard`
 (`frontend/src/components/`, mounted once inside the router in `App.jsx`) watches the route, not a
-page unmounting (the conversation page stays mounted from one conversation to the next), and calls
-`leaveConversation` (`frontend/src/utils/ephemeralConversations.js`), which aborts the answer the
-conversation is streaming, if any, then sends `DELETE /erudi/conversations/{id}` without asking.
-The abandoned answer is neither an error record nor a red bubble. A conversation is deleted once,
-whatever the route does next, and a regular conversation is never touched.
+page unmounting (the conversation page stays mounted from one conversation to the next), and the
+`pagehide` event, and calls `leaveConversation` (`frontend/src/utils/ephemeralConversations.js`).
+It aborts the answer the conversation is streaming, if any (`abortTurns`,
+`frontend/src/utils/conversationTurns.js`, where the conversation page registers every answer it
+streams), then sends `DELETE /erudi/conversations/{id}` without asking; on `pagehide` the request
+is sent with `keepalive` so it outlives the page. The abandoned answer is neither an error record nor
+a red bubble. A conversation is deleted once, whatever the route does next, and a regular
+conversation is never touched. A window reloaded on an ephemeral conversation then finds it gone and
+says the conversation cannot be read.
 
 The delete removes the row, its messages, its checkpointer thread and its pasted images (see
 [Delete](#delete)). It waits for the turn in flight: the renderer's abort reaches the backend as a
@@ -87,13 +92,17 @@ after the generation lock is released. Each turn, title and manual compaction is
 work on its conversation from its first statement to its last write
 (`backend/src/domains/conversations/turns.py`); the delete marks the conversation as closing, waits
 for that work to end, and only then deletes. While it closes, a new turn is refused (`error` then
-`done`, nothing written), a title is skipped and `/compact` is a 404. Nothing can therefore write a
-row or a thread after the delete.
+`done`, nothing written), a title is skipped, `/compact` is a 404, and `GET
+/erudi/conversations/{id}` is a 404 as for a deleted conversation (a page navigated back to during the
+wait does not reload it). Nothing can therefore write a row or a thread after the delete.
 
 What the renderer cannot delete, the backend does (`backend/src/domains/conversations/ephemeral.py`):
 
-- **When the app quits**, the lifespan deletes every ephemeral conversation before it closes the
-  checkpointer, within 10 s (`SHUTDOWN_PURGE_SECONDS`); what is left goes at the next start.
+- **When the app quits**, the lifespan tries to delete every ephemeral conversation before it closes
+  the checkpointer (for at most `SHUTDOWN_PURGE_SECONDS`, 10 s). This is best effort: uvicorn first
+  waits for the requests in flight, and the Electron main process kills the backend 8 s after asking
+  it to stop (`frontend/src/utils/backendShutdown.js`), so the purge may not run or not finish. The
+  sweep of the next start is the guarantee.
 - **At the next start** (a crash, a force-quit, a killed backend), once the checkpointer is open
   and before the first request, every ephemeral conversation left over is deleted, then every
   checkpointer thread whose conversation no longer exists: a delete interrupted between the rows
@@ -268,7 +277,8 @@ that handle must be a regular file of at most 20 MB, the composer's own limit
 (`frontend/src/utils/imageLimits.js`), whose first bytes are one of those formats' signatures; the
 MIME type is taken from those bytes. Pasting writes only those five formats. A refused file shows "Image not shown" with the reason where the
 image was; a file that is gone shows the plain image placeholder. Pasted images are written to
-`pasted-images/` in the data folder, and deleted with their conversation (see [Delete](#delete)).
+`pasted-images/` in the data folder, and deleted with their conversation (see [Delete](#delete));
+an image pasted before pasted images moved into the data folder stays where it is.
 
 ### Event types
 
@@ -1101,7 +1111,8 @@ Returns `{"message": ..., "error_message_id": <id>}`.
 curl -X DELETE http://127.0.0.1:27182/erudi/conversations/42
 ```
 
-Permanent. It removes, in order, the conversation's row and its messages (they cascade), its
+Permanent. The app's history row aborts the answer the conversation is streaming before it sends
+the DELETE, and sends no second DELETE of a conversation while the first is on its way. It removes, in order, the conversation's row and its messages (they cascade), its
 checkpointer thread, and its pasted images. It first waits for a turn, a title or a manual
 compaction still writing to the conversation (see [Ephemeral
 conversations](#ephemeral-conversations)), so a delete sent during an answer returns once that
@@ -1112,7 +1123,10 @@ resolved) is inside the app's pasted-images folder: `PASTED_IMAGES_FOLDER` in th
 (`backend/src/launcher/runtime_paths.py`, the folder the Electron main process writes a pasted
 image to; the name is pinned on both sides by `backend/tests/fixtures/runtime_paths_layout.json`).
 An image attached from the disk is the user's own file and is never touched, nor is a link in that
-folder that leads out of it, nor an image another conversation still references. A file already
+folder that leads out of it, nor an image another conversation still references. An image pasted
+before pasted images moved into the data folder (`pasted-images/` under `~/Library/Application
+Support/erudi` or `%LOCALAPPDATA%\erudi`) is not inside that folder either and stays on disk; Clear
+All Data removes those. A file already
 gone is not a failure; one that cannot be deleted stays on disk with one `WARNING`
 (`backend/src/utils/pasted_images.py`).
 

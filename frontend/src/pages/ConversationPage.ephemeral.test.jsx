@@ -54,6 +54,7 @@ import {
   leaveConversation,
   resetEphemeralConversations,
 } from "../utils/ephemeralConversations";
+import { abortTurns } from "../utils/conversationTurns";
 
 const detail = (ephemeral) => ({
   id: 7,
@@ -170,6 +171,27 @@ describe("ConversationPage, ephemeral conversation", () => {
     await act(async () => {});
     const answers = screen.getAllByTestId("answer").map((a) => a.textContent);
     expect(answers.join(" ")).not.toContain("ERROR");
+    expect(logMock.error).not.toHaveBeenCalled();
+  });
+
+  it("lets a delete abort the streaming answer of a regular conversation, silently", async () => {
+    tracedFetchMock.mockImplementation(routeFetch({ ephemeral: false }));
+    await renderAndSettle();
+    await screen.findByText("HEADER_EXPORT");
+
+    fireEvent.click(screen.getByText("SEND"));
+    await waitFor(() => expect(screen.getAllByTestId("answer").at(-1).textContent).toBe("Partial"));
+    const querySignal = tracedFetchMock.mock.calls.find(([u]) => String(u).includes("/query"))[1]
+      .signal;
+
+    // What the history row does before its DELETE.
+    await act(async () => {
+      abortTurns("7");
+    });
+
+    expect(querySignal.aborted).toBe(true);
+    await act(async () => {});
+    expect(calls("store_error_message")).toBe(0);
     expect(logMock.error).not.toHaveBeenCalled();
   });
 });

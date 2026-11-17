@@ -11,11 +11,8 @@ const { tracedFetchMock } = vi.hoisted(() => ({ tracedFetchMock: vi.fn() }));
 vi.mock("../services/api/client", () => ({ tracedFetch: tracedFetchMock }));
 
 import EphemeralConversationGuard from "./EphemeralConversationGuard";
-import {
-  markEphemeral,
-  resetEphemeralConversations,
-  trackTurn,
-} from "../utils/ephemeralConversations";
+import { markEphemeral, resetEphemeralConversations } from "../utils/ephemeralConversations";
+import { trackTurn } from "../utils/conversationTurns";
 
 let navigate;
 const keepNavigate = (fn) => {
@@ -118,5 +115,36 @@ describe("EphemeralConversationGuard", () => {
 
     expect(controller.signal.aborted).toBe(true);
     expect(abortedAtDelete).toBe(true);
+  });
+
+  it("deletes the open ephemeral conversation, kept alive, when the window closes or reloads", async () => {
+    markEphemeral(5);
+    const controller = new AbortController();
+    trackTurn(5, controller);
+    renderAt("/erudi/conversations/5");
+
+    await act(async () => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+
+    expect(controller.signal.aborted).toBe(true);
+    expect(deletes()).toHaveLength(1);
+    const [url, options] = deletes()[0];
+    expect(String(url)).toMatch(/\/conversations\/5$/);
+    expect(options.keepalive).toBe(true);
+  });
+
+  it("sends nothing on pagehide for a regular conversation or another page", async () => {
+    renderAt("/erudi/conversations/5");
+    await act(async () => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+    markEphemeral(6);
+    await act(async () => navigate("/erudi/chat"));
+    await act(async () => {
+      window.dispatchEvent(new Event("pagehide"));
+    });
+
+    expect(deletes()).toHaveLength(0);
   });
 });

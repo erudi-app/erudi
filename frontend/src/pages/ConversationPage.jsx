@@ -13,7 +13,8 @@ import ChatCollapsibleSection from "../components/ChatCollapsibleSection";
 import QuestionInput from "../components/QuestionInput";
 import ConversationHeader from "../components/ConversationHeader";
 import { exportConversation } from "../utils/conversationExport";
-import { isEphemeral, markEphemeral, trackTurn } from "../utils/ephemeralConversations";
+import { isEphemeral, markEphemeral } from "../utils/ephemeralConversations";
+import { trackTurn } from "../utils/conversationTurns";
 import UnloadModelButton from "../components/UnloadModelButton";
 import CommandPopups from "../components/CommandPopups";
 import CommandNotice from "../components/CommandNotice";
@@ -523,8 +524,9 @@ export default function ConversationPage() {
 
       setMessages((prev) => [...prev, userMessage, assistantMessage]);
 
-      // Leaving an ephemeral conversation aborts this answer (#428): the
-      // user asked for it, so the abort is neither an error nor a red bubble.
+      // Leaving an ephemeral conversation, or deleting this one, aborts this
+      // answer (#428): the user asked for it, so the abort is neither an error
+      // nor a red bubble.
       const turnController = new AbortController();
       const untrackTurn = trackTurn(id, turnController);
       const leftByUser = () => turnController.signal.aborted;
@@ -814,7 +816,7 @@ export default function ConversationPage() {
             }
           } catch (streamError) {
             if (leftByUser()) {
-              log.info(`Answer of conversation ${id} abandoned: the user left it`);
+              log.info(`Answer of conversation ${id} abandoned: the user left or deleted it`);
             } else {
               log.error("Streaming error during response generation", streamError);
               answerText = joinFailure(
@@ -881,7 +883,7 @@ export default function ConversationPage() {
         }
       } catch (err) {
         if (leftByUser()) {
-          log.info(`Message to conversation ${id} abandoned: the user left it`);
+          log.info(`Message to conversation ${id} abandoned: the user left or deleted it`);
         } else {
           log.error("Failed to send message", err);
         }
