@@ -53,31 +53,51 @@ STARRED_TRUNCATION_MARK = " [...]"
 _APPROX_CHARS_PER_TOKEN = 4
 
 
-def _star_tokens(text: str, weight: float) -> int:
+def _star_tokens(text: str) -> int:
+    """The counter's tokens of ``text``: its own weight times chars/4."""
+    from langchain_core.messages import HumanMessage
+
+    if not text:
+        return 0
+    weight = counter_weight(HumanMessage(text))
     return math.ceil(weight * len(text) / _APPROX_CHARS_PER_TOKEN)
+
+
+def _head_within(text: str, budget: int) -> str:
+    """The longest head of ``text`` whose OWN count fits ``budget``: cut at
+    ``budget * 4 / w`` characters with the whole text's weight ``w`` first,
+    then shortened while the head's own weight says it is over (a Chinese
+    head of a mostly Latin message weighs far more than the average)."""
+    from langchain_core.messages import HumanMessage
+
+    weight = counter_weight(HumanMessage(text))
+    head = text[: int(budget * _APPROX_CHARS_PER_TOKEN / weight)]
+    while head and _star_tokens(head) > budget:
+        over = _star_tokens(head) - budget
+        head = head[: max(0, len(head) - max(1, over))]
+    return head.rstrip()
 
 
 def bound_starred_messages(messages: List[str]) -> List[str]:
     """``messages`` (the starred contents, oldest first) as the system prompt
     carries them: each whole when it fits its budget -- ``min(500, what the
-    2,000-token total leaves)`` -- else its head, cut at ``budget * 4 / w``
-    characters (``w`` the counter's weight of the message, as the compaction
-    gate counts it) and marked; none once the total is spent."""
-    from langchain_core.messages import HumanMessage
-
+    2,000-token total leaves)`` -- else its longest head that fits it, counted
+    on the head itself with the compaction counter (``_head_within``), and
+    marked; a star whose head would be empty is skipped; none once the total
+    is spent."""
     carried: List[str] = []
     left = STARRED_TOTAL_TOKENS
     for text in messages:
         budget = min(STARRED_MESSAGE_TOKENS, left)
         if budget <= 0:
             break
-        weight = counter_weight(HumanMessage(text))
-        if _star_tokens(text, weight) > budget:
-            text = text[: int(budget * _APPROX_CHARS_PER_TOKEN / weight)].rstrip()
-            cost = _star_tokens(text, weight)
+        cost = _star_tokens(text)
+        if cost > budget:
+            text = _head_within(text, budget)
+            if not text:
+                continue
+            cost = _star_tokens(text)
             text += STARRED_TRUNCATION_MARK
-        else:
-            cost = _star_tokens(text, weight)
         carried.append(text)
         left -= cost
     return carried

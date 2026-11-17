@@ -109,3 +109,23 @@ def test_a_turn_plan_carries_the_bounded_stars():
     assert "BEGIN" in plan.system_prompt
     assert "FINISH" not in plan.system_prompt
     assert len(plan.system_prompt) < len(long) // 10
+
+
+def test_a_mixed_script_star_keeps_its_bound():
+    """2,200 Chinese characters then 48,000 Latin ones: the whole message's
+    average weight would let the CJK head run far past 500 tokens."""
+    star = "中文内容" * 550 + "latin text " * 4_364
+
+    (carried,) = bound_starred_messages([star])
+
+    assert _tokens(_body(carried)) <= STARRED_MESSAGE_TOKENS
+    assert carried.endswith(STARRED_TRUNCATION_MARK)
+
+
+def test_a_star_whose_cut_would_be_empty_is_skipped():
+    stars = ["x " * 10_000] * 3 + ["y " * 990, "中" * 5_000]
+
+    carried = bound_starred_messages(stars)
+
+    assert all(_body(c).strip() for c in carried)
+    assert sum(_tokens(_body(c)) for c in carried) <= STARRED_TOTAL_TOKENS
