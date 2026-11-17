@@ -543,6 +543,51 @@ def test_a_timeout_within_the_reload_grace_does_not_unload(child, http, sensors)
 
 
 @pytest.mark.parametrize(
+    "brake",
+    [
+        BrakeState(reloaded_at=time.time() - 10),
+        BrakeState(in_episode=True, unloaded_this_episode=True),
+    ],
+    ids=["grace", "second-in-episode"],
+)
+def test_a_reset_timeout_the_law_does_not_unload_keeps_its_warning(
+    child, http, sensors, caplog, brake
+):
+    """The unload's line stands for the timeout only when there is an
+    unload: when the law refuses it, the reset's own WARNING is the record."""
+    sensors.level = 4
+    child["last_request_tokens"] = 10
+    child["brake"] = brake
+    http.fail["/v1/cache/reset"] = _timed_out()
+
+    with caplog.at_level(logging.INFO):
+        outcome = MLX_Engine.brake_point("idle")
+
+    assert outcome == BrakeOutcome()
+    assert MLX_Engine._model is child
+    (warning,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warning.getMessage() == (
+        "[MLX_Engine] Prefix cache reset failed (ReadTimeout); "
+        "memory release incomplete, a later release returns it: reason=memory_pressure"
+    )
+
+
+def test_a_failed_reset_inside_a_release_names_the_release(child, http, sensors, caplog):
+    sensors.level = 4
+    child["last_request_tokens"] = 10
+    http.fail["/v1/cache/reset"] = 500
+
+    with caplog.at_level(logging.INFO):
+        MLX_Engine.brake_point("idle")
+
+    (warning,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warning.getMessage() == (
+        "[MLX_Engine] Prefix cache reset failed (HTTP 500); "
+        "memory release incomplete, a later release returns it: reason=memory_pressure"
+    )
+
+
+@pytest.mark.parametrize(
     "failure", [500, mlx_engine_module.requests.ConnectionError("refused")], ids=["http", "conn"]
 )
 def test_a_release_failure_that_is_not_a_timeout_does_not_unload(child, http, sensors, failure):

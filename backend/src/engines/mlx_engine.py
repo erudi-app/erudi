@@ -687,28 +687,36 @@ class MLX_Engine(BaseChatServerEngine):
             timed_out = isinstance(exc, requests.ReadTimeout)
             if not (timed_out and quiet_timeout):
                 # The class name only: the exception text can quote the request.
-                logger.warning(
-                    f"[MLX_Engine] Prefix cache reset failed ({type(exc).__name__}); "
-                    f"deferred to the next claim: reason={reason}"
-                )
+                cls._log_reset_failure(type(exc).__name__, purpose, reason)
             return cls._OUTCOME_TIMED_OUT if timed_out else cls._OUTCOME_FAILED
         if resp.status_code != 200:
-            logger.warning(
-                f"[MLX_Engine] Prefix cache reset failed (HTTP {resp.status_code}); "
-                f"deferred to the next claim: reason={reason}"
-            )
+            cls._log_reset_failure(f"HTTP {resp.status_code}", purpose, reason)
             handle["prefix_owner"] = cls._PREFIX_OWNER_DIRTY
             return cls._OUTCOME_FAILED
         logger.info(f"Prefix cache reset: reason={reason}")
         return cls._OUTCOME_OK
 
-    # What a failed barrier costs, by purpose: a claim's barrier defers the
-    # reset to the next claim; the memory brake's release barrier leaves
-    # the fallback clear (see ``_send_barrier``) to a later release.
+    # What a failed barrier or reset costs, by purpose: a claim's defers the
+    # reset to the next claim; a memory release's leaves what it was to give
+    # back (the prefix cache, the fallback clear of ``_send_barrier``) to a
+    # later release.
     _BARRIER_FAILURE_OUTCOMES = {
         "claim": "reset deferred to the next claim",
         "release": "memory release incomplete, a later release returns it",
     }
+    _RESET_FAILURE_OUTCOMES = {
+        "claim": "deferred to the next claim",
+        "release": "memory release incomplete, a later release returns it",
+    }
+
+    @classmethod
+    def _log_reset_failure(cls, cause: str, purpose: str, reason: str) -> None:
+        """The one record of a failed reset (``cause``: the exception's class
+        name or the HTTP status)."""
+        logger.warning(
+            f"[MLX_Engine] Prefix cache reset failed ({cause}); "
+            f"{cls._RESET_FAILURE_OUTCOMES[purpose]}: reason={reason}"
+        )
 
     @classmethod
     def _send_barrier(
