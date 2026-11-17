@@ -67,6 +67,23 @@ def get_embeddings() -> Embeddings:
     return E5Embeddings()
 
 
+def embedding_artifact_missing() -> bool:
+    """Whether the selected backend NEEDS the e5 artifact and it is absent.
+
+    True only on the child backend (the child serves the snapshot by path
+    and cannot download): the "KB present, embedding model missing" state
+    the interface surfaces, and what lets an ingestion refuse its job up
+    front instead of failing file by file. The in-process backend still
+    fetches lazily on first use (pre-#146 behaviour, gone with F4), so it
+    never reports missing.
+    """
+    if _forced_backend == "in-process":
+        return False
+    if _forced_backend == "child" or embedder_child.embedder_child_supported():
+        return not embedding_model_available()
+    return False
+
+
 def build_embedding_text(*, file_name: str, chunk_text: str) -> str:
     """Prefix the chunk with its source document name (R&D POC format)."""
     return f"[document_name:{file_name}]\n{chunk_text}"
