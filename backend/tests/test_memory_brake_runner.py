@@ -34,7 +34,7 @@ from src.engines.memory_brake import NOTICE_ACTED, NOTICE_EXTERNAL, BrakeOutcome
 from src.engines.mlx_engine import MLX_Engine
 from tests._helpers import ToolableFakeChatModel
 from tests.test_agent_runner import _TimingOutModel
-from tests.test_compaction_keep import _measured, _text
+from tests.test_compaction_keep import SUMMARY, _measured, _text
 
 pytestmark = pytest.mark.unit
 
@@ -805,7 +805,7 @@ async def test_after_a_shrink_below_the_history_the_next_turn_compacts_and_answe
     _BrakeEngine.window = new_w
     main = _WindowedModel(messages=iter([AIMessage(content="still here")]))
     summary = _WindowedModel(
-        messages=iter([AIMessage(content="The user asked about many things.")] * 3),
+        messages=iter([AIMessage(content=SUMMARY)] * 3),
         cap=runner_module.summary_cap(new_w),
         refuse_first=refused,
     )

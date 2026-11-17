@@ -288,8 +288,18 @@ async def test_summarization_compacts_checkpointer_state(monkeypatch):
         for i in itertools.count():
             yield AIMessage(content=f"answer {i} with several words here")
 
+    from src.agents.reasoning_effort import NO_REASONING_PLAN
+    from tests.test_compaction_keep import SUMMARY
+
     fake = ToolableFakeChatModel(messages=infinite())
-    monkeypatch.setattr(runner_module, "build_chat_model", lambda llm, **kw: fake)
+    # The summary client (effort "none") writes a summary; answering with the
+    # main fake's answers would be a copy of the last one, which is rejected.
+    summarizer = ToolableFakeChatModel(messages=itertools.repeat(AIMessage(content=SUMMARY)))
+    monkeypatch.setattr(
+        runner_module,
+        "build_chat_model",
+        lambda llm, **kw: summarizer if kw.get("effort_plan") is NO_REASONING_PLAN else fake,
+    )
 
     cp = InMemorySaver()
     runner = AgentRunner(checkpointer=cp)

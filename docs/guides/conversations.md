@@ -207,7 +207,7 @@ their contents through history forever.
 | `thinking` | `text` | A chunk of the model's reasoning (see below) |
 | `tool_call` | `name`, `args` | The agent called a tool (`search_knowledge_base`, `web_search`, `calculator`) |
 | `tool_result` | `name`, `text` | What that tool returned |
-| `compaction` | `phase`; with `phase: "done"`: `summarized`, `reason`, `summary`, `summary_lost` | Earlier messages are summarized (see [compaction](#what-the-thread-shows-of-a-compaction)). `phase: "start"`: the summary call is about to run; never persisted. `phase: "done"`: the history was rewritten — `summarized` = the user messages and answers summarized (tool calls, tool results and the previous summary not counted), `reason` = `"memory"` (the computer's memory bounds the window) or `"length"`, `summary` = the summary text, `summary_lost: true` when no summary could be written (`summary` is then the previous summary the model keeps, possibly empty). Persisted in the turn's trace. Several per turn are possible: one before each model call that needs it |
+| `compaction` | `phase`; with `phase: "done"`: `summarized`, `reason`, `summary` | Earlier messages are summarized (see [compaction](#what-the-thread-shows-of-a-compaction)). `phase: "start"`: the summary call is about to run; never persisted. `phase: "done"`: the history was rewritten — `summarized` = the user messages and answers summarized (tool calls, tool results and the previous summary not counted), `reason` = `"memory"` (the computer's memory bounds the window) or `"length"`, `summary` = the summary text. A summary that could not be written or was rejected rewrites nothing and sends no `done`. Persisted in the turn's trace. Several per turn are possible: one before each model call that needs it |
 | `memory_reload` | `reason` (`"memory"`, `"idle"` or `"manual"`) | Why this turn reloads the model, which picks the renderer's copy. `reason: "memory"`: the memory brake unloaded the model (or, on the llama.cpp engines, restarted it with a smaller window) while the computer's memory was under pressure, and this turn reloads it or re-reads the conversation (see below). `reason: "idle"` (any engine): the model was unloaded after the Settings idle delay without use, and this turn reloads it; the copy names no duration. `reason: "manual"` (any engine): the user unloaded it with the header's Unload button ("You unloaded the model; reloading it…"). The idle and manual reasons only reach a conversation that already has messages (a new one shows its first-reply hint); a model switch never sends the event, and a turn announces at most one reload. Sent before anything else the model produces; never persisted |
 | `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one, by precedence: a brake notice, then `gpu_contention`, then `bound`. `reason: "pressure"`: the computer's memory is under pressure and the memory brake shrank the window, so the conversation will be summarized sooner. `reason: "pressure_external"`: the computer's memory is under pressure from other apps and this conversation uses little of it. `reason: "gpu_contention"` (the CUDA engine on Windows): another app is taking the graphics card's memory from the model, so answers are slower; sent at every turn end while it lasts, and the renderer polls `GET /hardware/gpu_contention/status` to drop the notice once it ends (see below). `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
 | `error` | `text`; optional `code`, `raw`, `detail`, `request_id`, `curated`, `curated_error` | The turn failed. `text` is the red message: the generic apology, or a curated sentence in English (a prompt that does not fit, a model that did not start answering in time or went silent mid-answer, the tool-loop limit). A generic failure carries `detail` (the cleaned cause, see [Errors](#when-a-turn-fails)) and `request_id`; a curated one carries `curated: true`, `curated_error` (`{"kind", "params", "text"}`, what the renderer translates it from) and no detail. `code`/`raw` are the engine's typed cause (CUDA remedies). Text streamed before the failure stays in the answer; the error event follows it |
@@ -330,6 +330,36 @@ When the wire error matched but its numbers didn't parse, the turn drops the fig
 same honest wording. There is no silent truncation or shifting of the conversation to make it fit --
 the user always gets a turn that says why and what to do next.
 
+Two refusals come before the engine is asked anything, from the compaction middleware, against
+the allocated window -- the limit the engine refuses on. They count the request as the
+[output budget](#output-budget) does (no weight below 1.0, Chinese, Japanese and Korean characters
+0.65 token each), not with the compaction's counter, which counts higher on purpose to compact a
+little early: a refusal counted that way would turn away requests the engine serves.
+
+- **A message too long on its own.** When the new message, with the request's overhead (system
+  prompt, tool schemas, knowledge-base block) and the output budget's 512-token floor, exceeds the
+  allocated window, no compaction can make room for it: the turn is refused at once, without a
+  summary call and without rewriting the history — the refused question is closed like any failed
+  turn (`message_too_long`, or `message_too_long_memory` when the allocated window is the child's
+  memory bound):
+
+  `This message alone is too long for the model's context window (with the app's instructions and
+  room for an answer it needs about N tokens; the window holds W). Send a shorter message or split
+  it into several, or switch to a model with a larger window.`
+
+  When the overhead alone already exceeds the window, the message is not what is too long, and the
+  engine's own overflow above answers instead.
+- **A conversation that could not be summarized.** When an automatic compaction produced no
+  usable summary (see [the failed summary](#how-conversation-state-is-kept)) — or, during the pause
+  after one, the compaction tried anyway fails too — and the whole request does not fit the
+  allocated window with the 512-token floor, the turn is refused (`summary_failed`): `This
+  conversation no longer fits the model's context window, and its earlier messages could not be
+  summarized to make room (...). Start a new conversation, or use Compact in this conversation's
+  settings to summarize it now.`
+
+`backend.log` carries one `Agent turn refused before generation: kind=...` warning per refusal,
+with both figures.
+
 ### Curated turns
 
 Each sentence above, and the ones of a model that did not start answering in time, went silent
@@ -341,6 +371,9 @@ mid-answer, or hit the tool-loop limit, is a **curated turn**: one entry of `CUR
 | `context_overflow` | `prompt_tokens`, `context_tokens` | The prompt does not fit the model's window |
 | `context_overflow_unsized` | — | The same, its numbers unparsed |
 | `memory_overflow` | `prompt_tokens`, `context_tokens` | The prompt does not fit what memory allows |
+| `message_too_long` | `prompt_tokens`, `context_tokens` | The new message alone does not fit the window; refused before any compaction |
+| `message_too_long_memory` | `prompt_tokens`, `context_tokens` | The same, the window being the memory bound |
+| `summary_failed` | `prompt_tokens`, `context_tokens` | The summary that would make room failed or was rejected, and the request does not fit; suggests a new conversation or Compact in the conversation's settings |
 | `prefill_timeout` | `minutes` | No first token within the budget |
 | `decode_timeout` | `seconds` | Silent mid-answer past the inter-chunk budget |
 | `loop_limit` | — | The tool-loop limit, with no tool result to fall back to |
@@ -792,7 +825,15 @@ curl -X POST http://127.0.0.1:27182/erudi/conversations/unstar_message \
 
 Starred messages are read back when a turn is planned and appended to the system prompt under
 "Important points from the conversation so far" (`build_system_prompt` in
-`backend/src/utils/prompt_utils.py`).
+`backend/src/utils/prompt_utils.py`). The block rides every request and compaction never shortens
+it, so it is bounded (`bound_starred_messages` in `backend/src/agents/prompts.py`): each starred
+message is carried whole up to about **500 tokens**, and only its beginning past that, marked
+`[...]`; all of them together carry about **2,000 tokens**, the oldest stars first (the newer ones
+are the likelier to still be in the history word for word) — a star past that total is not carried.
+Tokens are counted with the compaction's own counter, on the head that is carried (a Chinese
+beginning of a mostly English message is cut on its own weight), and a star of which not even a
+beginning fits what is left is skipped. A short starred message is carried word for word; the end
+of a long one is not recalled from the star.
 
 ### Compact a conversation now
 
@@ -838,7 +879,9 @@ brake's turn-end sample, also after a failure (a model that could not load inclu
 
 Each failure has one record in `backend.log`:
 
-- A summary that fails or runs past its bound, or a thread state that cannot be written, changes
+- A summary that fails, is rejected (too short for what it replaces, or a copy of the last message:
+  the automatic compaction's rule, see [How conversation state is kept](#how-conversation-state-is-kept))
+  or runs past its bound, or a thread state that cannot be written, changes
   nothing — the model still sees the whole history — and is a 503 (`COMPACTION_FAILED`). Its one
   warning names the causes of each attempt; the summarizer's per-attempt records are debug-level
   for a manual compaction.
@@ -1079,18 +1122,50 @@ the prompt names it
    19,200 tokens of history in one call, so that one turn waits for a long prefill before its
    answer starts — slowest on the CPU engine.
 
-   **A failed summary never erases memory.** A transient failure of the summary call (the child
-   unreachable or dead, a client timeout, a timeout while the summary was being written, HTTP
+   **A failed summary never touches the history.** A transient failure of the summary call (the
+   child unreachable or dead, a client timeout, a timeout while the summary was being written, HTTP
    408/409/429/5xx) fails the turn with the history intact: no summary is written and the next turn
    retries. A deterministic failure — a context overflow, another 4xx, a timeout while the model was
-   still reading the input (deterministic for that input size), or an **empty summary** — and a
-   history where no user turn fits the summarizer's budget because one answer alone exceeds it are
-   retried once with oversized messages truncated (and the budget halved after a failed call); if
-   that fails too, the compaction writes a placeholder that **carries the previous summary** —
-   capped at `summary_cap(W)` real tokens, so a summary written under a larger window cannot keep the
-   conversation above a smaller window's trigger — followed by "Later messages of this
-   conversation could not be summarized." The conversation keeps working, and `backend.log`
-   carries one warning per failed attempt.
+   still reading the input (deterministic for that input size), an **empty summary** or a
+   **rejected** one — and a history where no user turn fits the summarizer's budget because one
+   answer alone exceeds it are retried once with oversized messages truncated (and the budget halved
+   after a failed attempt). A summary is rejected (`summary_rejection` in `runner.py`) when it
+   cannot stand for what the summarizer read:
+
+   - **too short**: fewer tokens than `max(4, min(0.05 × read, 24))`, the summary and what was
+     read (the previous summary and the trimmed history) both counted with the compaction's
+     counter, so a Chinese summary is not held to a Latin length. On summaries stored in local
+     conversations, healthy ones ran 388 to 1,060 characters, at least 0.6 of what they read on
+     small pools; degenerate ones ran 8 to 41 characters ("Bonjour.", "None of the above messages
+     were provided."), 0.001 to 0.038 of what they read. The floor lets the short summary of a one-
+     or two-message history through; the ceiling (about 80 Latin characters, twice the longest
+     degenerate one) keeps a long history from asking more than a short summary can carry;
+   - **a copy**: with more than one message read and the summary under 0.2 of what it read, the
+     summary is the last question or the last answer it read — case, spacing and the punctuation
+     at its ends ignored, or 90 % similar. A long recap that is also the last answer (the user
+     asked to recap everything) is kept.
+
+   `backend.log` carries one warning per failed attempt, a rejection as `Compaction summary
+   rejected (<attempt> attempt): too_short|copy, summary_chars=..., read_chars=...,
+   read_messages=...`. When the retry fails too, nothing is rewritten — no summary, no separator —
+   and automatic compaction **pauses for the next 4 user messages** (one `Automatic compaction
+   paused ...` info line): a failing summary is not retried on every turn, each attempt being a
+   model call that reads the whole pool, and by the retry the history has grown by four exchanges.
+   The pause is kept in the thread state (`erudi_compaction_paused_at`: the id of the question whose
+   compaction failed; the fifth user message after it compacts again). Any compaction that rewrites
+   the history — automatic, or `/compact` — clears it. On the failing turn the turn goes ahead when
+   the request still fits the allocated window with the output budget's 512-token floor, and is
+   refused with `summary_failed` otherwise. During the pause a request that fits is sent without a
+   summary call; one that does not fit tries one compaction anyway (a summary call and its retry),
+   and is refused with `summary_failed` only when that fails too — the pause keeps its anchor (see
+   [When the prompt no longer fits the context window](#when-the-prompt-no-longer-fits-the-context-window)).
+   A manual compaction (`/compact`) rejects the same summaries and fails with the history untouched
+   (see [Compact a conversation now](#compact-a-conversation-now)).
+
+   **A new message that cannot fit on its own is refused before any compaction**: the middleware
+   counts it, with the request's overhead, before the trigger, and a compaction that could not make
+   room for it never runs (`message_too_long`, see
+   [When the prompt no longer fits the context window](#when-the-prompt-no-longer-fits-the-context-window)).
 
    **Warn only when memory limits the conversation and compaction cannot save it**: the memory
    notice concerns only a model whose window the machine's memory bounds — on Apple Silicon, when
@@ -1203,9 +1278,13 @@ answer text from the `model` node only.
   the working window smaller than the allocated one, or the allocated window is unknown and the
   working window comes from the memory ceiling alone. N counts the user messages and the answers
   summarized; with N at 0 the line names no number. "Show summary" reveals the summary as plain
-  text, its inline `<think>` blocks removed when the model wrote any. A lost summary says "Earlier messages could not be summarized and were dropped from what
-  the model sees." and offers the previous summary the model keeps, when there is one. A turn
-  that compacts several times shows one separator per compaction, in order.
+  text, its inline `<think>` blocks removed when the model wrote any. A separator stored with
+  `summary_lost: true` says "Earlier messages could not be summarized and were dropped from what
+  the model sees." and offers the summary it carries, when there is one. A turn that compacts
+  several times shows one separator per compaction, in order.
+- **When no summary could be written.** A compaction whose summary failed or was rejected sends
+  `start` and no `done`: the history is kept, so no separator is drawn, and the pending answer
+  shows the model's answer (or the refusal) as usual.
 - **After a reload.** The `done` events are part of the persisted trace, error turns included, so
   the separators come back with the conversation; a trace holding only compactions shows no
   reasoning strip.

@@ -102,7 +102,6 @@ async def test_a_compaction_saves_its_separator_on_the_last_answer(setup, test_d
             "reason": "length",
             "summarized": 1,
             "summary": "Ada lives in Lyon.",
-            "summary_lost": False,
         }
     ]
     state = await _state(cp, str(conversation.id))
