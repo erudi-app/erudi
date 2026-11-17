@@ -40,17 +40,25 @@ const BLOCKED_ENV_PREFIXES = ["LANGCHAIN_", "LANGSMITH_"];
  * close stdin so the backend shuts down gracefully (stop_postgres), which
  * Windows otherwise never got because taskkill /F /T skips the lifespan (#216).
  *
+ * ERUDI_APP_VERSION is the app version (`app.getVersion()`): the backend has
+ * none of its own, and gives backend.log to the running version with it, so the
+ * Diagnostics page lists that version's records only (#576). Only the value
+ * main passes is used; one inherited from the parent environment is dropped.
+ *
  * @param {object} parentEnv - typically process.env; never mutated
+ * @param {{appVersion?: string}} [options] - the app version to pass
  * @returns {object} the environment to hand to spawn
  */
-export function buildBackendEnv(parentEnv) {
+export function buildBackendEnv(parentEnv, { appVersion } = {}) {
   const env = {};
   for (const [key, value] of Object.entries(parentEnv)) {
     if (BLOCKED_ENV_PREFIXES.some((prefix) => key.startsWith(prefix))) continue;
+    if (key === "ERUDI_APP_VERSION") continue;
     env[key] = value;
   }
   env.PYTHONUTF8 = "1";
   env.ERUDI_WATCH_STDIN = "1";
+  if (appVersion) env.ERUDI_APP_VERSION = appVersion;
   return env;
 }
 

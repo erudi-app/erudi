@@ -541,7 +541,7 @@ the card only appears where the setting does something.*
 - [ ] When I trigger a **Hugging Face download while offline**, then the download modal still tells me it failed, but the failure appears on **neither** the Diagnostics page's recent-errors list **nor** the copied report **nor** the bug icon's badge — an unreachable network is not counted as a defect anywhere.
 - [ ] When more than nine new errors accumulate before I next open Diagnostics, then the badge reads **9+** rather than the exact count.
 - [ ] *(not built yet: v1.3.0, #534 — record as not applicable)* When the recent-errors list would show the **same error on consecutive rows**, then they collapse into a single row with a repeat count — no run of identical lines slips through.
-- [ ] *(not built yet: v1.3.0, #576 — record as not applicable)* When I open Diagnostics after updating from an older version, then it lists only records of the version now running; older history stays in the log files; a reinstall of the same version keeps them.
+- [ ] When I open Diagnostics after updating from an older version, then it lists only records of the version now running; older history stays in the log files (`backend.log.1` and up beside `backend.log`, `erudi-backend.old.log` beside the app log); a restart or a reinstall of the same version keeps them (#576).
 
 ## Shared chrome (sidebar, connection, downloads)
 

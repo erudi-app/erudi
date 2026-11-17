@@ -24,12 +24,17 @@
 // lines after it. Continuations inherit their header's level, so those under a
 // dropped record are dropped with it — including a leading fragment whose
 // header fell outside the read window.
+//
+// The log belongs to the running app version (utils/appLogVersion.js): every
+// record above the last version marker is an earlier version's and is dropped.
 
 // `import` rather than `require`: this module uses ESM exports (main.js
 // requires it the way it requires the other shared helpers, and webpack bridges
 // the two), and mixing `require` into an ESM module is the one combination
 // neither bundler nor test runner is obliged to support.
 import fs from "node:fs";
+
+import { APP_LOG_VERSION_MARKER } from "./appLogVersion.js";
 
 /** Read window. Large enough for hundreds of records, small enough to be free. */
 export const DEFAULT_TAIL_BYTES = 512 * 1024;
@@ -89,6 +94,12 @@ export function parseAppLogRecords(text, limit = DEFAULT_LIMIT) {
 
   for (const line of lines) {
     const match = RECORD_RE.exec(line);
+    if (match && match[2].startsWith(APP_LOG_VERSION_MARKER)) {
+      // A version's log starts here; what precedes it is an earlier version's.
+      records.length = 0;
+      current = null;
+      continue;
+    }
     if (match) {
       const level = detectLevel(match[2]);
       if (!level) {

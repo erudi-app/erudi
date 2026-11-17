@@ -55,6 +55,17 @@ describe("buildBackendEnv", () => {
     expect(env.PATH).toBe("/usr/bin");
   });
 
+  it("passes the app version, so backend.log belongs to the running version (#576)", () => {
+    expect(buildBackendEnv({ PATH: "/usr/bin" }, { appVersion: "1.3.0" }).ERUDI_APP_VERSION).toBe(
+      "1.3.0"
+    );
+  });
+
+  it("never forwards an app version inherited from the parent environment", () => {
+    const env = buildBackendEnv({ ERUDI_APP_VERSION: "0.0.1" });
+    expect(env.ERUDI_APP_VERSION).toBeUndefined();
+  });
+
   it("does not mutate the environment it was given", () => {
     const parent = { LANGSMITH_TRACING: "true" };
     buildBackendEnv(parent);

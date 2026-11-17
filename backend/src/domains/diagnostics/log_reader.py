@@ -23,6 +23,12 @@ of their header: those under a kept record are kept, those under a filtered
 record are dropped, and continuations with no header at all -- the top of a
 window that started mid-record -- are dropped too, because their level is
 unknown.
+
+**It reads the running app version only.** The launcher gives ``backend.log``
+to the running version (``src/launcher/log_version.py``), and the first record
+of a version is a marker. When the old file could not be rolled over, the
+older versions' records sit above that marker in the same file, so every
+record before the last marker is dropped (#576).
 """
 
 from __future__ import annotations
@@ -30,6 +36,11 @@ from __future__ import annotations
 import re
 from pathlib import Path
 from typing import Any, Dict, List, Optional
+
+from src.launcher.log_version import VERSION_SWITCH_MARKER
+
+# The logger that writes the version-switch marker (src.core.logging's).
+_MARKER_LOGGER = "erudi"
 
 # Read window. Comfortably more than 200 records of a few hundred bytes, and
 # small enough that reading it costs nothing on any disk.
@@ -142,6 +153,16 @@ def parse_records(
 
     for line in lines:
         match = RECORD_RE.match(line)
+        if match and (
+            match.group("logger") == _MARKER_LOGGER
+            and match.group("message").startswith(VERSION_SWITCH_MARKER)
+        ):
+            # A version's log starts here: what precedes it belongs to an
+            # earlier version (#576).
+            records.clear()
+            current = None
+            keeping = False
+            continue
         if match:
             level = match.group("level")
             keeping = level in levels

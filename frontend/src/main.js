@@ -24,6 +24,7 @@ const { buildBackendSpawnOptions, buildBackendEnv } = require("./utils/backendSp
 const { gracefulShutdown } = require("./utils/backendShutdown");
 const { singleFlight } = require("./utils/singleFlight");
 const { readAppLogTailResult } = require("./utils/appLogTail");
+const { switchAppLogForVersion, appLogVersionLines } = require("./utils/appLogVersion");
 const { describeProcessGone, formatMainRecord } = require("./utils/mainLog");
 const { createBackendStartTracker, requestStop } = require("./utils/backendStartTracker");
 const { configureUpdater, createUpdaterWiring } = require("./utils/updaterWiring");
@@ -166,6 +167,16 @@ const log = (message) => {
 const logWarn = (message, error) => log(formatMainRecord("WARN", message, error));
 const logError = (message, error) => log(formatMainRecord("ERROR", message, error));
 
+// The app log belongs to the running app version (#576): at the first launch
+// of another version the old file is moved aside before anything is written.
+const appLogVersionSwitch = switchAppLogForVersion({
+  fs,
+  logFile,
+  oldLogFile,
+  versionFile: path.join(os.tmpdir(), "erudi-backend.log.version"),
+  version: app.getVersion(),
+});
+for (const line of appLogVersionLines(appLogVersionSwitch, app.getVersion())) log(line);
 log(`Starting app, log file: ${logFile}`);
 if (updaterLoadError) {
   logWarn("electron-updater could not be loaded; automatic updates are off", updaterLoadError);
@@ -331,8 +342,9 @@ const startRealBackend = () => {
     // buildBackendEnv inherits the parent environment, strips what must never
     // cross into the backend (the LangChain/LangSmith family, which would turn
     // on cloud tracing of every conversation), and adds PYTHONUTF8 and
-    // ERUDI_WATCH_STDIN. See utils/backendSpawn.js for the reasoning.
-    const backendEnv = buildBackendEnv(process.env);
+    // ERUDI_WATCH_STDIN, and ERUDI_APP_VERSION (backend.log belongs to the
+    // running version, #576). See utils/backendSpawn.js for the reasoning.
+    const backendEnv = buildBackendEnv(process.env, { appVersion: app.getVersion() });
 
     backendProcess = spawn(
       backendPath,

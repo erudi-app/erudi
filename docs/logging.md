@@ -22,6 +22,27 @@ from the click in the UI down to the backend work it triggered.
 - `backend.log` rotates at 10 MB and keeps up to 10 previous files (`backend.log.1` … `backend.log.10`).
 - `erudi-backend.log` rotates at 10 MB and keeps one previous file, `erudi-backend.old.log`.
 
+### One log per app version
+
+Both files belong to the version of Erudi that is running. The log folders
+outlive updates and reinstalls, so at the **first start of another version**
+each file is moved into its history before anything is written to it:
+`backend.log` becomes `backend.log.1` (the older ones shift up, as in a size
+rotation) and `erudi-backend.log` becomes `erudi-backend.old.log`. A restart, or
+a reinstall of the same version, keeps the file as it is. The version of the
+last start is kept beside each file (`backend.log.version`,
+`erudi-backend.log.version`); the backend learns the app version from the
+Electron main process (`ERUDI_APP_VERSION`), and a backend started by hand,
+without it, never moves its file.
+
+The first line of a version's file says so: `Diagnostics starts here: … app
+version X`. When a file cannot be moved — on Windows, another program holding
+it open — the start goes on, that marker line is written into the old file,
+followed by a `WARNING` naming the failure, and the Diagnostics page reads only
+what follows the last marker. Every start of the backend also writes
+`Erudi backend starting, app version X`, so a raw read of a file shows where
+each version begins.
+
 All timestamps in both files are UTC, ISO-8601, with milliseconds — so lines
 from the two files can be correlated reliably.
 
@@ -62,7 +83,9 @@ two files carry, without leaving the app:
   state of the embedded database. The absolute path of both log files is not
   listed on screen — **Open log folder** is how you get to them — but it still
   travels in the copied report below, for whoever triages the issue.
-- **Recent errors**: the last 200 records at `WARNING` or above, merged from
+- **Recent errors**: the last 200 records at `WARNING` or above **of the
+  version now running** (see [One log per app version](#one-log-per-app-version);
+  older versions' records stay in the files), merged from
   three sources and sorted on one timeline — `backend.log`,
   `erudi-backend.log`, and the errors this window caught itself — minus any
   `ERROR`/`CRITICAL` record that merely describes the environment rather than
