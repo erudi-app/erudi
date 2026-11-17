@@ -16,6 +16,7 @@ import { exportConversation } from "../utils/conversationExport";
 import { isEphemeral, markEphemeral } from "../utils/ephemeralConversations";
 import { trackTurn } from "../utils/conversationTurns";
 import UnloadModelButton from "../components/UnloadModelButton";
+import FreeGraphicsCardButton from "../components/FreeGraphicsCardButton";
 import CommandPopups from "../components/CommandPopups";
 import CommandNotice from "../components/CommandNotice";
 import KbEmbeddingBanner from "../components/KbEmbeddingBanner";
@@ -244,6 +245,9 @@ export default function ConversationPage() {
   const [loading, setLoading] = useState(false);
   // Turns completed on this page; bumped once each turn is over.
   const [turnsEnded, setTurnsEnded] = useState(0);
+  // Unloads asked from the GPU contention notice: the header's Unload button
+  // reads the loaded model again after each.
+  const [cardsFreed, setCardsFreed] = useState(0);
   const [models, setModels] = useState([]);
   // The models list and the conversation load independently; the orphan
   // check below only fires once each has resolved, so the "missing model"
@@ -321,6 +325,18 @@ export default function ConversationPage() {
   useEffect(() => {
     contextEpochRef.current += 1;
   }, [id]);
+  // A memory warning is about the conversation's model too: when the user
+  // picks another one, it no longer applies (and the GPU contention notice's
+  // action would name a model that is not loaded). The first value read for
+  // a conversation is not a change.
+  const conversationLlmId = conversationSettings.values.llm_id;
+  const [seenLlmId, setSeenLlmId] = useState(conversationLlmId);
+  if (seenLlmId !== conversationLlmId) {
+    setSeenLlmId(conversationLlmId);
+    if (seenLlmId !== null && seenLlmId !== undefined) {
+      setMemoryWarning(null);
+    }
+  }
   // A ref, not state: the scroll handler updates it on every scroll event, and
   // reading it from the auto-scroll effect must NOT re-run that effect. As state
   // it did (the effect depended on it), so toggling it near the bottom snapped
@@ -353,6 +369,16 @@ export default function ConversationPage() {
   // and touches a gpu_contention notice only, never a warning of another
   // reason that replaced it meanwhile.
   const contentionShown = memoryWarning?.reason === "gpu_contention";
+  // The contention notice goes: the contention ended, or the user freed the
+  // graphics card (the notice's action unloaded the model; the next message
+  // shows the reload state).
+  const dropContentionNotice = useCallback(() => {
+    setMemoryWarning((current) => (current?.reason === "gpu_contention" ? null : current));
+  }, []);
+  const cardFreed = useCallback(() => {
+    dropContentionNotice();
+    setCardsFreed((count) => count + 1);
+  }, [dropContentionNotice]);
   useEffect(() => {
     if (!contentionShown) return undefined;
     let cancelled = false;
@@ -364,7 +390,7 @@ export default function ConversationPage() {
           const status = await apiClient.get(GPU_CONTENTION_STATUS_PATH, { silentFailure: true });
           if (cancelled) return;
           if (status?.active === false) {
-            setMemoryWarning((current) => (current?.reason === "gpu_contention" ? null : current));
+            dropContentionNotice();
             return;
           }
         } catch (error) {
@@ -385,7 +411,7 @@ export default function ConversationPage() {
       cancelled = true;
       clearTimeout(timer);
     };
-  }, [contentionShown]);
+  }, [contentionShown, dropContentionNotice]);
 
   const toggleSidebar = () => {
     setCollapsed((prev) => !prev);
@@ -833,7 +859,11 @@ export default function ConversationPage() {
             // user sees at once, whatever window thinking opened.
             const startsAnswer = evt.t === "answer" && answerText === "";
             handleEvent(evt);
-            if (!gotFirstEvent) {
+            // A memory warning is a statement about the machine, not the
+            // model's reply: said before the answer (the GPU contention
+            // notice at a turn's start), it leaves the typing indicator and
+            // the first-reply hint up for the prefill.
+            if (!gotFirstEvent && evt.t !== "memory_warning") {
               gotFirstEvent = true;
               setLoading(false);
               setFirstReplyPending(false);
@@ -1264,6 +1294,8 @@ export default function ConversationPage() {
   // false) can only fail, so it blocks the same way; undefined/null
   // weights_available (remote or older backend) never blocks.
   const llmId = conversationSettings.values.llm_id;
+  // An answer is being written (its bubble streams): the engine is busy.
+  const answerStreaming = messages.some((m) => m.streaming);
   const assignedModel = models.find((m) => m.id === llmId);
   const isModelOrphaned =
     conversationSettings.loaded &&
@@ -1463,8 +1495,9 @@ export default function ConversationPage() {
             saveFailed={conversationSettings.saveFailed}
           >
             {/* Re-read the loaded model when a turn has completed (turnsEnded),
-                when one starts streaming (loading) and when the model changes. */}
-            <UnloadModelButton refreshKey={`${turnsEnded}:${loading}:${llmId}`} />
+                when one starts streaming (loading), when the model changes and
+                when the GPU contention notice unloaded it (cardsFreed). */}
+            <UnloadModelButton refreshKey={`${turnsEnded}:${loading}:${llmId}:${cardsFreed}`} />
           </ConversationHeader>
         </div>
 
@@ -1748,20 +1781,30 @@ export default function ConversationPage() {
                 conversation will be summarized sooner (`pressure`); the
                 pressure comes from other apps (`pressure_external`); or
                 another app is taking the graphics card's memory and answers
-                are slower (`gpu_contention`, polled away once it ends). An
+                are slower (`gpu_contention`, shown from the turn's start
+                when the contention is already known, polled away once it
+                ends, and carrying "Free the graphics card", which unloads the
+                conversation's model when the user asks, never on its own). An
                 unknown reason shows nothing. Same amber vocabulary as the
                 DragDropArea rejection toast. */}
             {memoryWarning && Object.hasOwn(MEMORY_WARNING_KEYS, memoryWarning.reason) && (
               <div
                 role="alert"
-                className="mb-3 flex items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-200 text-xs"
+                className="mb-3 flex flex-wrap items-center gap-2 px-3 py-2 rounded-lg bg-amber-500/15 border border-amber-500/30 text-amber-200 text-xs"
               >
                 <AlertTriangle className="w-4 h-4 flex-shrink-0" />
-                <span>
+                <span className="flex-1 min-w-0">
                   {t(MEMORY_WARNING_KEYS[memoryWarning.reason], {
                     size: formatBytes(memoryWarning.footprintBytes) ?? "?",
                   })}
                 </span>
+                {memoryWarning.reason === "gpu_contention" && (
+                  <FreeGraphicsCardButton
+                    llmId={llmId}
+                    disabled={loading || answerStreaming || compactingHere}
+                    onFreed={cardFreed}
+                  />
+                )}
               </div>
             )}
             {loadFailed && (

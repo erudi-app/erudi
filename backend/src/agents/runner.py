@@ -432,6 +432,14 @@ def _gpu_contention_active(engine: Any) -> bool:
     return isinstance(state, dict) and bool(state.get("active"))
 
 
+def _serves_turn_model(engine: Any, llm: Any) -> bool:
+    """Whether the loaded, live child serves ``llm`` (``loaded_child_for``),
+    read defensively like the other engine probes: an engine without the
+    probe serves nothing."""
+    probe = getattr(engine, "loaded_child_for", None)
+    return callable(probe) and bool(probe(getattr(llm, "id", None)))
+
+
 def _track_memory_warning(engine: Any, thread_id: Optional[str], active: bool) -> None:
     """Per-conversation warning state on the loaded child's handle, with ONE
     INFO line at each transition (start, end). Lost when the child is reaped
@@ -2248,6 +2256,21 @@ class AgentRunner:
                     # conversation, so the reload state is said in this turn.
                     if not reload_announced and _respawned(outcome):
                         yield {"t": "memory_reload", "reason": RELOAD_REASON_MEMORY}
+                # Another app already takes the graphics card from THIS
+                # turn's model (the eviction gauge's cached state; the
+                # turn_start sample above reads it again for a loaded child
+                # unless a generation ended less than the settle delay ago):
+                # said now, before the answer the user would otherwise wait
+                # for unwarned. Read, never sampled here. Only when the loaded
+                # child serves this turn's model: another model's contention
+                # says nothing about the one this turn loads. Stateful turns
+                # only, like the turn-end check, which then does not say it
+                # again.
+                contention_said = (
+                    stateful and _serves_turn_model(engine, llm) and _gpu_contention_active(engine)
+                )
+                if contention_said:
+                    yield dict(_GPU_CONTENTION_WARNING)
                 sampling = resolve_sampling_defaults(llm)
                 # No implicit tools (#129): callers own the tool list (built by
                 # ``plan_turn``); ``tools=None`` means a zero-tool agent.
@@ -2652,8 +2675,9 @@ class AgentRunner:
                         # apps is ``pressure_external``. Then, as long as
                         # another app takes the graphics card from the child
                         # (the CUDA engine's eviction gauge, read at this
-                        # turn's start or idle), ``gpu_contention`` at every
-                        # turn end, the bound criterion not evaluated either.
+                        # turn's start or idle), ``gpu_contention``, the bound
+                        # criterion not evaluated either -- not yielded again
+                        # when this turn's start already said it.
                         # Otherwise the event goes out ONLY when memory
                         # bounds the child's window and even a compaction
                         # down to the keep-tail would
@@ -2689,7 +2713,9 @@ class AgentRunner:
                                 )
                             if budget is not None and budget.used_fraction(0) is not None:
                                 _track_memory_warning(engine, thread_id, warning is not None)
-                            if warning is not None:
+                            if warning is not None and not (
+                                contention_said and warning == _GPU_CONTENTION_WARNING
+                            ):
                                 yield warning
                         duration_ms = (time.perf_counter() - stream_start_s) * 1000
                         logger.info(

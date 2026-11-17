@@ -290,7 +290,7 @@ an image pasted before pasted images moved into the data folder stays where it i
 | `tool_result` | `name`, `text` | What that tool returned |
 | `compaction` | `phase`; with `phase: "done"`: `summarized`, `reason`, `summary` | Earlier messages are summarized (see [compaction](#what-the-thread-shows-of-a-compaction)). `phase: "start"`: the summary call is about to run; never persisted. `phase: "done"`: the history was rewritten — `summarized` = the user messages and answers summarized (tool calls, tool results and the previous summary not counted), `reason` = `"memory"` (the computer's memory bounds the window) or `"length"`, `summary` = the summary text. A summary that could not be written or was rejected rewrites nothing and sends no `done`. Persisted in the turn's trace. Several per turn are possible: one before each model call that needs it |
 | `memory_reload` | `reason` (`"memory"`, `"idle"` or `"manual"`) | Why this turn reloads the model, which picks the renderer's copy. `reason: "memory"`: the memory brake unloaded the model (or, on the llama.cpp engines, restarted it with a smaller window) while the computer's memory was under pressure, and this turn reloads it or re-reads the conversation (see below). `reason: "idle"` (any engine): the model was unloaded after the Settings idle delay without use, and this turn reloads it; the copy names no duration. `reason: "manual"` (any engine): the user unloaded it with the header's Unload button ("You unloaded the model; reloading it…"). The idle and manual reasons only reach a conversation that already has messages (a new one shows its first-reply hint); a model switch never sends the event, and a turn announces at most one reload. Sent before anything else the model produces; never persisted |
-| `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one, by precedence: a brake notice, then `gpu_contention`, then `bound`. `reason: "pressure"`: the computer's memory is under pressure and the memory brake shrank the window, so the conversation will be summarized sooner. `reason: "pressure_external"`: the computer's memory is under pressure from other apps and this conversation uses little of it. `reason: "gpu_contention"` (the CUDA engine on Windows): another app is taking the graphics card's memory from the model, so answers are slower; sent at every turn end while it lasts, and the renderer polls `GET /hardware/gpu_contention/status` to drop the notice once it ends (see below). `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
+| `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one, by precedence (and `gpu_contention` also at the start of a turn, see below): a brake notice, then `gpu_contention`, then `bound`. `reason: "pressure"`: the computer's memory is under pressure and the memory brake shrank the window, so the conversation will be summarized sooner. `reason: "pressure_external"`: the computer's memory is under pressure from other apps and this conversation uses little of it. `reason: "gpu_contention"` (the CUDA engine on Windows): another app is taking the graphics card's memory from the model, so answers are slower; sent at the start of a turn when the contention is already detected (then not again at that turn's end) and otherwise at the turn end, at every turn while it lasts; the notice offers **Free the graphics card**, which unloads the model, and the renderer polls `GET /hardware/gpu_contention/status` to drop the notice once it ends (see below). `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
 | `error` | `text`; optional `code`, `raw`, `detail`, `request_id`, `curated`, `curated_error` | The turn failed. `text` is the red message: the generic apology, or a curated sentence in English (a prompt that does not fit, a model that did not start answering in time or went silent mid-answer, the tool-loop limit). A generic failure carries `detail` (the cleaned cause, see [Errors](#when-a-turn-fails)) and `request_id`; a curated one carries `curated: true`, `curated_error` (`{"kind", "params", "text"}`, what the renderer translates it from) and no detail. `code`/`raw` are the engine's typed cause (CUDA remedies). Text streamed before the failure stays in the answer; the error event follows it |
 | `done` | — | Terminal event, always sent, including after an `error` |
 
@@ -1386,11 +1386,25 @@ the prompt names it
    about it: on Windows, when a game or another GPU app evicts the model from the card, the CUDA
    engine's eviction gauge (sampled at the start of a turn and while the model is idle, see
    [the eviction gauge](../dev/architecture/engines.md#the-memory-brake-cuda)) makes every turn
-   end carry `memory_warning` with `reason: "gpu_contention"` for as long as it lasts — after a
-   brake notice, before `bound`, which is then not evaluated. While the renderer shows that
+   carry `memory_warning` with `reason: "gpu_contention"` for as long as it lasts. When the
+   gauge's cached reading already says so at the start of a turn whose model is the one loaded (right after the turn's start
+   sample; nothing more is read), the event goes out then, before the answer the user would
+   otherwise wait for unwarned, and the turn end does not send it again; otherwise the turn end
+   sends it — after a brake notice, before `bound`, which is then not evaluated. A brake notice
+   at the turn end still replaces a contention said at its start. While the renderer shows that
    notice, and no turn runs, it polls `GET /hardware/gpu_contention/status` about every 10 s and
    drops the notice once `active` is false; a failed poll, or `active: null` (no reading),
-   keeps it.
+   keeps it. The notice carries **Free the graphics card**: it unloads the conversation's model
+   (`POST /erudi/llms/loaded/unload` with its `llm_id`, the request of the header's Unload
+   button), is disabled while an answer is being written, says why on a `409` ("The model is
+   busy; try again in a moment." or "Another model is loaded now.") and keeps the notice then,
+   and drops the notice once the model is unloaded (the header's Unload button then reads the
+   loaded model again). Said before the answer, the notice leaves the typing indicator up for
+   the prefill (a `memory_warning` is not the model's first reply), and picking another model
+   for the conversation drops it. The next message shows the reload state
+   (`reason: "manual"`), and that load sizes the model against the card's free memory at that
+   moment, so llama.cpp's fit places on the card only the layers that fit. Erudi never unloads
+   the model on its own for a contention.
    When the brake unloaded the model while the user was away, the next turn first sends
    `memory_reload` with `reason: "memory"` (after the idle delay's own unload it carries
    `reason: "idle"` and the copy names the pause instead of memory; after the Unload button,
