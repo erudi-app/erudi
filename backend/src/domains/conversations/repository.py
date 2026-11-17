@@ -5,6 +5,7 @@ Handles all database operations.
 
 from datetime import datetime, timezone
 from typing import List, Optional
+from sqlalchemy import and_, exists, or_
 from sqlalchemy.orm import Session
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -26,6 +27,22 @@ from src.core.exceptions import (
     DatabaseException,
     MessageNotFoundException,
 )
+
+# What a history search returns at most (#429): the sidebar lists them in one
+# column, and a longer answer is a query too short to mean anything.
+SEARCH_LIMIT = 50
+
+_LIKE_ESCAPE = "\\"
+
+
+def _like_pattern(text: str) -> str:
+    """``%text%`` with the user's ``\\``, ``%`` and ``_`` taken literally."""
+    escaped = (
+        text.replace(_LIKE_ESCAPE, _LIKE_ESCAPE * 2)
+        .replace("%", _LIKE_ESCAPE + "%")
+        .replace("_", _LIKE_ESCAPE + "_")
+    )
+    return f"%{escaped}%"
 
 
 class ConversationRepository:
@@ -53,6 +70,41 @@ class ConversationRepository:
             return conversations
         except SQLAlchemyError as e:
             raise DatabaseException("Could not retrieve conversations", trace=str(e))
+
+    def search_conversations(self, query: str, limit: int = SEARCH_LIMIT) -> List[Conversation]:
+        """
+        Find the conversations whose title or message text contains ``query``.
+
+        The match is a case-insensitive substring (``ILIKE``, the query's own
+        ``%`` / ``_`` / ``\\`` escaped). Only ``messages.content`` is searched:
+        the model's reasoning lives in ``messages.trace`` and never matches, and
+        a failed turn (``ERROR_SENTINEL``) is not conversation text. Newest
+        first, at most ``limit``; a blank query matches nothing.
+
+        Raises:
+            DatabaseException: If database query fails
+        """
+        text = query.strip()
+        if not text:
+            return []
+        pattern = _like_pattern(text)
+        try:
+            in_a_message = exists().where(
+                and_(
+                    Message.conversation_id == Conversation.id,
+                    Message.content.ilike(pattern, escape=_LIKE_ESCAPE),
+                    ~Message.content.contains(ERROR_SENTINEL),
+                )
+            )
+            return (
+                self.db.query(Conversation)
+                .filter(or_(Conversation.name.ilike(pattern, escape=_LIKE_ESCAPE), in_a_message))
+                .order_by(Conversation.id.desc())
+                .limit(limit)
+                .all()
+            )
+        except SQLAlchemyError as e:
+            raise DatabaseException("Could not search conversations", trace=str(e))
 
     def get_conversation_by_id(self, conversation_id: int) -> Conversation:
         """
