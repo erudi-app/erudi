@@ -25,6 +25,9 @@ jobs:
     # Skip on draft PRs: the heavy build runs once the PR is marked ready (and in
     # the merge queue once enabled), not on every work-in-progress commit.
     if: github.event_name != 'pull_request' || github.event.pull_request.draft == false
+    # Explicit name: the required checks on main are these four matrix values,
+    # so a matrix key added later (eb_sign_args) must not reach the check name.
+    name: app-smoke (${{ matrix.os }}, ${{ matrix.reqs }}, ${{ matrix.spec }}, ${{ matrix.dist_script }})
     strategy:
       fail-fast: false
       matrix:
