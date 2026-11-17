@@ -286,7 +286,15 @@ _hidden_common = [
     "sentence_transformers",
     "huggingface_hub",
     "tokenizers",
+    # Document parsers: imported at FUNCTION scope only (the extractors in
+    # src/ingestion/extractors, #621) -- pinned for the same reason as the
+    # #160 imports. lxml.etree is python-docx's XML core.
     "pypdf",
+    "docx",
+    "docx.table",
+    "openpyxl",
+    "lxml",
+    "lxml.etree",
     "tqdm",
     "requests",
     "httpx",

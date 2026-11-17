@@ -11,8 +11,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from pypdf import PdfReader
-
 from src.core.logging import logger
 from src.ingestion.cleaning import clean_extracted_text
 from src.ingestion.types import ExtractedDocument, ExtractedPage
@@ -24,6 +22,9 @@ class PdfExtractor:
     MIN_AVG_CHARS_PER_PAGE = 25
 
     def extract(self, path: Path) -> ExtractedDocument:
+        # Function scope: pypdf stays out of the boot heap until the first PDF (#621).
+        from pypdf import PdfReader
+
         reader = PdfReader(str(path))
         pages = [
             ExtractedPage(

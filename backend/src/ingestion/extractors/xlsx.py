@@ -9,8 +9,6 @@ from __future__ import annotations
 
 from pathlib import Path
 
-import openpyxl
-
 from src.core.logging import logger
 from src.ingestion.cleaning import clean_extracted_text
 from src.ingestion.markdown import rows_to_markdown_table
@@ -19,6 +17,9 @@ from src.ingestion.types import ExtractedDocument
 
 class XlsxExtractor:
     def extract(self, path: Path) -> ExtractedDocument:
+        # Function scope: openpyxl stays out of the boot heap until the first XLSX (#621).
+        import openpyxl
+
         workbook = openpyxl.load_workbook(str(path), read_only=True, data_only=True)
         try:
             sections: list[str] = []
