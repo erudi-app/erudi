@@ -33,7 +33,7 @@ non-functional behavior.
 - [ ] When a model is **gated** (from a Hugging Face search hit), then the card shows a "gated" tag.
 - [ ] When I browse the **bundled catalog**, then no card links to a gated repository at all — Erudi downloads anonymously, so a gated link would 401 whoever clicked it *(gated repos are dropped at snapshot time, not flagged)*.
 - [ ] When a model is **under ~4B parameters**, then its card — catalog, explore and installed alike — carries the note that tool use, knowledge-base search and multi-step reasoning are unreliable below ~4B; a 7B or unknown-size card carries no such note.
-- [ ] *(not built yet: v1.3.0, #561 — record as not applicable)* When I view a model card, then it shows **Published <month year>** (when the publisher released it); nothing when the date is unknown (not a broken or wrong date).
+- [ ] When I view a model card (catalog, explore, installed or a Hugging Face search hit), then it shows **Published <month year>** in the interface language (for example "Publié en mars 2026" in French), the month the base repo was created for a catalog base model; nothing when the date is unknown (not a broken or wrong date).
 - [ ] When a category carousel has more than 4 models, then a "See all" control expands it to a grid (and back).
 - [ ] When I apply a **size filter** or **"Fits my machine"** and nothing matches, then I see "No models match these filters. Widen the size range or turn off 'Fits my machine'."
 - [ ] When there are no base models at all, then the browse area shows "No base models available" (not a crash).

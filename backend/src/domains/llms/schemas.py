@@ -166,6 +166,19 @@ class LLMResponse(LLMBase):
 
     @computed_field
     @property
+    def published_at(self) -> Optional[str]:
+        """ISO-8601 publication date shown on the cards, or None when unknown.
+
+        Read from the ``Created:`` line of ``model_metadata`` (the base repo's
+        creation date for a curated row), so there is no column and no network
+        call; a row whose metadata lacks the line yields None (#561).
+        """
+        from src.utils.hf_model_metadata import published_at_from_metadata
+
+        return published_at_from_metadata(self.model_metadata)
+
+    @computed_field
+    @property
     def sampling_defaults(self) -> SamplingDefaultsResponse:
         """Per-model sampling defaults resolved at read time (#388): the values a
         new conversation / arena panel seeds its sliders from. Pure function over
@@ -320,6 +333,9 @@ class HFSearchResult(BaseModel):
     gated: bool = False
     pipeline_tag: Optional[str] = None
     quantized: bool = True
+    published_at: Optional[str] = Field(
+        default=None, description="ISO-8601 creation date of the repo; None when unknown (#561)"
+    )
 
 
 class HFDownloadRequest(BaseModel):
@@ -334,6 +350,10 @@ class HFDownloadRequest(BaseModel):
     )
     quantized: bool = True
     category: str = "general"
+    published_at: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 date the search hit carried; stored as the row's Created line (#561)",
+    )
 
 
 class DependentAssistant(BaseModel):

@@ -123,6 +123,8 @@ export default function LandingPage() {
       library: metadata.library || unknown,
       pipeline: metadata.pipeline || unknown,
       lastUpdate: metadata.last_modified || unknown,
+      // ISO publication date, or null: the cards print nothing for null (#561).
+      publishedAt: model.published_at ?? null,
       description: model.description,
       runnable: model.runnable !== false,
       is_base: model.is_base === true,
@@ -162,6 +164,7 @@ export default function LandingPage() {
       // line is formatted at render time from these fields.
       artifact_size_bytes: model.artifact_size_bytes,
       lastUpdate: metadata.last_modified || unknown,
+      publishedAt: model.published_at ?? null,
       isOnline: false,
       description: model.description,
       // Orphan-model UX (#225/#208): `link` ties a KB assistant to the base

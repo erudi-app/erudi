@@ -11,6 +11,7 @@ import {
   SMALL_MODEL_PARAM_THRESHOLD_B,
 } from "../utils/modelCapabilities";
 import { isTestedModel } from "../utils/testedModels";
+import { publishedLabel } from "../utils/publishedDate";
 
 /**
  * Explore-panel model card. Frosted-glass surface (the look the catalog has always
@@ -44,6 +45,7 @@ export default function ExploreModelCard({ model, range, onDownload, onInfo, ins
 
   const downloads = formatCount(model.downloads);
   const likes = formatCount(model.likes);
+  const published = publishedLabel(model.publishedAt);
 
   return (
     <GradientBox
@@ -129,6 +131,8 @@ export default function ExploreModelCard({ model, range, onDownload, onInfo, ins
             <span className="text-[var(--fit-tight)]">{t("models:explore.gated")}</span>
           )}
         </div>
+        {/* Nothing at all when the publication date is unknown (#561). */}
+        {published && <div className="mono text-xs text-[var(--ink-dim)] mb-2.5">{published}</div>}
         <div className="flex items-center justify-end gap-3">
           <button
             onClick={() => onInfo && onInfo(model)}

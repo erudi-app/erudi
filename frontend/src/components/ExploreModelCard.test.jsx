@@ -145,3 +145,15 @@ describe("ExploreModelCard very small model note (#381)", () => {
     expect(screen.queryByTestId(noteId)).toBeNull();
   });
 });
+
+describe("ExploreModelCard publication date (#561)", () => {
+  it("shows the month and year when the date is known", () => {
+    render(<ExploreModelCard model={{ ...baseModel, publishedAt: "2026-03-04T10:00:00+00:00" }} />);
+    expect(screen.getByText("Published March 2026")).toBeTruthy();
+  });
+
+  it("shows nothing when the date is unknown", () => {
+    render(<ExploreModelCard model={{ ...baseModel, publishedAt: null }} />);
+    expect(screen.queryByText(/Published/)).toBeNull();
+  });
+});

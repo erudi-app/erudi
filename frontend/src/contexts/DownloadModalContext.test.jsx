@@ -169,6 +169,22 @@ describe("DownloadModalContext completion (#205)", () => {
     const body = JSON.parse(post[1].body);
     expect(body.link).toBe("org/repo");
     expect(body.param_size).toBeNull(); // not laundered into a plausible default (#201)
+    expect(body.published_at).toBeNull(); // a hit with no date sends none (#561)
+  });
+
+  it("sends the publication date the search hit showed (#561)", async () => {
+    currentModel = {
+      name: "HF Hit",
+      link: "org/repo",
+      publishedAt: "2026-03-04T10:00:00+00:00",
+    };
+    renderProvider();
+    await startAndPollOnce();
+
+    const post = tracedFetchMock.mock.calls.find(
+      ([u, o]) => o?.method === "POST" && String(u).includes("/llms/download/huggingface")
+    );
+    expect(JSON.parse(post[1].body).published_at).toBe("2026-03-04T10:00:00+00:00");
   });
 });
 
