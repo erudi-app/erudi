@@ -10,7 +10,24 @@
     "deleteConfirmTitle": "Are you sure you want to delete this conversation?",
     "deleteConfirmBody": "This action is irreversible.",
     "renameFailed": "Could not rename conversation, try again: {{error}}",
-    "deleteFailed": "Deleting conversation failed: {{error}}"
+    "deleteFailed": "Deleting conversation failed: {{error}}",
+    "searchPlaceholder": "Search conversations",
+    "searchLabel": "Search conversations",
+    "clearSearch": "Clear search",
+    "noResults": "No conversation matches.",
+    "searchFailed": "The search failed. Try again."
+  },
+  "export": {
+    "action": "Export as Markdown",
+    "failed": "Could not export the conversation: {{error}}",
+    "user": "You",
+    "assistant": "Assistant",
+    "attachment": "Attachment",
+    "image": "Image",
+    "created": "Started {{date}}",
+    "compaction_one": "{{count}} earlier message was summarized here.",
+    "compaction_other": "{{count}} earlier messages were summarized here.",
+    "compactionNoCount": "Earlier messages were summarized here."
   },
   "header": {
     "chatWith": "Chat with",

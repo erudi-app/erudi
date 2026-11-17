@@ -10,7 +10,24 @@
     "deleteConfirmTitle": "¿Seguro que quieres eliminar esta conversación?",
     "deleteConfirmBody": "Esta acción es irreversible.",
     "renameFailed": "No se pudo renombrar la conversación, inténtalo de nuevo: {{error}}",
-    "deleteFailed": "No se pudo eliminar la conversación: {{error}}"
+    "deleteFailed": "No se pudo eliminar la conversación: {{error}}",
+    "searchPlaceholder": "Buscar conversaciones",
+    "searchLabel": "Buscar conversaciones",
+    "clearSearch": "Borrar la búsqueda",
+    "noResults": "Ninguna conversación coincide.",
+    "searchFailed": "La búsqueda ha fallado. Inténtalo de nuevo."
+  },
+  "export": {
+    "action": "Exportar como Markdown",
+    "failed": "No se pudo exportar la conversación: {{error}}",
+    "user": "Tú",
+    "assistant": "Asistente",
+    "attachment": "Adjunto",
+    "image": "Imagen",
+    "created": "Iniciada el {{date}}",
+    "compaction_one": "Aquí se resumió {{count}} mensaje anterior.",
+    "compaction_other": "Aquí se resumieron {{count}} mensajes anteriores.",
+    "compactionNoCount": "Aquí se resumieron los mensajes anteriores."
   },
   "header": {
     "chatWith": "Chatear con",

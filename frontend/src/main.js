@@ -32,6 +32,7 @@ const {
 const { describeProcessGone, formatMainRecord, stripAnsi } = require("./utils/mainLog");
 const { createBackendStartTracker, requestStop } = require("./utils/backendStartTracker");
 const { configureUpdater, createUpdaterWiring } = require("./utils/updaterWiring");
+const { createElectronConversationSave } = require("./utils/conversationSave");
 const {
   resolveDataLocations,
   listClearTargets,
@@ -1014,6 +1015,22 @@ ipcMain.handle(
     resolvedPort = null;
     startBackendSupervised();
     return { ok: true };
+  })
+);
+
+// Export one conversation as Markdown (#430). The renderer sends its title and
+// the text; main opens the save dialog itself and writes where the user chose.
+// No path comes from the renderer, and only the main frame of the app window may ask.
+ipcMain.handle(
+  "conversation:saveMarkdown",
+  createElectronConversationSave({
+    dialog,
+    fs,
+    app,
+    getWindow: () => mainWindow,
+    t,
+    logWarn,
+    logError,
   })
 );
 

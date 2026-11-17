@@ -10,7 +10,24 @@
     "deleteConfirmTitle": "确定要删除这个对话吗？",
     "deleteConfirmBody": "此操作无法撤销。",
     "renameFailed": "无法重命名对话，请重试：{{error}}",
-    "deleteFailed": "删除对话失败：{{error}}"
+    "deleteFailed": "删除对话失败：{{error}}",
+    "searchPlaceholder": "搜索对话",
+    "searchLabel": "搜索对话",
+    "clearSearch": "清除搜索",
+    "noResults": "没有匹配的对话。",
+    "searchFailed": "搜索失败，请重试。"
+  },
+  "export": {
+    "action": "导出为 Markdown",
+    "failed": "无法导出对话：{{error}}",
+    "user": "你",
+    "assistant": "助手",
+    "attachment": "附件",
+    "image": "图片",
+    "created": "开始于 {{date}}",
+    "compaction_one": "此处已汇总 {{count}} 条较早的消息。",
+    "compaction_other": "此处已汇总 {{count}} 条较早的消息。",
+    "compactionNoCount": "此处已汇总较早的消息。"
   },
   "header": {
     "chatWith": "聊天对象",

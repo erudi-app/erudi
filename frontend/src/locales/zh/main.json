@@ -34,6 +34,10 @@
       "detail": "应用现在将退出。",
       "detailPending": "有少量文件仍在使用中，暂时无法删除。Erudi 会在下次启动时删除它们。\n\n应用现在将退出。",
       "leftInPlace": "以下内容保留未动，因为它们不是 Erudi 创建的，或 Erudi 无权删除：\n{{folders}}"
+    },
+    "exportConversation": {
+      "title": "导出对话",
+      "filter": "Markdown"
     }
   }
 }
