@@ -156,6 +156,16 @@ class TestSettingsValues:
         with pytest.raises(ValueError):
             postmaster_options({"shared_buffers": "32 MB"})
 
+    @pytest.mark.unit
+    @pytest.mark.parametrize("char", list('&|<>^%"'))
+    def test_postmaster_options_reject_shell_metacharacters(self, char):
+        # On Windows pg_ctl starts the postmaster through cmd.exe, which
+        # would interpret these in the -o string.
+        with pytest.raises(ValueError):
+            postmaster_options({"shared_buffers": f"32MB{char}"})
+        with pytest.raises(ValueError):
+            postmaster_options({f"shared{char}buffers": "32MB"})
+
 
 class TestPgCtlArgument:
     def _record(self):
@@ -266,6 +276,34 @@ class TestClusterRunsWithTheSettings:
             text=True,
         ).stdout
         assert "settings_probe" in listing
+
+
+class TestClusterFromAnOlderVersion:
+    @pytest.mark.integration
+    def test_a_cluster_run_with_the_defaults_restarts_with_these_settings(
+        self, tmp_path, monkeypatch
+    ):
+        data_dir = tmp_path / "data"
+        # An older version's cluster: started with initdb's defaults, data
+        # written under wal_level=replica and 100 connections, stopped.
+        monkeypatch.setattr(postgres_settings, "server_settings", lambda: {})
+        old = start_postgres(data_dir)
+        with psycopg.connect(old.psycopg_url, autocommit=True) as conn:
+            assert _show(conn, "wal_level") == "replica"
+            assert _show(conn, "max_connections") == "100"
+            conn.execute("CREATE TABLE kept (id int)")
+            conn.execute("INSERT INTO kept VALUES (42)")
+        stop_postgres(old)
+        monkeypatch.undo()
+
+        new = start_postgres(data_dir)
+        try:
+            with psycopg.connect(new.psycopg_url) as conn:
+                running = {name: _show(conn, name) for name in server_settings()}
+                assert conn.execute("SELECT id FROM kept").fetchone()[0] == 42
+            assert running == server_settings()
+        finally:
+            stop_postgres(new)
 
 
 class TestJoinedPostmasterKeepsItsSettings:

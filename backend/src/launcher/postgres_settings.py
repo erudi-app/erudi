@@ -107,18 +107,33 @@ def server_settings() -> dict[str, str]:
     }
 
 
+# Characters cmd.exe interprets in the command line pg_ctl builds on Windows.
+_CMD_METACHARACTERS = frozenset('&|<>^%"')
+
+
 def postmaster_options(settings: dict[str, str] | None = None) -> list[str]:
     """``pg_ctl`` arguments that pass ``settings`` to the postmaster.
 
     One ``-o "-c name=value"`` per setting. ``pg_ctl`` joins the ``-o``
-    strings and postgres splits them on whitespace, so a name or value with
-    whitespace would break the start: refused here instead.
+    strings and postgres splits them on whitespace, and on Windows ``pg_ctl``
+    starts the postmaster through ``cmd.exe``, which interprets
+    ``& | < > ^ % "`` in that string: a name or value carrying either would
+    break the start or run something else, so it is refused here.
     """
     if settings is None:
         settings = server_settings()
     options: list[str] = []
     for name, value in settings.items():
-        if not name or not value or any(ch.isspace() for ch in name + value):
-            raise ValueError(f"postmaster setting {name!r}={value!r} must be non-empty, no spaces")
+        text = name + value
+        if (
+            not name
+            or not value
+            or any(ch.isspace() for ch in text)
+            or any(ch in _CMD_METACHARACTERS for ch in text)
+        ):
+            raise ValueError(
+                f"postmaster setting {name!r}={value!r} must be non-empty, "
+                "without spaces or cmd metacharacters"
+            )
         options += ["-o", f"-c {name}={value}"]
     return options
