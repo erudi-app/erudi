@@ -106,6 +106,13 @@ const renderAndSettle = async () => {
   await screen.findByText("SEND");
 };
 
+// Answer text that follows within ~33 ms of the previous chunk is painted when
+// that window ends (#618).
+const answerWindow = () =>
+  act(async () => {
+    await new Promise((resolve) => setTimeout(resolve, 60));
+  });
+
 const settle = async () => {
   await act(async () => {
     await Promise.resolve();
@@ -225,6 +232,7 @@ describe("refetch vs stream races (#303)", () => {
 
     // Later turn-2 chunks must still paint.
     await pushAndSettle(ctrl2, '{"t":"answer","text":"streams on"}\n');
+    await answerWindow();
     expect(
       screen.getAllByTestId("answer").some((n) => n.textContent === "Turn two streams on")
     ).toBe(true);

@@ -677,6 +677,11 @@ line, typed `answer`, `thinking`, `tool_call`, `tool_result`, `compaction`, `mem
 or `done`. Arena queries stream NDJSON as well, limited to `answer` and `error` events.
 Title generation keeps a plain-text stream.
 
+The renderer keeps the cost of a streamed answer flat in the length of the conversation:
+answer and thinking text reach the page at most once every 33 ms (the first token at once;
+every other event, the end of the turn and a dropped connection immediately), and `MarkdownRenderer`
+is memoized on its text, so only the message being written is parsed again.
+
 ## Main flows
 
 ### Conversation turn
