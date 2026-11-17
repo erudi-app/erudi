@@ -75,6 +75,32 @@ CURATED_KINDS: dict[str, CuratedKind] = {
         "{context_tokens}). Start a new conversation, send less at once, or switch to a "
         "smaller model."
     ),
+    # The new message alone, with the request's instructions, tools and the
+    # answer's floor, does not fit the allocated window (#690): refused before
+    # any compaction, which could not make room for it. ``_memory`` when that
+    # window is the child's memory bound.
+    "message_too_long": CuratedKind(
+        "This message alone is too long for the model's context window (with the app's "
+        "instructions and room for an answer it needs about {prompt_tokens} tokens; the "
+        "window holds {context_tokens}). Send a shorter message or split it into several, "
+        "or switch to a model with a larger window."
+    ),
+    "message_too_long_memory": CuratedKind(
+        "This message alone is too large for what your machine's memory can hold for this "
+        "model (with the app's instructions and room for an answer it needs about "
+        "{prompt_tokens} tokens; memory allows {context_tokens}). Send a shorter message or "
+        "split it into several, or switch to a smaller model."
+    ),
+    # The summary that would have made room was rejected or could not be
+    # written (#690), and the request does not fit without it; automatic
+    # compaction is paused for the next few messages. The copy names the
+    # Compact button of the conversation's settings, never a slash command.
+    "summary_failed": CuratedKind(
+        "This conversation no longer fits the model's context window, and its earlier "
+        "messages could not be summarized to make room (with room for an answer the request "
+        "needs about {prompt_tokens} tokens; the window holds {context_tokens}). Start a new "
+        "conversation, or use Compact in this conversation's settings to summarize it now."
+    ),
     # No first chunk within the budget (#573): retrying makes it worse, the
     # history only grows.
     "prefill_timeout": CuratedKind(

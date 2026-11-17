@@ -219,6 +219,22 @@ class TestMessageRepository:
         assert test_db_session.get(Message, message.id).starred is False
         assert msg_repo.get_starred_messages(conversation.id) == []
 
+    def test_starred_messages_come_in_conversation_order(
+        self, msg_repo, conversation, test_db_session
+    ):
+        """The starred block's budget favours the oldest stars: the order is
+        the conversation's (insertion), never the timestamps'."""
+        first = msg_repo.create_message(conversation.id, "first", "user")
+        second = msg_repo.create_message(conversation.id, "second", "llm")
+        third = msg_repo.create_message(conversation.id, "third", "user")
+        first.timestamp = datetime(2030, 1, 1)
+        third.timestamp = datetime(2020, 1, 1)
+        test_db_session.flush()
+        for message in (third, first, second):
+            msg_repo.star_message(message.id)
+
+        assert msg_repo.get_starred_messages(conversation.id) == ["first", "second", "third"]
+
     def test_a_starred_error_turn_is_not_a_starred_context(self, msg_repo, conversation):
         """The system prompt's starred block never carries a failed turn."""
         from src.agents.runner import ERROR_MESSAGE
