@@ -300,3 +300,74 @@ def test_release_and_smoke_check_the_frozen_bundle_ships_the_docx_parts():
             i for i, s in enumerate(steps) if "pyinstaller backend/" in str(s.get("run", ""))
         )
         assert freeze < names.index(step["name"]), workflow
+
+
+@pytest.mark.unit
+def test_mac_app_signature_is_verified_in_smoke_and_before_the_release_publishes():
+    # Without a certificate electron-builder signs the main executable only, which
+    # `codesign --verify --deep --strict` rejects and macOS 26 refuses to launch
+    # (#690). The smoke leg has it sign every file ad hoc (`-c.mac.identity=-`,
+    # which electron-builder skips on a pull request without
+    # CSC_FOR_PULL_REQUEST) and verifies; the release builds with no publish,
+    # verifies the signed and notarized app, and only then publishes it.
+    import yaml
+
+    root = _BACKEND.parent
+    script = "scripts/ci/check_mac_app_signature.sh"
+    smoke = yaml.safe_load(
+        (root / ".github/workflows/app-build-smoke.yml").read_text(encoding="utf-8")
+    )
+    job = next(iter(smoke["jobs"].values()))
+    mac = next(
+        leg for leg in job["strategy"]["matrix"]["include"] if leg["dist_script"] == "dist:mac"
+    )
+    assert mac["eb_sign_args"] == "-c.mac.identity=-"
+    steps = job["steps"]
+    names = [s.get("name") for s in steps]
+    build = _step(steps, "Build packaged app (unsigned, no publish)")
+    assert "matrix.eb_sign_args" in build["run"]
+    assert build["env"]["CSC_FOR_PULL_REQUEST"] == "true"
+    check = _step(steps, "Check the macOS app signature")
+    assert check["if"] == "runner.os == 'macOS'"
+    assert check["run"].strip() == f"bash {script} frontend/dist/mac-arm64/Erudi.app"
+    assert names.index(build["name"]) < names.index(check["name"])
+
+    release = yaml.safe_load((root / ".github/workflows/release.yml").read_text(encoding="utf-8"))
+    steps = release["jobs"]["build"]["steps"]
+    names = [s.get("name") for s in steps]
+    generic = _step(steps, "Build, sign and publish (electron-builder)")
+    assert generic["if"] == "matrix.variant != 'mac-arm'"
+    build = _step(steps, "Build and sign (electron-builder, macOS)")
+    assert "--publish never" in build["run"]
+    assert "--publish always" not in build["run"]
+    verify = _step(steps, "Verify the macOS app signature")
+    assert verify["run"].strip() == f"bash {script} --release frontend/dist/mac-arm64/Erudi.app"
+    publish = _step(steps, "Publish the macOS artifacts (electron-builder)")
+    assert "--prepackaged dist/mac-arm64/Erudi.app" in publish["run"]
+    assert "--publish always" in publish["run"]
+    for step in (build, verify, publish):
+        assert step["if"] == "matrix.variant == 'mac-arm'"
+    assert names.index(build["name"]) < names.index(verify["name"]) < names.index(publish["name"])
+
+
+@pytest.mark.unit
+def test_mac_signature_script_only_verifies_and_the_local_build_signs_ad_hoc():
+    root = _BACKEND.parent
+    text = (root / "scripts/ci/check_mac_app_signature.sh").read_text(encoding="utf-8")
+    code = "\n".join(line for line in text.splitlines() if not line.lstrip().startswith("#"))
+    assert "codesign --verify --deep --strict" in code
+    assert "codesign --force" not in code
+    assert "--sign" not in code
+    assert "Authority=Developer ID Application:" in code
+    assert "TeamIdentifier=$RELEASE_TEAM_ID" in code
+    assert 'RELEASE_TEAM_ID="FAF8JCAT86"' in code
+    assert "xcrun stapler validate" in code
+    assert "runtime" in code
+
+    build = (root / "scripts/build/build-mac-silicon.sh").read_text(encoding="utf-8")
+    assert '"-c.mac.identity=-"' in build
+    assert 'npm run dist:mac -- ${EB_SIGN_ARGS[@]+"${EB_SIGN_ARGS[@]}"}' in build
+    assert "codesign --force" not in build
+    assert "--prepackaged" not in build
+    assert "dist/mac-arm64/Erudi.app" in build
+    assert build.index("npm run dist:mac") < build.index("check_mac_app_signature.sh")

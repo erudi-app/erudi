@@ -401,6 +401,7 @@ jobs:
           npm version "$TAG" --no-git-tag-version --allow-same-version
 
       - name: Build, sign and publish (electron-builder)
+        if: matrix.variant != 'mac-arm'
         working-directory: frontend
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
@@ -414,3 +415,33 @@ jobs:
         # `-- ${{ matrix.eb_extra_args }}` forwards per-leg overrides to
         # electron-builder (empty for mac/win-cpu; channel + artifactName for win-cuda).
         run: npm run ${{ matrix.release_script }} -- ${{ matrix.eb_extra_args }}
+
+      # macOS is built, verified, then published, so a signature that does not
+      # verify never reaches the draft. The first run signs and notarizes and
+      # publishes nothing; the second packs the DMG and zip from the verified app
+      # (--prepackaged skips electron-builder's pack, signing and notarization
+      # steps, and goes through the same publish pipeline: DMG, zip, blockmaps and
+      # latest-mac.yml).
+      - name: Build and sign (electron-builder, macOS)
+        if: matrix.variant == 'mac-arm'
+        working-directory: frontend
+        env:
+          CSC_LINK: ${{ secrets.CSC_LINK }}
+          CSC_KEY_PASSWORD: ${{ secrets.CSC_KEY_PASSWORD }}
+          APPLE_ID: ${{ secrets.APPLE_ID }}
+          APPLE_APP_SPECIFIC_PASSWORD: ${{ secrets.APPLE_ID_PASSWORD }}
+          APPLE_TEAM_ID: ${{ secrets.APPLE_TEAM_ID }}
+        run: |
+          npm run build
+          npx electron-builder --mac --config electron-builder.yml --publish never
+
+      - name: Verify the macOS app signature
+        if: matrix.variant == 'mac-arm'
+        run: bash scripts/ci/check_mac_app_signature.sh --release frontend/dist/mac-arm64/Erudi.app
+
+      - name: Publish the macOS artifacts (electron-builder)
+        if: matrix.variant == 'mac-arm'
+        working-directory: frontend
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: npx electron-builder --mac --config electron-builder.yml --prepackaged dist/mac-arm64/Erudi.app --publish always
