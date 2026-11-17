@@ -85,6 +85,15 @@ the conversation service carry to the chat stream's error event as `code` + `raw
 The backend's own HTTP server binds 27182-27199, below both pools, so the three local
 servers never contend for a port.
 
+One more child exists on Apple Silicon and is **not an engine**: the Knowledge Base
+embedding child (#594), a second `mlx_vlm.server` started with only `--embedding-model`
+(the local e5 snapshot) on its own slice, 27400-27499. It never enters the engine class
+state, gauges, memory brake or the Settings idle delay; its lifecycle — per-spawn API
+key, `/health` + 1-input `/v1/embeddings` probe, ingestion lease, fixed 5-minute idle
+release — lives in `src/ingestion/embedder_child.py` (manager, shared with the coming
+Windows/Linux `llama-server --embedding` child) and `src/ingestion/mlx_embedder.py`
+(platform adapter). See `docs/guides/knowledge_base.md`.
+
 ## llama-server slots and prompt cache
 
 `BaseLlamaCppEngine._spawn_child` appends the same flags to every `llama-server` it spawns

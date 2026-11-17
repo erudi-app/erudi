@@ -55,6 +55,13 @@ E5_TOKENIZER_FILE = config.ROOT_DIR / "src" / "ingestion" / "e5_tokenizer.json.g
 DEFAULT_TARGET_TOKENS = 180
 DEFAULT_OVERLAP_TOKENS = 27  # ~15 %
 
+# What fits in e5's 512-token window once ``<s>`` and ``</s>`` are counted.
+# sentence-transformers truncated the PREFIXED text to 512 ids specials
+# included; bounding the raw text at 510 content tokens reproduces that
+# exactly, so the dedicated embedding child (#594) sees the same input the
+# in-process embedder used to.
+E5_MAX_CONTENT_TOKENS = 510
+
 HEADERS_TO_SPLIT_ON = [
     ("#", "h1"),
     ("##", "h2"),
@@ -88,6 +95,21 @@ def _get_tokenizer() -> Tokenizer:
 def count_tokens(text: str) -> int:
     """Real e5 subword count (no special tokens) — never a chars/N estimate."""
     return len(_get_tokenizer().encode(text, add_special_tokens=False).ids)
+
+
+def truncate_to_tokens(text: str, max_tokens: int = E5_MAX_CONTENT_TOKENS) -> str:
+    """The longest prefix of ``text`` holding at most ``max_tokens`` e5 tokens.
+
+    Bounds what the dedicated embedding child receives (#594): the frozen
+    tokenizer's offsets give the character where token ``max_tokens`` starts,
+    and the text is cut there — a plain prefix of the original, never a
+    decode round-trip (decoding re-spaces subwords and would alter the text).
+    A text already within the bound is returned unchanged, identity included.
+    """
+    encoding = _get_tokenizer().encode(text, add_special_tokens=False)
+    if len(encoding.ids) <= max_tokens:
+        return text
+    return text[: encoding.offsets[max_tokens][0]]
 
 
 @dataclass(slots=True)

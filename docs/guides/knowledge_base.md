@@ -68,10 +68,24 @@ Ingestion runs as a FastAPI background task, one file at a time
    `tests/test_e5_tokenizer.py` checks it gives `transformers`' ids and the same chunks.
    Loaded, it holds about 250 MB and stays resident once an ingestion, or a retrieval that counts an
    older chunk, has used it.
-6. **Embed.** `E5Embeddings` (`src/ingestion/embeddings.py`) holds a resident
-   `multilingual-e5-small` (384 dimensions, 512-token window). The asymmetric prefixes are
-   mandatory: `passage: ` for indexed chunks, `query: ` for searches. Vectors are L2-normalized, so
-   cosine similarity is a dot product. The embedded text is
+6. **Embed.** `get_embeddings()` (`src/ingestion/embeddings.py`) picks the platform's backend for
+   `multilingual-e5-small` (384 dimensions, 512-token window) — the two produce identical vectors
+   (cosine 1.0000000 measured, inputs past 512 tokens included), so a Knowledge Base never needs
+   re-indexing across platforms or updates:
+   - **Apple Silicon** — `ChildE5Embeddings`: a dedicated `mlx_vlm.server` child
+     (`src/ingestion/embedder_child.py` + `src/ingestion/mlx_embedder.py`) serves the local e5
+     snapshot over `POST /v1/embeddings`, on its own port slice (27400-27499) with a per-spawn API
+     key. Nothing stays resident in the backend: the child spawns on first use (or ahead, when a
+     conversation with a Knowledge Base opens), an ingestion holds a lease so it is never stopped
+     mid-job, and it is released after a fixed 5 minutes unused (no setting). Inputs are bounded at
+     e5's 512-token window Erudi-side (`chunking.truncate_to_tokens`, prefix included) before the
+     call.
+   - **Windows and Linux** — `E5Embeddings`: the resident in-process sentence-transformers
+     singleton, until the `llama-server --embedding` child of #594 replaces it.
+
+   The asymmetric prefixes are mandatory on both backends: `passage: ` for indexed chunks,
+   `query: ` for searches. Vectors are L2-normalized, so cosine similarity is a dot product. The
+   embedded text is
    `passage: [document_name:<file>]\n<breadcrumb>\n\n<chunk>` — the document-name prefix boosts
    retrieval but is **not** stored: the stored content is the clean chunk, which is what goes into
    the prompt.
@@ -229,6 +243,14 @@ curl -X POST http://127.0.0.1:27182/erudi/knowledge_base/embedding-model/downloa
 `POST .../download` is idempotent: it is a no-op if the model is already present or a download is
 already running. The download runs in a background thread, so navigating away from the KB page does
 not lose it; the UI polls the status route.
+
+On Apple Silicon the same snapshot is what the dedicated embedding child serves (by LOCAL path,
+never by repo id — `embedding_snapshot_path()`), so one gate covers both backends.
+
+A Knowledge Base whose embedding model has left the disk (a cleared `models_cache`) is a **state**,
+not a turn error: a conversation or Arena panel whose assistant carries a Knowledge Base shows a
+banner naming it, with the same download the gate offers (`KbEmbeddingBanner`); a turn asked
+meanwhile degrades to answering without the documents, as any Knowledge Base search failure does.
 
 ## API
 

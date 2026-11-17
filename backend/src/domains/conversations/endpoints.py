@@ -112,9 +112,32 @@ from src.domains.conversations.schemas import (
 )
 from src.domains.conversations.repository import ConversationRepository, MessageRepository
 from src.domains.conversations.services import ConversationService
+from src.entities.Llm import Llm
+from src.ingestion.embedder_child import prewarm_embedder
 
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
+
+
+def _prewarm_kb_embedder(db: Session, llm_id) -> None:
+    """Start the KB embedding child ahead when this conversation's assistant
+    has a Knowledge Base (#594).
+
+    Called from the two endpoints the frontend hits when a conversation
+    opens (``POST /`` and ``GET /{id}``), so the first KB use of the session
+    does not pay the child's spawn. One PK read + a fire-and-forget thread;
+    a failure here must never color the request — it is recorded (WARNING)
+    and swallowed.
+    """
+    if not llm_id:
+        return
+    try:
+        llm = db.get(Llm, llm_id)
+        if llm is not None and bool(llm.is_attached_to_kb):
+            prewarm_embedder()
+    except Exception as exc:
+        logger.warning(f"KB embedder pre-start skipped on a failed check: {exc}")
+
 
 # MLX_Engine spawns `mlx_vlm.server` in a child process, so the GPU stream lives
 # entirely in the child — the parent FastAPI process never touches MLX. Starlette
@@ -282,6 +305,7 @@ async def get_all_conversations(
 async def get_conversation_by_id(
     conversation_id: int,
     conversation_repo: ConversationRepository = Depends(get_conversation_repository),
+    db: Session = Depends(get_db),
 ):
     """Fetch a single conversation by ID with all associated messages.
 
@@ -314,10 +338,14 @@ async def get_conversation_by_id(
     """
     logger.debug(f"Fetching conversation {conversation_id}")
     # Read-only operation, no commit needed
-    return await run_in_threadpool(
+    conversation = await run_in_threadpool(
         conversation_repo.get_conversation_by_id,
         conversation_id,
     )
+    # Opening a conversation whose assistant has a Knowledge Base pre-starts
+    # the embedding child (#594), so the first KB use does not pay the spawn.
+    await run_in_threadpool(_prewarm_kb_embedder, db, getattr(conversation, "llm_id", None))
+    return conversation
 
 
 @router.post("/", response_model=ConversationResponse, status_code=201)
@@ -385,6 +413,9 @@ async def create_conversation(
             f"reasoning_effort={conv.reasoning_effort}, "
             f"compaction_threshold={conv.compaction_threshold}"
         )
+        # A new conversation on a KB assistant pre-starts the embedding
+        # child (#594) like opening an existing one does.
+        await run_in_threadpool(_prewarm_kb_embedder, db, payload.llm_id)
         return conv
     except Exception:
         db.rollback()
