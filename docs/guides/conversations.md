@@ -1296,7 +1296,11 @@ the prompt names it
    `memory_reload` with `reason: "memory"` (after the idle delay's own unload it carries
    `reason: "idle"` and the copy names the pause instead of memory; after the Unload button,
    `reason: "manual"`) and the renderer shows a reload state in the pending answer until the model
-   speaks, an error arrives or the turn ends; the model reloads with the reduced window. On the CPU
+   speaks, an error arrives or the turn ends; the model reloads with the reduced window. On Apple
+   Silicon the brake unloads the model either after two idle samples under critical pressure or,
+   under warning or critical, when its memory release gets no answer within 30 s while the user
+   is away (the model is swapped out, and every request would page it back in); both carry the
+   same `reason: "memory"`. On the CPU
    engine a smaller window means restarting the model with it (about 1-2 s, then the
    conversation is read again): under critical pressure at the next turn boundary — a restart at
    the start of a turn sends `memory_reload` in that same turn —, under warning once the user has

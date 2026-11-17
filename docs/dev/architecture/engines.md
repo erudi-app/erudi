@@ -281,7 +281,7 @@ opens at the first non-calm sample and ends after 2 calm samples in a row.
 |---|---|---|
 | Shrink | One per episode under warning, one more once critical; never two without a turn between them; only when the last turn's largest request reaches the compaction trigger of the shrunk window, at the threshold of the conversation that sent it (80 % for an Arena turn; the next turn compacts and frees its KV) | The brake's cap becomes `max(4096, 0.75 × working window)`, and the child enforces `min(ceiling, cap)` (`PATCH /v1/settings`) |
 | Release | Idle under critical pressure, idle under warning once the user has been away 180 s (`WARNING_RELEASE_IDLE_S`: a reader keeps the prefix cache), `turn_end` under critical pressure; never `turn_start`; only when it would give back 256 MiB or more beyond what the last release left | `POST /v1/cache/reset`, then a non-streamed 1-token request; both barriers it may send are bounded by 30 s. The prefix owner is kept |
-| Unload | Idle only: critical at two consecutive idle samples with no turn between them (a calm or warning idle sample in between starts over), at most once per episode, never within 600 s of a brake reload, only for a child holding 5 % or more of the memory total | The idle reap's path, under the lock the monitor holds |
+| Unload | Idle only: critical at two consecutive idle samples with no turn between them (a calm or warning idle sample in between starts over), only for a child holding 5 % or more of the memory total; or, under warning as under critical, a release that got no answer within its 30 s bound (`release_timed_out`). Either way at most once per episode and never within 600 s of a brake reload | The idle reap's path, under the lock the monitor holds |
 | Grow | Outside an episode, every 3 calm samples | One step back up (`cap / 0.75`), never back to 90 % of the window that hurt while it is remembered (forgotten after 10 calm samples); the cap is dropped once growth reaches the window without brake |
 
 **Why a release is a reset and a request.** Measured under MLX's default buffer cache, before the child bounded it (see above), on the streamed path every
@@ -296,7 +296,16 @@ the release left, at idle, as the lowest footprint over a bounded 2 s window
 (`RELEASE_SETTLE_S`), and at `turn_end` as one read (the turn's last events must not
 wait); about 0.33 GiB stays (measured under the default cache, not re-measured with the bound, which makes the request the fallback for a child whose bound failed to apply), and it never triggers another release. A release whose reset
 or barrier failed records nothing: the next eligible sample tries again, and no
-`external` notice is drawn from it.
+`external` notice is drawn from it. A **read timeout** is the exception, at an idle
+sample: when the abandon barrier, the reset or the release barrier gets no answer within
+its bound (30 s for the barriers, 5 s for the reset), the child is swapped out — answering
+one token touches every layer, so every further request pages the weights back in, under
+the very pressure the release was for. The law (`memory_brake.release_timed_out`, decided
+before the release is sent) turns that release into an unload, under warning as under
+critical, unless the episode already took its unload or a brake reload is within its
+600 s grace; the share of the memory total is not asked, the release having already found
+256 MiB to give back. The carry and the next message's reload notice are the unload's own.
+A timeout at `turn_end`, or any other failure, stays a failed release.
 
 **Notices.** A shrink sets the notice `acted` (the conversation is now summarized
 earlier); pressure the conversation does not cause — what a release would give back is
@@ -344,9 +353,11 @@ reload.
 **Logs.** A shrink, a grow and a release are one INFO line each,
 `[MLX_Engine] Memory brake: point=..., level=..., action=..., window=A->B, excess_mib=...`
 (a release quotes the excess before and after); an unload is one WARNING, the app having
-degraded on its own (see [Logging](../../logging.md)). A reset or a barrier that fails is
-its own WARNING (a barrier sent by a release, the abandon barrier included, says the memory
-release is incomplete) and no brake line follows. A shrink or a grow the child did not apply is the applier's WARNING alone,
+degraded on its own (see [Logging](../../logging.md)); an unload after a release that timed
+out says so (`...; release timed out; the model reloads at the next message`) and is the
+timeout's only record. A reset or a barrier that fails otherwise is its own WARNING (a
+barrier sent by a release, the abandon barrier included, says the memory release is
+incomplete) and no brake line follows. A shrink or a grow the child did not apply is the applier's WARNING alone,
 and the brake forgets the decision (cap, episode count, notice) as if it never happened.
 
 ### The window on the CPU engine

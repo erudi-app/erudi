@@ -591,7 +591,7 @@ class MLX_Engine(BaseChatServerEngine):
             handle["prefix_owner"] = owner
             return
         reason = "arena" if owner == "arena" else "conversation_change"
-        if cls._reset_prefix_cache(handle, reason=reason):
+        if cls._reset_prefix_cache(handle, reason=reason) == cls._OUTCOME_OK:
             handle["prefix_owner"] = owner
 
     @classmethod
@@ -628,6 +628,14 @@ class MLX_Engine(BaseChatServerEngine):
         if isinstance(flagged_at, float) and flagged_at < started_at:
             handle["abandoned"] = False
 
+    # What a request to the child came to: the reset, the barrier and the
+    # memory brake's release all answer one of these. A read timeout is told
+    # apart from every other failure: the memory brake reads it as a child
+    # swapped out (see ``_brake_point``).
+    _OUTCOME_OK = "ok"
+    _OUTCOME_FAILED = "failed"
+    _OUTCOME_TIMED_OUT = "timed_out"
+
     @classmethod
     def _reset_prefix_cache(
         cls,
@@ -636,8 +644,10 @@ class MLX_Engine(BaseChatServerEngine):
         reason: str,
         purpose: str = "claim",
         barrier_timeout_s: Optional[float] = None,
-    ) -> bool:
-        """Reset the child's prefix cache; True on success. Never raises.
+        quiet_timeout: bool = False,
+    ) -> str:
+        """Reset the child's prefix cache; returns ``_OUTCOME_OK``, ``_FAILED``
+        or ``_TIMED_OUT`` (a read timeout). Never raises.
 
         Acts on ``handle`` only (the caller read ``cls._model`` once). After
         an abandoned stream, a barrier request goes first; a failed barrier
@@ -648,16 +658,23 @@ class MLX_Engine(BaseChatServerEngine):
         ``purpose`` names what a failed barrier costs (``"release"``: the
         memory brake's). ``barrier_timeout_s`` bounds that barrier below the
         first-chunk ceiling (the memory brake's release: a shielded release
-        must never hold a shutdown that long).
+        must never hold a shutdown that long). ``quiet_timeout``: a read
+        timeout writes no record, the caller owns it (the brake's unload).
         """
         api_key = handle.get("api_key")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
         if handle.get("abandoned"):
-            if not cls._send_barrier(
-                handle, headers, reason=reason, purpose=purpose, timeout_s=barrier_timeout_s
-            ):
+            outcome = cls._send_barrier(
+                handle,
+                headers,
+                reason=reason,
+                purpose=purpose,
+                timeout_s=barrier_timeout_s,
+                quiet_timeout=quiet_timeout,
+            )
+            if outcome != cls._OUTCOME_OK:
                 handle["prefix_owner"] = cls._PREFIX_OWNER_DIRTY
-                return False
+                return outcome
             handle["abandoned"] = False
         try:
             resp = requests.post(
@@ -666,22 +683,24 @@ class MLX_Engine(BaseChatServerEngine):
                 timeout=cls._CACHE_RESET_TIMEOUT_S,
             )
         except requests.RequestException as exc:
-            # The class name only: the exception text can quote the request.
-            logger.warning(
-                f"[MLX_Engine] Prefix cache reset failed ({type(exc).__name__}); "
-                f"deferred to the next claim: reason={reason}"
-            )
             handle["prefix_owner"] = cls._PREFIX_OWNER_DIRTY
-            return False
+            timed_out = isinstance(exc, requests.ReadTimeout)
+            if not (timed_out and quiet_timeout):
+                # The class name only: the exception text can quote the request.
+                logger.warning(
+                    f"[MLX_Engine] Prefix cache reset failed ({type(exc).__name__}); "
+                    f"deferred to the next claim: reason={reason}"
+                )
+            return cls._OUTCOME_TIMED_OUT if timed_out else cls._OUTCOME_FAILED
         if resp.status_code != 200:
             logger.warning(
                 f"[MLX_Engine] Prefix cache reset failed (HTTP {resp.status_code}); "
                 f"deferred to the next claim: reason={reason}"
             )
             handle["prefix_owner"] = cls._PREFIX_OWNER_DIRTY
-            return False
+            return cls._OUTCOME_FAILED
         logger.info(f"Prefix cache reset: reason={reason}")
-        return True
+        return cls._OUTCOME_OK
 
     # What a failed barrier costs, by purpose: a claim's barrier defers the
     # reset to the next claim; the memory brake's release barrier leaves
@@ -700,8 +719,12 @@ class MLX_Engine(BaseChatServerEngine):
         reason: str,
         purpose: str = "claim",
         timeout_s: Optional[float] = None,
-    ) -> bool:
-        """One 1-token request, the readiness ping's shape; True on success.
+        quiet_timeout: bool = False,
+    ) -> str:
+        """One 1-token request, the readiness ping's shape; returns
+        ``_OUTCOME_OK``, ``_FAILED`` or ``_TIMED_OUT`` (a read timeout). A
+        failure is ONE warning, but for a read timeout under ``quiet_timeout``,
+        whose record the caller owns (the memory brake's unload).
 
         It proves a cancelled request has settled only because the child runs
         one sequence at a time (``MLX_VLM_MAX_NUM_SEQS=1``, see the section
@@ -719,7 +742,6 @@ class MLX_Engine(BaseChatServerEngine):
         """
         from src.agents.chat_model import first_chunk_ceiling_s
 
-        outcome = cls._BARRIER_FAILURE_OUTCOMES[purpose]
         timeout = (
             timeout_s
             if timeout_s is not None
@@ -739,18 +761,23 @@ class MLX_Engine(BaseChatServerEngine):
                 timeout=timeout,
             )
         except requests.RequestException as exc:
-            logger.warning(
-                f"[MLX_Engine] Prefix cache barrier failed ({type(exc).__name__}); "
-                f"{outcome}: reason={reason}"
-            )
-            return False
+            timed_out = isinstance(exc, requests.ReadTimeout)
+            if not (timed_out and quiet_timeout):
+                cls._log_barrier_failure(type(exc).__name__, purpose, reason)
+            return cls._OUTCOME_TIMED_OUT if timed_out else cls._OUTCOME_FAILED
         if resp.status_code >= 400:
-            logger.warning(
-                f"[MLX_Engine] Prefix cache barrier failed (HTTP {resp.status_code}); "
-                f"{outcome}: reason={reason}"
-            )
-            return False
-        return True
+            cls._log_barrier_failure(f"HTTP {resp.status_code}", purpose, reason)
+            return cls._OUTCOME_FAILED
+        return cls._OUTCOME_OK
+
+    @classmethod
+    def _log_barrier_failure(cls, cause: str, purpose: str, reason: str) -> None:
+        """The one record of a failed barrier (``cause``: the exception's class
+        name -- its text can quote the request -- or the HTTP status)."""
+        logger.warning(
+            f"[MLX_Engine] Prefix cache barrier failed ({cause}); "
+            f"{cls._BARRIER_FAILURE_OUTCOMES[purpose]}: reason={reason}"
+        )
 
     # ======================= MEASURED MEMORY =======================
     #
@@ -1285,7 +1312,16 @@ class MLX_Engine(BaseChatServerEngine):
     #   a 0.727 base.
     #   Both barriers it may send are bounded by ``RELEASE_BARRIER_TIMEOUT_S``
     #   so a shielded release never holds a shutdown for long. The prefix
-    #   owner is kept;
+    #   owner is kept. A release that got no answer in time (a read timeout
+    #   on the abandon barrier, the reset or the barrier) at an idle sample is
+    #   an unload, under warning as under critical, when the law allows one
+    #   (``memory_brake.release_timed_out``: once per episode, never within
+    #   the reload grace): a child that cannot answer within those bounds (one
+    #   token in 30 s, a reset in 5 s) is swapped out, and every further
+    #   request would page it back in. Its one
+    #   record is the unload's WARNING (``release timed out``). Any other
+    #   failure, or a timeout at turn end, is the request's own WARNING and
+    #   the next eligible sample retries;
     # * unload (idle only): the reap path, under the lock the idle monitor
     #   holds; the episode and the cap go to ``_brake_reload``, keyed by the
     #   model's alias, and the next spawn of that model is seeded with them
@@ -1345,11 +1381,12 @@ class MLX_Engine(BaseChatServerEngine):
         ceiling = cls._memory_ceiling(handle)
         total = total_memory_bytes(cls)
         state = handle.get("brake")
+        now = time.time()
         decision = memory_brake.step(
             state if isinstance(state, BrakeState) else BrakeState(),
             memory_brake.Sample(
                 point=point,
-                now=time.time(),
+                now=now,
                 level=level,
                 swapped_pages=swapped,
                 excess_bytes=excess,
@@ -1387,10 +1424,27 @@ class MLX_Engine(BaseChatServerEngine):
             return BrakeOutcome(acted=True, action="unload")
         done = []
         if decision.release:
+            # What a release that times out becomes, decided by the law
+            # BEFORE it is sent: when it is an unload, the timeout's one
+            # record is the unload's line, not the barrier's.
+            on_timeout = memory_brake.release_timed_out(
+                decision.state, point=point, level=decision.level, now=now
+            )
             # Settling the footprint takes up to RELEASE_SETTLE_S: only at
             # idle. At turn_end the lock is held and the turn's last events
             # wait, so the residual is one read.
-            after = cls._brake_release(handle, settle=point == memory_brake.POINT_IDLE)
+            status, after = cls._brake_release(
+                handle,
+                settle=point == memory_brake.POINT_IDLE,
+                quiet_timeout=on_timeout.unload,
+            )
+            if status == cls._OUTCOME_TIMED_OUT and on_timeout.unload:
+                # The child could not answer within the release's bounds: it
+                # is swapped out, and every further request pages it back in.
+                # Unloading returns that memory without reading it.
+                handle["brake"] = on_timeout.state
+                cls._brake_unload(handle, on_timeout, point, excess, cause="release timed out")
+                return BrakeOutcome(acted=True, action="unload")
             # A release that failed (or whose residual is unreadable) leaves
             # ``excess_after_release`` as it was: the next eligible sample
             # retries, and no ``external`` notice is drawn from it. The
@@ -1457,36 +1511,47 @@ class MLX_Engine(BaseChatServerEngine):
         return False
 
     @classmethod
-    def _brake_release(cls, handle: Dict[str, Any], *, settle: bool) -> Optional[int]:
+    def _brake_release(
+        cls, handle: Dict[str, Any], *, settle: bool, quiet_timeout: bool = False
+    ) -> Tuple[str, Optional[int]]:
         """Reset the prefix cache, then send the non-streamed barrier (the
-        fallback clear of MLX's buffer cache, see ``_send_barrier``); returns what the child keeps
-        above base afterwards -- only when both succeeded and the footprint
-        is readable, else None. A failure is the reset's or the barrier's own
-        WARNING. ``settle``: read the residual over ``RELEASE_SETTLE_S`` (idle
-        only), else once."""
+        fallback clear of MLX's buffer cache, see ``_send_barrier``). Returns
+        the outcome (``_OUTCOME_OK``, ``_FAILED``, or ``_TIMED_OUT`` when a
+        request -- the abandon barrier, the reset or the barrier -- got no
+        answer in time) and what the child keeps above base afterwards (None
+        unless both succeeded and the footprint is readable). A failure is
+        the reset's or the barrier's own WARNING, but for a timeout under
+        ``quiet_timeout`` (the caller unloads, and that is the record).
+        ``settle``: read the residual over ``RELEASE_SETTLE_S`` (idle only),
+        else once."""
         from src.engines import process_footprint
 
-        if not cls._reset_prefix_cache(
+        outcome = cls._reset_prefix_cache(
             handle,
             reason="memory_pressure",
             purpose="release",
             barrier_timeout_s=cls.RELEASE_BARRIER_TIMEOUT_S,
-        ):
-            return None
+            quiet_timeout=quiet_timeout,
+        )
+        if outcome != cls._OUTCOME_OK:
+            return outcome, None
         api_key = handle.get("api_key")
-        if not cls._send_barrier(
+        outcome = cls._send_barrier(
             handle,
             {"Authorization": f"Bearer {api_key}"} if api_key else None,
             reason="memory_pressure",
             purpose="release",
             timeout_s=cls.RELEASE_BARRIER_TIMEOUT_S,
-        ):
-            return None
+            quiet_timeout=quiet_timeout,
+        )
+        if outcome != cls._OUTCOME_OK:
+            return outcome, None
         pid, base = handle.get("pid"), handle.get("base_footprint_bytes")
         if not pid:
-            return None
+            return outcome, None
         after = cls._settled_footprint(pid) if settle else process_footprint.footprint(pid)
-        return max(0, after - base) if after is not None and base is not None else None
+        residual = max(0, after - base) if after is not None and base is not None else None
+        return outcome, residual
 
     # mlx_vlm clears MLX's buffer cache synchronously, before the barrier's
     # answer is sent (``server/openai.py``: ``mx.clear_cache()`` then
@@ -1523,10 +1588,12 @@ class MLX_Engine(BaseChatServerEngine):
         decision: "memory_brake.Decision",
         point: str,
         excess: Optional[int],
+        cause: Optional[str] = None,
     ) -> None:
         """Reap the child (the caller holds the generation lock) and leave
         the episode for the next spawn of the same model. ONE WARNING: the
-        app degraded on its own."""
+        app degraded on its own; ``cause`` names what made it unload when it
+        is not two idle criticals (a release that timed out)."""
         record = {
             "alias": handle.get("alias"),
             **decision.state.carry(),
@@ -1541,7 +1608,7 @@ class MLX_Engine(BaseChatServerEngine):
             window,
             window,
             cls._mib(excess),
-            "; the model reloads at the next message",
+            f"{f'; {cause}' if cause else ''}; the model reloads at the next message",
         )
         cls.cleanup()
         cls._brake_reload = record
