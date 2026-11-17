@@ -10,6 +10,7 @@ barrier before its next prefix-cache reset (``src.engines.mlx_engine``).
 from __future__ import annotations
 
 import asyncio
+import time
 
 import pytest
 from langchain_core.messages import HumanMessage
@@ -24,12 +25,13 @@ from src.engines.mlx_engine import MLX_Engine
 pytestmark = pytest.mark.unit
 
 
-def _client(hook):
+def _client(hook, completed=None):
     return erudi_chat_openai_class()(
         base_url="http://127.0.0.1:1/v1",
         api_key="not-needed",
         model="fake-model",
         abandon_hook=hook,
+        complete_hook=completed,
     )
 
 
@@ -39,6 +41,10 @@ class _Recorder:
 
     def hook(self):
         self.events.append("hook")
+
+    def completed(self, started_at):
+        self.started_at = started_at
+        self.events.append("completed")
 
 
 def _inner(recorder, script):
@@ -68,6 +74,40 @@ async def test_a_normal_completion_never_calls_the_hook(monkeypatch):
 
     assert chunks == ["a", "b"]
     assert "hook" not in rec.events
+
+
+async def test_a_normal_completion_reports_when_its_request_started(monkeypatch):
+    """The completion hook gets the time the call STARTED, taken before the
+    request is sent: the engine clears only an abandon flagged before it."""
+    from langchain_openai import ChatOpenAI
+
+    rec = _Recorder()
+    monkeypatch.setattr(ChatOpenAI, "_astream", _inner(rec, ["a", "b"]))
+    before = time.monotonic()
+
+    _ = [c async for c in _client(rec.hook, rec.completed)._astream([HumanMessage("hi")])]
+
+    assert rec.events == ["inner-closed", "completed"]
+    assert before <= rec.started_at <= time.monotonic()
+
+
+async def test_a_stop_before_the_first_token_flags_and_reports_no_completion(monkeypatch):
+    from langchain_openai import ChatOpenAI
+
+    rec = _Recorder()
+    monkeypatch.setattr(ChatOpenAI, "_astream", _inner(rec, ["sleep", "a"]))
+
+    async def _consume():
+        async for _ in _client(rec.hook, rec.completed)._astream([HumanMessage("hi")]):
+            pass
+
+    task = asyncio.create_task(_consume())
+    await asyncio.sleep(0.05)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert rec.events == ["inner-closed", "hook"]
 
 
 async def test_a_consumer_that_closes_mid_stream_calls_the_hook_once_after_the_inner_close(
@@ -130,12 +170,11 @@ async def test_a_cancelled_stream_calls_the_hook_once(monkeypatch):
     assert rec.events == ["inner-closed", "hook"]
 
 
-async def test_a_retried_preflight_rejection_also_flags(monkeypatch):
-    """Documented cost: a preflight 400 that is then retried flags the child,
-    which costs one barrier before the next reset."""
+def _preflight_client(rec, outcomes):
+    """A client whose first call is rejected by the engine's context check,
+    then retried; ``outcomes`` scripts the retry."""
     from langchain_openai import ChatOpenAI
 
-    rec = _Recorder()
     attempts = []
 
     class _Rejection(Exception):
@@ -146,18 +185,43 @@ async def test_a_retried_preflight_rejection_also_flags(monkeypatch):
         attempts.append(kwargs.get("max_tokens"))
         if len(attempts) == 1:
             raise _Rejection()
-        yield "ok"
+        for step in outcomes:
+            if isinstance(step, BaseException):
+                raise step
+            yield step
 
-    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
     client = erudi_chat_openai_class()(
         base_url="http://127.0.0.1:1/v1",
         api_key="not-needed",
         model="fake-model",
         effective_context_tokens=4096,
         abandon_hook=rec.hook,
+        complete_hook=rec.completed,
     )
+    return client, attempts, (ChatOpenAI, "_astream", _server)
+
+
+async def test_a_successful_preflight_retry_does_not_flag_the_stream_abandoned(monkeypatch):
+    """The rejection came from the preflight, before any prefill: a retry
+    that completes leaves nothing cancelled on the child, and reports its own
+    completion."""
+    rec = _Recorder()
+    client, attempts, patch = _preflight_client(rec, ["ok"])
+    monkeypatch.setattr(*patch)
 
     assert [c async for c in client._astream([HumanMessage("hi")])] == ["ok"]
+    assert len(attempts) == 2
+    assert rec.events == ["completed"]
+
+
+async def test_a_preflight_retry_that_fails_flags_the_stream_abandoned(monkeypatch):
+    rec = _Recorder()
+    client, attempts, patch = _preflight_client(rec, ["a", RuntimeError("reset")])
+    monkeypatch.setattr(*patch)
+
+    with pytest.raises(RuntimeError):
+        _ = [c async for c in client._astream([HumanMessage("hi")])]
+
     assert len(attempts) == 2
     assert rec.events == ["hook"]
 
@@ -197,6 +261,15 @@ def test_the_factory_binds_the_hook_to_the_handle_captured_at_build_time(monkeyp
     assert built_for["abandoned"] is True
     assert "abandoned" not in swapped_in
 
+    # The completion hook is bound the same way: it clears the flag of the
+    # child the stream ran against, never the new one.
+    swapped_in["abandoned"] = True
+    swapped_in["abandoned_at"] = built_for["abandoned_at"]
+    client.complete_hook(time.monotonic())
+
+    assert built_for["abandoned"] is False
+    assert swapped_in["abandoned"] is True
+
 
 def test_an_engine_without_the_hook_builds_a_client_without_one(monkeypatch):
     class _Plain:
@@ -213,3 +286,4 @@ def test_an_engine_without_the_hook_builds_a_client_without_one(monkeypatch):
     client = build_chat_model(_Llm(), temperature=0.5, top_p=0.9, max_tokens=64)
 
     assert client.abandon_hook is None
+    assert client.complete_hook is None

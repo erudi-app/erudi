@@ -560,6 +560,12 @@ class MLX_Engine(BaseChatServerEngine):
     # barrier could share a step with the cancelled request and finish first.
     # With one sequence, the barrier is admitted only once the cancelled
     # request has left the batch -- its completion proves that request settled.
+    # Any request gives the same proof: a stream whose request was sent after
+    # the abandon was flagged and that completed lifts the flag
+    # (`note_stream_completed`), so the barrier is sent only when nothing has
+    # completed on the child since the abandon. A stream sent BEFORE the
+    # abandon proves nothing (it may have been admitted ahead of the cancelled
+    # one) and leaves the flag up.
 
     _PREFIX_OWNER_FRESH = "<fresh>"
     _PREFIX_OWNER_DIRTY = "<dirty>"
@@ -602,9 +608,25 @@ class MLX_Engine(BaseChatServerEngine):
     @classmethod
     def note_stream_abandoned(cls, handle: Any) -> None:
         """Flag ``handle`` -- the child the stream was BUILT against, never the
-        one loaded now -- so its next reset sends a barrier first."""
+        one loaded now -- so its next reset sends a barrier first. The flag's
+        time is the latest abandon's (``note_stream_completed`` reads it)."""
         if isinstance(handle, dict):
             handle["abandoned"] = True
+            handle["abandoned_at"] = time.monotonic()
+
+    @classmethod
+    def note_stream_completed(cls, handle: Any, started_at: float) -> None:
+        """A stream against ``handle`` ended normally; its request was sent
+        after ``started_at`` (``time.monotonic()``). It lifts the abandoned
+        flag only when that flag was raised before ``started_at``: the
+        completed request then ran after the cancelled one (one sequence at a
+        time, see the section comment), as a barrier would have. A flag with
+        no time stays up."""
+        if not isinstance(handle, dict) or not handle.get("abandoned"):
+            return
+        flagged_at = handle.get("abandoned_at")
+        if isinstance(flagged_at, float) and flagged_at < started_at:
+            handle["abandoned"] = False
 
     @classmethod
     def _reset_prefix_cache(

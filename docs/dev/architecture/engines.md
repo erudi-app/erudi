@@ -840,14 +840,15 @@ the other.
 
 The `mlx_vlm.server` child keeps an Automatic Prefix Cache pool, sized from the window at
 spawn. It holds **one conversation at a time**; the ownership lives on the engine handle
-(`prefix_owner`) and is driven by three `BaseEngine` hooks that are no-ops everywhere but
+(`prefix_owner`) and is driven by four `BaseEngine` hooks that are no-ops everywhere but
 `MLX_Engine` (the llama.cpp engines write nothing):
 
 | Hook | Called by | MLX behaviour |
 |---|---|---|
 | `claim_prefix(owner)` | the runner, every conversation (`conv:<id>`) or Arena (`arena`) turn, after the model is resolved | Same owner: nothing. A freshly spawned child (`<fresh>`, empty pool): records the owner without a reset. Anything else: reset, then record the owner. |
 | `on_history_rewritten()` | the compaction middleware, when it rewrote the history | Reset; the owner is kept. |
-| `note_stream_abandoned(handle)` | the chat client (`abandon_hook`, bound at build time) and the runner, when a stream did not end normally | Sets `abandoned` on the handle the stream was built against. |
+| `note_stream_abandoned(handle)` | the chat client (`abandon_hook`, bound at build time) and the runner, when a stream did not end normally | Sets `abandoned` on the handle the stream was built against, with the time of this abandon. |
+| `note_stream_completed(handle, started_at)` | the chat client (`complete_hook`, bound at build time), when a stream ended normally — a call whose preflight rejection was retried and completed included | Clears `abandoned` when it was set before `started_at`, the time taken before the stream's request was sent. |
 
 A reset is `POST /v1/cache/reset` with the child's Bearer key (5 s). A child without a
 prefix cache answers `{"enabled": false}`, which counts as success. When the handle is
@@ -864,7 +865,12 @@ first; with one sequence the barrier is admitted only once that request has left
 batch. The cap costs no concurrency — every request to the child is already serialized
 behind the generation guard — but it does cost a wait right after an abandon: ANY request
 sent then (not only the barrier: the next turn, a title, a summary call) waits for the
-cancelled request to leave the batch, typically one prefill step. A failed barrier or reset is one
+cancelled request to leave the batch, typically one prefill step. The same reasoning lets any
+request stand for the barrier: a stream whose request was sent after the abandon was flagged
+and that completed ran after the cancelled one, so it clears the flag
+(`note_stream_completed`) and the next reset sends no barrier. A stream sent before the abandon
+proves nothing (it may have been admitted ahead of the cancelled one) and leaves the flag; a
+Stop before the first token therefore still puts the barrier before the next reset. A failed barrier or reset is one
 WARNING and leaves the owner `<dirty>`, so the next claim retries; it never fails a turn.
 Each performed reset logs `Prefix cache reset: reason=<conversation_change|arena|compaction>`.
 

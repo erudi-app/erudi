@@ -2,9 +2,10 @@
 
 The MLX child keeps an Automatic Prefix Cache (APC) pool that must hold ONLY
 the current conversation: it is reset when the conversation changes and when
-compaction rewrites the history. Three engine hooks carry that ownership
-(``claim_prefix``, ``on_history_rewritten``, ``note_stream_abandoned``); only
-``MLX_Engine`` implements them, the llama.cpp engines stay strict no-ops.
+compaction rewrites the history. Four engine hooks carry that ownership
+(``claim_prefix``, ``on_history_rewritten``, ``note_stream_abandoned``,
+``note_stream_completed``); only ``MLX_Engine`` implements them, the llama.cpp
+engines stay strict no-ops.
 
 Every reset runs in a worker thread through ``run_reset_shielded`` and is
 registered as ``BaseEngine._pending_reset``; whoever acquires the generation
@@ -18,6 +19,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import threading
+import time
 from datetime import datetime, timedelta
 
 import anyio
@@ -255,6 +257,56 @@ def test_note_stream_abandoned_flags_the_given_handle_only(monkeypatch):
     assert "abandoned" not in current
 
 
+def test_a_stream_that_completes_clears_the_abandoned_flag(http, monkeypatch):
+    """The child runs one sequence at a time: a stream sent after the abandon
+    and complete ran after the cancelled one, so the next reset needs no
+    barrier."""
+    handle = _handle()
+    monkeypatch.setattr(MLX_Engine, "_model", handle)
+
+    MLX_Engine.note_stream_abandoned(handle)
+    started = time.monotonic()
+    MLX_Engine.note_stream_completed(handle, started)
+    MLX_Engine.claim_prefix("conv:2")
+
+    assert handle["abandoned"] is False
+    assert http.paths() == ["/v1/cache/reset"]
+
+
+def test_a_stop_before_the_first_token_keeps_the_flag(http, monkeypatch):
+    """A stream sent BEFORE the abandon proves nothing about the cancelled
+    one (it may have been admitted first): its completion keeps the flag, and
+    the barrier still precedes the next reset."""
+    handle = _handle()
+    monkeypatch.setattr(MLX_Engine, "_model", handle)
+
+    started = time.monotonic()
+    MLX_Engine.note_stream_abandoned(handle)
+    MLX_Engine.note_stream_completed(handle, started)
+    MLX_Engine.claim_prefix("conv:2")
+
+    assert http.paths() == ["/v1/chat/completions", "/v1/cache/reset"]
+
+
+def test_a_completion_on_another_handle_keeps_the_flag(monkeypatch):
+    built_for = _handle()
+    other = _handle()
+    MLX_Engine.note_stream_abandoned(built_for)
+
+    MLX_Engine.note_stream_completed(other, time.monotonic())
+
+    assert built_for["abandoned"] is True
+    assert "abandoned" not in other
+
+
+def test_a_flag_set_without_its_time_is_never_cleared_by_a_completion():
+    handle = _handle(abandoned=True)
+
+    MLX_Engine.note_stream_completed(handle, time.monotonic())
+
+    assert handle["abandoned"] is True
+
+
 def test_hooks_act_on_the_handle_read_once_even_if_the_engine_swaps_mid_call(monkeypatch):
     """A swap between the read and the write must never make the hook write
     into another child's handle."""
@@ -280,6 +332,7 @@ def test_hooks_on_a_missing_handle_are_no_ops(http, monkeypatch):
     MLX_Engine.claim_prefix("conv:1")
     MLX_Engine.on_history_rewritten()
     MLX_Engine.note_stream_abandoned(None)
+    MLX_Engine.note_stream_completed(None, time.monotonic())
 
     assert http.calls == []
 
@@ -323,6 +376,7 @@ def test_non_mlx_hooks_write_nothing(engine, monkeypatch):
     engine.claim_prefix("conv:1")
     engine.on_history_rewritten()
     engine.note_stream_abandoned(handle)
+    engine.note_stream_completed(handle, time.monotonic())
 
     assert handle == snapshot
 
