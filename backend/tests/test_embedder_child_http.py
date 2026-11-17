@@ -20,6 +20,8 @@ the real binary itself and the model load, covered once per release by
 from __future__ import annotations
 
 import json
+import os
+import site
 import sys
 import time
 from pathlib import Path
@@ -36,11 +38,13 @@ pytestmark = pytest.mark.integration
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 FAKE_SERVER = FIXTURES / "fake_llama_embedding_server.py"
-# The double needs the standard library only, so it runs on the base
-# interpreter: on Windows a venv's python.exe is a launcher that starts the
-# real interpreter as its own child, and terminating the launcher would leave
-# that grandchild alive, holding the log file the reap then deletes.
+# The double runs on the base interpreter, with this venv's packages on its
+# PYTHONPATH (it imports `tokenizers`): on Windows a venv's python.exe is a
+# launcher that starts the real interpreter as its own child, and terminating
+# the launcher would leave that grandchild alive, holding the log file the
+# reap then deletes.
 _INTERPRETER = getattr(sys, "_base_executable", None) or sys.executable
+_VENV_PATH = os.pathsep.join(site.getsitepackages())
 GOLDEN_FILE = FIXTURES / "e5_llama_golden.json"
 
 
@@ -57,6 +61,9 @@ def child(monkeypatch, tmp_path):
     gguf = tmp_path / "artifacts" / "kb-embedder" / llama_embedder.E5_GGUF_NAME
     gguf.parent.mkdir(parents=True)
     gguf.write_bytes(b"GGUF")
+    monkeypatch.setenv(
+        "PYTHONPATH", os.pathsep.join(filter(None, [_VENV_PATH, os.environ.get("PYTHONPATH")]))
+    )
     monkeypatch.setattr(llama_embedder, "_server_command", lambda: [_INTERPRETER, str(FAKE_SERVER)])
     monkeypatch.setattr(
         llama_embedder, "_log_path", lambda port: tmp_path / f"embedder-child-{port}.log"
