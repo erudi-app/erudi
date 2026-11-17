@@ -24,6 +24,7 @@
 // record, unfiltered.
 
 import { isHiddenFromDiagnostics } from "./bugCounter";
+import { messageIdentity } from "./foldIdentity";
 
 /** Entries kept in the merged timeline. */
 export const DEFAULT_ENTRY_LIMIT = 200;
@@ -108,7 +109,8 @@ export function mergeRecentErrors({
       source: "backend",
       requestId: record.request_id ?? null,
       message: record.message,
-      count: 1,
+      // The reader already folded identical records (#534).
+      count: record.count ?? 1,
     });
   }
 
@@ -122,7 +124,7 @@ export function mergeRecentErrors({
       source: "app",
       requestId: null,
       message,
-      count: 1,
+      count: record.count ?? 1,
     };
     appEntries.push(entry);
     entries.push(entry);
@@ -167,7 +169,12 @@ export function mergeRecentErrors({
  * `limit` and out of the copied report, and they read as three problems
  * instead of one thing happening three times.
  *
- * Identity is `source` + `level` + `message` + `stack`: a record is only
+ * Identity is `source` + `level` + `message` + `stack`, where the message of
+ * a backend line echoed into the app log leaves out the backend's own
+ * timestamp and request id (`messageIdentity`): those differ on every
+ * occurrence, and kept in, they would list the same warning echoed three
+ * times while the backend did not answer as three consecutive rows. A record
+ * is only
  * folded into a record of the same kind, so a backend line never absorbs the
  * app's echo of it, and a WARNING never merges into an ERROR of the same text.
  * The stack is part of it because a session entry keeps its stack OUTSIDE the
@@ -180,9 +187,12 @@ export function mergeRecentErrors({
  * worth.
  *
  * The surviving entry carries the NEWEST timestamp and that record's request
- * id: the question a reader asks of a repeated error is when it last
- * happened, and the id has to name the occurrence the timestamp does or the
- * two point at different turns.
+ * id and message: the question a reader asks of a repeated error is when it
+ * last happened, and the id and the text have to name the occurrence the
+ * timestamp does or they point at different turns.
+ *
+ * The readers fold the same way before their own cap (`log_reader.py`,
+ * `appLogTail.js`), so a record can arrive with a count above 1; it is summed.
  *
  * Collapsing happens before the `limit` slice so folding actually frees slots.
  *
@@ -195,7 +205,7 @@ function collapseRepeats(entries) {
     const identity = JSON.stringify([
       entry.source,
       entry.level,
-      entry.message,
+      messageIdentity(entry.message),
       entry.stack ?? null,
     ]);
     const seen = byIdentity.get(identity);
@@ -207,6 +217,7 @@ function collapseRepeats(entries) {
     if (timeKey(entry) > timeKey(seen)) {
       seen.timestamp = entry.timestamp;
       seen.requestId = entry.requestId ?? null;
+      seen.message = entry.message;
     }
   }
   return [...byIdentity.values()];

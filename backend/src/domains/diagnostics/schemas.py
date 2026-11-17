@@ -45,6 +45,11 @@ class DiagnosticsLogRecord(BaseModel):
         default=None, description="Correlation id of the request that produced it, if any."
     )
     message: str = Field(description="Record body, continuation lines included.")
+    count: int = Field(
+        default=1,
+        description="Identical records (same level and text) this one stands for; "
+        "timestamp and request id are the newest occurrence's.",
+    )
 
 
 class DiagnosticsResponse(BaseModel):

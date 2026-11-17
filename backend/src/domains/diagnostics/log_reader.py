@@ -29,6 +29,12 @@ to the running version (``src/launcher/log_version.py``), and the first record
 of a version is a marker. When the old file could not be rolled over, the
 older versions' records sit above that marker in the same file, so every
 record before the last marker is dropped (#576).
+
+**A repeat is one record with a count.** Identical records (same level, same
+text) fold into one, carrying the newest occurrence's timestamp and request id
+and how many times it was written, before the ``limit`` cut -- so a line a
+retry loop writes a thousand times holds one of the 200 slots, not all of them
+(#534).
 """
 
 from __future__ import annotations
@@ -130,8 +136,10 @@ def parse_records(
             alike, is discarded.
 
     Returns:
-        list[dict]: Records ordered oldest first, each with ``timestamp``,
-        ``level``, ``request_id`` (None outside a request) and ``message``.
+        list[dict]: Records ordered by their newest occurrence, oldest first,
+        each with ``timestamp``, ``level``, ``request_id`` (None outside a
+        request), ``message`` and ``count`` (how many identical records it
+        stands for).
     """
     records: List[Dict[str, Any]] = []
     current: Optional[Dict[str, Any]] = None
@@ -175,6 +183,7 @@ def parse_records(
                 "level": level,
                 "request_id": request_id if request_id and request_id != "-" else None,
                 "message": match.group("message"),
+                "count": 1,
             }
             records.append(current)
         elif keeping and current is not None:
@@ -187,7 +196,25 @@ def parse_records(
             dropped = len(record["message"]) - MAX_MESSAGE_CHARS
             record["message"] = f"{record['message'][:MAX_MESSAGE_CHARS]}... [+{dropped}]"
 
+    records = _fold_repeats(records)
     return records[-limit:] if limit else records
+
+
+def _fold_repeats(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """One record per (level, message), at the place of its newest occurrence.
+
+    The kept record carries the newest timestamp and THAT occurrence's request
+    id, so the two always name the same turn, and ``count`` occurrences.
+    """
+    folded: Dict[tuple, Dict[str, Any]] = {}
+    for record in records:
+        identity = (record["level"], record["message"])
+        seen = folded.pop(identity, None)
+        if seen is not None:
+            record["count"] += seen["count"]
+        # Re-inserted last: the order is that of the newest occurrences.
+        folded[identity] = record
+    return list(folded.values())
 
 
 def recent_errors(

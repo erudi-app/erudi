@@ -176,6 +176,54 @@ class TestParseRecords:
         (rec,) = log_reader.parse_records(text)
         assert len(rec["message"]) <= log_reader.MAX_MESSAGE_CHARS + 32
 
+    def test_identical_records_fold_into_one_with_a_count(self):
+        """#534 - three byte-identical warnings are one row with a count."""
+        text = "\n".join(
+            [
+                _record("WARNING", "Xet Storage is enabled", ts="2026-09-13T01:45:36.652Z"),
+                _record("WARNING", "Xet Storage is enabled", ts="2026-09-13T01:45:37.293Z"),
+                _record(
+                    "WARNING", "Xet Storage is enabled", ts="2026-09-13T01:51:04.874Z", rid="be-3"
+                ),
+            ]
+        )
+        (rec,) = log_reader.parse_records(text)
+        assert rec["count"] == 3
+        # The newest occurrence names the row, timestamp and request id alike.
+        assert rec["timestamp"] == "2026-09-13T01:51:04.874Z"
+        assert rec["request_id"] == "be-3"
+
+    def test_a_single_record_counts_one(self):
+        (rec,) = log_reader.parse_records(_record("ERROR", "boom"))
+        assert rec["count"] == 1
+
+    def test_the_same_text_at_another_level_stays_apart(self):
+        text = "\n".join([_record("WARNING", "same"), _record("ERROR", "same")])
+        assert [r["level"] for r in log_reader.parse_records(text)] == ["WARNING", "ERROR"]
+
+    def test_repeats_fold_before_the_cap(self):
+        """A noisy line must not push a real error out of the 200 records."""
+        noisy = [
+            _record("WARNING", "noisy", ts=f"2026-09-05T23:04:{i:02d}.000Z") for i in range(50)
+        ]
+        text = "\n".join([_record("ERROR", "the real failure"), *noisy])
+        records = log_reader.parse_records(text, limit=2)
+        assert [r["message"] for r in records] == ["the real failure", "noisy"]
+        assert records[1]["count"] == 50
+
+    def test_a_folded_record_takes_the_place_of_its_newest_occurrence(self):
+        text = "\n".join(
+            [
+                _record("WARNING", "repeated", ts="2026-09-05T23:00:00.000Z"),
+                _record("ERROR", "in between", ts="2026-09-05T23:00:01.000Z"),
+                _record("WARNING", "repeated", ts="2026-09-05T23:00:02.000Z"),
+            ]
+        )
+        assert [r["message"] for r in log_reader.parse_records(text)] == [
+            "in between",
+            "repeated",
+        ]
+
 
 class TestRecentErrors:
     """The reader's public entry point."""

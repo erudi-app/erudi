@@ -27,6 +27,11 @@
 //
 // The log belongs to the running app version (utils/appLogVersion.js): every
 // record above the last version marker is an earlier version's and is dropped.
+//
+// Identical records (same level, same text once an echoed backend line's own
+// timestamp and request id are set aside, utils/foldIdentity.js) fold into one
+// carrying the newest occurrence and a `count`, before the `limit` cut: a line
+// repeated a thousand times holds one slot, not all of them (#534).
 
 // `import` rather than `require`: this module uses ESM exports (main.js
 // requires it the way it requires the other shared helpers, and webpack bridges
@@ -35,6 +40,7 @@
 import fs from "node:fs";
 
 import { APP_LOG_VERSION_MARKER } from "./appLogVersion.js";
+import { messageIdentity } from "./foldIdentity.js";
 
 /** Read window. Large enough for hundreds of records, small enough to be free. */
 export const DEFAULT_TAIL_BYTES = 512 * 1024;
@@ -74,7 +80,8 @@ export function detectLevel(text) {
  * Group raw app-log text into records and keep the levelled ones.
  * @param {string} text - Raw log text.
  * @param {number} limit - Maximum records to return (newest kept).
- * @returns {Array<{timestamp: string, level: string, message: string}>} Oldest first.
+ * @returns {Array<{timestamp: string, level: string, message: string, count: number}>}
+ *   Ordered by newest occurrence, oldest first.
  */
 export function parseAppLogRecords(text, limit = DEFAULT_LIMIT) {
   const records = [];
@@ -106,7 +113,7 @@ export function parseAppLogRecords(text, limit = DEFAULT_LIMIT) {
         current = null;
         continue;
       }
-      current = { timestamp: match[1], level, message: match[2] };
+      current = { timestamp: match[1], level, message: match[2], count: 1 };
       records.push(current);
     } else if (current) {
       current.message += `\n${line}`;
@@ -122,7 +129,29 @@ export function parseAppLogRecords(text, limit = DEFAULT_LIMIT) {
     }
   }
 
-  return limit ? records.slice(-limit) : records;
+  const folded = foldRepeats(records);
+  return limit ? folded.slice(-limit) : folded;
+}
+
+/**
+ * One record per identity, at the place of its newest occurrence, whose
+ * timestamp and text it keeps; `count` is how many records it stands for.
+ * @param {Array<object>} records - Parsed records, oldest first.
+ * @returns {Array<object>} Folded records, oldest first.
+ */
+function foldRepeats(records) {
+  const byIdentity = new Map();
+  for (const record of records) {
+    const identity = `${record.level}\u0000${messageIdentity(record.message)}`;
+    const seen = byIdentity.get(identity);
+    if (seen) {
+      record.count += seen.count;
+      // Re-inserted last: the order is that of the newest occurrences.
+      byIdentity.delete(identity);
+    }
+    byIdentity.set(identity, record);
+  }
+  return [...byIdentity.values()];
 }
 
 /**

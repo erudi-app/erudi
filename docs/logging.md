@@ -95,7 +95,12 @@ two files carry, without leaving the app:
   copied report and the badge below can never disagree). `WARNING` records are
   never filtered this way. Each remaining row shows its timestamp, level,
   source, request id when it has one, and how many times an identical error
-  repeated. When nothing was recorded, the area says so in one line and asks
+  repeated: records with the same source, level and text (and stack, for an
+  error this window caught) are one row, dated and identified by their latest
+  occurrence. A backend line echoed into the app log is compared without the
+  backend's own timestamp and request id, which differ on every occurrence.
+  Both readers fold repeats before keeping their last 200, so a line written a
+  thousand times holds one place, never all of them. When nothing was recorded, the area says so in one line and asks
   nothing — but only when all three sources answered: a source that could not
   be read is reported as missing, never counted as silence.
 - **A counter on the bug icon itself**: the sidebar badges the icon with how

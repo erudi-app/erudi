@@ -420,6 +420,84 @@ describe("mergeRecentErrors", () => {
     expect(entries[0].count).toBe(4);
     expect(entries[0].source).toBe("app");
   });
+
+  it("keeps the repeat count a reader already folded (#534)", () => {
+    // The readers fold repeats before their own 200-record cap, so a record
+    // can arrive already standing for several occurrences.
+    const entries = mergeRecentErrors({
+      backend: {
+        recent_errors: [
+          {
+            timestamp: "2026-09-05T10:00:02.000Z",
+            level: "WARNING",
+            request_id: "be-3",
+            message: "the same noisy line",
+            count: 3,
+          },
+        ],
+      },
+      appLog: [
+        { timestamp: "2026-09-05T10:00:03.000Z", level: "ERROR", message: "app err", count: 2 },
+      ],
+      sessionErrors: [],
+    });
+    expect(entries.map((e) => e.count)).toEqual([3, 2]);
+  });
+
+  it("folds the backend's echoed lines that differ only by the backend's own header", () => {
+    // When the backend does not answer, its stdout echoes are kept. Each echo
+    // carries the backend formatter's timestamp and request id inside the
+    // message, so three occurrences of one warning would otherwise list as
+    // three consecutive rows of the same text.
+    const echo = (ts, rid) =>
+      `Backend stdout: [WARNING] ${ts} [${rid}] - erudi - hf.py:12 - Xet Storage is enabled`;
+    const entries = mergeRecentErrors({
+      backend: null,
+      appLog: [
+        {
+          timestamp: "2026-09-13T01:45:36.700Z",
+          level: "WARNING",
+          message: echo("2026-09-13T01:45:36.652Z", "-"),
+        },
+        {
+          timestamp: "2026-09-13T01:45:37.300Z",
+          level: "WARNING",
+          message: echo("2026-09-13T01:45:37.293Z", "be-2"),
+        },
+        {
+          timestamp: "2026-09-13T01:51:04.900Z",
+          level: "WARNING",
+          message: echo("2026-09-13T01:51:04.874Z", "be-3"),
+        },
+      ],
+      sessionErrors: [],
+    });
+    expect(entries).toHaveLength(1);
+    expect(entries[0].count).toBe(3);
+    expect(entries[0].timestamp).toBe("2026-09-13T01:51:04.900Z");
+    // The surviving row quotes the newest occurrence, as its timestamp does.
+    expect(entries[0].message).toBe(echo("2026-09-13T01:51:04.874Z", "be-3"));
+  });
+
+  it("never folds two different echoed lines", () => {
+    const entries = mergeRecentErrors({
+      backend: null,
+      appLog: [
+        {
+          timestamp: "2026-09-13T01:45:36.700Z",
+          level: "WARNING",
+          message: "Backend stdout: [WARNING] 2026-09-13T01:45:36.652Z [-] - erudi - a.py:1 - one",
+        },
+        {
+          timestamp: "2026-09-13T01:45:37.300Z",
+          level: "WARNING",
+          message: "Backend stdout: [WARNING] 2026-09-13T01:45:37.293Z [-] - erudi - a.py:1 - two",
+        },
+      ],
+      sessionErrors: [],
+    });
+    expect(entries).toHaveLength(2);
+  });
 });
 
 describe("buildPrefill", () => {

@@ -524,7 +524,7 @@ the card only appears where the setting does something.*
 
 **Diagnostics page**
 - [ ] When I open Diagnostics (the bug icon in the left rail) with the backend running, then the page shows my Erudi version, operating system, inference engine, CPU/GPU, the model in memory (or none), the backend's Python version and the database state — no log-file paths are listed on screen, and there is no text preview of the report.
-- [ ] *(not built yet: v1.3.0, #534 — record as not applicable)* When the backend has recorded warnings or errors, then they are listed newest last with their timestamp, level, source and request id, and an identical error repeated many times appears **once** with a repeat count.
+- [ ] When the backend has recorded warnings or errors, then they are listed newest last with their timestamp, level, source and request id, and an identical error repeated many times appears **once** with a repeat count (#534).
 - [ ] When a recorded error merely describes the environment (no network, HuggingFace rate-limited or down, a gated repository with no token, the disk or the app's own port taken) rather than Erudi being wrong, then it does **not** appear in the list and is **not** in the copied report — the same exclusion the bug icon's badge uses, applied once so the two can never disagree. A `WARNING` is never excluded this way.
 - [ ] When I read the recent-errors list, then no ordinary activity line appears — only `WARNING` and above.
 - [ ] When there is at least one recent error, then a one-line hint says to paste the report into the bug form's Logs field, and a single **Copy the full report** button appears alongside **Report on GitHub** and the contact link, all headed **Report a problem**.
@@ -540,7 +540,7 @@ the card only appears where the setting does something.*
 - [ ] When something the app itself gets wrong happens silently (not offline, not a service outage) — for example the backend returns a real 500 — then a small badge appears on the bug icon showing **1**; opening Diagnostics lists that error and the badge disappears, with no popup, toast or sound at any point.
 - [ ] When I trigger a **Hugging Face download while offline**, then the download modal still tells me it failed, but the failure appears on **neither** the Diagnostics page's recent-errors list **nor** the copied report **nor** the bug icon's badge — an unreachable network is not counted as a defect anywhere.
 - [ ] When more than nine new errors accumulate before I next open Diagnostics, then the badge reads **9+** rather than the exact count.
-- [ ] *(not built yet: v1.3.0, #534 — record as not applicable)* When the recent-errors list would show the **same error on consecutive rows**, then they collapse into a single row with a repeat count — no run of identical lines slips through.
+- [ ] When the recent-errors list would show the **same error on consecutive rows**, then they collapse into a single row with a repeat count, dated at its latest occurrence — no run of identical lines slips through, including the backend's echoed lines when the backend did not answer (#534).
 - [ ] When I open Diagnostics after updating from an older version, then it lists only records of the version now running; older history stays in the log files (`backend.log.1` and up beside `backend.log`, `erudi-backend.old.log` beside the app log); a restart or a reinstall of the same version keeps them (#576).
 
 ## Shared chrome (sidebar, connection, downloads)
