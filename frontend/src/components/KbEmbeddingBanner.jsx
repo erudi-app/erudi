@@ -56,6 +56,17 @@ export default function KbEmbeddingBanner({ active }) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [active, state]);
 
+  // The model can leave or reach the disk while the app is in the
+  // background (a cleared models_cache, a download finished from the KB
+  // page): coming back re-checks the state without a remount.
+  useEffect(() => {
+    if (!active) return undefined;
+    const onFocus = () => refresh();
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [active]);
+
   const handleDownload = async () => {
     setState(GATE.DOWNLOADING);
     setError(null);

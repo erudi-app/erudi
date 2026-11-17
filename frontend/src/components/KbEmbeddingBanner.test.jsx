@@ -57,6 +57,18 @@ describe("KbEmbeddingBanner", () => {
     expect(screen.queryByRole("alert")).toBeNull();
   });
 
+  it("re-checks the status when the window regains focus", async () => {
+    getMock.mockResolvedValue({ available: true, downloading: false, error: null });
+    render(<KbEmbeddingBanner active={true} />);
+    await waitFor(() => expect(getMock).toHaveBeenCalledTimes(1));
+    // The model was deleted while the app was in the background: coming back
+    // must surface the state without a remount.
+    getMock.mockResolvedValue({ available: false, downloading: false, error: null });
+    fireEvent(window, new Event("focus"));
+    await screen.findByRole("alert");
+    expect(getMock).toHaveBeenCalledTimes(2);
+  });
+
   it("shows the failed download with a retry action", async () => {
     getMock.mockResolvedValue({
       available: false,
