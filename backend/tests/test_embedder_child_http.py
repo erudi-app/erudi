@@ -36,6 +36,11 @@ pytestmark = pytest.mark.integration
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
 FAKE_SERVER = FIXTURES / "fake_llama_embedding_server.py"
+# The double needs the standard library only, so it runs on the base
+# interpreter: on Windows a venv's python.exe is a launcher that starts the
+# real interpreter as its own child, and terminating the launcher would leave
+# that grandchild alive, holding the log file the reap then deletes.
+_INTERPRETER = getattr(sys, "_base_executable", None) or sys.executable
 GOLDEN_FILE = FIXTURES / "e5_llama_golden.json"
 
 
@@ -52,9 +57,7 @@ def child(monkeypatch, tmp_path):
     gguf = tmp_path / "artifacts" / "kb-embedder" / llama_embedder.E5_GGUF_NAME
     gguf.parent.mkdir(parents=True)
     gguf.write_bytes(b"GGUF")
-    monkeypatch.setattr(
-        llama_embedder, "_server_command", lambda: [sys.executable, str(FAKE_SERVER)]
-    )
+    monkeypatch.setattr(llama_embedder, "_server_command", lambda: [_INTERPRETER, str(FAKE_SERVER)])
     monkeypatch.setattr(
         llama_embedder, "_log_path", lambda port: tmp_path / f"embedder-child-{port}.log"
     )
