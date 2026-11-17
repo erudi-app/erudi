@@ -454,6 +454,65 @@ class TestStreamDeleteRace:
                 await service.compact_conversation(conversation.id)
 
 
+class TestDisconnectAndReads:
+    async def test_a_client_disconnect_mid_turn_lets_the_delete_through(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        """The renderer aborts the answer before its DELETE: the server sees a
+        disconnect, which cancels the task streaming the turn (Starlette's
+        listener). The turn unwinds, its registration ends, and the delete
+        that was waiting completes."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(
+            agent_runner,
+            "build_chat_model",
+            _fake_chat_model("one two three four five six seven eight nine ten"),
+        )
+        checkpointer = InMemorySaver()
+        service = ConversationService(test_db_session, checkpointer)
+        conversation = service.create_conversation(llm_id=mock_llm.id)
+        conversation_id = conversation.id
+        mid_answer = asyncio.Event()
+        held = asyncio.Event()
+
+        async def consume():
+            async for chunk in service.query_and_respond_stream(
+                conversation_id, ConversationQuery(question="Count to ten")
+            ):
+                if '"answer"' in chunk and not mid_answer.is_set():
+                    mid_answer.set()
+                    await held.wait()  # the client is gone; the send never returns
+
+        streaming = asyncio.create_task(consume())
+        await asyncio.wait_for(mid_answer.wait(), 5)
+        delete = asyncio.create_task(
+            ConversationService(test_db_session, checkpointer).delete_conversation(conversation_id)
+        )
+        await asyncio.sleep(0.05)
+        assert not delete.done()
+
+        streaming.cancel()  # the disconnect
+        with pytest.raises(asyncio.CancelledError):
+            await streaming
+        await asyncio.wait_for(delete, 5)
+
+        assert test_db_session.get(Conversation, conversation_id) is None
+        assert await checkpointer.aget_tuple(_thread(conversation_id)) is None
+
+    async def test_a_conversation_being_deleted_reads_as_gone(self, client, mock_llm):
+        conversation = client.post(
+            "/erudi/conversations/", json={"llm_id": mock_llm.id, "ephemeral": True}
+        ).json()
+
+        async with conversation_turns.closing(conversation["id"]):
+            during = client.get(f"/erudi/conversations/{conversation['id']}")
+        after = client.get(f"/erudi/conversations/{conversation['id']}")
+
+        assert during.status_code == 404
+        assert during.json()["error"]["type"] == "CONVERSATION_NOT_FOUND"
+        assert after.status_code == 200
+
+
 # =====================================================================
 # Title
 # =====================================================================

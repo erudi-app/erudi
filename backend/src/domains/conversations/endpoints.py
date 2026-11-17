@@ -96,7 +96,11 @@ from fastapi.concurrency import run_in_threadpool
 from sqlalchemy.orm import Session
 from fastapi.responses import StreamingResponse
 
-from src.core.exceptions import CompactionFailedException, app_error_response
+from src.core.exceptions import (
+    CompactionFailedException,
+    ConversationNotFoundException,
+    app_error_response,
+)
 from src.core.logging import logger
 from src.database.core import get_db
 from src.agents.checkpoint import get_checkpointer
@@ -113,6 +117,7 @@ from src.domains.conversations.schemas import (
 )
 from src.domains.conversations.repository import ConversationRepository, MessageRepository
 from src.domains.conversations.services import ConversationService
+from src.domains.conversations.turns import conversation_turns
 
 
 router = APIRouter(prefix="/conversations", tags=["conversations"])
@@ -337,6 +342,10 @@ async def get_conversation_by_id(
     Fetch a single conversation by its ID, including messages.
     """
     logger.debug(f"Fetching conversation {conversation_id}")
+    if conversation_turns.is_closing(conversation_id):
+        # Being deleted (an ephemeral conversation the user just left): it is
+        # gone for the reader, whose page must not reload it.
+        raise ConversationNotFoundException(conversation_id)
     # Read-only operation, no commit needed
     return await run_in_threadpool(
         conversation_repo.get_conversation_by_id,

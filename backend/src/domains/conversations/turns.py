@@ -16,7 +16,8 @@ deletes anything:
 * ``closing`` marks the conversation as closing, then waits for every
   registered piece of work on it to end;
 * while it is closing, ``begin`` refuses new work on it (``None``), which then
-  writes nothing;
+  writes nothing, and ``is_closing`` lets a read answer as if it were gone
+  (the page a user navigates back to during the wait does not reload it);
 * the delete runs inside ``closing``, so once it returns every write that
   could have touched the conversation is behind it, and the next one finds no
   row.
@@ -51,6 +52,11 @@ class ConversationTurns:
         turn = asyncio.Event()
         self._open.setdefault(conversation_id, set()).add(turn)
         return turn
+
+    def is_closing(self, conversation_id: int) -> bool:
+        """Whether a delete of the conversation is under way: it is read as
+        already deleted (``GET /conversations/{id}`` answers 404)."""
+        return conversation_id in self._closing
 
     def end(self, conversation_id: int, turn: asyncio.Event) -> None:
         """The work registered by ``begin`` is over (idempotent)."""

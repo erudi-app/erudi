@@ -5,7 +5,9 @@ it cannot delete -- the app quit with the conversation open, a crash, a
 force-quit, a backend killed -- is deleted here:
 
 * at shutdown (``purge_at_shutdown``), in the lifespan before the
-  checkpointer closes, bounded by ``SHUTDOWN_PURGE_SECONDS``;
+  checkpointer closes, bounded by ``SHUTDOWN_PURGE_SECONDS``. Best effort:
+  uvicorn first waits for the requests in flight and Electron kills the
+  backend 8 s after asking it to stop, so this may not run or not finish;
 * at the next start (``sweep_at_start``), in ``_start_services`` once the
   checkpointer is open: every ephemeral conversation left over, then every
   checkpointer thread no conversation owns. A delete that stopped between the
