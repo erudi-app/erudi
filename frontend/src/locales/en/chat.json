@@ -230,6 +230,7 @@
     "notes": {
       "reducedByMemory": "The model supports up to {{trained}} tokens; this computer's memory limits this conversation to {{working}}.",
       "reducedByMemoryNoTrained": "This computer's memory limits this conversation to {{working}} tokens.",
+      "cutByEstimate": "The model supports up to {{trained}} tokens; this conversation works with {{working}} because Erudi's conservative estimate of the model's memory needs cuts the window, not this computer's memory.",
       "notLoaded": "The model is not loaded: this is the window it was trained for. The window this computer allows is known once the model is loaded.",
       "unknownWindow": "The model's window is not known, so no share is shown.",
       "kbExcluded": "The counts leave out the knowledge-base excerpts each question retrieves.",

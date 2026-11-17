@@ -230,6 +230,7 @@
     "notes": {
       "reducedByMemory": "Le modèle accepte jusqu'à {{trained}} tokens ; la mémoire de cet ordinateur limite cette conversation à {{working}}.",
       "reducedByMemoryNoTrained": "La mémoire de cet ordinateur limite cette conversation à {{working}} tokens.",
+      "cutByEstimate": "Le modèle accepte jusqu'à {{trained}} tokens ; cette conversation travaille avec {{working}}, car l'estimation prudente d'Erudi des besoins en mémoire du modèle réduit la fenêtre, et non la mémoire de cet ordinateur.",
       "notLoaded": "Le modèle n'est pas chargé : voici la fenêtre pour laquelle il a été entraîné. La fenêtre que permet cet ordinateur est connue une fois le modèle chargé.",
       "unknownWindow": "La fenêtre du modèle est inconnue, aucune part n'est donc affichée.",
       "kbExcluded": "Les décomptes n'incluent pas les extraits de la base de connaissances que chaque question récupère.",

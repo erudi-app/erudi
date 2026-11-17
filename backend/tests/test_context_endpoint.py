@@ -56,8 +56,12 @@ class _Engine(BaseEngine):
         return isinstance(cls._model, dict) and cls._model_id == llm_id
 
 
-def _load(llm_id=7, window=8192, bound=None):
-    _Engine._model = {"context_tokens": window, "memory_bound_tokens": bound}
+def _load(llm_id=7, window=8192, bound=None, estimate=False):
+    _Engine._model = {
+        "context_tokens": window,
+        "memory_bound_tokens": bound,
+        "spawn_cut_by_estimate": estimate,
+    }
     _Engine._model_id = llm_id
 
 
@@ -200,6 +204,7 @@ async def test_not_loaded_the_trained_window_is_the_denominator():
         "allocated": None,
         "trained": _TRAINED,
         "reduced_by_memory": False,
+        "cut_by_estimate": False,
         "model_loaded": False,
     }
 
@@ -220,8 +225,26 @@ async def test_loaded_the_allocated_window_is_the_denominator():
         "allocated": 8192,
         "trained": _TRAINED,
         "reduced_by_memory": False,
+        "cut_by_estimate": False,
         "model_loaded": True,
     }
+
+
+async def test_loaded_and_cut_by_the_estimate_says_so_apart_from_memory():
+    _load(estimate=True)
+    window = (await _usage(_alternating(4, 100)))["window"]
+    assert window["cut_by_estimate"] is True
+    assert window["reduced_by_memory"] is False
+
+
+async def test_the_estimate_flag_stays_off_when_not_loaded_or_memory_bound():
+    assert (await _usage(_alternating(4, 100)))["window"]["cut_by_estimate"] is False
+    _load(bound=8192, estimate=True)
+    window = (await _usage(_alternating(4, 100)))["window"]
+    assert window["reduced_by_memory"] is True
+    assert window["cut_by_estimate"] is False
+    _load(llm_id=99, estimate=True)
+    assert (await _usage(_alternating(4, 100)))["window"]["cut_by_estimate"] is False
 
 
 async def test_loaded_and_bounded_by_memory_says_so():
@@ -279,7 +302,11 @@ async def test_the_window_comes_from_one_snapshot_of_the_handle(monkeypatch):
     )
     usage = await _usage(_alternating(4, 100))
 
-    assert seen[0] == {"context_tokens": 8192, "memory_bound_tokens": None}
+    assert seen[0] == {
+        "context_tokens": 8192,
+        "memory_bound_tokens": None,
+        "spawn_cut_by_estimate": False,
+    }
     assert usage["window"]["allocated"] == 8192
     assert usage["window"]["working"] == 8192
     assert usage["window"]["reduced_by_memory"] is False
@@ -318,6 +345,7 @@ async def test_the_real_cpu_engine_read_path(monkeypatch):
         "allocated": 12_288,
         "trained": _TRAINED,
         "reduced_by_memory": True,
+        "cut_by_estimate": False,
         "model_loaded": True,
     }
     assert _Cpu._model is handle and set(handle) == {

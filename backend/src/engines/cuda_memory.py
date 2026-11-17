@@ -185,6 +185,9 @@ class VramWindow:
     # The VRAM budget, not the trained window nor a sliding-window
     # over-estimate, limits the window. The brake's cap never sets it.
     memory_bound: bool
+    # Cut below the trained window by the conservative sliding-window
+    # estimate, not by the VRAM budget (``SpawnWindow.cut_by_estimate``).
+    cut_by_estimate: bool
     kv_token_bytes: int
     weights_bytes: int
     vram_total_bytes: int
@@ -245,6 +248,7 @@ def _window(
     window: int,
     static_window: int,
     memory_bound: bool,
+    cut_by_estimate: bool = False,
     weights_bytes: int,
     vram_total_bytes: int,
     device_budget_bytes: int,
@@ -259,6 +263,7 @@ def _window(
         trained=shape.context_length,
         static_window=static_window,
         memory_bound=memory_bound,
+        cut_by_estimate=cut_by_estimate,
         kv_token_bytes=kv,
         weights_bytes=weights_bytes,
         vram_total_bytes=vram_total_bytes,
@@ -301,6 +306,7 @@ def window_for_vram(
         window=_capped(static, brake_cap),
         static_window=static,
         memory_bound=affordable < trained and not shape.swa_overestimated,
+        cut_by_estimate=affordable < trained and shape.swa_overestimated,
         weights_bytes=weights_bytes,
         vram_total_bytes=vram_total_bytes,
         device_budget_bytes=budget,
@@ -316,6 +322,7 @@ def respawn_window(
     vram_total_bytes: int,
     device_budget_bytes: int,
     memory_bound: bool,
+    cut_by_estimate: bool = False,
 ) -> Optional[VramWindow]:
     """The window of a brake respawn: the live child's static window folded
     with the cap, ``min(static, max(floor, cap))`` -- at worst the floor,
@@ -328,6 +335,7 @@ def respawn_window(
         window=window,
         static_window=static_window,
         memory_bound=memory_bound,
+        cut_by_estimate=cut_by_estimate,
         weights_bytes=weights_bytes,
         vram_total_bytes=vram_total_bytes,
         device_budget_bytes=device_budget_bytes,

@@ -164,6 +164,7 @@ class TestSpawnContextAndArgv:
         assert ctx["kv_token_bytes"] == 114_688
         assert ctx["weights_bytes"] == WEIGHTS
         assert ctx["spawn_memory_bound"] is False
+        assert ctx["spawn_cut_by_estimate"] is False
         assert ctx["vram_total_bytes"] == 16 * GIB
         assert ctx["fa_proven"] is True
         assert ctx["tok_embd_bytes"] == 300 * MIB
@@ -183,6 +184,16 @@ class TestSpawnContextAndArgv:
         ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
         assert ctx["ctx_size"] == 20_736
         assert ctx["spawn_memory_bound"] is True
+        assert ctx["spawn_cut_by_estimate"] is False
+
+    def test_a_sliding_window_cut_is_flagged_as_an_estimate_not_memory(self, gpu):
+        gemma = dataclasses.replace(QWEN3, context_length=131_072, sliding_window=1024)
+        gpu.inputs = (gemma, WEIGHTS)
+        gpu.device = _device(total=8 * GIB, free=int(6.5 * GIB))
+        ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert ctx["ctx_size"] < 131_072
+        assert ctx["spawn_memory_bound"] is False
+        assert ctx["spawn_cut_by_estimate"] is True
 
     def test_the_alias_window_memory_caps_a_load(self, gpu):
         CUDA_Engine._window_memory["erudi-9"] = {"cap": 20_480, "faulty": None, "at": time.time()}

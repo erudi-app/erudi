@@ -24,6 +24,7 @@ const usage = ({ categories = {}, window = {}, ...extra } = {}) => ({
     allocated: 8192,
     trained: 40960,
     reduced_by_memory: false,
+    cut_by_estimate: false,
     model_loaded: true,
     ...window,
   },
@@ -107,6 +108,28 @@ describe("ContextUsagePanel", () => {
     expect(notes()).toEqual([
       "The model supports up to 40,960 tokens; this computer's memory limits this conversation to 6,144.",
     ]);
+  });
+
+  it("says a conservative estimate, not the memory, cuts the window below the trained one", () => {
+    render(
+      <ContextUsagePanel
+        usage={usage({ window: { working: 6144, allocated: 6144, cut_by_estimate: true } })}
+        onDismiss={vi.fn()}
+      />
+    );
+    expect(notes()).toEqual([
+      "The model supports up to 40,960 tokens; this conversation works with 6,144 because Erudi's conservative estimate of the model's memory needs cuts the window, not this computer's memory.",
+    ]);
+  });
+
+  it("never shows the estimate note when the window is not below the trained one", () => {
+    render(
+      <ContextUsagePanel
+        usage={usage({ window: { working: 40960, allocated: 40960, cut_by_estimate: true } })}
+        onDismiss={vi.fn()}
+      />
+    );
+    expect(notes()).toEqual([]);
   });
 
   it("says a model that is not loaded is measured against its trained window", () => {

@@ -44,6 +44,18 @@ function windowNotes(usage, view, t, number) {
           })
         : t("chat:context.notes.reducedByMemoryNoTrained", { working: number(view.window) })
     );
+  } else if (window.cut_by_estimate) {
+    // The engine's conservative estimate cut the window, not this computer's
+    // memory: worded apart, and only when the window really is below the trained one.
+    const trained = Number(window.trained);
+    if (Number.isFinite(trained) && trained > view.window) {
+      notes.push(
+        t("chat:context.notes.cutByEstimate", {
+          trained: number(trained),
+          working: number(view.window),
+        })
+      );
+    }
   }
   if (usage.kb_excerpts_excluded) {
     notes.push(t("chat:context.notes.kbExcluded"));
@@ -147,6 +159,7 @@ ContextUsagePanel.propTypes = {
       allocated: PropTypes.number,
       trained: PropTypes.number,
       reduced_by_memory: PropTypes.bool,
+      cut_by_estimate: PropTypes.bool,
       model_loaded: PropTypes.bool,
     }).isRequired,
     kb_excerpts_excluded: PropTypes.bool,

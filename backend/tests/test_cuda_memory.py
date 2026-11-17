@@ -211,6 +211,26 @@ def test_mla_is_refused_and_swa_is_never_memory_bound():
     )
     assert swa.window < 131_072
     assert swa.memory_bound is False
+    # The cut is the conservative sliding-window estimate's, said apart.
+    assert swa.cut_by_estimate is True
+
+
+def test_the_estimate_flag_is_set_only_for_an_overestimated_sliding_window_cut():
+    roomy = dict(weights_bytes=GIB, vram_total_bytes=16 * GIB, vram_free_bytes=16 * GIB)
+    # Trained window affordable: nothing is cut.
+    swa_fits = cm.window_for_vram(_shape(sliding_window=1024), **roomy)
+    assert swa_fits.window == swa_fits.trained
+    assert swa_fits.cut_by_estimate is False
+    # A full-attention model cut by memory is memory-bound, not an estimate.
+    tight = dict(weights_bytes=int(2.5 * GIB), vram_total_bytes=8 * GIB, vram_free_bytes=8 * GIB)
+    full = cm.window_for_vram(_shape(context_length=131_072), **tight)
+    assert full.memory_bound is True and full.cut_by_estimate is False
+    # A sliding window as long as the trained one is not over-estimated.
+    same = cm.window_for_vram(_shape(sliding_window=131_072, context_length=131_072), **tight)
+    assert same.cut_by_estimate is False
+    # The brake's cap alone never sets the flag.
+    capped = cm.window_for_vram(_shape(sliding_window=1024), brake_cap=20_500, **roomy)
+    assert capped.window < capped.static_window and capped.cut_by_estimate is False
 
 
 def test_a_trained_window_under_the_floor_is_sized():

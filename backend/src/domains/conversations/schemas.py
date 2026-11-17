@@ -428,13 +428,18 @@ class ContextWindow(BaseModel):
     memory ceiling when this conversation's model is loaded
     (``model_loaded``), the trained window otherwise; ``None`` when neither is
     known. ``allocated`` exists only while the model is loaded;
-    ``reduced_by_memory`` says this computer's memory bounds it.
+    ``reduced_by_memory`` says this computer's memory bounds it;
+    ``cut_by_estimate`` says the window is below the trained one because of
+    the engine's conservative estimate of the model's memory needs (a
+    sliding-window model on the CUDA or CPU engine), not this computer's
+    memory. The two are never both true.
     """
 
     working: Optional[int] = None
     allocated: Optional[int] = None
     trained: Optional[int] = None
     reduced_by_memory: bool
+    cut_by_estimate: bool = False
     model_loaded: bool
 
 

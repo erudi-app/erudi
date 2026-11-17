@@ -2943,7 +2943,10 @@ class AgentRunner:
         and the auto-compaction reserve ``max(0, W - max(T, used))``, so the
         blocks add up to ``W`` while ``used <= W`` (``over_window`` past it).
         Unknown ``W``: both are 0. ``reduced_by_memory`` says the machine's
-        memory bounds the loaded child's window (``compaction_reason``).
+        memory bounds the loaded child's window (``compaction_reason``);
+        ``cut_by_estimate`` says the CUDA or CPU engine cut it below the
+        trained window by its conservative sliding-window estimate of the
+        model's memory needs (``spawn_cut_by_estimate``), memory not binding.
 
         The loaded child is read ONCE: its handle is taken, checked to serve
         this conversation's model (``loaded_child_for``) and to still be the
@@ -2962,7 +2965,7 @@ class AgentRunner:
             and bool(probe(getattr(llm, "id", None)))
             and getattr(engine, "_model", None) is handle
         )
-        allocated, working, reduced = None, None, False
+        allocated, working, reduced, estimated = None, None, False, False
         if loaded:
             budget = await run_in_threadpool(MemoryBudget.from_engine, engine, handle)
             allocated, working = self._fold_windows(
@@ -2974,6 +2977,12 @@ class AgentRunner:
                 else None
             )
             reduced = _compaction_reason_of(bound, working, allocated) == COMPACTION_REASON_MEMORY
+            # Cut by Erudi's conservative sliding-window estimate, apart from
+            # memory (``memory_bound_tokens`` stays the brake's criterion):
+            # the note shows only when memory is not what bounds the window.
+            estimated = (
+                bool(handle.get("spawn_cut_by_estimate")) and allocated is not None and not reduced
+            )
         window = working if _known_window(working) else trained
         overhead = request_overhead(system_prompt, None, "", tools)
         projection = project_next_request(
@@ -3012,6 +3021,7 @@ class AgentRunner:
                 "allocated": allocated,
                 "trained": trained,
                 "reduced_by_memory": reduced,
+                "cut_by_estimate": estimated,
                 "model_loaded": loaded,
             },
             "over_window": _known_window(window) and used > window,
