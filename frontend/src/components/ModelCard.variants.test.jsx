@@ -193,3 +193,17 @@ describe("ModelCard orphaned assistant (#225/#208)", () => {
     expect(screen.getByText("No installed base model available")).toBeTruthy();
   });
 });
+
+describe("ModelCard publication date (#561)", () => {
+  it("shows the month and year on a catalog card", () => {
+    render(
+      <ModelCard model={{ ...baseModel, publishedAt: "2026-03-04T10:00:00+00:00" }} type="base" />
+    );
+    expect(screen.getByText("Published March 2026")).toBeTruthy();
+  });
+
+  it("shows nothing when the date is unknown", () => {
+    render(<ModelCard model={{ ...baseModel, publishedAt: null }} type="base" />);
+    expect(screen.queryByText(/Published/)).toBeNull();
+  });
+});
