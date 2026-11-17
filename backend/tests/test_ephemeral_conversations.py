@@ -22,6 +22,7 @@ from sqlalchemy import text
 import src.agents.runner as agent_runner
 import src.domains.conversations.services as conversation_services
 from src.core import config
+from src.core.exceptions import ConversationNotFoundException
 from src.domains.conversations.ephemeral import (
     purge_ephemeral_conversations,
     purge_orphan_threads,
@@ -29,6 +30,7 @@ from src.domains.conversations.ephemeral import (
 from src.domains.conversations.repository import ConversationRepository
 from src.domains.conversations.schemas import ConversationQuery
 from src.domains.conversations.services import ConversationService
+from src.domains.conversations.turns import ConversationTurns, conversation_turns
 from src.engines.base_engine import BaseEngine
 from src.entities.Conversation import Conversation
 from src.entities.Message import Message
@@ -324,6 +326,135 @@ class TestDelete:
 
 
 # =====================================================================
+# The turn registry and the stream/delete race
+# =====================================================================
+
+
+class TestTurnRegistry:
+    async def test_closing_waits_for_an_open_turn(self):
+        turns = ConversationTurns()
+        turn = turns.begin(7)
+        assert turn is not None
+        entered = asyncio.Event()
+
+        async def close():
+            async with turns.closing(7):
+                entered.set()
+
+        closer = asyncio.create_task(close())
+        await asyncio.sleep(0.05)
+        assert not entered.is_set()
+
+        turns.end(7, turn)
+        await asyncio.wait_for(closer, 1)
+        assert entered.is_set()
+
+    async def test_a_turn_cannot_begin_while_its_conversation_closes(self):
+        turns = ConversationTurns()
+        async with turns.closing(7):
+            assert turns.begin(7) is None
+            # Another conversation is not concerned.
+            other = turns.begin(8)
+            assert other is not None
+            turns.end(8, other)
+        turn = turns.begin(7)
+        assert turn is not None
+        turns.end(7, turn)
+
+    async def test_closing_an_idle_conversation_does_not_wait(self):
+        turns = ConversationTurns()
+        async with asyncio.timeout(1):
+            async with turns.closing(7):
+                pass
+
+
+class TestStreamDeleteRace:
+    async def test_delete_waits_for_the_turn_and_nothing_is_written_after_it(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        """The renderer leaves an ephemeral conversation while its answer
+        streams: it aborts the query and sends the DELETE, which may arrive
+        before the backend has seen the disconnect. The DELETE waits for the
+        turn's persistence (its ``finally``, which runs after the generation
+        lock is released), then deletes: no row, no message, no thread is
+        left, and no write fails on a deleted row."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(
+            agent_runner,
+            "build_chat_model",
+            _fake_chat_model("one two three four five six seven eight nine ten"),
+        )
+        checkpointer = InMemorySaver()
+        streaming = ConversationService(test_db_session, checkpointer)
+        deleting = ConversationService(test_db_session, checkpointer)
+        conversation = streaming.create_conversation(llm_id=mock_llm.id, ephemeral=True)
+        conversation_id = conversation.id
+
+        stream = streaming.query_and_respond_stream(
+            conversation_id, ConversationQuery(question="Count to ten")
+        )
+        async for chunk in stream:
+            if '"answer"' in chunk:
+                break  # mid-answer: the user leaves now
+
+        delete = asyncio.create_task(deleting.delete_conversation(conversation_id))
+        await asyncio.sleep(0.1)
+        assert not delete.done(), "the delete must wait for the turn in flight"
+
+        # The disconnect reaches the stream: its finally persists the partial
+        # answer, then the turn ends.
+        await stream.aclose()
+        await asyncio.wait_for(delete, 5)
+
+        assert test_db_session.get(Conversation, conversation_id) is None
+        assert (
+            test_db_session.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .count()
+            == 0
+        )
+        assert await checkpointer.aget_tuple(_thread(conversation_id)) is None
+
+    async def test_a_turn_that_starts_during_the_delete_writes_nothing(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(agent_runner, "build_chat_model", _fake_chat_model("Late answer."))
+        checkpointer = InMemorySaver()
+        service = ConversationService(test_db_session, checkpointer)
+        conversation = service.create_conversation(llm_id=mock_llm.id, ephemeral=True)
+        conversation_id = conversation.id
+
+        async with conversation_turns.closing(conversation_id):
+            events = [
+                chunk
+                async for chunk in service.query_and_respond_stream(
+                    conversation_id, ConversationQuery(question="Too late")
+                )
+            ]
+
+        assert any('"error"' in e for e in events)
+        assert any('"done"' in e for e in events)
+        assert (
+            test_db_session.query(Message)
+            .filter(Message.conversation_id == conversation_id)
+            .count()
+            == 0
+        )
+        assert await checkpointer.aget_tuple(_thread(conversation_id)) is None
+
+    async def test_a_manual_compaction_during_the_delete_is_refused(
+        self, test_db_session, mock_llm
+    ):
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(llm_id=mock_llm.id, ephemeral=True)
+
+        async with conversation_turns.closing(conversation.id):
+            with pytest.raises(ConversationNotFoundException):
+                await service.compact_conversation(conversation.id)
+
+
+# =====================================================================
 # Title
 # =====================================================================
 
@@ -348,6 +479,23 @@ class TestTitle:
 
         assert streamed == []
         assert called == []
+        test_db_session.refresh(conversation)
+        assert conversation.name == "New Conversation"
+
+    async def test_a_title_for_a_deleted_conversation_writes_nothing(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(llm_id=mock_llm.id)
+        conversation_id = conversation.id
+
+        async with conversation_turns.closing(conversation_id):
+            streamed = [
+                t async for t in service.generate_title_stream(conversation_id, "What is AI?")
+            ]
+
+        assert streamed == []
         test_db_session.refresh(conversation)
         assert conversation.name == "New Conversation"
 

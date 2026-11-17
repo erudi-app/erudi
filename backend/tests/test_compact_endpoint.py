@@ -424,29 +424,38 @@ class _DeletingSummaryModel(_ScriptedSummaryModel):
             yield chunk
 
 
-def test_a_conversation_deleted_during_the_summary_is_a_404_and_leaves_no_thread(
-    client, test_db_session, mock_llm, monkeypatch, caplog
+async def test_a_delete_during_the_summary_waits_for_it_and_leaves_no_thread(
+    test_db_session, mock_llm, monkeypatch
 ):
-    conversation_id = _client_conversation(client, test_db_session, mock_llm)
-    checkpointer = client.app.state.checkpointer
+    """The user deletes the conversation while its summary runs: the delete
+    waits for the compaction to end (``src.domains.conversations.turns``),
+    then removes the rows and the thread the compaction rewrote."""
+    cp = InMemorySaver()
+    service = ConversationService(test_db_session, cp)
+    conversation = service.create_conversation(llm_id=mock_llm.id)
+    test_db_session.commit()
+    conversation_id = conversation.id
+    _rows(test_db_session, conversation_id, 2)
+    await _seed(cp, str(conversation_id), _exchanges(2))
+    deletes: list = []
 
     async def _delete():
-        await ConversationService(test_db_session, checkpointer).delete_conversation(
-            conversation_id
-        )
+        if not deletes:
+            deletes.append(
+                asyncio.create_task(
+                    ConversationService(test_db_session, cp).delete_conversation(conversation_id)
+                )
+            )
+        await asyncio.sleep(0.05)
+        assert not deletes[0].done(), "the delete must wait for the compaction"
 
     _Builds(monkeypatch, _DeletingSummaryModel(messages=iter([]), delete=_delete))
 
-    with caplog.at_level(logging.INFO):
-        response = client.post(f"/erudi/conversations/{conversation_id}/compact")
+    result = await service.compact_conversation(conversation_id)
+    await asyncio.wait_for(deletes[0], 5)
 
-    assert response.status_code == 404
-    assert response.json()["error"]["type"] == "CONVERSATION_NOT_FOUND"
-    assert not _records_from(caplog)
-    tuple_ = asyncio.run(
-        checkpointer.aget_tuple({"configurable": {"thread_id": str(conversation_id)}})
-    )
-    assert tuple_ is None
+    assert result["summarized"] > 0
+    assert await cp.aget_tuple({"configurable": {"thread_id": str(conversation_id)}}) is None
     test_db_session.expire_all()
     assert test_db_session.get(Conversation, conversation_id) is None
 

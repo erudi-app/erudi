@@ -41,11 +41,13 @@ from src.domains.conversations.repository import ConversationRepository, Message
 from src.domains.llms.conversation_defaults import SOURCE_SAVED, read_conversation_defaults
 from src.domains.llms.repository import detect_supports_vision
 from src.domains.conversations.schemas import ConversationQuery
+from src.domains.conversations.turns import conversation_turns
 from src.entities.Conversation import Conversation
 from src.entities.Llm import Llm
 from src.entities.Message import Message
 from src.core.exceptions import (
     CompactionSeparatorException,
+    ConversationNotFoundException,
     DatabaseException,
     ModelNotFoundException,
     StateConflictException,
@@ -388,13 +390,21 @@ class ConversationService:
         path is inside the app's pasted-images folder
         (``src.utils.pasted_images``), never a file the user picked from the
         disk, and never one another conversation still references.
+
+        Nothing is deleted while a turn, a title or a compaction still writes
+        to the conversation: the delete closes it first
+        (``src.domains.conversations.turns``), waiting for that work to end and
+        refusing new work, so no write lands after it -- an ephemeral
+        conversation left mid-answer included, whose turn persists its partial
+        answer after the generation lock is released.
         """
         logger.info(f"Deleting conversation {conversation_id}")
-        images = await run_in_threadpool(self._pasted_images_of, conversation_id)
-        await run_in_threadpool(self._delete_conversation_db, conversation_id)
-        await self._purge_thread(conversation_id)
-        if images:
-            await run_in_threadpool(self._remove_pasted_images, conversation_id, images)
+        async with conversation_turns.closing(conversation_id):
+            images = await run_in_threadpool(self._pasted_images_of, conversation_id)
+            await run_in_threadpool(self._delete_conversation_db, conversation_id)
+            await self._purge_thread(conversation_id)
+            if images:
+                await run_in_threadpool(self._remove_pasted_images, conversation_id, images)
 
     def _pasted_images_of(self, conversation_id: int) -> list[PastedImage]:
         contents = [
@@ -475,6 +485,35 @@ class ConversationService:
             return []
 
     async def query_and_respond_stream(
+        self,
+        conversation_id: int,
+        payload: ConversationQuery,
+    ) -> AsyncGenerator[str, None]:
+        """The turn of ``_stream_turn``, registered as work on the
+        conversation from its first statement to its last persistence
+        (``src.domains.conversations.turns``): a delete waits for it to end.
+
+        A conversation being deleted takes no new turn: the stream is the
+        ``error`` event and ``done``, and nothing is written.
+        """
+        turn = conversation_turns.begin(conversation_id)
+        if turn is None:
+            # The user left it (an ephemeral conversation) or deleted it: an
+            # outcome the client asked for, not a defect.
+            logger.info(f"Query refused: conversation {conversation_id} is being deleted")
+            yield _ndjson({"t": "error", "text": ERROR_MESSAGE, "request_id": get_request_id()})
+            yield _ndjson({"t": "done"})
+            return
+        try:
+            # ``aclosing``: closing this generator closes the turn's first, so
+            # its ``finally`` (the persistence) has run when the turn ends.
+            async with contextlib.aclosing(self._stream_turn(conversation_id, payload)) as lines:
+                async for line in lines:
+                    yield line
+        finally:
+            conversation_turns.end(conversation_id, turn)
+
+    async def _stream_turn(
         self,
         conversation_id: int,
         payload: ConversationQuery,
@@ -787,7 +826,27 @@ class ConversationService:
     ) -> AsyncGenerator[str, None]:
         """Stream an auto-generated 2-4 word title (stateless one-shot).
 
-        An ephemeral conversation (#428) never gets one."""
+        Registered as work on the conversation like a turn: a delete waits
+        for the title to be saved, and a conversation being deleted gets no
+        title. An ephemeral conversation (#428) never gets one."""
+        turn = conversation_turns.begin(conversation_id)
+        if turn is None:
+            logger.info(
+                f"Title generation skipped: conversation {conversation_id} is being deleted"
+            )
+            return
+        try:
+            async with contextlib.aclosing(self._title_stream(conversation_id, question)) as chunks:
+                async for chunk in chunks:
+                    yield chunk
+        finally:
+            conversation_turns.end(conversation_id, turn)
+
+    async def _title_stream(
+        self,
+        conversation_id: int,
+        question: str,
+    ) -> AsyncGenerator[str, None]:
         start_s = time.perf_counter()
         logger.info(
             f"Generating title for conversation {conversation_id}: "
@@ -1036,7 +1095,19 @@ class ConversationService:
         last answer read under the guard, once the checkpoint is rewritten. A
         separator that cannot be saved then raises
         ``CompactionSeparatorException`` (the history stays summarized).
+
+        Registered as work on the conversation like a turn: a delete waits
+        for it, and a conversation being deleted is a 404.
         """
+        turn = conversation_turns.begin(conversation_id)
+        if turn is None:
+            raise ConversationNotFoundException(conversation_id)
+        try:
+            return await self._compact(conversation_id)
+        finally:
+            conversation_turns.end(conversation_id, turn)
+
+    async def _compact(self, conversation_id: int) -> dict:
         conversation, llm = await run_in_threadpool(
             self._load_conversation_and_llm_read_only, conversation_id
         )
