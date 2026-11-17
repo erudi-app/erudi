@@ -258,24 +258,3 @@ def test_e5_embeddings_load_is_offline_when_available(
     E5Embeddings._get_model()
 
     assert spy_sentence_transformer.calls[0]["local_files_only"] is available
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("available", [True, False])
-def test_chunking_tokenizer_load_is_offline_when_available(monkeypatch, available):
-    import transformers
-
-    from src.ingestion import chunking
-
-    monkeypatch.setattr(chunking, "embedding_model_available", lambda: available)
-    monkeypatch.setattr(chunking, "_tokenizer", None)  # reset the resident singleton
-
-    calls = []
-    monkeypatch.setattr(
-        transformers.AutoTokenizer,
-        "from_pretrained",
-        lambda name, **kwargs: calls.append(kwargs) or "tokenizer",
-    )
-
-    assert chunking._get_tokenizer() == "tokenizer"
-    assert calls[0]["local_files_only"] is available

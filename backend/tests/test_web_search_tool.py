@@ -228,9 +228,8 @@ class TestWebSearchTool:
 
 
 class TestWebToolDoesNotLoadKbTokenizer:
-    """The privacy promise (docs/privacy.md): Hugging Face is contacted only
-    when the user accepts the knowledge-base embedding download. The web
-    tool must never trigger that fetch by loading the e5 tokenizer."""
+    """The web tool sizes its results with a byte estimate: it never loads
+    the e5 tokenizer (about 250 MB) that only knowledge-base chunking needs."""
 
     def test_format_web_tool_result_never_loads_the_e5_tokenizer(self, monkeypatch):
         def boom():

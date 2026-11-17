@@ -264,6 +264,23 @@ def test_specs_collect_docx_as_pyz_and_source_files():
 
 
 @pytest.mark.unit
+def test_every_spec_ships_the_frozen_e5_tokenizer():
+    # KB chunking and retrieval count tokens with the e5 tokenizer frozen in
+    # the repository; src/ingestion/chunking.py reads it at
+    # ROOT_DIR/src/ingestion/e5_tokenizer.json.gz, so a bundle without it at
+    # that path cannot ingest a document. backend-cpu.spec executes
+    # backend.spec, so the two Analysis inputs cover the three specs.
+    entry = (
+        'datas.append((str(spec_root / "src" / "ingestion" / "e5_tokenizer.json.gz"),'
+        ' "src/ingestion"))'
+    )
+    assert entry in _read("backend.spec")
+    assert entry in _read("backend-mac-silicon.spec")
+    assert "backend.spec" in _read("backend-cpu.spec")
+    assert (_BACKEND / "src" / "ingestion" / "e5_tokenizer.json.gz").is_file()
+
+
+@pytest.mark.unit
 def test_release_and_smoke_check_the_frozen_bundle_ships_the_docx_parts():
     # The spec option is only text; what proves it is the frozen tree on disk.
     # Both the release build and the boot gate run the check right after

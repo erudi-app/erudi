@@ -22,7 +22,7 @@ requirements/
 │                             #   + meta/build.txt, same file name (lock/win-cpu-prod.txt, …)
 ├── meta/
 │   ├── base.txt              # shared core: FastAPI, SQLAlchemy, pgserver,
-│   │                         #   langchain, sentence-transformers, transformers (pinned 5.14.1)
+│   │                         #   langchain, sentence-transformers, transformers (pinned 5.14.1), tokenizers
 │   ├── build.txt             # the build tool (PyInstaller); in no entrypoint, locked with each prod one
 │   ├── dev.txt               # pytest / ruff (linter + formatter) / mkdocs
 │   ├── cpu.txt               # CPU torch (official CPU index) + gguf — REUSED by the CUDA entrypoints
