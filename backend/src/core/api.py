@@ -77,9 +77,11 @@ from src.ingestion.vector_store import close_kb_store, init_kb_store
 from src.core.exceptions import (
     AppBaseException,
     app_base_exception_handler,
+    database_pool_timeout_handler,
     unhandled_exception_handler,
 )
 from src.core import config
+from sqlalchemy.exc import TimeoutError as SQLAlchemyPoolTimeout
 from src.core.request_context import new_request_id, request_id_var
 from src.engines.base_engine import BaseEngine, drain_pending_reset
 from src.engines.cuda_compatibility import cuda_preflight_notice
@@ -259,6 +261,8 @@ def add_exception_handlers(app: FastAPI) -> None:
     Registers custom exception handlers for application-level errors:
     - AppBaseException and its subclasses (ModelNotFoundException,
       InvalidInputException, EngineException, ...)
+    - SQLAlchemy's pool ``TimeoutError`` (every pooled connection in use
+      for the pool timeout) as a ``DATABASE_BUSY`` 503
     - plain Exception as a last-resort fallback, returning the same
       structured 500 JSON shape and logging the traceback with the
       request id.
@@ -283,6 +287,7 @@ def add_exception_handlers(app: FastAPI) -> None:
         See src.core.exceptions.app_base_exception_handler for response format.
     """
     app.add_exception_handler(AppBaseException, app_base_exception_handler)
+    app.add_exception_handler(SQLAlchemyPoolTimeout, database_pool_timeout_handler)
     app.add_exception_handler(Exception, unhandled_exception_handler)
 
 

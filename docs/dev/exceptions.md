@@ -60,6 +60,7 @@ All classes below live in `backend/src/core/exceptions.py`.
 | `HardwareException` | `(message, trace=None)` | 500 | `HARDWARE_ERROR` |
 | `UnsupportedPlatformException` | `(feature, reason, trace=None)` | 501 | `UNSUPPORTED_PLATFORM` |
 | `HuggingFaceAPIException` | `(message, trace=None)` | 503 | `HUGGINGFACE_API_ERROR` |
+| `DatabaseBusyException` | `(timeout_seconds, trace=None)` | 503 | `DATABASE_BUSY` |
 | `GenerationTimeoutException` | `(message, *, phase, budget_s, estimated_prompt_tokens=0, trace=None)` | 504 | `GENERATION_TIMEOUT` |
 | `InsufficientMemoryException` | `(operation, trace=None)` | 507 | `INSUFFICIENT_MEMORY` |
 
@@ -126,13 +127,19 @@ except Exception as e:
 
 ## The wire format
 
-Two handlers are registered in `add_exception_handlers`
+Three handlers are registered in `add_exception_handlers`
 (`backend/src/core/api.py`):
 
 ```python
 app.add_exception_handler(AppBaseException, app_base_exception_handler)
+app.add_exception_handler(SQLAlchemyPoolTimeout, database_pool_timeout_handler)
 app.add_exception_handler(Exception, unhandled_exception_handler)
 ```
+
+`database_pool_timeout_handler` turns SQLAlchemy's pool `TimeoutError` (every pooled
+connection in use for `POOL_TIMEOUT_SECONDS`, `src/launcher/postgres_settings.py`) into a
+`DatabaseBusyException`, a 503 `DATABASE_BUSY` written and logged by
+`app_base_exception_handler`, with the pool's own message as the trace.
 
 `app_base_exception_handler` responds with the exception's own status code:
 

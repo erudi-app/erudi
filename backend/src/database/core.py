@@ -51,6 +51,11 @@ from sqlalchemy.ext.declarative import declarative_base
 from sqlalchemy.orm import sessionmaker
 
 from src.core.logging import logger
+from src.launcher.postgres_settings import (
+    BUSINESS_POOL_MAX_OVERFLOW,
+    BUSINESS_POOL_SIZE,
+    POOL_TIMEOUT_SECONDS,
+)
 
 # Session factory — configured in place by init_database(). Safe to import.
 SessionLocal = sessionmaker(autocommit=False, autoflush=False)
@@ -89,7 +94,21 @@ def init_database(sqlalchemy_url: str) -> Engine:
         The live engine (also published as ``core.db_engine``).
     """
     global db_engine
-    db_engine = create_engine(sqlalchemy_url)
+    # A rebind (the DB watchdog restarting the cluster) replaces the engine:
+    # close the idle connections of the one it replaces, which would
+    # otherwise stay open until garbage collection, counted against the
+    # cluster's max_connections. A connection still checked out goes back to
+    # the old pool and closes with it once nothing references it.
+    if db_engine is not None:
+        db_engine.dispose()
+    # Sized by the connection budget the cluster's max_connections is
+    # computed from (src/launcher/postgres_settings.py).
+    db_engine = create_engine(
+        sqlalchemy_url,
+        pool_size=BUSINESS_POOL_SIZE,
+        max_overflow=BUSINESS_POOL_MAX_OVERFLOW,
+        pool_timeout=POOL_TIMEOUT_SECONDS,
+    )
     SessionLocal.configure(bind=db_engine)
     logger.info(f"Database bound: {_sanitize_url_for_log(sqlalchemy_url)}")
     return db_engine
