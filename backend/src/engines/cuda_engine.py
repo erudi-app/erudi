@@ -475,7 +475,6 @@ class CUDA_Engine(BaseLlamaCppEngine):
             vram_total_bytes=live["vram_total_bytes"],
             device_budget_bytes=live.get("device_budget_bytes"),
             memory_bound=bool(live.get("spawn_memory_bound")),
-            cut_by_estimate=bool(live.get("spawn_cut_by_estimate")),
         )
         if window is None:
             raise EngineException(message=f"KV cache of {model_path} not modelled at respawn")

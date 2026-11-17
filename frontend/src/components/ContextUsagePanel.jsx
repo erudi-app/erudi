@@ -56,6 +56,17 @@ function windowNotes(usage, view, t, number) {
         })
       );
     }
+  } else if (window.reduced_by_brake) {
+    // The memory brake's cap shrank the window the engine had sized.
+    const trained = Number(window.trained);
+    notes.push(
+      Number.isFinite(trained) && trained > view.window
+        ? t("chat:context.notes.reducedByBrake", {
+            trained: number(trained),
+            working: number(view.window),
+          })
+        : t("chat:context.notes.reducedByBrakeNoTrained", { working: number(view.window) })
+    );
   }
   if (usage.kb_excerpts_excluded) {
     notes.push(t("chat:context.notes.kbExcluded"));
@@ -160,6 +171,7 @@ ContextUsagePanel.propTypes = {
       trained: PropTypes.number,
       reduced_by_memory: PropTypes.bool,
       cut_by_estimate: PropTypes.bool,
+      reduced_by_brake: PropTypes.bool,
       model_loaded: PropTypes.bool,
     }).isRequired,
     kb_excerpts_excluded: PropTypes.bool,

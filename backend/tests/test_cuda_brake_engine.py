@@ -1580,6 +1580,19 @@ def test_an_oom_at_load_retries_once_at_the_floor(windows, caplog):
     assert "host" in warning.getMessage()
 
 
+def test_the_oom_retry_at_the_floor_is_not_the_estimates_cut(windows):
+    swa = shape_from_fields({**QWEN3_FIELDS, "context_length": 400_000, "sliding_window": 1024})
+    windows.inputs = (swa, WEIGHTS)
+    first = _load(windows)
+    assert first["spawn_cut_by_estimate"] is True
+    CUDA_Engine._model = None
+    windows.spawns.clear()
+    windows.probe_fail = [_oom()]
+    handle = _load(windows)
+    assert [s["ctx_size"] for s in windows.spawns][-1] == MIN_KV_BOUND_TOKENS
+    assert handle["spawn_cut_by_estimate"] is False
+
+
 def test_a_second_oom_is_the_load_error(windows):
     windows.probe_fail = [_oom(), _oom()]
     with pytest.raises(EngineException) as raised:

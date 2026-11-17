@@ -215,6 +215,29 @@ def test_mla_is_refused_and_swa_is_never_memory_bound():
     assert swa.cut_by_estimate is True
 
 
+def test_a_brake_cap_under_the_static_window_is_not_the_estimates_cut():
+    tight = dict(weights_bytes=int(2.5 * GIB), vram_total_bytes=8 * GIB, vram_free_bytes=8 * GIB)
+    swa = _shape(sliding_window=1024, context_length=131_072)
+    uncapped = cm.window_for_vram(swa, **tight)
+    assert uncapped.cut_by_estimate is True
+    capped = cm.window_for_vram(swa, brake_cap=4096, **tight)
+    assert capped.window == 4096 < capped.static_window
+    assert capped.cut_by_estimate is False
+    # The OOM retry's floor cap, and a respawn folding a cap under the static window.
+    floor = cm.window_for_vram(swa, brake_cap=MIN_KV_BOUND_TOKENS, **tight)
+    assert floor.cut_by_estimate is False
+    facts = dict(
+        static_window=uncapped.static_window,
+        weights_bytes=uncapped.weights_bytes,
+        vram_total_bytes=uncapped.vram_total_bytes,
+        device_budget_bytes=uncapped.device_budget_bytes,
+        memory_bound=False,
+    )
+    assert cm.respawn_window(swa, cap=4096, **facts).cut_by_estimate is False
+    assert cm.respawn_window(swa, cap=None, **facts).cut_by_estimate is True
+    assert cm.respawn_window(swa, cap=uncapped.static_window, **facts).cut_by_estimate is True
+
+
 def test_the_estimate_flag_is_set_only_for_an_overestimated_sliding_window_cut():
     roomy = dict(weights_bytes=GIB, vram_total_bytes=16 * GIB, vram_free_bytes=16 * GIB)
     # Trained window affordable: nothing is cut.

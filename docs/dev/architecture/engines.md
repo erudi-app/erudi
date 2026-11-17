@@ -383,7 +383,9 @@ passed as `-c`; `/props` reads it back.
   would fit (Gemma-3-4B on 16 GiB: about 66-71k tokens of its 131k) and its window is
   never reported as memory-bound, even when memory does bind it. The cut is reported apart:
   `cut_by_estimate` (`SpawnWindow` and `VramWindow`, stamped on the handle as
-  `spawn_cut_by_estimate`) is `affordable < trained` for such a shape, and `/context` words it as
+  `spawn_cut_by_estimate`) is `affordable < trained` for such a shape and a window the brake's cap
+  did not shrink (a cap under the static window, the out-of-memory retry's floor included, clears
+  it; a respawn recomputes it from the static window), and `/context` words it as
   the estimate's cut with no amber notice; `memory_bound` keeps driving the brake, the compaction
   reason and the overflow message. A GGUF whose header
   cannot be read (or a missing `gguf` package) is one WARNING and no `-c`.

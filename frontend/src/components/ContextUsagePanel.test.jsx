@@ -25,6 +25,7 @@ const usage = ({ categories = {}, window = {}, ...extra } = {}) => ({
     trained: 40960,
     reduced_by_memory: false,
     cut_by_estimate: false,
+    reduced_by_brake: false,
     model_loaded: true,
     ...window,
   },
@@ -110,7 +111,7 @@ describe("ContextUsagePanel", () => {
     ]);
   });
 
-  it("says a conservative estimate, not the memory, cuts the window below the trained one", () => {
+  it("says a cautious estimate of the model's memory needs cuts the window", () => {
     render(
       <ContextUsagePanel
         usage={usage({ window: { working: 6144, allocated: 6144, cut_by_estimate: true } })}
@@ -118,7 +119,33 @@ describe("ContextUsagePanel", () => {
       />
     );
     expect(notes()).toEqual([
-      "The model supports up to 40,960 tokens; this conversation works with 6,144 because Erudi's conservative estimate of the model's memory needs cuts the window, not this computer's memory.",
+      "The model supports up to 40,960 tokens; this conversation works with 6,144. Erudi sizes this model's window with a cautious estimate of its memory needs, so it may use less than this computer could hold.",
+    ]);
+  });
+
+  it("says the memory brake reduced the window when neither memory nor the estimate applies", () => {
+    render(
+      <ContextUsagePanel
+        usage={usage({ window: { working: 4096, allocated: 4096, reduced_by_brake: true } })}
+        onDismiss={vi.fn()}
+      />
+    );
+    expect(notes()).toEqual([
+      "The model supports up to 40,960 tokens; the memory brake reduced this conversation's window to 4,096 to free memory.",
+    ]);
+  });
+
+  it("shows only the memory note when memory and the brake flags are both set", () => {
+    render(
+      <ContextUsagePanel
+        usage={usage({
+          window: { working: 6144, reduced_by_memory: true, reduced_by_brake: true },
+        })}
+        onDismiss={vi.fn()}
+      />
+    );
+    expect(notes()).toEqual([
+      "The model supports up to 40,960 tokens; this computer's memory limits this conversation to 6,144.",
     ]);
   });
 

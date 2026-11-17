@@ -301,12 +301,14 @@ def window_for_vram(
     if affordable < min(trained, MIN_KV_BOUND_TOKENS):
         return None
     static = min(trained, affordable)
+    window = _capped(static, brake_cap)
     return _window(
         shape,
-        window=_capped(static, brake_cap),
+        window=window,
         static_window=static,
         memory_bound=affordable < trained and not shape.swa_overestimated,
-        cut_by_estimate=affordable < trained and shape.swa_overestimated,
+        # The estimate's cut, not a brake cap's shrink on top of it.
+        cut_by_estimate=(affordable < trained and shape.swa_overestimated and window == static),
         weights_bytes=weights_bytes,
         vram_total_bytes=vram_total_bytes,
         device_budget_bytes=budget,
@@ -322,20 +324,25 @@ def respawn_window(
     vram_total_bytes: int,
     device_budget_bytes: int,
     memory_bound: bool,
-    cut_by_estimate: bool = False,
 ) -> Optional[VramWindow]:
     """The window of a brake respawn: the live child's static window folded
     with the cap, ``min(static, max(floor, cap))`` -- at worst the floor,
     never above the static window (a trained window under the floor stays
     whole) -- with no VRAM reading in, so a series of respawns is
-    deterministic. The other facts carry over from the live child."""
+    deterministic. The other facts carry over from the live child; the estimate's
+    cut is recomputed (an over-estimated sliding window whose static window is
+    below the trained one, and no cap under it)."""
     window = _capped(static_window, cap)
     return _window(
         shape,
         window=window,
         static_window=static_window,
         memory_bound=memory_bound,
-        cut_by_estimate=cut_by_estimate,
+        cut_by_estimate=(
+            shape.swa_overestimated
+            and static_window < shape.context_length
+            and window == static_window
+        ),
         weights_bytes=weights_bytes,
         vram_total_bytes=vram_total_bytes,
         device_budget_bytes=device_budget_bytes,

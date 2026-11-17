@@ -515,6 +515,29 @@ class TestWindowsFitMargin:
         assert win661.list_calls == []
         assert _flag(_argv(**ctx), "-fitt") == "1024"
 
+    def test_a_respawn_under_the_static_window_is_not_the_estimates_cut(self, win661, monkeypatch):
+        swa = dataclasses.replace(QWEN3, context_length=131_072, sliding_window=1024)
+        monkeypatch.setattr(gguf_memory, "read_shape", lambda path: swa)
+        live = {
+            "alias": "erudi-9",
+            "window_sized": True,
+            "static_window_tokens": 66_048,
+            "weights_bytes": WEIGHTS,
+            "vram_total_bytes": TOTAL_661,
+            "device_budget_bytes": 8 * GIB,
+            "gpu_uuid": UUID,
+        }
+        capped = CUDA_Engine._prepare_spawn_context(
+            Path("/m.gguf"), "erudi-9", brake_cap=30_720, respawn_from=live
+        )
+        assert capped["ctx_size"] == 30_720
+        assert capped["spawn_cut_by_estimate"] is False
+        whole = CUDA_Engine._prepare_spawn_context(
+            Path("/m.gguf"), "erudi-9", brake_cap=70_000, respawn_from=live
+        )
+        assert whole["ctx_size"] == 66_048
+        assert whole["spawn_cut_by_estimate"] is True
+
     def test_linux_keeps_the_base_margin(self, win661, monkeypatch):
         """No WDDM: cudaMemGetInfo is the card's real free memory."""
         monkeypatch.setattr(platform, "system", lambda: "Linux")

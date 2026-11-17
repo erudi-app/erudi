@@ -369,7 +369,7 @@ def window_for(
         trained=trained,
         static_window=static,
         memory_bound=affordable < trained and not shape.swa_overestimated,
-        cut_by_estimate=affordable < trained and shape.swa_overestimated,
+        cut_by_estimate=(affordable < trained and shape.swa_overestimated and window == static),
         kv_token_bytes=kv,
         static_anonymous_bytes=(
             window * kv + LLAMA_COMPUTE_FIXED_BYTES + window * LLAMA_COMPUTE_PER_TOKEN_BYTES

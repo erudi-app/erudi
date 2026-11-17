@@ -2946,7 +2946,9 @@ class AgentRunner:
         memory bounds the loaded child's window (``compaction_reason``);
         ``cut_by_estimate`` says the CUDA or CPU engine cut it below the
         trained window by its conservative sliding-window estimate of the
-        model's memory needs (``spawn_cut_by_estimate``), memory not binding.
+        model's memory needs (``spawn_cut_by_estimate``), memory not binding;
+        ``reduced_by_brake`` says the memory brake's cap put the allocated
+        window under the one sized at spawn, neither of the others applying.
 
         The loaded child is read ONCE: its handle is taken, checked to serve
         this conversation's model (``loaded_child_for``) and to still be the
@@ -2965,7 +2967,7 @@ class AgentRunner:
             and bool(probe(getattr(llm, "id", None)))
             and getattr(engine, "_model", None) is handle
         )
-        allocated, working, reduced, estimated = None, None, False, False
+        allocated, working, reduced, estimated, braked = None, None, False, False, False
         if loaded:
             budget = await run_in_threadpool(MemoryBudget.from_engine, engine, handle)
             allocated, working = self._fold_windows(
@@ -2982,6 +2984,18 @@ class AgentRunner:
             # the note shows only when memory is not what bounds the window.
             estimated = (
                 bool(handle.get("spawn_cut_by_estimate")) and allocated is not None and not reduced
+            )
+            # The brake's cap put the window under the one Erudi sized at
+            # spawn (``static_window_tokens``, stamped by the llama.cpp
+            # engines; MLX stamps none): explained when neither memory nor
+            # the estimate is the note.
+            sized = _positive_window(handle.get("static_window_tokens"))
+            braked = (
+                allocated is not None
+                and sized is not None
+                and allocated < sized
+                and not reduced
+                and not estimated
             )
         window = working if _known_window(working) else trained
         overhead = request_overhead(system_prompt, None, "", tools)
@@ -3022,6 +3036,7 @@ class AgentRunner:
                 "trained": trained,
                 "reduced_by_memory": reduced,
                 "cut_by_estimate": estimated,
+                "reduced_by_brake": braked,
                 "model_loaded": loaded,
             },
             "over_window": _known_window(window) and used > window,

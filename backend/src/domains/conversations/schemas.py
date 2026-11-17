@@ -432,7 +432,9 @@ class ContextWindow(BaseModel):
     ``cut_by_estimate`` says the window is below the trained one because of
     the engine's conservative estimate of the model's memory needs (a
     sliding-window model on the CUDA or CPU engine), not this computer's
-    memory. The two are never both true.
+    memory; ``reduced_by_brake`` says the memory brake's cap put the
+    allocated window under the one sized at spawn. At most one of the three
+    is true.
     """
 
     working: Optional[int] = None
@@ -440,6 +442,7 @@ class ContextWindow(BaseModel):
     trained: Optional[int] = None
     reduced_by_memory: bool
     cut_by_estimate: bool = False
+    reduced_by_brake: bool = False
     model_loaded: bool
 
 

@@ -188,6 +188,23 @@ def test_a_sliding_window_model_is_never_memory_bound():
     assert window.cut_by_estimate is True
 
 
+def test_a_brake_cap_under_the_static_window_is_not_the_estimates_cut():
+    swa = _shape(sliding_window=1024)
+    uncapped = window_for(swa, weights_bytes=601 * MIB, total_ram_bytes=4 * GIB)
+    assert uncapped.cut_by_estimate is True and uncapped.static_window > 4096
+    capped = window_for(swa, weights_bytes=601 * MIB, total_ram_bytes=4 * GIB, brake_cap=4096)
+    assert capped.window == 4096 < capped.static_window
+    assert capped.cut_by_estimate is False
+    # A cap at or above the static window changes nothing.
+    loose = window_for(
+        swa,
+        weights_bytes=601 * MIB,
+        total_ram_bytes=4 * GIB,
+        brake_cap=uncapped.static_window,
+    )
+    assert loose.cut_by_estimate is True
+
+
 def test_the_estimate_flag_is_unset_without_an_overestimated_cut():
     roomy = window_for(
         _shape(sliding_window=1024), weights_bytes=601 * MIB, total_ram_bytes=64 * GIB

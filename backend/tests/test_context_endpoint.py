@@ -56,12 +56,15 @@ class _Engine(BaseEngine):
         return isinstance(cls._model, dict) and cls._model_id == llm_id
 
 
-def _load(llm_id=7, window=8192, bound=None, estimate=False):
+def _load(llm_id=7, window=8192, bound=None, estimate=False, static=None):
     _Engine._model = {
         "context_tokens": window,
         "memory_bound_tokens": bound,
         "spawn_cut_by_estimate": estimate,
     }
+    if static is not None:
+        # The window Erudi sized at spawn, without the brake's cap.
+        _Engine._model["static_window_tokens"] = static
     _Engine._model_id = llm_id
 
 
@@ -205,6 +208,7 @@ async def test_not_loaded_the_trained_window_is_the_denominator():
         "trained": _TRAINED,
         "reduced_by_memory": False,
         "cut_by_estimate": False,
+        "reduced_by_brake": False,
         "model_loaded": False,
     }
 
@@ -226,6 +230,7 @@ async def test_loaded_the_allocated_window_is_the_denominator():
         "trained": _TRAINED,
         "reduced_by_memory": False,
         "cut_by_estimate": False,
+        "reduced_by_brake": False,
         "model_loaded": True,
     }
 
@@ -235,6 +240,30 @@ async def test_loaded_and_cut_by_the_estimate_says_so_apart_from_memory():
     window = (await _usage(_alternating(4, 100)))["window"]
     assert window["cut_by_estimate"] is True
     assert window["reduced_by_memory"] is False
+
+
+async def test_a_window_the_brake_shrank_below_the_sized_one_says_so():
+    _load(window=4096, static=8192)
+    window = (await _usage(_alternating(4, 100)))["window"]
+    assert window["reduced_by_brake"] is True
+    assert window["reduced_by_memory"] is False
+    assert window["cut_by_estimate"] is False
+
+
+async def test_the_brake_flag_yields_to_the_memory_note_and_stays_off_otherwise():
+    # Not shrunk: the allocated window is the sized one.
+    _load(window=8192, static=8192)
+    assert (await _usage(_alternating(4, 100)))["window"]["reduced_by_brake"] is False
+    # No sized window on the handle (MLX, an unsized child): nothing to compare.
+    _load(window=4096)
+    assert (await _usage(_alternating(4, 100)))["window"]["reduced_by_brake"] is False
+    # Memory binds the window: its own note wins.
+    _load(window=4096, bound=4096, static=8192)
+    window = (await _usage(_alternating(4, 100)))["window"]
+    assert window["reduced_by_memory"] is True and window["reduced_by_brake"] is False
+    # Another model is loaded: not this conversation's window.
+    _load(llm_id=99, window=4096, static=8192)
+    assert (await _usage(_alternating(4, 100)))["window"]["reduced_by_brake"] is False
 
 
 async def test_the_estimate_flag_stays_off_when_not_loaded_or_memory_bound():
@@ -346,6 +375,7 @@ async def test_the_real_cpu_engine_read_path(monkeypatch):
         "trained": _TRAINED,
         "reduced_by_memory": True,
         "cut_by_estimate": False,
+        "reduced_by_brake": False,
         "model_loaded": True,
     }
     assert _Cpu._model is handle and set(handle) == {
