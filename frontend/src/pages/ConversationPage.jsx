@@ -75,6 +75,12 @@ const MEMORY_WARNING_KEYS = {
   pressure_external: "chat:memoryWarning.pressureExternal",
   gpu_contention: "chat:memoryWarning.gpuContention",
 };
+// Why an image of the thread is not shown, by the `reason` the main process's
+// image reader refused it for (utils/imageReader.js).
+const IMAGE_REFUSAL_KEYS = {
+  too_large: "chat:message.imageRefused.tooLarge",
+  not_image: "chat:message.imageRefused.notImage",
+};
 // The reload state's copy, by the `reason` of the `memory_reload` event.
 const RELOAD_COPY = {
   memory: "chat:message.memoryReload",
@@ -385,18 +391,23 @@ export default function ConversationPage() {
           // Marker paths are percent-encoded by the backend; decode before
           // touching the filesystem.
           const paths = getImagePaths(m.content);
-          const images = (
-            await Promise.all(
-              paths.map((p) =>
-                window.fsAPI.readImageAsDataURL(p).catch((error) => {
-                  // The message renders without this image: degraded, named.
-                  log.warn(`Could not reload the image attachment ${p}`, error);
-                  return null;
-                })
-              )
+          const results = await Promise.all(
+            paths.map((p) =>
+              window.fsAPI.readImageAsDataURL(p).catch((error) => {
+                // The message renders without this image: degraded, named.
+                log.warn(`Could not reload the image attachment ${p}`, error);
+                return null;
+              })
             )
-          ).filter(Boolean);
-          return { ...m, images };
+          );
+          const images = results.filter((r) => r?.ok).map((r) => r.dataUrl);
+          // Main refuses a file that is not an image or is over the size cap
+          // (utils/imageReader.js); the message says so where the image would
+          // be. A file that is simply gone keeps the plain placeholder.
+          const imageRefusals = results
+            .filter((r) => r && !r.ok && IMAGE_REFUSAL_KEYS[r.reason])
+            .map((r) => r.reason);
+          return { ...m, images, imageRefusals };
         })
       );
       if (!cancelled) setMessages(restored);
@@ -451,6 +462,7 @@ export default function ConversationPage() {
         const fetched = msgs.map((m, i) => ({
           ...m,
           images: (sameConv && prev[i]?.images) || m.images,
+          imageRefusals: (sameConv && prev[i]?.imageRefusals) || m.imageRefusals,
         }));
         return sameConv ? mergeFetchedMessages(prev, fetched) : fetched;
       });
@@ -925,6 +937,7 @@ export default function ConversationPage() {
           const fetched = msgs.map((m, i) => ({
             ...m,
             images: (sameConv && prev[i]?.images) || m.images,
+            imageRefusals: (sameConv && prev[i]?.imageRefusals) || m.imageRefusals,
           }));
           return sameConv ? mergeFetchedMessages(prev, fetched) : fetched;
         });
@@ -1472,7 +1485,10 @@ export default function ConversationPage() {
 
                   {/* Text bubble. Skipped for an attachment-only user message so
                       no empty bubble shows beneath the picture or the chips. */}
-                  {((!hasImages && !hasAttachments) || displayText || showTypingIndicator) && (
+                  {((!hasImages && !hasAttachments) ||
+                    displayText ||
+                    msg.imageRefusals?.length > 0 ||
+                    showTypingIndicator) && (
                     <div
                       className={`break-words w-fit max-w-[75%] p-4 rounded-2xl overflow-wrap break-word ${bubbleClass}`}
                     >
@@ -1492,12 +1508,20 @@ export default function ConversationPage() {
                         <div className="flex flex-col gap-2">
                           {/* Reloaded sessions without image bytes: placeholder
                               markers, only when there are no real images above. */}
+                          {msg.imageRefusals?.map((reason, i) => (
+                            <span
+                              key={`refused-${i}`}
+                              className="inline-flex items-center gap-1 text-xs text-[var(--ink-faint)] border border-[var(--line)] rounded px-2 py-0.5 w-fit"
+                            >
+                              {t(IMAGE_REFUSAL_KEYS[reason])}
+                            </span>
+                          ))}
                           {!hasImages &&
                             (() => {
-                              const fallbackCount = (
-                                msg.content.match(/\[image\]|\[image_path:[^\]]*\]/g) || []
-                              ).length;
-                              return Array.from({ length: fallbackCount }, (_, i) => (
+                              const fallbackCount =
+                                (msg.content.match(/\[image\]|\[image_path:[^\]]*\]/g) || [])
+                                  .length - (msg.imageRefusals?.length || 0);
+                              return Array.from({ length: Math.max(0, fallbackCount) }, (_, i) => (
                                 <span
                                   key={i}
                                   className="inline-flex items-center gap-1 text-xs text-[var(--ink-faint)] border border-[var(--line)] rounded px-2 py-0.5 w-fit"

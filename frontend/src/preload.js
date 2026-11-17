@@ -23,7 +23,9 @@ contextBridge.exposeInMainWorld("electron", {
   },
 });
 
-// Local filesystem image loader (for reloading image attachments from stored paths)
+// Local filesystem image loader (for reloading image attachments from stored
+// paths). Answers {ok: true, dataUrl} or {ok: false, reason}: main refuses a
+// file that is not an image or is over the size cap (utils/imageReader.js).
 contextBridge.exposeInMainWorld("fsAPI", {
   readImageAsDataURL: (filePath) => ipcRenderer.invoke("fs:readImageAsDataURL", filePath),
 });
@@ -32,12 +34,6 @@ contextBridge.exposeInMainWorld("fsAPI", {
 // its absolute path, so a pasted attachment survives reload like a file one (#136).
 contextBridge.exposeInMainWorld("imageAPI", {
   savePasted: (dataUrl) => ipcRenderer.invoke("image:savePasted", dataUrl),
-});
-
-// Expose additional API for data management
-contextBridge.exposeInMainWorld("electronAPI", {
-  openDataFolder: () => ipcRenderer.invoke("data:openFolder"),
-  clearAllData: () => ipcRenderer.invoke("data:clearAll"),
 });
 
 // Backend lifecycle bridge: forwards run.py / main.js "backend-event" messages

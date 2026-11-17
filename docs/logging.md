@@ -17,6 +17,8 @@ from the click in the UI down to the backend work it triggered.
 | `backend.log` | `backend/logs/backend.log` | macOS: `~/Library/Logs/erudi/backend.log` · Windows: `%LOCALAPPDATA%\erudi\logs\backend.log` · Linux: `${XDG_STATE_HOME:-~/.local/state}/erudi/logs/backend.log` |
 | `erudi-backend.log` | OS temp directory (same as packaged) | macOS: `$TMPDIR/erudi-backend.log` (run `echo $TMPDIR` in a terminal to resolve the folder) · Windows: `%TEMP%\erudi-backend.log` · Linux: `/tmp/erudi-backend.log` |
 
+With `ERUDI_DATA_ROOT` set, both files are in `<root>/logs/` (and the updater's `main.log` in `<root>/electron/logs/`), so an instance beside the installed app shares no log with it. *Help → Clear All Data* deletes every log above ([privacy.md](privacy.md#what-clear-all-data-removes)).
+
 ### Rotation
 
 - `backend.log` rotates at 10 MB and keeps up to 10 previous files (`backend.log.1` … `backend.log.10`).
