@@ -12,6 +12,7 @@ import Sidebar from "../components/Sidebar";
 import ChatCollapsibleSection from "../components/ChatCollapsibleSection";
 import QuestionInput from "../components/QuestionInput";
 import ConversationHeader from "../components/ConversationHeader";
+import { exportConversation } from "../utils/conversationExport";
 import UnloadModelButton from "../components/UnloadModelButton";
 import CommandPopups from "../components/CommandPopups";
 import CommandNotice from "../components/CommandNotice";
@@ -1099,6 +1100,17 @@ export default function ConversationPage() {
     }
   }, [messages]);
 
+  // Export this conversation as Markdown (#430): the save dialog is main's; a
+  // cancelled dialog is not a failure.
+  const exportThisConversation = async () => {
+    try {
+      await exportConversation(id, { t });
+    } catch (err) {
+      log.error("Conversation export failed", err);
+      alert(t("chat:export.failed", { error: err.message }));
+    }
+  };
+
   const handleConversationClick = (newId) => navigate(conversationPath(newId));
 
   const handleRename = (cid, newName) =>
@@ -1342,6 +1354,7 @@ export default function ConversationPage() {
               compactingHere ? ALL_COMMAND_NAMES : loading ? COMMANDS_DISABLED_WHILE_ANSWERING : []
             }
             onCommand={runCommand}
+            onExport={exportThisConversation}
             saveFailed={conversationSettings.saveFailed}
           >
             {/* Re-read the loaded model when a turn has completed (turnsEnded),

@@ -14,8 +14,9 @@ import { headerCommands } from "../utils/slashCommands";
  * settings icon that opens a panel with one button per command the page offers
  * (`commands`, from the slash-command registry, shown in its `headerOrder`),
  * labelled in words, never by slash name, each running the command exactly as
- * typing it does. What the page adds as children renders in the panel after
- * the command buttons.
+ * typing it does. `onExport` (#430) adds an "Export as Markdown" button after
+ * them: it is no command and has no slash form. What the page adds as children
+ * renders in the panel after the buttons.
  *
  * `attention` is the orphaned-conversation state (#225): the model is gone,
  * the line is replaced by a red "Please select a model" that is the picker's
@@ -31,6 +32,7 @@ export default function ConversationHeader({
   commands,
   disabledCommands = [],
   onCommand,
+  onExport,
   saveFailed = false,
   children,
 }) {
@@ -143,6 +145,19 @@ export default function ConversationHeader({
                     {t(`chat:commands.${command.name}.label`)}
                   </button>
                 ))}
+                {onExport && (
+                  <button
+                    type="button"
+                    onClick={onExport}
+                    className={[
+                      "inline-flex items-baseline rounded-xl px-3.5 py-2 text-sm font-semibold",
+                      "bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20",
+                      "text-gray-100 transition active:scale-95",
+                    ].join(" ")}
+                  >
+                    {t("chat:export.action")}
+                  </button>
+                )}
                 {children}
               </div>
             </motion.div>
@@ -167,6 +182,7 @@ ConversationHeader.propTypes = {
   ).isRequired,
   disabledCommands: PropTypes.arrayOf(PropTypes.string),
   onCommand: PropTypes.func.isRequired,
+  onExport: PropTypes.func,
   saveFailed: PropTypes.bool,
   children: PropTypes.node,
 };

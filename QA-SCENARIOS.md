@@ -550,7 +550,7 @@ the card only appears where the setting does something.*
 - [ ] When a download is in progress, then the bug icon is hidden; navigation stays enabled and the progress widget follows me across screens.
 - [ ] When I navigate to an unknown route, then I am redirected to the Models screen.
 - [ ] When I type in the **conversation search** field in the sidebar, then the history list turns into the conversations whose title or message text matches; text that appears only in a reasoning block finds nothing; clearing the field restores the list.
-- [ ] *(not built yet: v1.3.0, #430 — record as not applicable)* When I export a conversation (from its history row, or from the conversation header), then the save dialog lets me choose where, and the Markdown file holds the messages in order, with compactions marked; errors and the model's reasoning are left out.
+- [ ] When I export a conversation (from its history row, or from the conversation header), then the save dialog lets me choose where, and the Markdown file holds the messages in order, with compactions marked; errors and the model's reasoning are left out.
 
 ## Security — localhost hardening
 

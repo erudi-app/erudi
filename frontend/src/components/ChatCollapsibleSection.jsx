@@ -1,6 +1,15 @@
 import React, { useEffect, useState } from "react";
 import PropTypes from "prop-types";
-import { ChevronDown, ChevronRight, RefreshCcw, Plus, Edit3, Search, X } from "lucide-react";
+import {
+  ChevronDown,
+  ChevronRight,
+  Download,
+  RefreshCcw,
+  Plus,
+  Edit3,
+  Search,
+  X,
+} from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import ErrorModal from "./modals/ErrorModal";
@@ -8,6 +17,7 @@ import { API_BASE_URL } from "../config/api.js";
 import { tracedFetch } from "../services/api/client";
 import { createLogger } from "../utils/logger";
 import { conversationPath } from "../utils/routes";
+import { exportConversation } from "../utils/conversationExport";
 const log = createLogger("ChatCollapsibleSection");
 // Route of the new-chat screen (mirrors the Sidebar link).
 const CHAT_PATH = "/erudi/chat";
@@ -160,6 +170,17 @@ export default function ChatCollapsibleSection({
     }
   };
 
+  // The save dialog and the file belong to the main process; a cancelled dialog
+  // is not a failure.
+  const exportRow = async (id) => {
+    try {
+      await exportConversation(id, { t });
+    } catch (err) {
+      log.error(err);
+      alert(t("chat:export.failed", { error: err.message }));
+    }
+  };
+
   const renderItems = () => {
     if (loading) {
       return (
@@ -212,6 +233,15 @@ export default function ChatCollapsibleSection({
             )}
 
             <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-2 opacity-0 group-hover:opacity-100">
+              <Download
+                role="button"
+                aria-label={t("chat:export.action")}
+                onClick={(e) => {
+                  e.stopPropagation();
+                  exportRow(conv.id);
+                }}
+                className="w-4 h-4 text-gray-400 hover:text-gray-200 cursor-pointer"
+              />
               <Edit3
                 role="button"
                 aria-label={t("chat:history.renameConversation")}

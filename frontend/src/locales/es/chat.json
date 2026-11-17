@@ -17,6 +17,18 @@
     "noResults": "Ninguna conversación coincide.",
     "searchFailed": "La búsqueda ha fallado. Inténtalo de nuevo."
   },
+  "export": {
+    "action": "Exportar como Markdown",
+    "failed": "No se pudo exportar la conversación: {{error}}",
+    "user": "Tú",
+    "assistant": "Asistente",
+    "attachment": "Adjunto",
+    "image": "Imagen",
+    "created": "Iniciada el {{date}}",
+    "compaction_one": "Aquí se resumió {{count}} mensaje anterior.",
+    "compaction_other": "Aquí se resumieron {{count}} mensajes anteriores.",
+    "compactionNoCount": "Aquí se resumieron los mensajes anteriores."
+  },
   "header": {
     "chatWith": "Chatear con",
     "selectModel": "Seleccionar modelo",

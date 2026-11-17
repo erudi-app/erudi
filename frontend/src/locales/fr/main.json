@@ -28,6 +28,10 @@
       "title": "Données effacées",
       "message": "Toutes les données ont été supprimées.",
       "detail": "L'application va maintenant se fermer."
+    },
+    "exportConversation": {
+      "title": "Exporter la conversation",
+      "filter": "Markdown"
     }
   }
 }

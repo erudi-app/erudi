@@ -40,6 +40,15 @@ contextBridge.exposeInMainWorld("electronAPI", {
   clearAllData: () => ipcRenderer.invoke("data:clearAll"),
 });
 
+// Markdown export of one conversation (#430). The renderer hands over a title
+// and the text; the main process opens the save dialog and writes the file the
+// user picks. The bridge takes no path and returns none: {status} only, one of
+// "saved" | "cancelled" | "invalid" | "error".
+contextBridge.exposeInMainWorld("exportAPI", {
+  saveMarkdown: ({ title, text }) =>
+    ipcRenderer.invoke("conversation:saveMarkdown", { title, text }),
+});
+
 // Backend lifecycle bridge: forwards run.py / main.js "backend-event" messages
 // ({event: "starting"|"ready"|"shutdown"|"startup_error", code?, message?}) so the
 // renderer can show a real error instead of an endless loading spinner.

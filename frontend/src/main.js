@@ -32,6 +32,7 @@ const {
 const { describeProcessGone, formatMainRecord, stripAnsi } = require("./utils/mainLog");
 const { createBackendStartTracker, requestStop } = require("./utils/backendStartTracker");
 const { configureUpdater, createUpdaterWiring } = require("./utils/updaterWiring");
+const { createConversationSave } = require("./utils/conversationSave");
 
 // electron-updater: only loaded in production to avoid dev noise.
 // Reads latest.yml / latest-mac.yml from GitHub Releases and handles
@@ -1013,6 +1014,25 @@ ipcMain.handle(
     resolvedPort = null;
     startBackendSupervised();
     return { ok: true };
+  })
+);
+
+// Export one conversation as Markdown (#430). The renderer sends its title and
+// the text; main opens the save dialog itself and writes where the user chose.
+// No path comes from the renderer, and only the app window may ask.
+ipcMain.handle(
+  "conversation:saveMarkdown",
+  createConversationSave({
+    isTrustedSender: (event) =>
+      !!mainWindow && !mainWindow.isDestroyed() && event.sender === mainWindow.webContents,
+    showSaveDialog: (options) => dialog.showSaveDialog(mainWindow, options),
+    writeFile: (file, data, encoding) => fs.promises.writeFile(file, data, encoding),
+    getDefaultDirectory: () => app.getPath("documents"),
+    now: () => new Date(),
+    dialogTitle: () => t("dialogs.exportConversation.title"),
+    filterName: () => t("dialogs.exportConversation.filter"),
+    logWarn,
+    logError,
   })
 );
 

@@ -28,6 +28,10 @@
       "title": "Datos borrados",
       "message": "Todos los datos se han eliminado correctamente.",
       "detail": "La aplicación se cerrará ahora."
+    },
+    "exportConversation": {
+      "title": "Exportar la conversación",
+      "filter": "Markdown"
     }
   }
 }

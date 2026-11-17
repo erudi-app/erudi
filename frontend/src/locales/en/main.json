@@ -28,6 +28,10 @@
       "title": "Data Cleared",
       "message": "All data has been deleted successfully.",
       "detail": "The application will now quit."
+    },
+    "exportConversation": {
+      "title": "Export conversation",
+      "filter": "Markdown"
     }
   }
 }

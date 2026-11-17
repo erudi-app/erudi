@@ -17,6 +17,18 @@
     "noResults": "Aucune conversation ne correspond.",
     "searchFailed": "La recherche a échoué. Réessayez."
   },
+  "export": {
+    "action": "Exporter en Markdown",
+    "failed": "Impossible d'exporter la conversation : {{error}}",
+    "user": "Vous",
+    "assistant": "Assistant",
+    "attachment": "Pièce jointe",
+    "image": "Image",
+    "created": "Commencée le {{date}}",
+    "compaction_one": "{{count}} message précédent a été résumé ici.",
+    "compaction_other": "{{count}} messages précédents ont été résumés ici.",
+    "compactionNoCount": "Les messages précédents ont été résumés ici."
+  },
   "header": {
     "chatWith": "Discuter avec",
     "selectModel": "Sélectionner un modèle",

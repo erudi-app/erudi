@@ -542,7 +542,8 @@ disabled while an answer is being written and while a compaction runs, like `/mo
 can be offered, the open picker says to download one in Models or to re-bind the assistant in
 Knowledge Base. The settings icon opens a panel with one button per command (Model, Config, Effort,
 Compact, Context), labelled in words and never by slash name, each running that command exactly as
-typing it does. When the conversation's model was deleted, the whole line becomes a red "Please
+typing it does, followed by **Export as Markdown** (not a command: it has no slash form; see
+[Export as Markdown](#export-as-markdown)). When the conversation's model was deleted, the whole line becomes a red "Please
 select a model" that is the picker's button, and the composer is blocked; picking a model there, or
 with the panel's Model button, unblocks sending (Compact and Context then say to pick a model first
 and ask the backend nothing). The state is also announced in a polite live region, and the picker
@@ -766,9 +767,31 @@ before `/{conversation_id}`, which would otherwise take `search` for an id.
 
 In the app, the history list in the sidebar has a search field. Typing, after a pause of 300 ms,
 replaces the list with the matches (a "No conversation matches." line when there is none, a red
-line when the search fails); the matches open, rename and delete like any row. Emptying the
+line when the search fails); the matches open, rename, export and delete like any row. Emptying the
 field, its clear button or Escape brings the whole list back. Only the latest query's answer is
 shown.
+
+### Export as Markdown
+
+An open conversation exports from two places: the download icon on its history row (with rename and
+delete, on hover) and the **Export as Markdown** button of the conversation header's settings
+panel. Both run `frontend/src/utils/conversationExport.js`: it reads
+`GET /erudi/conversations/{id}`, writes the Markdown in the interface language
+(`utils/conversationMarkdown.js`, a pure function) and hands the title and the text to the Electron
+main process (`window.exportAPI.saveMarkdown`, the `conversation:saveMarkdown` channel). **Main**
+opens the save dialog (in the user's documents folder, proposing "`<title> <YYYY-MM-DD>`.md", the
+title made safe as a file name on every OS) and writes the text to the path the user chose. The
+renderer sends no path and receives none, only a status (`saved`, `cancelled`, `invalid`, `error`);
+main accepts requests from the app window alone, reads only a string title and a non-empty string
+text of at most 20 million characters, and never logs the text.
+
+The file holds the title, the start date, then the messages in order under a role heading
+(`## You`, `## Assistant`). A **compaction** is a separator (`---`, a line saying how many earlier
+messages were summarized, `---`) where it took over: before the answer of the turn that ran it, after
+the answer a `/compact` run was saved on. The summary itself is not written. **Left out**: the
+model's reasoning and tool activity, and the failed turns. **Named, not embedded**: an image is
+`> Image: <file name>` (`> Image` for a pasted one that has no file), an attached document is
+`> Attachment: <file name>`; no file path is written.
 
 ### Update a conversation
 

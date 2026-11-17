@@ -28,6 +28,10 @@
       "title": "数据已清除",
       "message": "所有数据已成功删除。",
       "detail": "应用现在将退出。"
+    },
+    "exportConversation": {
+      "title": "导出对话",
+      "filter": "Markdown"
     }
   }
 }
