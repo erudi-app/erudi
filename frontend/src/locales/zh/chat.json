@@ -10,7 +10,12 @@
     "deleteConfirmTitle": "确定要删除这个对话吗？",
     "deleteConfirmBody": "此操作无法撤销。",
     "renameFailed": "无法重命名对话，请重试：{{error}}",
-    "deleteFailed": "删除对话失败：{{error}}"
+    "deleteFailed": "删除对话失败：{{error}}",
+    "searchPlaceholder": "搜索对话",
+    "searchLabel": "搜索对话",
+    "clearSearch": "清除搜索",
+    "noResults": "没有匹配的对话。",
+    "searchFailed": "搜索失败，请重试。"
   },
   "header": {
     "chatWith": "聊天对象",

@@ -10,7 +10,12 @@
     "deleteConfirmTitle": "¿Seguro que quieres eliminar esta conversación?",
     "deleteConfirmBody": "Esta acción es irreversible.",
     "renameFailed": "No se pudo renombrar la conversación, inténtalo de nuevo: {{error}}",
-    "deleteFailed": "No se pudo eliminar la conversación: {{error}}"
+    "deleteFailed": "No se pudo eliminar la conversación: {{error}}",
+    "searchPlaceholder": "Buscar conversaciones",
+    "searchLabel": "Buscar conversaciones",
+    "clearSearch": "Borrar la búsqueda",
+    "noResults": "Ninguna conversación coincide.",
+    "searchFailed": "La búsqueda ha fallado. Inténtalo de nuevo."
   },
   "header": {
     "chatWith": "Chatear con",

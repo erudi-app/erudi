@@ -1,6 +1,6 @@
-import React, { useState } from "react";
+import React, { useEffect, useState } from "react";
 import PropTypes from "prop-types";
-import { ChevronDown, ChevronRight, RefreshCcw, Plus, Edit3, X } from "lucide-react";
+import { ChevronDown, ChevronRight, RefreshCcw, Plus, Edit3, Search, X } from "lucide-react";
 import { useNavigate } from "react-router-dom";
 import { useTranslation } from "react-i18next";
 import ErrorModal from "./modals/ErrorModal";
@@ -15,6 +15,9 @@ const CHAT_PATH = "/erudi/chat";
 // greeting, a title that did not come out); shown translated, so the stored
 // name stays right when the interface language changes.
 const DEFAULT_CONVERSATION_NAME = "New Conversation";
+// How long the search field waits for a pause in the typing before it asks the
+// backend (#429).
+export const SEARCH_DEBOUNCE_MS = 300;
 
 ChatCollapsibleSection.propTypes = {
   title: PropTypes.string.isRequired,
@@ -63,6 +66,53 @@ export default function ChatCollapsibleSection({
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [pendingDeleteId, setPendingDeleteId] = useState(null);
   const [errorMessage, setErrorMessage] = useState("");
+  // The search (#429). `outcome` is what the backend answered for the text it
+  // was asked about -- `{ text, rows }` or `{ text, failed }` -- and counts only
+  // while that text is still what is typed: the results replace the list, and
+  // an emptied field brings the list back.
+  const [query, setQuery] = useState("");
+  const [outcome, setOutcome] = useState(null);
+  const typed = query.trim();
+  const current = outcome && outcome.text === typed ? outcome : null;
+  const results = current?.rows ?? null;
+  const searchFailed = !!current?.failed;
+
+  useEffect(() => {
+    if (!typed) {
+      return undefined;
+    }
+    // A newer query (or an unmount) retires this one, so a slow answer never
+    // overwrites the results of what is typed now.
+    let live = true;
+    const timer = setTimeout(async () => {
+      try {
+        const res = await tracedFetch(
+          `${API_BASE_URL}/conversations/search?q=${encodeURIComponent(typed)}`
+        );
+        if (!res.ok) {
+          throw new Error(res.status);
+        }
+        const rows = await res.json();
+        if (live) {
+          setOutcome({ text: typed, rows });
+        }
+      } catch (err) {
+        if (live) {
+          log.error("Conversation search failed", err);
+          setOutcome({ text: typed, failed: true });
+        }
+      }
+    }, SEARCH_DEBOUNCE_MS);
+    return () => {
+      live = false;
+      clearTimeout(timer);
+    };
+  }, [typed]);
+
+  const changeResults = (change) =>
+    setOutcome((prev) => (prev?.rows ? { ...prev, rows: change(prev.rows) } : prev));
+
+  const shown = results ?? items;
 
   const renameConversation = async (id, name) => {
     try {
@@ -75,6 +125,7 @@ export default function ChatCollapsibleSection({
       if (!res.ok) {
         throw new Error(res.status);
       }
+      changeResults((rows) => rows.map((c) => (c.id === id ? { ...c, name } : c)));
       onRename?.(id, name);
     } catch (err) {
       log.error(err);
@@ -99,6 +150,7 @@ export default function ChatCollapsibleSection({
         throw new Error("Delete failed");
       }
 
+      changeResults((rows) => rows.filter((c) => c.id !== id));
       onDelete?.(id);
     } catch (err) {
       log.error(err);
@@ -117,8 +169,8 @@ export default function ChatCollapsibleSection({
       );
     }
 
-    if (items.length > 0) {
-      return items.map((conv) => {
+    if (shown.length > 0) {
+      return shown.map((conv) => {
         const isSelected = selectedId === conv.id;
         const isEditing = editingId === conv.id;
 
@@ -186,7 +238,11 @@ export default function ChatCollapsibleSection({
       });
     }
 
-    return <p className="italic">{t("chat:history.empty")}</p>;
+    return (
+      <p className="italic">
+        {results !== null ? t("chat:history.noResults") : t("chat:history.empty")}
+      </p>
+    );
   };
 
   const closeErrorModal = () => {
@@ -245,10 +301,48 @@ export default function ChatCollapsibleSection({
         </div>
       </div>
 
+      {open && (
+        <div className="px-4 pb-2 flex-shrink-0">
+          <div className="relative">
+            <Search
+              aria-hidden="true"
+              className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 pointer-events-none"
+            />
+            <input
+              type="search"
+              value={query}
+              onChange={(e) => setQuery(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === "Escape") {
+                  setQuery("");
+                }
+              }}
+              maxLength={200}
+              placeholder={t("chat:history.searchPlaceholder")}
+              aria-label={t("chat:history.searchLabel")}
+              className="w-full rounded-md bg-gray-700/40 py-1.5 pl-9 pr-8 text-sm text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-emerald-400 [&::-webkit-search-cancel-button]:hidden"
+            />
+            {query && (
+              <X
+                role="button"
+                aria-label={t("chat:history.clearSearch")}
+                onClick={() => setQuery("")}
+                className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 hover:text-gray-200 cursor-pointer"
+              />
+            )}
+          </div>
+        </div>
+      )}
+
       <div
         className={`grid transition-all duration-300 ease-in-out flex-1 min-h-0 ${open ? "grid-rows-[1fr] opacity-100" : "grid-rows-[0fr] opacity-0"} `}
       >
         <div className="px-4 py-2 overflow-y-auto overflow-x-visible custom-scroll">
+          {searchFailed && (
+            <p role="alert" className="mb-2 italic text-red-300">
+              {t("chat:history.searchFailed")}
+            </p>
+          )}
           {renderItems()}
         </div>
       </div>

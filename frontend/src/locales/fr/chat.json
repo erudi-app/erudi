@@ -10,7 +10,12 @@
     "deleteConfirmTitle": "Voulez-vous vraiment supprimer cette conversation ?",
     "deleteConfirmBody": "Cette action est irréversible.",
     "renameFailed": "Impossible de renommer la conversation, réessayez : {{error}}",
-    "deleteFailed": "La suppression de la conversation a échoué : {{error}}"
+    "deleteFailed": "La suppression de la conversation a échoué : {{error}}",
+    "searchPlaceholder": "Rechercher dans les conversations",
+    "searchLabel": "Rechercher dans les conversations",
+    "clearSearch": "Effacer la recherche",
+    "noResults": "Aucune conversation ne correspond.",
+    "searchFailed": "La recherche a échoué. Réessayez."
   },
   "header": {
     "chatWith": "Discuter avec",

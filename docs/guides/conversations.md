@@ -745,8 +745,30 @@ curl http://127.0.0.1:27182/erudi/conversations/42/fetch_messages
 Each `MessageResponse` carries `id`, `conversation_id`, `sender` (`user`, `assistant` or `llm`),
 `content`, `timestamp`, `starred`, and the optional `trace` described above.
 
-`GET /erudi/conversations/` lists conversations without their messages;
+`GET /erudi/conversations/` lists conversations without their messages (and
+`GET /erudi/conversations/search?q=` finds some, see [Search the history](#search-the-history));
 `GET /erudi/conversations/{id}` returns the conversation with its full message list.
+
+### Search the history
+
+```bash
+curl 'http://127.0.0.1:27182/erudi/conversations/search?q=zeppelin'
+```
+
+Returns the conversations (the same rows as `GET /erudi/conversations/`) whose **title** or whose
+**message text** contains `q`, newest first, at most 50. The match is a case-insensitive substring
+(`ILIKE`); the `%`, `_` and `\` the user types are taken literally (`ESCAPE`), so `100%` finds
+"100%" and never "1000". Only `messages.content` is searched: the model's reasoning lives in the
+message's `trace`, so text that appears only in a reasoning block finds nothing, and a failed turn
+(the `[ERROR_MESSAGE_SYSTEM]` line) is not conversation text and never matches. A blank `q` matches
+nothing; `q` is required and holds at most 200 characters (422 otherwise). The route is declared
+before `/{conversation_id}`, which would otherwise take `search` for an id.
+
+In the app, the history list in the sidebar has a search field. Typing, after a pause of 300 ms,
+replaces the list with the matches (a "No conversation matches." line when there is none, a red
+line when the search fails); the matches open, rename and delete like any row. Emptying the
+field, its clear button or Escape brings the whole list back. Only the latest query's answer is
+shown.
 
 ### Update a conversation
 
