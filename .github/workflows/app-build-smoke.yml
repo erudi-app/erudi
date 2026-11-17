@@ -71,6 +71,25 @@ jobs:
       - name: Install backend dependencies
         run: bash scripts/ci/install_backend_requirements.sh backend/requirements/entrypoints/prod/${{ matrix.reqs }}
 
+      # ── Windows/Linux: the KB embedding GGUF the installers bundle (#594),
+      #    so the smoke freezes and boots what a release ships. Restored from
+      #    the cache the release workflow shares; on a miss the conversion
+      #    needs the llama.cpp submodule (converter + gguf-py), fetched only
+      #    then — the smoke checkout skips submodules.
+      - name: Restore the KB embedding GGUF (cache)
+        if: runner.os != 'macOS'
+        id: e5-gguf-cache
+        uses: actions/cache@v4
+        with:
+          path: backend/artifacts/kb-embedder
+          key: e5-gguf-${{ runner.os }}-${{ hashFiles('scripts/dev/backend/build_e5_gguf.py', 'scripts/dev/backend/e5-conversion.patch') }}
+
+      - name: Produce the KB embedding GGUF
+        if: runner.os != 'macOS' && steps.e5-gguf-cache.outputs.cache-hit != 'true'
+        run: |
+          git submodule update --init backend/forks/llama-cpp
+          python scripts/dev/backend/build_e5_gguf.py
+
       - name: Build frozen backend (PyInstaller)
         env:
           # This gate proves the backend boots to `ready`; it does not compile

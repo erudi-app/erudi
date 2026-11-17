@@ -49,6 +49,37 @@ needs `git submodule sync --recursive` first).
 macOS does not need it: inference there goes through MLX, which is a pip
 dependency.
 
+### The KB embedding GGUF (Windows and Linux)
+
+The Knowledge Base embedding child on Windows and Linux is the bundled CPU
+`llama-server --embedding` serving `multilingual-e5-small` as a Q8_0 GGUF
+(#594). That file ships **inside** the installers at
+`backend/artifacts/kb-embedder/multilingual-e5-small-q8_0.gguf` and is never
+downloaded at runtime. It is not committed and not fetched from anywhere:
+every build converts it reproducibly from the pinned e5 snapshot
+(`614241f6…`, the exact weights every existing Knowledge Base was embedded
+with) —
+
+```bash
+python scripts/dev/backend/build_e5_gguf.py        # backend venv, repo root
+```
+
+The script needs the llama.cpp submodule (its converter and `gguf-py`) and
+the backend venv (torch, transformers, sentencepiece). Community e5 GGUFs
+carry a wrong WordPiece vocab, and the pinned converter refuses the model
+outright, so the script copies the conversion toolchain to a scratch
+directory and applies `scripts/dev/backend/e5-conversion.patch` there — the
+submodule itself is never modified. The result's sha256 is pinned in the
+script and verified on every run; after a deliberate change (new revision,
+new patch), re-pin with `--print-sha` and re-measure parity
+(`scripts/dev/backend/capture_e5_golden.py`,
+`backend/tests/test_llama_embedder_real.py`). In CI (`release.yml`,
+`app-build-smoke.yml`) the produced file is cached on the script+patch hash,
+so the conversion is paid once per change and OS. Both Windows/Linux specs
+refuse to build without the file (same `ERUDI_ALLOW_MISSING_INFERENCE_BINARY`
+opt-out as a missing `llama-server`); a dev run without it degrades to the
+missing-embedding-model state on every Knowledge Base path.
+
 ### PyInstaller specs
 
 | Spec | Target |
@@ -139,6 +170,7 @@ both already compiled, each with its runtime DLLs beside it:
 ```powershell
 .\scripts\dev\backend\build-llamacpp-cuda-win.ps1   # artifacts\llama-cpp\cuda\bin
 .\scripts\dev\backend\build-llamacpp-cpu-win.ps1    # artifacts\llama-cpp\cpu\bin
+py -3.12 scripts\dev\backend\build_e5_gguf.py       # artifacts\kb-embedder (KB embedding GGUF)
 ```
 
 Both scripts find Visual Studio through `vswhere` — under

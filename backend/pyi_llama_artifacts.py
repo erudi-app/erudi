@@ -17,6 +17,15 @@ What ships, per build variant (`ERUDI_BUILD_VARIANT`):
 
 Each flavour lands in its own directory: a Windows executable loads the DLLs
 beside it first, so the CPU copy never sees the CUDA runtime.
+
+Both variants also bundle ``artifacts/kb-embedder/multilingual-e5-small-q8_0.gguf``
+(#594): the Knowledge Base embedding child on Windows/Linux is the CPU
+``llama-server --embedding`` serving that file, produced reproducibly by
+``scripts/dev/backend/build_e5_gguf.py`` and never downloaded at runtime. A
+build without it would gate every Knowledge Base on a download that does not
+exist, so its absence fails the build like a missing server, under the same
+``allow_missing`` opt-out (the boot-only smoke). macOS bundles neither: its
+embedding child serves the downloadable snapshot.
 """
 
 from __future__ import annotations
@@ -26,6 +35,11 @@ from pathlib import Path
 from typing import List, Tuple
 
 _FLAVOURS = {"cuda": ("cuda", "cpu"), "cpu": ("cpu",)}
+
+#: The KB embedding GGUF every Windows/Linux installer carries (#594) and
+#: the script that produces it (named by the build failure).
+_E5_GGUF = Path("artifacts") / "kb-embedder" / "multilingual-e5-small-q8_0.gguf"
+_E5_GGUF_SCRIPT = "scripts/dev/backend/build_e5_gguf.py"
 
 
 @dataclass
@@ -63,12 +77,19 @@ def collect_llama_artifacts(
         return out
 
     exe = "llama-server.exe" if os_tag == "win" else "llama-server"
-    missing: List[Tuple[str, Path]] = []
+    # (what is missing, its path, the command that produces it)
+    missing: List[Tuple[str, Path, str]] = []
+
+    gguf = Path(root) / _E5_GGUF
+    if gguf.exists():
+        out.datas.append((str(gguf), str(_E5_GGUF.parent).replace("\\", "/")))
+    else:
+        missing.append(("the KB embedding GGUF", gguf, f"python {_E5_GGUF_SCRIPT}"))
     for flavour in _FLAVOURS[variant]:
         bindir = Path(root) / "artifacts" / "llama-cpp" / flavour / "bin"
         server = bindir / exe
         if not server.exists():
-            missing.append((flavour, server))
+            missing.append((f"the {flavour} llama-server", server, _build_script(flavour, os_tag)))
             continue
         dest = f"artifacts/llama-cpp/{flavour}/bin"
         # Only the inference server ships. The HF -> GGUF conversion toolchain
@@ -81,18 +102,19 @@ def collect_llama_artifacts(
         out.runtime_files += [(f"{dest}/{f.name}", str(f)) for f in sorted(bindir.glob("*.dll"))]
 
     if missing and not allow_missing:
-        # A bundle without these binaries is an app that loads a model and
-        # then fails at the first message (or, for the CPU flavour, whose
-        # "Processor only" setting runs the CUDA build), and nothing
-        # downstream would catch it. Fail here, where the cause is legible.
-        lines = "\n".join(
-            f"    {server}  <- {_build_script(flavour, os_tag)}" for flavour, server in missing
-        )
+        # A bundle without these files is an app that loads a model and then
+        # fails at the first message (or, for the CPU flavour, whose
+        # "Processor only" setting runs the CUDA build; or, for the GGUF,
+        # whose Knowledge Base is gated on a download that does not exist),
+        # and nothing downstream would catch it. Fail here, where the cause
+        # is legible.
+        lines = "\n".join(f"    {path}  <- {producer}" for _what, path, producer in missing)
+        names = ", ".join(what for what, _path, _producer in missing)
         raise RuntimeError(
-            f"llama-server missing for the {variant} build. The frozen backend would ship "
-            f"without its inference engine. Compile it first:\n{lines}\n"
+            f"Missing for the {variant} build: {names}. The frozen backend would ship "
+            f"without them. Produce them first:\n{lines}\n"
             f"Set ERUDI_ALLOW_MISSING_INFERENCE_BINARY=1 only for a build that is never "
             f"released (the boot-only smoke gate)."
         )
-    out.skipped = [str(server) for _flavour, server in missing]
+    out.skipped = [str(path) for _what, path, _producer in missing]
     return out

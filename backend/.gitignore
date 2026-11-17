@@ -193,6 +193,9 @@ data/db/
 
 # Builds and artifacts
 artifacts/llama-cpp/
+# The KB embedding GGUF (#594): produced by scripts/dev/backend/build_e5_gguf.py,
+# bundled by the specs, never committed.
+artifacts/kb-embedder/
 forks/llama-cpp/build-*/
 
 # End of https://www.toptal.com/developers/gitignore/api/python
