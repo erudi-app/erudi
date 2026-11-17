@@ -468,29 +468,38 @@ def test_gate_cl0_points_stay_under_the_prediction_of_their_window():
     """The budget invariant at the cache limit the child runs with (0): every
     clean turn of the campaign -- a small one right after a large one
     included -- stays under ``predict`` of the largest request the window was
-    sized for, ``max(N, N_prev)``. Measured with the prior recorded as is for
-    this configuration, conservative by about 2x there (median ratio 0.48)."""
-    ratios = []
+    sized for, ``max(N, N_prev)``, by at least the prior's own margin ``m``
+    (a ratio of ``1 / m`` at most: the prediction without its margin still
+    holds every point)."""
+    worst = 0.0
     for key, budget, measured, _residue in _gate_cl0():
         _model, _step, _kind, n, n_prev = key
-        assert measured < budget.predict(max(n, n_prev or 0)), key
-        ratios.append(measured / budget.predict(n))
-    ratios.sort()
-    assert ratios[len(ratios) // 2] < 0.6
+        ratio = measured / budget.predict(max(n, n_prev or 0))
+        assert ratio <= 1 / PRIOR_MARGIN, key
+        worst = max(worst, ratio)
+    assert worst > 0.5  # the data does reach the prediction's range
+
+
+def test_the_limit0_prior_is_conservative_by_about_2x():
+    """What the docs say of the prior at cache limit 0: the median clean
+    point uses about half its own prediction."""
+    ratios = sorted(measured / budget.predict(key[3]) for key, budget, measured, _ in _gate_cl0())
+    assert 0.4 < ratios[len(ratios) // 2] < 0.6
 
 
 def test_gate_cl0_points_stay_under_their_own_prediction_once_the_residue_is_set_aside():
     """A small turn right after a large one can exceed ``predict(N)`` at its
     own size by what the large turn left in the child: set that residue
     aside, as the exceeded-prediction WARNING does, and every point is under
-    its own prediction. The residue stays out of the admission."""
+    its own prediction by at least the prior's margin ``m``. The residue
+    stays out of the admission."""
     over_own = 0
     for key, budget, measured, residue_gib in _gate_cl0():
         n = key[3]
         if measured >= budget.predict(n):
             over_own += 1
         residue = (residue_gib or 0.0) * GIB
-        assert measured - residue < budget.predict(n), key
+        assert (measured - residue) / budget.predict(n) <= 1 / PRIOR_MARGIN, key
     # The case the residue is set aside for is in the data.
     assert over_own > 0
 
