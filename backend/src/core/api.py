@@ -90,6 +90,7 @@ from src.domains.llms.endpoints import router as llms_router
 from src.domains.llms.services import stop_active_downloads
 from src.domains.arena.endpoints import router as arena_router
 from src.domains.conversations.endpoints import router as conversations_router
+from src.domains.conversations.ephemeral import purge_at_shutdown, sweep_at_start
 from src.domains.hardware.endpoints import router as hardware_router
 from src.domains.knowledge_base.endpoints import router as knowledge_base_router
 from src.domains.startup.endpoints import router as startup_router
@@ -449,6 +450,14 @@ async def _start_services(app: FastAPI, _phase) -> None:
     # swap this CM (#162), so publish it on app.state and let shutdown close the
     # LIVE one rather than this now-possibly-stale local.
     app.state.checkpointer_cm = checkpointer_cm
+    # Ephemeral conversations left over by a crash or a force-quit, and the
+    # checkpointer threads whose conversation is gone (#428), before the
+    # first request. A failed sweep does not stop the start: the leftovers
+    # stay hidden from the history and the next start tries again.
+    try:
+        await sweep_at_start(app.state.checkpointer)
+    except Exception as exc:
+        logger.error(f"Startup sweep of ephemeral conversations failed: {exc}", exc_info=exc)
     config.LLM_Engine.start_cleanup_task()
     # The memory brake's idle samples (every engine binds one).
     config.LLM_Engine.start_pressure_task()
@@ -533,14 +542,17 @@ async def lifespan(app: FastAPI):
            unload delay to the engine that won, and run the CUDA pre-flight
            (apply_inference_backend_preference / apply_idle_unload_preference
            / emit_engine_notice)
-        7. Open the LangGraph checkpointer (app.state.checkpointer)
+        7. Open the LangGraph checkpointer (app.state.checkpointer), then
+           delete the ephemeral conversations a crash left over and the
+           threads whose conversation is gone (sweep_at_start)
         8. Start the cleanup background task (30s interval) and the memory
            pressure monitor (60s interval)
         9. **[YIELD]** → Application handles requests
         10. Shutdown: active downloads interrupted and their tasks awaited
             (bounded) → then, in reverse order: cleanup task → pressure
             monitor (awaited) → pending prefix-cache reset drained → engine
-            → checkpointer → embedded PostgreSQL cluster last; finally
+            → ephemeral conversations purged (bounded) → checkpointer →
+            embedded PostgreSQL cluster last; finally
             ``app.state.services_stopped`` (a ``threading.Event`` run.py
             injects) is set, so the launcher bounds the process exit from
             there
@@ -618,6 +630,9 @@ async def _stop_services(app: FastAPI) -> None:
     await step("stop_pressure_task", lambda: config.LLM_Engine.stop_pressure_task())
     await step("drain_pending_reset", drain_pending_reset)
     await step("engine_cleanup", lambda: config.LLM_Engine.cleanup())
+    # The ephemeral conversations still open when the app stops (#428), while
+    # the checkpointer is still open to delete their threads.
+    await step("purge_ephemeral_conversations", lambda: purge_at_shutdown(app.state.checkpointer))
     await step("close_checkpointer", lambda: app.state.checkpointer_cm.__aexit__(None, None, None))
     await step("close_kb_store", close_kb_store)
     # Cluster stops LAST: every DB consumer above must be closed first.

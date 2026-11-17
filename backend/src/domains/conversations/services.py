@@ -51,12 +51,14 @@ from src.core.exceptions import (
     StateConflictException,
 )
 from src.core.request_context import get_request_id
+from src.launcher.runtime_paths import pasted_images_dir
 from src.utils.attachment_utils import (
     build_attachment_notice,
     prepend_attachment_block,
     resolve_attachments,
 )
 from src.utils.kb_utils import KbExcerpt, retrieve_kb_excerpts
+from src.utils.pasted_images import PastedImage, pasted_images_in, remove_pasted_images
 from src.utils.prompt_utils import get_prompting_strategy
 
 
@@ -242,6 +244,7 @@ class ConversationService:
         web_search_enabled: Optional[bool] = None,
         reasoning_effort: Optional[str] = None,
         compaction_threshold: Optional[int] = None,
+        ephemeral: bool = False,
     ) -> Conversation:
         """Create a new conversation with the given LLM and generation params.
 
@@ -253,6 +256,7 @@ class ConversationService:
         from the model's own defaults (#388). An explicit value always wins.
         The conversation owns its values afterwards -- later changes to the
         model's saved values or to the settings never retro-affect it.
+        ``ephemeral`` (#428) is set here and never changed.
 
         Raises:
             ModelNotFoundException: If ``llm_id`` does not exist.
@@ -278,6 +282,7 @@ class ConversationService:
             llm_id=llm_id,
             name=DEFAULT_CONVERSATION_NAME,
             max_tokens=max_tokens,
+            ephemeral=ephemeral,
             **values,
         )
 
@@ -371,17 +376,51 @@ class ConversationService:
             )
         return updated
 
-    # ===================== Deletion (DB + checkpointer thread) =====================
+    # ============ Deletion (DB + checkpointer thread + pasted images) ============
     async def delete_conversation(self, conversation_id: int) -> None:
-        """Delete a conversation and purge its checkpointer thread.
+        """Delete a conversation, its checkpointer thread and its pasted images.
 
         Both stores must be cleared: ids can be reused after a fresh start or a
         sequence reset, so a stale checkpointer thread would otherwise leak a deleted
         conversation's agent context into a future one with the same id (BLOCKER B3).
+
+        The pasted images its messages reference go too: only files whose real
+        path is inside the app's pasted-images folder
+        (``src.utils.pasted_images``), never a file the user picked from the
+        disk, and never one another conversation still references.
         """
         logger.info(f"Deleting conversation {conversation_id}")
+        images = await run_in_threadpool(self._pasted_images_of, conversation_id)
         await run_in_threadpool(self._delete_conversation_db, conversation_id)
         await self._purge_thread(conversation_id)
+        if images:
+            await run_in_threadpool(self._remove_pasted_images, conversation_id, images)
+
+    def _pasted_images_of(self, conversation_id: int) -> list[PastedImage]:
+        contents = [
+            m.content
+            for m in self.message_repo.get_messages_by_conversation(conversation_id)
+            if m.sender == "user"
+        ]
+        if not any("[image_path:" in c for c in contents):
+            return []
+        return pasted_images_in(contents, pasted_images_dir())
+
+    def _remove_pasted_images(self, conversation_id: int, images: list[PastedImage]) -> None:
+        """Remove the images no remaining message references (read after the
+        conversation's own rows are gone)."""
+        unshared = [
+            image
+            for image in images
+            if not self.db.query(Message.id)
+            .filter(Message.content.contains(image.marker, autoescape=True))
+            .first()
+        ]
+        removed = remove_pasted_images(unshared, conversation_id)
+        logger.info(
+            f"Pasted images of conversation {conversation_id} deleted: {removed} "
+            f"(kept, still shown elsewhere: {len(images) - len(unshared)})"
+        )
 
     def _delete_conversation_db(self, conversation_id: int) -> None:
         self.conversation_repo.delete_conversation(conversation_id)
@@ -746,7 +785,9 @@ class ConversationService:
         conversation_id: int,
         question: str,
     ) -> AsyncGenerator[str, None]:
-        """Stream an auto-generated 2–4 word title (stateless one-shot)."""
+        """Stream an auto-generated 2-4 word title (stateless one-shot).
+
+        An ephemeral conversation (#428) never gets one."""
         start_s = time.perf_counter()
         logger.info(
             f"Generating title for conversation {conversation_id}: "
@@ -765,6 +806,12 @@ class ConversationService:
                 exc_info=True,
             )
             await run_in_threadpool(self._save_title, conversation_id, DEFAULT_CONVERSATION_NAME)
+            return
+
+        if _conversation.ephemeral:
+            # Never named (#428): an ephemeral conversation is never listed,
+            # and a title written as it is deleted would land on no row.
+            logger.info(f"Title generation skipped: conversation {conversation_id} is ephemeral")
             return
 
         if not question or not question.strip():

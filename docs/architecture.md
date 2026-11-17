@@ -316,7 +316,11 @@ cause: the model never started on a prompt this size, or it started and went sil
 7. **KB vector store** — `init_kb_store(...)`, after the migration because its
    cross-schema foreign keys reference the business tables.
 8. **Checkpointer** — `open_checkpointer(...)` on the same database, kept open for the
-   app lifetime and published on `app.state.checkpointer`.
+   app lifetime and published on `app.state.checkpointer`. Then the ephemeral sweep
+   (`src/domains/conversations/ephemeral.py:sweep_at_start`) deletes every ephemeral
+   conversation a crash or a force-quit left over, and every checkpointer thread whose
+   conversation is gone (see [Ephemeral conversations](guides/conversations.md#ephemeral-conversations)).
+   A failed sweep is one `ERROR` and the start goes on.
 9. **Idle cleanup task** — `config.LLM_Engine.start_cleanup_task()`; the monitor ticks
    every 30 s and unloads the model once it has been idle longer than
    `_max_idle_time`, the Settings idle delay (5 minutes by default, so about 300-330 s
@@ -328,8 +332,9 @@ cause: the model never started on a prompt this size, or it started and went sil
     threadpool, never inside the awaited boot sequence.
 
 Shutdown reverses the order: cancel the backfill task, stop the watchdog, stop the
-cleanup task, clean up the engine, close the checkpointer, close the KB store, and stop
-the PostgreSQL cluster last.
+cleanup task, clean up the engine, delete the ephemeral conversations still open
+(bounded to 10 s, the rest is left to the next start's sweep), close the checkpointer,
+close the KB store, and stop the PostgreSQL cluster last.
 
 Startup phase events are informational. Readiness is the launcher's `ready` event or a
 confirming health check — never a phase. `engine_notice` is informational too: it reports

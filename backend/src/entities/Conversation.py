@@ -50,7 +50,7 @@ from src.database.generation_hints import (
     FALLBACK_TOP_P,
 )
 from sqlalchemy.ext.hybrid import hybrid_property
-from sqlalchemy.sql import func
+from sqlalchemy.sql import expression, func
 from src.database.core import Base
 
 
@@ -115,6 +115,7 @@ class Conversation(Base):
         reasoning_effort: How much the model may deliberate (validated).
         compaction_threshold: Share of the working window, in percent, at
             which the conversation compacts (50-90 step 5, validated).
+        ephemeral: Deleted when the user leaves it (#428); never listed.
         messages: Relationship to Message entities (ordered by id = insertion order).
         llm: Relationship to Llm entity (which model).
         message_count: Hybrid property returning number of messages.
@@ -160,6 +161,11 @@ class Conversation(Base):
     compaction_threshold = Column(
         SmallInteger, default=DEFAULT_COMPACTION_THRESHOLD, nullable=False
     )
+    # An ephemeral conversation (#428), set at creation and never changed: it
+    # is never listed or searched, gets no generated title, and is deleted
+    # when the user leaves it, when the app stops, or at the next start
+    # (``src.domains.conversations.ephemeral``).
+    ephemeral = Column(Boolean, default=False, server_default=expression.false(), nullable=False)
 
     # Relationships — ordered by pk, NOT timestamp: PostgreSQL's now() is
     # frozen per transaction, so a user/assistant pair written in the same

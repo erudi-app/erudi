@@ -399,10 +399,12 @@ async def create_conversation(
             web_search_enabled=payload.web_search_enabled,
             reasoning_effort=payload.reasoning_effort,
             compaction_threshold=payload.compaction_threshold,
+            ephemeral=payload.ephemeral,
         )
         db.commit()
         logger.info(
             f"Conversation created: id={conv.id}, llm_id={payload.llm_id}, "
+            f"ephemeral={conv.ephemeral}, "
             f"temperature={conv.temperature}, top_p={conv.top_p}, "
             f"max_tokens={conv.max_tokens}, "
             f"web_search_enabled={conv.web_search_enabled}, "
@@ -421,7 +423,12 @@ async def delete_conversation(
     service: ConversationService = Depends(get_conversation_service),
     db: Session = Depends(get_db),
 ):
-    """Delete a conversation and all associated messages (cascade delete).
+    """Delete a conversation, its messages (cascade), its checkpointer thread
+    and its pasted images (``ConversationService.delete_conversation``).
+
+    Waits for a turn, a title or a compaction still writing to the
+    conversation before deleting anything; the renderer sends this, without
+    confirmation, when the user leaves an ephemeral conversation (#428).
 
     Args:
         conversation_id: ID of the conversation to delete.

@@ -15,6 +15,10 @@ from src.core import api
 from src.core import config
 
 
+async def _no_sweep(_checkpointer):
+    return None
+
+
 class _FakeEngine:
     def start_cleanup_task(self):
         pass
@@ -57,6 +61,9 @@ async def test_lifespan_emits_phases_in_order(monkeypatch):
     monkeypatch.setattr(api, "init_kb_store", lambda *_: None)
     monkeypatch.setattr(api, "close_kb_store", lambda *_a, **_k: None)
     monkeypatch.setattr(api, "open_checkpointer", lambda *_: _FakeCheckpointerCM())
+    # The ephemeral sweeps (#428) need a database; not under test here.
+    monkeypatch.setattr(api, "sweep_at_start", _no_sweep)
+    monkeypatch.setattr(api, "purge_at_shutdown", _no_sweep)
 
     async def _fake_populate():
         return {}  # catalog reconcile happens inside; nothing else is scheduled
@@ -91,6 +98,9 @@ async def test_lifespan_without_emitter_does_not_crash(monkeypatch):
     monkeypatch.setattr(api, "init_kb_store", lambda *_: None)
     monkeypatch.setattr(api, "close_kb_store", lambda *_a, **_k: None)
     monkeypatch.setattr(api, "open_checkpointer", lambda *_: _FakeCheckpointerCM())
+    # The ephemeral sweeps (#428) need a database; not under test here.
+    monkeypatch.setattr(api, "sweep_at_start", _no_sweep)
+    monkeypatch.setattr(api, "purge_at_shutdown", _no_sweep)
 
     async def _fake_populate():
         return {}
@@ -200,3 +210,68 @@ class _capture:
 
         logging.getLogger("erudi").removeHandler(self.handler)
         return False
+
+
+@pytest.mark.unit
+async def test_ephemeral_sweeps_run_while_the_checkpointer_is_open(monkeypatch):
+    """#428: the startup sweep runs once the checkpointer is open, the
+    shutdown purge before it closes; a failed startup sweep is one ERROR and
+    the start goes on."""
+    import logging
+
+    handle = SimpleNamespace(
+        sqlalchemy_url="postgresql+psycopg://x/erudi",
+        psycopg_url="postgresql://x/erudi",
+    )
+    calls: list[str] = []
+    saver = object()
+
+    class _RecordingCM:
+        async def __aenter__(self):
+            calls.append("open_checkpointer")
+            return saver
+
+        async def __aexit__(self, *exc):
+            calls.append("close_checkpointer")
+            return False
+
+    async def _sweep(checkpointer):
+        assert checkpointer is saver
+        calls.append("sweep_at_start")
+        raise RuntimeError("sweep exploded")
+
+    async def _purge(checkpointer):
+        assert checkpointer is saver
+        calls.append("purge_at_shutdown")
+
+    async def _fake_populate():
+        return {}
+
+    monkeypatch.setattr(api, "start_postgres", lambda *_: handle)
+    monkeypatch.setattr(api, "stop_postgres", lambda *_: None)
+    monkeypatch.setattr(api, "init_database", lambda *_: None)
+    monkeypatch.setattr(api, "run_migrations", lambda *_: None)
+    monkeypatch.setattr(api, "init_kb_store", lambda *_: None)
+    monkeypatch.setattr(api, "close_kb_store", lambda *_a, **_k: None)
+    monkeypatch.setattr(api, "open_checkpointer", lambda *_: _RecordingCM())
+    monkeypatch.setattr(api, "sweep_at_start", _sweep)
+    monkeypatch.setattr(api, "purge_at_shutdown", _purge)
+    monkeypatch.setattr(api, "startup_populate_database", _fake_populate)
+    monkeypatch.setattr(api, "BaseEngine", SimpleNamespace(get_engine=lambda: _FakeEngine()))
+    monkeypatch.setattr(config, "LLM_Engine", None, raising=False)
+
+    app = FastAPI()
+    with _capture(logging.ERROR) as errors:
+        async with api.lifespan(app):
+            calls.append("serving")
+
+    assert calls == [
+        "open_checkpointer",
+        "sweep_at_start",
+        "serving",
+        "purge_at_shutdown",
+        "close_checkpointer",
+    ]
+    assert [r.getMessage() for r in errors] == [
+        "Startup sweep of ephemeral conversations failed: sweep exploded"
+    ]

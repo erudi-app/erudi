@@ -36,6 +36,14 @@ _SENTINEL_TEXT = (
     "Help > Clear All Data deletes it.\n"
 )
 
+# The folder, inside the data folder, where the Electron main process writes a
+# pasted image (frontend/src/utils/pastedImage.js, the same name in
+# frontend/src/utils/dataLocations.js). It is the only folder whose files a
+# conversation's delete removes: an image attached from the disk is the
+# user's own file and is never touched. Pinned on both sides by
+# backend/tests/fixtures/runtime_paths_layout.json.
+PASTED_IMAGES_FOLDER = "pasted-images"
+
 
 @dataclass(frozen=True)
 class RuntimePaths:
@@ -111,6 +119,12 @@ def get_runtime_paths() -> RuntimePaths:
     if _RUNTIME_PATHS is None:
         raise RuntimeError("Runtime paths not initialized")
     return _RUNTIME_PATHS
+
+
+def pasted_images_dir() -> Path:
+    """The app's pasted-images folder (``PASTED_IMAGES_FOLDER`` in the data
+    folder), whether or not it exists yet."""
+    return ensure_runtime_paths_initialized().data_dir / PASTED_IMAGES_FOLDER
 
 
 def _compute_runtime_paths(
