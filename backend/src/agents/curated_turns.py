@@ -93,12 +93,13 @@ CURATED_KINDS: dict[str, CuratedKind] = {
     ),
     # The summary that would have made room was rejected or could not be
     # written (#690), and the request does not fit without it; automatic
-    # compaction is paused for the next few messages.
+    # compaction is paused for the next few messages. The copy names the
+    # Compact button of the conversation's settings, never a slash command.
     "summary_failed": CuratedKind(
         "This conversation no longer fits the model's context window, and its earlier "
         "messages could not be summarized to make room (with room for an answer the request "
         "needs about {prompt_tokens} tokens; the window holds {context_tokens}). Start a new "
-        "conversation or send less at once."
+        "conversation, or use Compact in this conversation's settings to summarize it now."
     ),
     # No first chunk within the budget (#573): retrying makes it worse, the
     # history only grows.

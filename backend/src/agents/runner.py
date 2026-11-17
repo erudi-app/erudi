@@ -82,8 +82,10 @@ from src.agents.output_budget import OUTPUT_BUDGET_FLOOR_TOKENS
 from src.agents.overflow import ContextOverflow, parse_context_overflow
 from src.agents.reasoning_effort import NO_REASONING_PLAN, EffortPlan
 from src.agents.token_accounting import (
+    BUDGET_DENSE_TOKENS,
     COUNTER_DENSE_TOKENS,
     COUNTER_WEIGHT_FLOOR,
+    GROUPED_DIGIT_TOKENS,
     STALE_TOOL_RESULT_MARKERS,
     SUMMARY_SOURCE_MARKER,
     RequestOverhead,
@@ -302,6 +304,10 @@ SUMMARY_SHORT_CEILING_TOKENS = 24
 # How similar to the last question or answer it read a summary may be before
 # it counts as a copy of it (difflib ratio of the normalized texts).
 SUMMARY_COPY_SIMILARITY = 0.9
+# A copy is degenerate only when it is short for what was read: a recap the
+# user asked for ("recap everything") is the last answer AND a summary. Below
+# this share of what it read, a copy of the last message is rejected.
+SUMMARY_COPY_MAX_RATIO = 0.2
 # After an automatic compaction whose summary failed or was rejected, the next
 # ``COMPACTION_PAUSE_MESSAGES`` user messages run without one: a failing
 # summary is not retried on every turn (one model call each, reading the whole
@@ -953,10 +959,11 @@ def summary_rejection(summary: str, read: list) -> Optional[str]:
       min(SUMMARY_MIN_RATIO * read, SUMMARY_SHORT_CEILING_TOKENS))``, both
       counted with the compaction counter (``content_tokens``), so a Chinese
       summary is not held to a Latin length;
-    * ``"copy"``: with more than one message read, the summary is the last
+    * ``"copy"``: with more than one message read, and the summary under
+      ``SUMMARY_COPY_MAX_RATIO`` of what it read, the summary is the last
       question or the last answer it read, normalized (``_normalized``), or
       within ``SUMMARY_COPY_SIMILARITY`` of it. A single message has nothing a
-      copy of it drops.
+      copy of it drops; a long recap that is also the last answer is kept.
     """
     import difflib
 
@@ -968,7 +975,7 @@ def summary_rejection(summary: str, read: list) -> Optional[str]:
     )
     if content_tokens(summary.strip()) < floor:
         return "too_short"
-    if len(read) > 1:
+    if len(read) > 1 and content_tokens(summary.strip()) < SUMMARY_COPY_MAX_RATIO * read_tokens:
         wanted = _normalized(summary)
         last_of = {}
         for message, body in zip(read, bodies):
@@ -988,7 +995,7 @@ def _refusal_figures(
     request_tokens: int, allocated_window: Optional[int]
 ) -> Optional[tuple[int, int]]:
     """``(needed, allocated)`` when a request of ``request_tokens`` (``O`` +
-    the messages, in the counter's tokens) leaves the allocated window less
+    the messages, counted as the output budget counts) leaves the allocated window less
     than the output budget's floor -- ``needed`` is the request plus that
     floor --, else ``None``. The allocated window is the limit the engine
     refuses on (the memory bound itself when memory bounds the child); the
@@ -1263,6 +1270,8 @@ def _summarization_middleware_class():
             # binds the counter; ``_freeze`` replaces it at every call.
             self.overhead = overhead
             self._weights: dict = {}
+            self._budget_weights: dict = {}
+            self._budget_overhead = 0
             self._past_ids: frozenset = frozenset()
             self._overhead = 0
             super().__init__(token_counter=self._real_count, **kwargs)
@@ -1282,17 +1291,42 @@ def _summarization_middleware_class():
 
         def _freeze(self, messages) -> None:
             """The per-call context, from the FULL raw state as sent: one
-            weight per message id, the past tool results' ids, and O."""
+            weight per message id, the past tool results' ids, and O -- with
+            the counter's settings (the trigger, the keep, the summarizer's
+            trim) and with the output budget's (the refusals,
+            ``_budget_count``)."""
             from src.agents.middleware import past_tool_result_ids, strip_stale_tool_results
 
             self._ensure_message_ids(messages)
             self._past_ids = past_tool_result_ids(messages)
-            self._weights, ratio = frozen_weights(strip_stale_tool_results(messages))
+            sent = strip_stale_tool_results(messages)
+            self._weights, ratio = frozen_weights(sent)
             self._overhead = overhead_tokens(
                 self.overhead,
                 ratio,
                 dense=COUNTER_DENSE_TOKENS,
                 weight_floor=COUNTER_WEIGHT_FLOOR,
+            )
+            budget_weights, _ratio = message_weights(
+                sent, dense=BUDGET_DENSE_TOKENS, digit_tokens=GROUPED_DIGIT_TOKENS
+            )
+            self._budget_weights = {
+                m.id: w for m, w in zip(sent, budget_weights) if getattr(m, "id", None) is not None
+            }
+            self._budget_overhead = overhead_tokens(
+                self.overhead,
+                ratio,
+                dense=BUDGET_DENSE_TOKENS,
+                digit_tokens=GROUPED_DIGIT_TOKENS,
+            )
+
+        def _budget_count(self, messages) -> int:
+            """``O`` + ``messages`` as the output budget counts them (no 1.2
+            floor, CJK 0.65 token per character): what a refusal judges on.
+            The counter counts high to compact a little early; a refusal
+            counted that way would turn away requests the engine serves."""
+            return self._budget_overhead + real_token_count(
+                messages, self._budget_weights, self._past_ids
             )
 
         def _determine_cutoff_index(self, messages):
@@ -1341,40 +1375,50 @@ def _summarization_middleware_class():
             # A pause that ran its course is cleared with whatever this call writes.
             update = {COMPACTION_PAUSE_KEY: None} if paused_at is not None and not paused else {}
             total = self._real_count(messages)
-            if paused:
-                self._refuse_unless_it_fits(total)
+            if paused and self._refusal(messages) is None:
                 return None
-            if not self._should_summarize(messages, total):
+            # Paused but past the window: one compaction is tried anyway.
+            if not paused and not self._should_summarize(messages, total):
                 return update or None
             cutoff = self._determine_cutoff_index(messages)
             if cutoff <= 0:
+                if paused:
+                    self._refuse_unless_it_fits(messages)
                 return update or None
             messages_to_summarize, preserved = self._partition_messages(messages, cutoff)
             summary = await self._acreate_summary(messages_to_summarize)
             if summary is None:
+                if paused:
+                    # The pause keeps its anchor: the extra attempt does not extend it.
+                    self._refuse_unless_it_fits(messages)
+                    return None
                 pause = {COMPACTION_PAUSE_KEY: _pause_anchor(messages)}
                 logger.info(
                     f"Automatic compaction paused for the next {COMPACTION_PAUSE_MESSAGES} "
                     f"user messages: no usable summary, history kept "
                     f"({len(messages_to_summarize)} message(s) not summarized)"
                 )
-                self._refuse_unless_it_fits(total, state_update=pause)
+                self._refuse_unless_it_fits(messages, state_update=pause)
                 return pause
             await reset_prefix_after_rewrite(self.engine)
             self._announce_done()
-            return {
+            result = {
                 "messages": [
                     RemoveMessage(id=REMOVE_ALL_MESSAGES),
                     *self._build_new_messages(summary),
                     *preserved,
                 ],
-                **update,
             }
+            if paused_at is not None:
+                # Any compaction that rewrote the history ends a pause.
+                result[COMPACTION_PAUSE_KEY] = None
+            return result
 
         def _refuse_a_message_too_long(self, messages) -> None:
             """Raise ``TurnRefused`` when the new message (the last user
             message) does not fit the allocated window on its own, with the
-            request's overhead and the answer's floor (``_refusal_figures``):
+            request's overhead and the answer's floor (``_refusal_figures``,
+            counted as the output budget counts, ``_budget_count``):
             no compaction can make room for it, so none runs. The memory kind
             when that window is the child's memory bound. When the overhead
             alone does not fit, the message is not what is too long: the
@@ -1382,10 +1426,9 @@ def _summarization_middleware_class():
             last = last_human_index(messages)
             if last is None or _is_previous_summary(messages[last]):
                 return
-            if _refusal_figures(self._overhead, self.allocated_window) is not None:
+            if _refusal_figures(self._budget_count([]), self.allocated_window) is not None:
                 return
-            alone = self._overhead + self._real_count([messages[last]])
-            figures = _refusal_figures(alone, self.allocated_window)
+            figures = _refusal_figures(self._budget_count([messages[last]]), self.allocated_window)
             if figures is None:
                 return
             needed, limit = figures
@@ -1393,12 +1436,16 @@ def _summarization_middleware_class():
             kind = "message_too_long_memory" if memory else "message_too_long"
             raise TurnRefused(kind, prompt_tokens=needed, context_tokens=limit)
 
-        def _refuse_unless_it_fits(self, total, *, state_update=None) -> None:
+        def _refusal(self, messages) -> Optional[tuple[int, int]]:
+            """``_refusal_figures`` of the whole request, budget-counted."""
+            return _refusal_figures(self._budget_count(messages), self.allocated_window)
+
+        def _refuse_unless_it_fits(self, messages, *, state_update=None) -> None:
             """Raise ``TurnRefused`` (``summary_failed``) when the whole
-            request -- ``O`` + ``total`` -- does not fit the allocated window
-            (``_refusal_figures``), no compaction having made room;
-            ``state_update`` is what the refusal still writes."""
-            figures = _refusal_figures(self._overhead + total, self.allocated_window)
+            request -- ``O`` + ``messages``, budget-counted -- does not fit the
+            allocated window (``_refusal_figures``), no compaction having made
+            room; ``state_update`` is what the refusal still writes."""
+            figures = self._refusal(messages)
             if figures is not None:
                 needed, limit = figures
                 raise TurnRefused(
@@ -3081,9 +3128,18 @@ class AgentRunner:
         reused -- and is ``ConversationNotFoundException``."""
         from langchain.agents import create_agent
 
-        agent = create_agent(model, tools=[], checkpointer=self.checkpointer)
+        from src.agents.middleware import CompactionState
+
+        # The compaction state schema, so the write also ends a pause.
+        agent = create_agent(
+            model, tools=[], checkpointer=self.checkpointer, state_schema=CompactionState
+        )
         try:
-            await agent.aupdate_state(run_config, {"messages": update}, as_node="model")
+            await agent.aupdate_state(
+                run_config,
+                {"messages": update, COMPACTION_PAUSE_KEY: None},
+                as_node="model",
+            )
         except Exception as exc:
             raise CompactionFailedException(
                 message="The summarized history could not be saved; nothing was changed.",

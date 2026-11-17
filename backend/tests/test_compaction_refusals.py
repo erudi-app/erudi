@@ -31,7 +31,7 @@ from src.agents.runner import (
     real_token_count,
     summary_rejection,
 )
-from src.agents.token_accounting import request_overhead
+from src.agents.token_accounting import message_weights, request_overhead
 from src.core import config
 from src.core.exceptions import CompactionFailedException
 from tests.test_compaction_keep import (
@@ -72,6 +72,19 @@ def _curated(events) -> list:
 def _pause_of(cp, thread_id):
     tup = cp.get_tuple({"configurable": {"thread_id": thread_id}})
     return tup.checkpoint["channel_values"].get(COMPACTION_PAUSE_KEY)
+
+
+def _budget_request_tokens(state, question="next question"):
+    """The same request counted the way the refusals count it: the output
+    budget's estimator (no 1.2 floor, CJK 0.65 token per character)."""
+    from src.agents.token_accounting import BUDGET_DENSE_TOKENS, GROUPED_DIGIT_TOKENS
+
+    messages = list(state) + [HumanMessage(question, id="probe")]
+    weights, _ratio = message_weights(
+        messages, dense=BUDGET_DENSE_TOKENS, digit_tokens=GROUPED_DIGIT_TOKENS
+    )
+    by_id = {m.id: w for m, w in zip(messages, weights)}
+    return real_token_count(messages, by_id) + request_overhead("s").fixed_est
 
 
 def _request_tokens(state, question="next question"):
@@ -115,6 +128,39 @@ async def test_a_message_too_long_on_its_own_is_refused_without_compacting(monke
     refusals = [r for r in caplog.records if "refused" in r.getMessage()]
     assert len(refusals) == 1 and refusals[0].levelno == logging.WARNING
     assert refusals[0].getMessage().isascii()
+
+
+_PROSE = "The quick brown fox jumps over the lazy dog near the river bank. "
+
+
+@pytest.mark.parametrize(
+    "message",
+    [_PROSE * 500, "这是一个很长的中文句子" * 960],
+    ids=["latin-32500-chars", "cjk-9600-chars"],
+)
+async def test_a_borderline_message_the_engine_would_serve_is_not_refused(monkeypatch, message):
+    """The conservative compaction counter (1.2 floor, one token per CJK
+    character) would refuse these; the output budget's estimator, which the
+    refusals use, lets them through."""
+    _WindowEngine.window = 10_000
+    summary = _ScriptedSummaryModel(messages=iter([]))
+    _models(monkeypatch, ["served"], summary)
+    cp = InMemorySaver()
+
+    events = await _turn(AgentRunner(checkpointer=cp), "border1", message)
+
+    assert _curated(events) == []
+    assert "".join(e["text"] for e in events if e["t"] == "answer") == "served"
+
+
+async def test_a_message_clearly_over_the_window_is_still_refused(monkeypatch):
+    _WindowEngine.window = 10_000
+    _models(monkeypatch, ["never sent"], _ScriptedSummaryModel(messages=iter([])))
+
+    events = await _turn(AgentRunner(checkpointer=InMemorySaver()), "over1", _PROSE * 700)
+
+    (curated,) = _curated(events)
+    assert curated["kind"] == "message_too_long"
 
 
 async def test_a_message_too_long_for_a_memory_bound_window_names_memory(monkeypatch):
@@ -192,6 +238,22 @@ def test_a_copy_of_the_last_question_is_rejected():
     pool = _pool(5)
     last = pool[-1].content
     assert summary_rejection(last, pool) == "copy"
+
+
+def test_a_full_recap_equal_to_the_last_answer_is_not_a_copy():
+    """The user asked for a recap of everything; the model's last answer is
+    that recap, and the summary repeats it: long for what it read, so kept."""
+    recap = (
+        "Recap: Ada lives in Lyon, works as an engineer, takes the 8:04 train to Paris on "
+        "Mondays, prefers aisle seats, and wants the fares compared before Friday."
+    )
+    pool = [
+        HumanMessage("My name is Ada, I live in Lyon."),
+        AIMessage("Noted."),
+        HumanMessage("Recap everything I told you."),
+        AIMessage(recap),
+    ]
+    assert summary_rejection(recap, pool) is None
 
 
 def test_a_legitimately_short_summary_of_a_two_message_pool_is_accepted():
@@ -276,8 +338,8 @@ async def test_a_rejected_summary_refuses_the_turn_when_it_does_not_fit(monkeypa
     summary = _ScriptedSummaryModel(messages=iter([]), script=["Bonjour.", "Bonjour."])
     _models(monkeypatch, ["never sent"], summary)
     cp = InMemorySaver()
-    seed = _alternating(28, 300)
-    assert _request_tokens(seed) > 10_000
+    seed = _alternating(36, 300)
+    assert _budget_request_tokens(seed) > 10_000
     await _seed(cp, "nofit1", seed)
 
     with caplog.at_level(logging.INFO):
@@ -328,24 +390,82 @@ async def test_the_pause_skips_the_next_messages_then_compaction_is_retried(monk
     assert _GOOD_SUMMARY in state[0].content
 
 
-async def test_a_paused_conversation_that_no_longer_fits_is_refused_without_a_summary_call(
-    monkeypatch,
-):
+async def test_a_paused_conversation_that_no_longer_fits_tries_one_compaction(monkeypatch):
     _WindowEngine.window = 10_000
-    summary = _ScriptedSummaryModel(messages=iter([]), script=["Bonjour.", "Bonjour."])
-    _models(monkeypatch, ["a"], summary)
+    summary = _ScriptedSummaryModel(
+        messages=iter([]), script=["Bonjour.", "Bonjour.", _GOOD_SUMMARY]
+    )
+    _models(monkeypatch, ["a", "b"], summary)
     cp = InMemorySaver()
     await _seed(cp, "pause2", _alternating(22, 300))
     runner = AgentRunner(checkpointer=cp)
     await _turn(runner, "pause2", "q0")
     assert len(summary.prompts) == 2
+    big = _text(3_000, "y")
+    assert _budget_request_tokens(await _state(cp, "pause2"), big) + 512 > 10_000
 
-    # A question that pushes the request past the window during the pause.
-    events = await _turn(runner, "pause2", _text(2_000, "y"))
+    # Past the window during the pause: one compaction is tried, and it works.
+    events = await _turn(runner, "pause2", big)
+
+    assert _curated(events) == []
+    assert len(summary.prompts) == 3
+    assert _WindowEngine.rewrites == ["rewrite"]
+    assert _pause_of(cp, "pause2") is None
+
+
+async def test_a_paused_conversation_whose_compaction_fails_again_is_refused(monkeypatch):
+    _WindowEngine.window = 10_000
+    summary = _ScriptedSummaryModel(messages=iter([]), script=["Bonjour."] * 4)
+    _models(monkeypatch, ["a"], summary)
+    cp = InMemorySaver()
+    await _seed(cp, "pause3", _alternating(22, 300))
+    runner = AgentRunner(checkpointer=cp)
+    await _turn(runner, "pause3", "q0")
+    anchor = _pause_of(cp, "pause3")
+
+    events = await _turn(runner, "pause3", _text(3_000, "y"))
 
     (curated,) = _curated(events)
     assert curated["kind"] == "summary_failed"
+    assert len(summary.prompts) == 4
+    assert _WindowEngine.rewrites == []
+    # The pause keeps its anchor: it is not extended by the extra attempt.
+    assert _pause_of(cp, "pause3") == anchor
+
+
+async def test_a_paused_conversation_that_fits_makes_no_summary_call(monkeypatch):
+    _WindowEngine.window = 10_000
+    summary = _ScriptedSummaryModel(messages=iter([]), script=["Bonjour.", "Bonjour."])
+    _models(monkeypatch, ["a", "b"], summary)
+    cp = InMemorySaver()
+    await _seed(cp, "pause4", _alternating(22, 300))
+    runner = AgentRunner(checkpointer=cp)
+    await _turn(runner, "pause4", "q0")
+
+    events = await _turn(runner, "pause4", "short")
+
+    assert _curated(events) == []
     assert len(summary.prompts) == 2
+
+
+# 2. /compact ends the pause.
+async def test_a_manual_compaction_clears_the_pause(monkeypatch):
+    from tests.test_manual_compaction import _compact
+
+    _WindowEngine.window = 10_000
+    summary = _ScriptedSummaryModel(
+        messages=iter([]), script=["Bonjour.", "Bonjour.", _GOOD_SUMMARY]
+    )
+    _models(monkeypatch, ["a"], summary)
+    cp = InMemorySaver()
+    await _seed(cp, "pause5", _alternating(22, 300))
+    runner = AgentRunner(checkpointer=cp)
+    await _turn(runner, "pause5", "q0")
+    assert _pause_of(cp, "pause5") is not None
+
+    await _compact(runner, "pause5")
+
+    assert _pause_of(cp, "pause5") is None
 
 
 def test_the_pause_lasts_a_few_messages():
@@ -369,10 +489,12 @@ async def test_an_overhead_that_alone_does_not_fit_is_not_blamed_on_the_message(
     mw = _mw(10_000, overhead=50_000, summary=_ScriptedSummaryModel(messages=iter([])))
     state = [HumanMessage("hi", id="h0"), AIMessage("yo", id="a0"), HumanMessage("q", id="q")]
 
-    try:
-        await mw.abefore_model({"messages": state}, None)
-    except runner_module.TurnRefused as refused:
-        assert not refused.kind.startswith("message_too_long")
+    # Not refused up front: the compaction runs (the engine will refuse
+    # the request itself, with its own overflow).
+    result = await mw.abefore_model({"messages": state}, None)
+
+    assert result is not None and "messages" in result
+    assert [m.id for m in result["messages"][2:]] == ["a0", "q"]
 
 
 # ===================== 2. manual: the error, the history kept =====================
@@ -399,3 +521,19 @@ async def test_a_rejected_manual_summary_fails_and_keeps_the_history(monkeypatch
 
     assert [m.id for m in await _state(cp, "man1")] == [m.id for m in seed]
     assert marker.events == []
+
+
+@pytest.mark.parametrize("language", ["en", "fr", "es", "zh"])
+def test_the_summary_failed_copy_names_compact_never_a_slash_command(language):
+    import json
+    from pathlib import Path
+
+    from src.agents.curated_turns import CURATED_KINDS
+
+    locales = Path(__file__).resolve().parents[2] / "frontend" / "src" / "locales"
+    chat = json.loads((locales / language / "chat.json").read_text(encoding="utf-8"))
+    line = chat["curated"]["summary_failed"]
+    assert chat["commands"]["compact"]["label"] in line
+    assert "/" not in line
+    template = CURATED_KINDS["summary_failed"].template
+    assert "Compact" in template and "/" not in template

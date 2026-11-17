@@ -330,9 +330,11 @@ When the wire error matched but its numbers didn't parse, the turn drops the fig
 same honest wording. There is no silent truncation or shifting of the conversation to make it fit --
 the user always gets a turn that says why and what to do next.
 
-Two refusals come before the engine is asked anything, from the compaction middleware, counted with
-the compaction's own counter (see [How conversation state is kept](#how-conversation-state-is-kept)),
-against the allocated window -- the limit the engine refuses on:
+Two refusals come before the engine is asked anything, from the compaction middleware, against
+the allocated window -- the limit the engine refuses on. They count the request as the
+[output budget](#output-budget) does (no weight below 1.0, Chinese, Japanese and Korean characters
+0.65 token each), not with the compaction's counter, which counts higher on purpose to compact a
+little early: a refusal counted that way would turn away requests the engine serves.
 
 - **A message too long on its own.** When the new message, with the request's overhead (system
   prompt, tool schemas, knowledge-base block) and the output budget's 512-token floor, exceeds the
@@ -348,11 +350,12 @@ against the allocated window -- the limit the engine refuses on:
   When the overhead alone already exceeds the window, the message is not what is too long, and the
   engine's own overflow above answers instead.
 - **A conversation that could not be summarized.** When an automatic compaction produced no
-  usable summary (see [the failed summary](#how-conversation-state-is-kept)), or is paused after
-  one, and the whole request does not fit the allocated window with the 512-token floor, the turn
-  is refused (`summary_failed`): `This conversation no longer fits the model's context window, and
-  its earlier messages could not be summarized to make room (...). Start a new conversation or
-  send less at once.`
+  usable summary (see [the failed summary](#how-conversation-state-is-kept)) — or, during the pause
+  after one, the compaction tried anyway fails too — and the whole request does not fit the
+  allocated window with the 512-token floor, the turn is refused (`summary_failed`): `This
+  conversation no longer fits the model's context window, and its earlier messages could not be
+  summarized to make room (...). Start a new conversation, or use Compact in this conversation's
+  settings to summarize it now.`
 
 `backend.log` carries one `Agent turn refused before generation: kind=...` warning per refusal,
 with both figures.
@@ -370,7 +373,7 @@ mid-answer, or hit the tool-loop limit, is a **curated turn**: one entry of `CUR
 | `memory_overflow` | `prompt_tokens`, `context_tokens` | The prompt does not fit what memory allows |
 | `message_too_long` | `prompt_tokens`, `context_tokens` | The new message alone does not fit the window; refused before any compaction |
 | `message_too_long_memory` | `prompt_tokens`, `context_tokens` | The same, the window being the memory bound |
-| `summary_failed` | `prompt_tokens`, `context_tokens` | The summary that would make room failed or was rejected, and the request does not fit |
+| `summary_failed` | `prompt_tokens`, `context_tokens` | The summary that would make room failed or was rejected, and the request does not fit; suggests a new conversation or Compact in the conversation's settings |
 | `prefill_timeout` | `minutes` | No first token within the budget |
 | `decode_timeout` | `seconds` | Silent mid-answer past the inter-chunk budget |
 | `loop_limit` | — | The tool-loop limit, with no tool result to fall back to |
@@ -824,8 +827,10 @@ it, so it is bounded (`bound_starred_messages` in `backend/src/agents/prompts.py
 message is carried whole up to about **500 tokens**, and only its beginning past that, marked
 `[...]`; all of them together carry about **2,000 tokens**, the oldest stars first (the newer ones
 are the likelier to still be in the history word for word) — a star past that total is not carried.
-Tokens are counted with the compaction's own counter. A short starred message is carried word for
-word; the end of a long one is not recalled from the star.
+Tokens are counted with the compaction's own counter, on the head that is carried (a Chinese
+beginning of a mostly English message is cut on its own weight), and a star of which not even a
+beginning fits what is left is skipped. A short starred message is carried word for word; the end
+of a long one is not recalled from the star.
 
 ### Compact a conversation now
 
@@ -1125,8 +1130,10 @@ the prompt names it
      were provided."), 0.001 to 0.038 of what they read. The floor lets the short summary of a one-
      or two-message history through; the ceiling (about 80 Latin characters, twice the longest
      degenerate one) keeps a long history from asking more than a short summary can carry;
-   - **a copy**: with more than one message read, the summary is the last question or the last
-     answer it read — case, spacing and the punctuation at its ends ignored, or 90 % similar.
+   - **a copy**: with more than one message read and the summary under 0.2 of what it read, the
+     summary is the last question or the last answer it read — case, spacing and the punctuation
+     at its ends ignored, or 90 % similar. A long recap that is also the last answer (the user
+     asked to recap everything) is kept.
 
    `backend.log` carries one warning per failed attempt, a rejection as `Compaction summary
    rejected (<attempt> attempt): too_short|copy, summary_chars=..., read_chars=...,
@@ -1135,10 +1142,12 @@ the prompt names it
    paused ...` info line): a failing summary is not retried on every turn, each attempt being a
    model call that reads the whole pool, and by the retry the history has grown by four exchanges.
    The pause is kept in the thread state (`erudi_compaction_paused_at`: the id of the question whose
-   compaction failed; the fifth user message after it compacts again, and a history `/compact`
-   rewrote meanwhile no longer holds that id, which ends the pause). Meanwhile — on the failing turn
-   too — the turn goes ahead when the request still fits the allocated window with the output
-   budget's 512-token floor, and is refused with `summary_failed` otherwise (see
+   compaction failed; the fifth user message after it compacts again). Any compaction that rewrites
+   the history — automatic, or `/compact` — clears it. On the failing turn the turn goes ahead when
+   the request still fits the allocated window with the output budget's 512-token floor, and is
+   refused with `summary_failed` otherwise. During the pause a request that fits is sent without a
+   summary call; one that does not fit tries one compaction anyway (a summary call and its retry),
+   and is refused with `summary_failed` only when that fails too — the pause keeps its anchor (see
    [When the prompt no longer fits the context window](#when-the-prompt-no-longer-fits-the-context-window)).
    A manual compaction (`/compact`) rejects the same summaries and fails with the history untouched
    (see [Compact a conversation now](#compact-a-conversation-now)).
