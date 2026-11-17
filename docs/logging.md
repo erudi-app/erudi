@@ -33,7 +33,13 @@ a reinstall of the same version, keeps the file as it is. The version of the
 last start is kept beside each file (`backend.log.version`,
 `erudi-backend.log.version`); the backend learns the app version from the
 Electron main process (`ERUDI_APP_VERSION`), and a backend started by hand,
-without it, never moves its file.
+without it, never moves its file. A version file that cannot be read as a
+version counts as unknown, and the file is moved. The app log's version file
+sits in the temp folder with the app log and is rewritten at every launch, so
+a temp cleaner that removes old files takes the two together. Only the
+installed app that holds the single-instance lock moves the app log: a second
+launch, which hands over to the running app, and a development run
+(`npm start`), which shares the temp folder with an installed app, never do.
 
 The first line of a version's file says so: `Diagnostics starts here: … app
 version X`. When a file cannot be moved — on Windows, another program holding

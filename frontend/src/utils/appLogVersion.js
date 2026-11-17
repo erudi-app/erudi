@@ -7,7 +7,15 @@
 // `erudi-backend.old.log` (the same single previous file its size cap uses) and
 // starts a fresh one; the version of the last launch is kept beside it in
 // `erudi-backend.log.version`, so a restart or a reinstall of the same version
-// keeps its records. backend.log gets the same treatment from the backend's
+// keeps its records. That file is rewritten at every launch: it lives in the
+// temp folder like the log it describes, and temp cleaners remove files by
+// age, so one written only on a switch would be removed before the log, and
+// the next launch would then roll the running version's own log away. Kept
+// beside the log rather than in the user data folder, the two go together.
+//
+// Only the packaged app that holds the single-instance lock switches
+// (`appLogSwitchAllowed`): a second instance hands over and quits, and a dev
+// run (`npm start`) shares the temp folder with an installed app. backend.log gets the same treatment from the backend's
 // launcher (backend/src/launcher/log_version.py).
 //
 // The rename can fail (Windows: the file held by another program). The launch
@@ -49,7 +57,14 @@ export function switchAppLogForVersion({ fs, logFile, oldLogFile, versionFile, v
     // Absent on a fresh install and before versioned logs existed; the log is
     // then rolled over, which is right for both.
   }
-  if (previous === version) return null;
+  if (previous === version) {
+    try {
+      fs.writeFileSync(versionFile, version);
+    } catch {
+      // Refreshing its age only; the file still says the right version.
+    }
+    return null;
+  }
 
   let rotated = false;
   let error = null;
@@ -69,6 +84,16 @@ export function switchAppLogForVersion({ fs, logFile, oldLogFile, versionFile, v
     error = error ?? String(err?.message ?? err);
   }
   return { version, previous, rotated, error };
+}
+
+/**
+ * Whether this launch may switch the app log: the packaged app holding the
+ * single-instance lock, and nothing else.
+ * @param {{isPackaged: boolean, hasSingleInstanceLock: boolean}} launch
+ * @returns {boolean}
+ */
+export function appLogSwitchAllowed({ isPackaged, hasSingleInstanceLock }) {
+  return Boolean(isPackaged && hasSingleInstanceLock);
 }
 
 /**

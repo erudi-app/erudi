@@ -13,6 +13,7 @@ import { join } from "node:path";
 
 import {
   APP_LOG_VERSION_MARKER,
+  appLogSwitchAllowed,
   appLogVersionLines,
   switchAppLogForVersion,
 } from "./appLogVersion.js";
@@ -91,10 +92,46 @@ describe("switchAppLogForVersion", () => {
     expect(readFileSync(paths.versionFile, "utf8")).toBe("1.3.0");
   });
 
+  it("rewrites the version file at every launch, so it lives as long as the log", () => {
+    // Temp cleaners delete files by age: a version file written only on a
+    // switch would go first, and the next launch would then roll the running
+    // version's own log away.
+    writeFileSync(paths.logFile, OLD_LINE);
+    writeFileSync(paths.versionFile, "1.3.0");
+    const writes = [];
+    const recordingFs = {
+      ...fs,
+      writeFileSync: (file, data) => {
+        writes.push([file, data]);
+        fs.writeFileSync(file, data);
+      },
+    };
+
+    expect(switchAppLogForVersion({ fs: recordingFs, ...paths, version: "1.3.0" })).toBeNull();
+    expect(writes).toEqual([[paths.versionFile, "1.3.0"]]);
+    expect(readFileSync(paths.logFile, "utf8")).toBe(OLD_LINE);
+  });
+
   it("does nothing without a version", () => {
     writeFileSync(paths.logFile, OLD_LINE);
     expect(switchAppLogForVersion({ fs, ...paths, version: "" })).toBeNull();
     expect(existsSync(paths.versionFile)).toBe(false);
+  });
+});
+
+describe("appLogSwitchAllowed", () => {
+  it("switches in the packaged app that holds the single-instance lock", () => {
+    expect(appLogSwitchAllowed({ isPackaged: true, hasSingleInstanceLock: true })).toBe(true);
+  });
+
+  it("never switches in a second instance, which hands over and quits", () => {
+    expect(appLogSwitchAllowed({ isPackaged: true, hasSingleInstanceLock: false })).toBe(false);
+  });
+
+  it("never switches in a dev run, which shares the log with an installed app", () => {
+    // `npm start` reports the package.json version and takes no lock; it
+    // must not roll the installed app's log away.
+    expect(appLogSwitchAllowed({ isPackaged: false, hasSingleInstanceLock: true })).toBe(false);
   });
 });
 

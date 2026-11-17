@@ -155,6 +155,42 @@ class TestSwitchLogForVersion:
         assert (tmp_path / VERSION_FILE_NAME).read_text(encoding="utf-8") == "1.3.0"
 
 
+class TestACorruptVersionFile:
+    """The version file is ours, but a disk, a sync tool or a crash mid-write
+    can leave anything in it: it must never stop the backend, and its content
+    never reaches a log line unless it is a plain version."""
+
+    @pytest.mark.unit
+    @pytest.mark.parametrize(
+        "raw", [b"\xff\xfe1.2.0", b"\x00" * 64, b"1.2.0\n[ERROR] forged", b"   "]
+    )
+    def test_reads_as_unknown_and_the_log_is_rolled_over(self, tmp_path, raw):
+        _write(tmp_path / LOG_FILE_NAME, OLD_RECORD)
+        (tmp_path / VERSION_FILE_NAME).write_bytes(raw)
+
+        switch = switch_log_for_version(tmp_path, "1.3.0")
+
+        assert switch is not None
+        assert switch.previous is None
+        assert switch.rotated is True
+        assert (tmp_path / VERSION_FILE_NAME).read_text(encoding="utf-8") == "1.3.0"
+
+    @pytest.mark.unit
+    def test_the_launcher_goes_on_when_the_switch_raises(self, tmp_path, monkeypatch, capsys):
+        import run
+
+        monkeypatch.setenv("ERUDI_APP_VERSION", "1.3.0")
+
+        def boom(log_dir, version):
+            raise RuntimeError("unexpected")
+
+        monkeypatch.setattr(log_version, "switch_log_for_version", boom)
+
+        run.start_versioned_log(tmp_path)  # must not raise
+
+        assert "unexpected" in capsys.readouterr().err
+
+
 class TestRecordLogVersion:
     @pytest.mark.unit
     def test_a_switch_writes_the_marker_the_reader_cuts_at(self, tmp_path, caplog):

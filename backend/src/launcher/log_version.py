@@ -76,11 +76,15 @@ def app_version_from_env() -> Optional[str]:
 
 def _read_previous_version(version_file: Path) -> Optional[str]:
     try:
-        return version_file.read_text(encoding="utf-8").strip() or None
-    except OSError:
+        raw = version_file.read_text(encoding="utf-8").strip()
+    except (OSError, ValueError):
         # Absent on a fresh install and before versioned logs existed; an
-        # unreadable one is treated the same: the log is rolled over.
+        # unreadable or undecodable one is treated the same: the log is
+        # rolled over. ValueError covers UnicodeDecodeError.
         return None
+    # Anything but a plain version (a torn write, NUL bytes) is unknown, and
+    # never reaches a log line.
+    return raw if _VERSION_RE.match(raw) else None
 
 
 def _roll_over(log_file: Path) -> None:

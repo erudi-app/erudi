@@ -752,20 +752,22 @@ def start_versioned_log(log_dir: Path) -> None:
 
     The switch (``src.launcher.log_version``) renames the file, so it runs
     before ``src.core.logging`` is imported; the records go through the
-    logger right after. Never stops the start.
+    logger right after. Never stops the start: a log that keeps an older
+    version's records is a lesser harm than a backend that does not start.
     """
-    from src.launcher.log_version import (
-        app_version_from_env,
-        record_log_version,
-        switch_log_for_version,
-    )
+    try:
+        from src.launcher import log_version
 
-    version = app_version_from_env()
-    switch = switch_log_for_version(log_dir, version)
+        version = log_version.app_version_from_env()
+        switch = log_version.switch_log_for_version(log_dir, version)
 
-    from src.core.logging import logger
+        from src.core.logging import logger
 
-    record_log_version(logger, version, switch)
+        log_version.record_log_version(logger, version, switch)
+    except Exception as exc:
+        # The logger may be what failed, so stderr (Electron echoes it into
+        # the app log); stdout is the launcher's JSON event channel.
+        print(f"Could not give backend.log to the running app version: {exc!r}", file=sys.stderr)
 
 
 def main() -> None:
