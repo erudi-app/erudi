@@ -1101,25 +1101,29 @@ class TestInitDatabase:
         # pool's connections open against the cluster's connection budget.
         from src.database import core
 
-        def backends() -> int:
+        # Follow the old pool's own backend by pid: the session cluster is
+        # shared, so a count of every client backend moves with other tests.
+        def alive(pid: int) -> bool:
             with psycopg.connect(pg.psycopg_url, autocommit=True) as conn:
-                return conn.execute(
-                    "SELECT count(*) FROM pg_stat_activity "
-                    "WHERE backend_type = 'client backend' AND pid <> pg_backend_pid()"
-                ).fetchone()[0]
+                return (
+                    conn.execute(
+                        "SELECT count(*) FROM pg_stat_activity WHERE pid = %s", (pid,)
+                    ).fetchone()[0]
+                    == 1
+                )
 
         try:
             first = core.init_database(pg.sqlalchemy_url)
             with first.connect() as conn:
-                conn.execute(text("SELECT 1"))
-            before = backends()
+                pid = conn.execute(text("SELECT pg_backend_pid()")).scalar_one()
+            assert alive(pid)
             second = core.init_database(pg.sqlalchemy_url)
             assert second is not first
             assert first.pool.checkedin() == 0
             deadline = time.monotonic() + 5
-            while backends() >= before and time.monotonic() < deadline:
+            while alive(pid) and time.monotonic() < deadline:
                 time.sleep(0.1)
-            assert backends() == before - 1
+            assert not alive(pid)
         finally:
             if core.db_engine is not None:
                 core.db_engine.dispose()
