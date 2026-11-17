@@ -766,9 +766,15 @@ reading replaces it; a missing reading (a respawned child has no PDH instance fo
 6 s, NVML fails) leaves it unchanged, silently, and each transition is one INFO line, `GPU contention
 started|ended: evicted_mib=..., device_free_mib=...`. It never acts on the child.
 
-A stateful turn end turns an active contention into `memory_warning` with
-`reason: "gpu_contention"`, again at every turn while it lasts; a brake notice
-(`pressure`, `pressure_external`) comes first, and `bound` is not evaluated after it.
+A stateful turn whose start finds the cached reading active (read right after the
+turn_start sample, never sampled again for it) sends `memory_warning` with
+`reason: "gpu_contention"` then, before the answer, and its end does not send it again;
+otherwise a stateful turn end turns an active contention into that event, again at every
+turn while it lasts; at the turn end a brake notice (`pressure`, `pressure_external`)
+comes first, and `bound` is not evaluated after it. The notice's **Free the graphics
+card** action is the user's unload (`POST /erudi/llms/loaded/unload`); the next load
+sizes the model against the free memory of that moment. Nothing in the engine or the
+brake acts on a contention.
 `GET /erudi/hardware/gpu_contention/status` returns the cached reading (`active: null`,
 unknown, and no numbers on every other engine and OS and without a live child: only a
 reading with `active: false` drops the notice); it never reads a

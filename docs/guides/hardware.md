@@ -241,7 +241,9 @@ engine and OS, a machine with no model loaded, and a model the engine just resta
 has not read yet answer `active: null` (unknown) with no numbers; only `active: false`
 says the contention is over.
 It never reads a sensor itself; the conversation page polls it only while it shows the
-`gpu_contention` notice.
+`gpu_contention` notice. That notice is sent from the start of a turn when the contention is
+already detected, and offers **Free the graphics card**, which unloads the model on the
+user's request; the next message reloads it with only what fits on the card then.
 
 ## Backend differences
 

@@ -2248,6 +2248,15 @@ class AgentRunner:
                     # conversation, so the reload state is said in this turn.
                     if not reload_announced and _respawned(outcome):
                         yield {"t": "memory_reload", "reason": RELOAD_REASON_MEMORY}
+                # Another app already takes the graphics card (the eviction
+                # gauge's cached state, which the turn_start sample above
+                # just refreshed when it could): said now, before the answer
+                # the user would otherwise wait for unwarned. Read, never
+                # sampled here. Stateful turns only, like the turn-end check,
+                # which then does not say it again.
+                contention_said = stateful and _gpu_contention_active(engine)
+                if contention_said:
+                    yield dict(_GPU_CONTENTION_WARNING)
                 sampling = resolve_sampling_defaults(llm)
                 # No implicit tools (#129): callers own the tool list (built by
                 # ``plan_turn``); ``tools=None`` means a zero-tool agent.
@@ -2652,8 +2661,9 @@ class AgentRunner:
                         # apps is ``pressure_external``. Then, as long as
                         # another app takes the graphics card from the child
                         # (the CUDA engine's eviction gauge, read at this
-                        # turn's start or idle), ``gpu_contention`` at every
-                        # turn end, the bound criterion not evaluated either.
+                        # turn's start or idle), ``gpu_contention``, the bound
+                        # criterion not evaluated either -- not yielded again
+                        # when this turn's start already said it.
                         # Otherwise the event goes out ONLY when memory
                         # bounds the child's window and even a compaction
                         # down to the keep-tail would
@@ -2689,7 +2699,9 @@ class AgentRunner:
                                 )
                             if budget is not None and budget.used_fraction(0) is not None:
                                 _track_memory_warning(engine, thread_id, warning is not None)
-                            if warning is not None:
+                            if warning is not None and not (
+                                contention_said and warning == _GPU_CONTENTION_WARNING
+                            ):
                                 yield warning
                         duration_ms = (time.perf_counter() - stream_start_s) * 1000
                         logger.info(

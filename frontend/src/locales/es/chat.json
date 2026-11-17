@@ -324,6 +324,7 @@
     "bound": "La memoria de tu equipo limita esta conversación: el modelo y esta conversación ocupan juntos alrededor de {{size}}, casi todo el espacio que permite la memoria. Inicia una nueva conversación, envía menos a la vez o cambia a un modelo más pequeño.",
     "pressure": "La memoria de tu equipo está bajo presión: esta conversación se resumirá antes para mantener la fluidez.",
     "pressureExternal": "La memoria de tu equipo está bajo presión por otras aplicaciones; esta conversación usa poca.",
-    "gpuContention": "Otra aplicación está ocupando la memoria de tu tarjeta gráfica: las respuestas son más lentas hasta que esa aplicación libere parte de ella. No se pierde nada."
+    "gpuContention": "Otra aplicación está ocupando la memoria de tu tarjeta gráfica: las respuestas son más lentas hasta que esa aplicación libere parte de ella. Liberar la tarjeta descarga el modelo; tu próximo mensaje lo vuelve a cargar, solo con lo que quepa entonces en la tarjeta. No se pierde nada.",
+    "freeGraphicsCard": "Liberar la tarjeta gráfica"
   }
 }

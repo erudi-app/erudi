@@ -12,21 +12,28 @@ import { render, screen, cleanup, fireEvent, waitFor, act } from "@testing-libra
 //    chain, paused while a turn runs) and drops the notice once `active` is
 //    false; a failed poll, or `active: null` (no reading), keeps it;
 //  - the poll only ever clears a gpu_contention notice: a warning of another
-//    reason that replaced it stays.
+//    reason that replaced it stays;
+//  - the notice carries "Free the graphics card", which unloads the
+//    conversation's model (`POST /llms/loaded/unload`), is disabled while an
+//    answer is written, says why on a 409, and hides the notice once the
+//    model is unloaded.
 
-const { tracedFetchMock, navigateMock, locationMock, paramsMock, statusMock } = vi.hoisted(() => ({
-  tracedFetchMock: vi.fn(),
-  navigateMock: vi.fn(),
-  locationMock: { pathname: "/conversation/7", state: null },
-  paramsMock: { id: "7" },
-  statusMock: vi.fn(),
-}));
+const { tracedFetchMock, navigateMock, locationMock, paramsMock, statusMock, postMock } =
+  vi.hoisted(() => ({
+    tracedFetchMock: vi.fn(),
+    navigateMock: vi.fn(),
+    locationMock: { pathname: "/conversation/7", state: null },
+    paramsMock: { id: "7" },
+    statusMock: vi.fn(),
+    postMock: vi.fn(),
+  }));
 
 const STATUS_PATH = "/hardware/gpu_contention/status";
 
 vi.mock("../services/api/client", () => {
   const get = vi.fn(async (path) => (path === STATUS_PATH ? statusMock() : []));
-  return { default: { get }, apiClient: { get }, tracedFetch: tracedFetchMock };
+  const client = { get, post: postMock };
+  return { default: client, apiClient: client, tracedFetch: tracedFetchMock };
 });
 
 vi.mock("react-router-dom", () => ({
@@ -52,7 +59,11 @@ import apiClient from "../services/api/client";
 
 const CONTENTION =
   "Another app is taking your graphics card's memory: answers are slower until it frees " +
-  "some. Nothing is lost.";
+  "some. Freeing the card unloads the model; your next message reloads it, with only what " +
+  "fits on the card then. Nothing is lost.";
+const FREE = "Free the graphics card";
+const BUSY = "The model is busy; try again in a moment.";
+const CHANGED = "Another model is loaded now.";
 const POLL_MS = 10_000;
 
 const conversationDetail = {
@@ -151,8 +162,15 @@ const elapse = async (ms) => {
   });
 };
 
+const httpError = (status, type) =>
+  Object.assign(new Error(`HTTP ${status}`), {
+    status,
+    data: type ? { error: { type } } : {},
+  });
+
 beforeEach(() => {
   vi.clearAllMocks();
+  postMock.mockReset();
   paramsMock.id = "7";
   statusMock.mockImplementation(async () => ({ active: true }));
   Element.prototype.scrollTo = () => {};
@@ -174,7 +192,7 @@ describe("ConversationPage gpu contention notice", () => {
     await contendedTurn(turn);
 
     const alert = await screen.findByRole("alert");
-    expect(alert.textContent).toBe(CONTENTION);
+    expect(alert.textContent).toContain(CONTENTION);
   });
 
   it("polls about every 10 s while it shows, and hides once the contention ends", async () => {
@@ -189,7 +207,7 @@ describe("ConversationPage gpu contention notice", () => {
 
     await elapse(POLL_MS);
     expect(statusCalls()).toHaveLength(1);
-    expect(screen.getByRole("alert").textContent).toBe(CONTENTION);
+    expect(screen.getByRole("alert").textContent).toContain(CONTENTION);
 
     await elapse(POLL_MS);
     expect(statusCalls()).toHaveLength(2);
@@ -219,7 +237,7 @@ describe("ConversationPage gpu contention notice", () => {
     await elapse(POLL_MS);
     await elapse(POLL_MS);
     expect(statusCalls()).toHaveLength(2);
-    expect(screen.getByRole("alert").textContent).toBe(CONTENTION);
+    expect(screen.getByRole("alert").textContent).toContain(CONTENTION);
   });
 
   it("keeps the notice and keeps polling while the status is unknown (active: null)", async () => {
@@ -237,7 +255,7 @@ describe("ConversationPage gpu contention notice", () => {
     await elapse(POLL_MS);
     await elapse(POLL_MS);
     expect(statusCalls()).toHaveLength(2);
-    expect(screen.getByRole("alert").textContent).toBe(CONTENTION);
+    expect(screen.getByRole("alert").textContent).toContain(CONTENTION);
 
     statusMock.mockImplementation(async () => ({ active: false }));
     await elapse(POLL_MS);
@@ -325,5 +343,87 @@ describe("ConversationPage gpu contention notice", () => {
 
     await elapse(5 * POLL_MS);
     expect(statusCalls()).toHaveLength(0);
+  });
+
+  it("shows from the turn's start, while the answer is written, and stays at its end", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await act(async () => {
+      turn.push('{"t":"memory_warning","reason":"gpu_contention"}\n');
+    });
+    expect((await screen.findByRole("alert")).textContent).toContain(CONTENTION);
+
+    // The backend does not say it again at the end of the same turn.
+    await runTurn(turn, ['{"t":"answer","text":"Slow."}\n', '{"t":"done"}\n']);
+    expect(screen.getByRole("alert").textContent).toContain(CONTENTION);
+  });
+
+  it("offers to free the graphics card, disabled while the answer is written", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await act(async () => {
+      turn.push('{"t":"memory_warning","reason":"gpu_contention"}\n');
+    });
+    const action = await screen.findByRole("button", { name: FREE });
+    expect(action.disabled).toBe(true);
+    fireEvent.click(action);
+    expect(postMock).not.toHaveBeenCalled();
+
+    await runTurn(turn, ['{"t":"answer","text":"Slow."}\n', '{"t":"done"}\n']);
+    await waitFor(() => expect(screen.getByRole("button", { name: FREE }).disabled).toBe(false));
+  });
+
+  it("unloads the conversation's model and hides the notice", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    postMock.mockResolvedValue(undefined);
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await contendedTurn(turn);
+    fireEvent.click(await screen.findByRole("button", { name: FREE }));
+
+    await waitFor(() => expect(screen.queryByRole("alert")).toBeNull());
+    expect(postMock).toHaveBeenCalledTimes(1);
+    expect(postMock).toHaveBeenCalledWith("/llms/loaded/unload", { llm_id: 1 });
+  });
+
+  it.each([
+    ["busy", httpError(409), BUSY],
+    ["another model loaded", httpError(409, "LOADED_MODEL_CHANGED"), CHANGED],
+  ])("says why on a 409 (%s) and keeps the notice", async (_label, error, sentence) => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    postMock.mockRejectedValue(error);
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await contendedTurn(turn);
+    fireEvent.click(await screen.findByRole("button", { name: FREE }));
+
+    await waitFor(() => expect(screen.getByRole("alert").textContent).toContain(sentence));
+    expect(screen.getByRole("alert").textContent).toContain(CONTENTION);
+    expect(screen.getByRole("button", { name: FREE }).disabled).toBe(false);
+  });
+
+  it("offers no action on a warning of another reason", async () => {
+    const turn = makeControlledStream();
+    tracedFetchMock.mockImplementation(makeRoute([turn]));
+    await renderAndSettle();
+
+    fireEvent.click(screen.getByText("SEND"));
+    await runTurn(turn, [
+      '{"t":"answer","text":"Long."}\n',
+      '{"t":"memory_warning","reason":"bound","footprint_bytes":1048576}\n',
+      '{"t":"done"}\n',
+    ]);
+    await screen.findByRole("alert");
+    expect(screen.queryByRole("button", { name: FREE })).toBeNull();
   });
 });

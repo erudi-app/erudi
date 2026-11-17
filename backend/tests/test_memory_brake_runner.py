@@ -409,7 +409,81 @@ async def test_a_brake_notice_wins_over_the_gpu_contention(monkeypatch, notice, 
     events = await _events(AgentRunner(checkpointer=InMemorySaver()))
 
     warnings = [e for e in events if e["t"] == "memory_warning"]
-    assert warnings == [{"t": "memory_warning", "reason": reason}]
+    # The contention is said at the turn's start; the brake's notice, at its
+    # end, replaces it.
+    assert warnings == [
+        {"t": "memory_warning", "reason": "gpu_contention"},
+        {"t": "memory_warning", "reason": reason},
+    ]
+
+
+async def test_a_contention_already_detected_is_said_at_the_turn_start(monkeypatch):
+    _answer(monkeypatch)
+    _patch_budget(monkeypatch, _StubBudget(ceiling=16_000))
+    _BrakeEngine.contention = _contended()
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    kinds = [e["t"] for e in events]
+    # Before the answer, so the user knows before waiting for it; once only.
+    assert kinds.index("memory_warning") < kinds.index("answer")
+    assert [e for e in events if e["t"] == "memory_warning"] == [
+        {"t": "memory_warning", "reason": "gpu_contention"}
+    ]
+
+
+async def test_the_turn_start_notice_reads_the_state_the_turn_start_sample_left(monkeypatch):
+    """The turn_start sample is the gauge's read on the turn path; the notice
+    reads the cached state it left, and samples nothing itself."""
+    _answer(monkeypatch)
+    _patch_budget(monkeypatch, _StubBudget(ceiling=16_000))
+
+    def _brake(cls, point, *, llm_id=None):
+        cls.calls.append(("brake", point, llm_id, True))
+        if point == "turn_start":
+            cls.contention = _contended()
+        return BrakeOutcome()
+
+    monkeypatch.setattr(_BrakeEngine, "brake_point", classmethod(_brake))
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    kinds = [e["t"] for e in events]
+    assert kinds.index("memory_warning") < kinds.index("answer")
+    assert len(_brakes("turn_start")) == 1
+
+
+async def test_no_contention_at_the_turn_start_says_nothing_then(monkeypatch):
+    _answer(monkeypatch)
+    _patch_budget(monkeypatch, _StubBudget(ceiling=16_000))
+    _BrakeEngine.contention = _contended(active=False)
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    assert not any(e["t"] == "memory_warning" for e in events)
+
+
+async def test_an_engine_without_the_gauge_says_nothing_at_the_turn_start(monkeypatch):
+    _answer(monkeypatch)
+    _patch_budget(monkeypatch, _StubBudget(ceiling=16_000))
+    monkeypatch.setattr(
+        _BrakeEngine, "gpu_contention_state", classmethod(BaseEngine.gpu_contention_state.__func__)
+    )
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    assert not any(e["t"] == "memory_warning" for e in events)
+
+
+async def test_a_failed_turn_keeps_the_contention_said_at_its_start(monkeypatch):
+    _patch_model(monkeypatch, _TimingOutModel(messages=iter([])))
+    _BrakeEngine.contention = _contended()
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    assert [e for e in events if e["t"] == "memory_warning"] == [
+        {"t": "memory_warning", "reason": "gpu_contention"}
+    ]
 
 
 async def test_the_gpu_contention_warning_is_said_again_while_it_lasts(monkeypatch):
