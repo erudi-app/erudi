@@ -265,8 +265,9 @@ def test_a_stream_that_completes_clears_the_abandoned_flag(http, monkeypatch):
     monkeypatch.setattr(MLX_Engine, "_model", handle)
 
     MLX_Engine.note_stream_abandoned(handle)
-    started = time.monotonic()
-    MLX_Engine.note_stream_completed(handle, started)
+    # Explicit times: on Windows the monotonic clock ticks every 15.6 ms, so
+    # two back-to-back reads are often equal.
+    MLX_Engine.note_stream_completed(handle, handle["abandoned_at"] + 1.0)
     MLX_Engine.claim_prefix("conv:2")
 
     assert handle["abandoned"] is False
@@ -280,9 +281,10 @@ def test_a_stop_before_the_first_token_keeps_the_flag(http, monkeypatch):
     handle = _handle()
     monkeypatch.setattr(MLX_Engine, "_model", handle)
 
-    started = time.monotonic()
     MLX_Engine.note_stream_abandoned(handle)
-    MLX_Engine.note_stream_completed(handle, started)
+    MLX_Engine.note_stream_completed(handle, handle["abandoned_at"] - 1.0)
+    # The same clock tick proves no order either (a coarse clock, Windows).
+    MLX_Engine.note_stream_completed(handle, handle["abandoned_at"])
     MLX_Engine.claim_prefix("conv:2")
 
     assert http.paths() == ["/v1/chat/completions", "/v1/cache/reset"]
@@ -293,7 +295,7 @@ def test_a_completion_on_another_handle_keeps_the_flag(monkeypatch):
     other = _handle()
     MLX_Engine.note_stream_abandoned(built_for)
 
-    MLX_Engine.note_stream_completed(other, time.monotonic())
+    MLX_Engine.note_stream_completed(other, built_for["abandoned_at"] + 1.0)
 
     assert built_for["abandoned"] is True
     assert "abandoned" not in other

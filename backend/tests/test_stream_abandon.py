@@ -265,7 +265,9 @@ def test_the_factory_binds_the_hook_to_the_handle_captured_at_build_time(monkeyp
     # child the stream ran against, never the new one.
     swapped_in["abandoned"] = True
     swapped_in["abandoned_at"] = built_for["abandoned_at"]
-    client.complete_hook(time.monotonic())
+    # An explicit time after the abandon: back-to-back clock reads can be
+    # equal on Windows (15.6 ms ticks).
+    client.complete_hook(built_for["abandoned_at"] + 1.0)
 
     assert built_for["abandoned"] is False
     assert swapped_in["abandoned"] is True
