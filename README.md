@@ -139,6 +139,19 @@ On Windows, run one of the following commands in PowerShell:
 .\scripts\dev\backend\build-llamacpp-cuda-win.ps1
 ```
 
+On Windows and Linux, the Knowledge Base also needs the e5 embedding GGUF
+(bundled inside the installers; a dev tree produces it once):
+
+```bash
+python scripts/dev/backend/build_e5_gguf.py
+```
+
+It runs in a dedicated conversion venv built from
+`backend/requirements/lock/{win,linux}-e5-gguf.txt` — see BUILD.md ("The KB
+embedding GGUF") for the exact commands. Until the file exists, every
+Knowledge Base shows the missing-embedding-model state. macOS needs neither:
+its embedding child serves the snapshot the app downloads on demand.
+
 ### 4. Start the app
 
 Start the backend in the first terminal:
@@ -231,7 +244,7 @@ Windows/Linux + NVIDIA    → CUDA_Engine (llama-server with CUDA offload)
 Windows/Linux, no NVIDIA  → CPU_Engine  (llama-server, CPU only)
 ```
 
-All inference engines run an OpenAI-compatible HTTP server in a child process and communicate with it through `http://127.0.0.1:<port>/v1/chat/completions`. Windows and Linux NVIDIA backends and the CPU fallback use `llama-server` from llama.cpp. macOS Apple Silicon uses `mlx_vlm.server` for vision and tool calling. PyTorch is never used for inference — only for the Knowledge Base embedding model (`multilingual-e5-small`), which runs on the CPU on Windows and Linux (those builds install torch from the CPU-only index) and on Metal on Apple Silicon. Conversation history and its rolling summary are handled by the LangGraph checkpointer, not by embeddings.
+All inference engines run an OpenAI-compatible HTTP server in a child process and communicate with it through `http://127.0.0.1:<port>/v1/chat/completions`. Windows and Linux NVIDIA backends and the CPU fallback use `llama-server` from llama.cpp. macOS Apple Silicon uses `mlx_vlm.server` for vision and tool calling. The Knowledge Base embedding model (`multilingual-e5-small`) is served by a dedicated child process too: a second `mlx_vlm.server` on Apple Silicon, and on Windows and Linux the bundled CPU `llama-server --embedding` over an e5 GGUF that ships inside the installers (produced at build time by `scripts/dev/backend/build_e5_gguf.py` — see BUILD.md). Conversation history and its rolling summary are handled by the LangGraph checkpointer, not by embeddings.
 
 ---
 

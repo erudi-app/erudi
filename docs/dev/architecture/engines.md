@@ -108,14 +108,18 @@ refuses an input past its 512-token window (HTTP 500, the whole batch), so every
 is bounded Erudi-side first (`chunking.truncate_to_tokens`, whose frozen tokenizer the
 GGUF tokenizes identically to).
 
-Two deliberate touch points with the rest of the system: the children watch their
-parent (the MLX child exits if the backend dies without its orderly stops; the
-llama-server child dies with its process group / job object), and the MLX memory
-brake, when it acts under CRITICAL pressure, first asks the manager to release an
-idle, unleased child (`embedder_child.release_now`) — ~1.2 GB back for a ~5 s respawn
-on the next KB use, before it shrinks or unloads the chat model. The CPU/CUDA brakes
-never govern the embedding child (its llama-server footprint is ~280 MB, released by
-its own fixed idle). See `docs/guides/knowledge_base.md`.
+Two deliberate touch points with the rest of the system. First, crash containment:
+the MLX child watches its parent and exits if the backend dies without its orderly
+stops (the `os._exit` deadline paths run no atexit); the llama-server embedding child
+has no parent watch — on Windows the backend's kill-on-close Job Object takes it down
+with a crashed backend, and on Linux a backend killed outright leaves it running
+until Electron's process-group kill or its own idle exit, the same exposure as the
+chat llama-server child. Second, the MLX memory brake, when it acts under CRITICAL
+pressure, first asks the manager to release an idle, unleased child
+(`embedder_child.release_now`) — ~1.2 GB back for a ~5 s respawn on the next KB use,
+before it shrinks or unloads the chat model. The CPU/CUDA brakes never govern the
+embedding child (its llama-server footprint is ~280 MB, released by its own fixed
+idle). See `docs/guides/knowledge_base.md`.
 
 ## llama-server slots and prompt cache
 

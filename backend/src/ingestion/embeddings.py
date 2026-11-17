@@ -58,6 +58,16 @@ EMBEDDING_DIMENSIONS = 384
 #: ``"child"`` pins ``ChildE5Embeddings``; ``None`` selects by platform.
 _forced_backend: Optional[str] = None
 
+#: The status ``error`` where the artifact ships with the installation and is
+#: not on disk (a dev tree before ``build_e5_gguf.py``, a quarantined file):
+#: the gate/banner shows it verbatim, so the user is told what to do instead
+#: of being offered a download that cannot produce the file.
+BUNDLED_ARTIFACT_MISSING_MESSAGE = (
+    "the embedding model file that ships with Erudi is missing from this "
+    "installation; reinstall Erudi to restore it (developers: run "
+    "scripts/dev/backend/build_e5_gguf.py)"
+)
+
 
 def get_embeddings() -> Embeddings:
     """The platform's KB embeddings backend (see module docstring)."""
@@ -97,17 +107,19 @@ def embedding_artifact_status() -> dict:
     Where the artifact is downloadable (macOS: the child serves the same
     snapshot the gate downloads) this is the #146 download state verbatim.
     Where it ships with the installation (Windows/Linux: the bundled GGUF)
-    only its on-disk presence speaks — a packaged install always has it; a
-    dev tree without it runs ``scripts/dev/backend/build_e5_gguf.py``.
+    only its on-disk presence speaks — a packaged install always has it; an
+    ABSENT file is an explicit ``error`` naming the remedy, because no
+    download can produce it and a silent prompt would offer one.
     """
     if _forced_backend != "in-process" and (
         _forced_backend == "child" or embedder_child.embedder_child_supported()
     ):
         if not embedder_child.artifact_downloadable():
+            available = embedder_child.artifact_available()
             return {
-                "available": embedder_child.artifact_available(),
+                "available": available,
                 "downloading": False,
-                "error": None,
+                "error": None if available else BUNDLED_ARTIFACT_MISSING_MESSAGE,
             }
     return embedding_model.download_state()
 

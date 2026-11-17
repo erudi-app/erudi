@@ -330,6 +330,10 @@ class TestArtifactState:
         status = embeddings.embedding_artifact_status()
         assert status["available"] is False
         assert status["downloading"] is False
+        # A bundled artifact that is NOT on disk is an explicit error naming
+        # the remedy (the banner/gate shows it verbatim): no download exists
+        # that could produce it, so a silent prompt would mislead.
+        assert status["error"] == embeddings.BUNDLED_ARTIFACT_MISSING_MESSAGE
 
     def test_status_of_a_downloadable_artifact_is_the_146_gate(self, monkeypatch):
         monkeypatch.setattr(embeddings, "_forced_backend", None)
@@ -352,6 +356,8 @@ class TestArtifactState:
         with caplog.at_level(logging.INFO):
             status = embeddings.start_embedding_artifact_download()
         assert status["available"] is False
+        # The answer carries the explicit state, never a silent no-op.
+        assert status["error"] == embeddings.BUNDLED_ARTIFACT_MISSING_MESSAGE
 
     def test_download_still_runs_the_gate_where_it_applies(self, monkeypatch):
         monkeypatch.setattr(embeddings, "_forced_backend", None)
