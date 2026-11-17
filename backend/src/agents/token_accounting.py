@@ -436,6 +436,13 @@ def fresh_weight(
     )
 
 
+def counter_weight(message: Any) -> float:
+    """The compaction counter's weight for a message nothing was frozen for
+    (rule 2 with the counter's settings: CJK one token per character, floor
+    1.2). Also what bounds the starred messages of the system prompt."""
+    return fresh_weight(message, dense=COUNTER_DENSE_TOKENS, weight_floor=COUNTER_WEIGHT_FLOOR)
+
+
 def _is_summary(message: Any) -> bool:
     kwargs = getattr(message, "additional_kwargs", None) or {}
     return kwargs.get("lc_source") == SUMMARY_SOURCE_MARKER

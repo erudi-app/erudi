@@ -29,13 +29,59 @@ lives in the LangGraph checkpointer (via ``SummarizationMiddleware``).
 
 from __future__ import annotations
 
+import math
 from typing import TYPE_CHECKING, List, Optional
 
 from src.agents.language import detect_language
+from src.agents.token_accounting import counter_weight
 from src.utils.prompt_utils import build_system_prompt, get_prompting_strategy
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
     from src.utils.kb_utils import KbExcerpt
+
+# What the starred block of the system prompt carries (#659): the beginning
+# of each starred message, at most ``STARRED_MESSAGE_TOKENS`` of it and
+# ``STARRED_TOTAL_TOKENS`` for all of them, in the compaction counter's tokens.
+# The block rides every request and compaction never shortens it, so a long
+# star would otherwise fill the window on every turn. The oldest stars come
+# first: the newer ones are the likelier to still be in the history verbatim,
+# while the early ones (the task, the constraints) are the first a compaction
+# summarizes. A cut message ends with ``STARRED_TRUNCATION_MARK``.
+STARRED_MESSAGE_TOKENS = 500
+STARRED_TOTAL_TOKENS = 2000
+STARRED_TRUNCATION_MARK = " [...]"
+_APPROX_CHARS_PER_TOKEN = 4
+
+
+def _star_tokens(text: str, weight: float) -> int:
+    return math.ceil(weight * len(text) / _APPROX_CHARS_PER_TOKEN)
+
+
+def bound_starred_messages(messages: List[str]) -> List[str]:
+    """``messages`` (the starred contents, oldest first) as the system prompt
+    carries them: each whole when it fits its budget -- ``min(500, what the
+    2,000-token total leaves)`` -- else its head, cut at ``budget * 4 / w``
+    characters (``w`` the counter's weight of the message, as the compaction
+    gate counts it) and marked; none once the total is spent."""
+    from langchain_core.messages import HumanMessage
+
+    carried: List[str] = []
+    left = STARRED_TOTAL_TOKENS
+    for text in messages:
+        budget = min(STARRED_MESSAGE_TOKENS, left)
+        if budget <= 0:
+            break
+        weight = counter_weight(HumanMessage(text))
+        if _star_tokens(text, weight) > budget:
+            text = text[: int(budget * _APPROX_CHARS_PER_TOKEN / weight)].rstrip()
+            cost = _star_tokens(text, weight)
+            text += STARRED_TRUNCATION_MARK
+        else:
+            cost = _star_tokens(text, weight)
+        carried.append(text)
+        left -= cost
+    return carried
+
 
 # Localized answer-language lines: an instruction written IN the target
 # language is the strongest prompt-level counter to English drift. Codes

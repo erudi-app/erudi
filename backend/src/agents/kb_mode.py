@@ -36,6 +36,7 @@ from typing import Any, Callable, List, Optional
 
 from src.agents.prompts import (
     answer_language_line,
+    bound_starred_messages,
     build_agent_system_prompt,
     build_kb_agentic_system_prompt,
     build_kb_context_block,
@@ -99,6 +100,9 @@ def plan_turn(
     regime, before the user's own instructions -- so the level means the same
     thing on a plain, a systematic and an agentic turn.
 
+    ``starred_messages`` reach the prompt bounded (#659,
+    ``bound_starred_messages``): the beginning of each, oldest first.
+
     ``web_search_enabled`` is the conversation's toggle (#310, set at creation
     from the model's saved defaults or the global default; arena passes the
     global setting directly). The
@@ -124,6 +128,7 @@ def plan_turn(
     from src.core import config
 
     base_tools = [calculator]
+    starred_messages = bound_starred_messages(starred_messages) if starred_messages else None
 
     # #298 agentic gate: the tri-state flag arbitrates, the per-model verified
     # wire capability decides in the default (flag None) state.

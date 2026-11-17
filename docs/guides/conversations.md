@@ -789,7 +789,13 @@ curl -X POST http://127.0.0.1:27182/erudi/conversations/unstar_message \
 
 Starred messages are read back when a turn is planned and appended to the system prompt under
 "Important points from the conversation so far" (`build_system_prompt` in
-`backend/src/utils/prompt_utils.py`).
+`backend/src/utils/prompt_utils.py`). The block rides every request and compaction never shortens
+it, so it is bounded (`bound_starred_messages` in `backend/src/agents/prompts.py`): each starred
+message is carried whole up to about **500 tokens**, and only its beginning past that, marked
+`[...]`; all of them together carry about **2,000 tokens**, the oldest stars first (the newer ones
+are the likelier to still be in the history word for word) — a star past that total is not carried.
+Tokens are counted with the compaction's own counter. A short starred message is carried word for
+word; the end of a long one is not recalled from the star.
 
 ### Compact a conversation now
 
