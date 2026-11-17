@@ -22,10 +22,25 @@ describe("publishedLabel", () => {
     expect(publishedLabel("2026-03-04T10:00:00+00:00")).toBe(expected);
   });
 
-  it("does not shift the month with the local time zone", () => {
-    expect(publishedLabel("2026-03-01T00:00:00+00:00")).toBe("Published March 2026");
-    expect(publishedLabel("2026-03-31T23:59:59+00:00")).toBe("Published March 2026");
-  });
+  it.each(["America/Los_Angeles", "Asia/Tokyo"])(
+    "does not shift the month with the local time zone (%s)",
+    (zone) => {
+      const previous = process.env.TZ;
+      process.env.TZ = zone;
+      try {
+        // Sanity: in this zone the local month really differs from the UTC one,
+        // so a formatter that used local time would fail below.
+        const local = new Date("2026-03-01T00:00:00+00:00").getMonth();
+        const localEnd = new Date("2026-03-31T23:59:59+00:00").getMonth();
+        expect(zone === "America/Los_Angeles" ? local : localEnd).not.toBe(2);
+        expect(publishedLabel("2026-03-01T00:00:00+00:00")).toBe("Published March 2026");
+        expect(publishedLabel("2026-03-31T23:59:59+00:00")).toBe("Published March 2026");
+      } finally {
+        if (previous === undefined) delete process.env.TZ;
+        else process.env.TZ = previous;
+      }
+    }
+  );
 
   it.each([null, undefined, "", "Unknown", "not a date"])("is null for %s", (value) => {
     expect(publishedLabel(value)).toBeNull();

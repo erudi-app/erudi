@@ -350,6 +350,10 @@ class HFDownloadRequest(BaseModel):
     )
     quantized: bool = True
     category: str = "general"
+    published_at: Optional[str] = Field(
+        default=None,
+        description="ISO-8601 date the search hit carried; stored as the row's Created line (#561)",
+    )
 
 
 class DependentAssistant(BaseModel):

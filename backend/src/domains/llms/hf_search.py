@@ -20,6 +20,7 @@ from src.database.catalog_classify import (
     VISION_PIPELINES,
 )
 from src.engines.model_resolver import base_key
+from src.database.generation_hints import resolve_base_repo
 from src.utils.hf_model_metadata import humanize_model_name
 
 # Pipelines that correspond to a runnable chat/vision LLM (everything else a text
@@ -110,7 +111,9 @@ def search_huggingface(query: str, limit: int = 30) -> List[Dict[str, Any]]:
             logger.debug(f"is_runnable check failed for {m.id}; keeping the hit", exc_info=True)
         seen.add(key)
         slug = m.id.split("/")[-1]
-        created = getattr(m, "created_at", None)
+        # Only a hit that is itself a base has a publisher date: a quant's upload
+        # date would mislead, and resolving its base would cost a Hub call per hit.
+        created = getattr(m, "created_at", None) if resolve_base_repo(m.id, tags) == m.id else None
         results.append(
             {
                 "link": m.id,
@@ -122,8 +125,7 @@ def search_huggingface(query: str, limit: int = 30) -> List[Dict[str, Any]]:
                 "gated": bool(getattr(m, "gated", None)),
                 "pipeline_tag": getattr(m, "pipeline_tag", None),
                 "quantized": True,
-                # The repo's own creation date (ISO) or None: the search hit is
-                # the quant repo itself, there is no base to look up (#561).
+                # ISO creation date of a hit that is itself a base, else None (#561).
                 "published_at": created.isoformat() if created else None,
             }
         )

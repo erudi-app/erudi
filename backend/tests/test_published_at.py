@@ -94,3 +94,125 @@ def test_community_search_requests_the_creation_date(engine):
     # Without it the reduced list serialization leaves ModelInfo.created_at at
     # None and every derived row says "Created: Unknown".
     assert "createdAt" in engine.community_search_kwargs("")["expand"]
+
+
+# -- By-link download keeps the date the search hit carried --------------------
+
+
+@pytest.mark.unit
+class TestDownloadByLinkKeepsTheDate:
+    def _stored_metadata(self, client, **extra):
+        """The ``model_metadata`` the route hands the placeholder row."""
+        from unittest.mock import patch
+
+        from src.core.exceptions import InvalidInputException
+
+        # The route is only asked what it hands the helper; the helper stops there.
+        with patch(
+            "src.domains.llms.endpoints._start_download", side_effect=InvalidInputException("stop")
+        ) as start:
+            client.post(
+                "/erudi/llms/download/huggingface",
+                json={"link": "mlx-community/Some-Model-4bit", "name": "Some Model", **extra},
+            )
+        return start.call_args.kwargs["model_metadata"]
+
+    def test_published_at_lands_in_the_placeholder_metadata(self, client):
+        meta = self._stored_metadata(client, published_at="2026-03-04T10:00:00+00:00")
+        assert published_at_from_metadata(meta) == "2026-03-04T10:00:00+00:00"
+
+    @pytest.mark.parametrize("extra", [{}, {"published_at": None}, {"published_at": "garbage"}])
+    def test_no_or_invalid_date_stores_no_date(self, client, extra):
+        assert published_at_from_metadata(self._stored_metadata(client, **extra)) is None
+
+
+# -- The date is the publisher's: the base repo, never a quant's upload date ----
+
+_BASE = "meta-llama/Llama-3.2-1B-Instruct"
+_QUANT = "bartowski/Llama-3.2-1B-Instruct-GGUF"
+_BASE_DATE = datetime(2024, 9, 18, 15, 12, 47, tzinfo=timezone.utc)
+_QUANT_DATE = datetime(2025, 1, 5, 8, 0, 0, tzinfo=timezone.utc)
+
+
+def _info(model_id, created, tags):
+    from huggingface_hub import ModelInfo
+
+    return ModelInfo(
+        id=model_id,
+        # The Hub serializes the date as a string; ModelInfo parses it.
+        created_at=created.strftime("%Y-%m-%dT%H:%M:%S.000Z") if created else None,
+        tags=tags,
+        pipeline_tag="text-generation",
+        downloads=1000,
+        likes=10,
+    )
+
+
+@pytest.mark.unit
+class TestDerivedRowsUseTheBaseDate:
+    def _build(self, monkeypatch, hit, model_info):
+        from src.database import seed as seed_mod
+        from src.database.seed import Model_Seeder, Search_Config
+
+        monkeypatch.setattr(seed_mod.config, "LLM_Engine", CPU_Engine)
+        calls = []
+
+        def fake_model_info(repo_id, **kw):
+            calls.append(repo_id)
+            return model_info(repo_id)
+
+        api = SimpleNamespace(model_info=fake_model_info, list_models=lambda **kw: [])
+        seeder = Model_Seeder(db=None, hf_api=api)
+        row = seeder._create_derived_llm(hit, Search_Config("", "community", 7.0))
+        return published_at_from_metadata(row.model_metadata), calls
+
+    def test_quant_takes_its_base_repos_date(self, monkeypatch):
+        hit = _info(_QUANT, _QUANT_DATE, ["gguf", f"base_model:quantized:{_BASE}"])
+        date, calls = self._build(
+            monkeypatch, hit, lambda repo: _info(_BASE, _BASE_DATE, ["text-generation"])
+        )
+        assert date == _BASE_DATE.isoformat()
+        assert _BASE in calls
+
+    def test_unresolvable_base_gives_no_date_not_the_quants(self, monkeypatch):
+        hit = _info(_QUANT, _QUANT_DATE, ["gguf", f"base_model:quantized:{_BASE}"])
+
+        def boom(repo):
+            raise RuntimeError("404")
+
+        date, _ = self._build(monkeypatch, hit, boom)
+        assert date is None
+
+    def test_a_repo_without_a_base_tag_is_its_own_publisher(self, monkeypatch):
+        hit = _info("someone/Own-Finetune-GGUF", _QUANT_DATE, ["gguf"])
+        date, calls = self._build(monkeypatch, hit, lambda repo: _info(repo, None, []))
+        assert date == _QUANT_DATE.isoformat()
+        assert _BASE not in calls
+
+
+@pytest.mark.unit
+class TestSearchHitsDateOnlyBases:
+    def _search(self, monkeypatch, tags):
+        class _Engine:
+            FORMAT_TAG = "mlx"
+
+            @staticmethod
+            def is_runnable(link):
+                return True
+
+        hit = SimpleNamespace(
+            id="org/Some-Model-4bit", downloads=5000, likes=3, gated=False,
+            pipeline_tag="text-generation", tags=tags, safetensors=None,
+            created_at=_QUANT_DATE,
+        )  # fmt: skip
+        monkeypatch.setattr(hf_search.config, "LLM_Engine", _Engine, raising=False)
+        monkeypatch.setattr(
+            hf_search.config, "get_hf_api", lambda: SimpleNamespace(list_models=lambda **k: [hit])
+        )
+        return hf_search.search_huggingface("some")[0]["published_at"]
+
+    def test_a_quant_hit_shows_no_date(self, monkeypatch):
+        assert self._search(monkeypatch, ["mlx", f"base_model:quantized:{_BASE}"]) is None
+
+    def test_a_base_hit_shows_its_own_date(self, monkeypatch):
+        assert self._search(monkeypatch, ["mlx"]) == _QUANT_DATE.isoformat()

@@ -67,7 +67,7 @@ from datetime import datetime
 from dataclasses import dataclass
 from enum import Enum
 from pathlib import Path
-from typing import Optional, Dict, Union
+from typing import Any, Optional, Dict, Union
 from huggingface_hub import ModelInfo
 
 from src.core.logging import logger
@@ -582,8 +582,14 @@ def get_parameter_count_from_name(model_name: str, link: str) -> str:
         return "Unknown"
 
 
+_OWN_DATE = object()
+
+
 def format_model_info_metadata(
-    model_info: ModelInfo, size_estimate: Optional[ModelSize] = None, quantized: bool = False
+    model_info: ModelInfo,
+    size_estimate: Optional[ModelSize] = None,
+    quantized: bool = False,
+    created_at: Any = _OWN_DATE,
 ) -> str:
     """Format HuggingFace ModelInfo object into structured string for storage.
 
@@ -603,6 +609,10 @@ def format_model_info_metadata(
             Get from get_disk_size_after_quant.
         quantized: Boolean indicating if model is quantized (default: False).
             Shows "True" or "False" in output.
+        created_at: The date the ``Created:`` line shows (#561). Left out, it is
+            the repo's own ``created_at``; a derived row passes its BASE repo's
+            date (or None: ``Unknown``), because the date a card shows is the
+            publisher's, never a quant's upload date.
 
     Returns:
         Multi-line formatted string with all metadata fields.
@@ -656,9 +666,11 @@ def format_model_info_metadata(
     # Format size estimate
     size_str = size_estimate.to_string() if size_estimate else "Unknown"
 
+    created = model_info.created_at if created_at is _OWN_DATE else created_at
+
     metadata_str = f"""Model ID: {model_info.id}
 Author: {model_info.author or 'Unknown'}
-Created: {model_info.created_at or 'Unknown'}
+Created: {created or 'Unknown'}
 Downloads: {model_info.downloads or 0} 
 Likes: {model_info.likes or 0}
 Library: {model_info.library_name or 'Unknown'}
