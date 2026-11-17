@@ -25,13 +25,18 @@ from __future__ import annotations
 # The business SQLAlchemy engine (`src/database/core.py`, `init_database`):
 # a QueuePool keeps up to `pool_size` connections open between requests and
 # opens up to `max_overflow` more while that many are checked out at once.
-BUSINESS_POOL_SIZE = 5
-BUSINESS_POOL_MAX_OVERFLOW = 10
+# Each connection kept open is a server process of its own (5 to 9 MB). A
+# session with a Knowledge Base assistant, a title, two compactions and the
+# renderer's polls never had more than 4 queries in flight at once: two are
+# kept, and up to 8 can be open.
+BUSINESS_POOL_SIZE = 2
+BUSINESS_POOL_MAX_OVERFLOW = 6
 
 # The langchain-postgres `PGEngine` behind the Knowledge Base store
 # (`src/ingestion/vector_store.py`, `init_kb_store`): an async pool of its own.
-KB_STORE_POOL_SIZE = 5
-KB_STORE_POOL_MAX_OVERFLOW = 10
+# A search and an ingestion each use one connection at a time.
+KB_STORE_POOL_SIZE = 1
+KB_STORE_POOL_MAX_OVERFLOW = 2
 
 # The LangGraph `AsyncPostgresSaver` (`src/agents/checkpoint.py`): one
 # connection held for the app's lifetime.

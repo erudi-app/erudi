@@ -474,7 +474,7 @@ difference. Every start `backend.log` records begins with
 
 | Setting | Value | Why |
 |---|---|---|
-| `max_connections` | computed | The sum of every connection the backend can hold at once — the business SQLAlchemy pool and its overflow, the Knowledge Base `PGEngine` pool and its overflow, the checkpointer, the migration engine, `pg_dump`, the direct `psycopg.connect` calls — plus a margin of 5 for a `psql` and a watchdog restart. Both pools are created from the same constants, so a pool and the limit cannot drift apart. |
+| `max_connections` | computed | The sum of every connection the backend can hold at once — the business SQLAlchemy pool and its overflow, the Knowledge Base `PGEngine` pool and its overflow, the checkpointer, the migration engine, `pg_dump`, the direct `psycopg.connect` calls — plus a margin of 5 for a `psql` and a watchdog restart: 21. Both pools are created from the same constants, so a pool and the limit cannot drift apart. |
 | `shared_buffers` | `32MB` | See the measurements below: same search latency as 128 MB on a 15,000-chunk Knowledge Base, 16 MB is slower there. |
 | `wal_level` | `minimal` | Nothing reads this cluster's WAL: no replica, no point-in-time recovery; the only backup is `pg_dump`, a logical dump. Index builds and tables loaded in the transaction that created them skip the WAL. |
 | `max_wal_senders` | `0` | Required by `wal_level = minimal`, and no WAL sender slot is reserved. |
@@ -514,6 +514,16 @@ until the hot part of the HNSW index no longer fits; on the larger Knowledge Bas
 16 MB crossed that line in one of two series. The WAL an ingestion writes is the same
 under both levels (17.9 MB against 18.4 MB for 3,774 chunks): rows added to an existing
 table are logged either way.
+
+The pools are sized for one user too. Each connection a pool keeps open is a server
+process of 5 to 9 MB. The business engine keeps 2 connections and opens up to 6 more
+under load; the Knowledge Base `PGEngine` keeps 1 and opens up to 2 more. Sampled every
+50 ms through a session against a Knowledge Base assistant (a question, its title, a long
+question, two compactions, the renderer's polls on three threads), `pg_stat_activity`
+counted at most 4 queries in flight at once with the library default pools (5 kept, 10
+more) and 3 with these, never a wait for a connection. The client backends open during the session went from 6
+to 5 most of the time, those left open once it ended from 6 to 4, and the cluster's
+footprint at that point from 61 MB to 33 MB.
 
 One database, three tenants:
 

@@ -58,6 +58,17 @@ class TestConnectionBudget:
         assert max_connections() > 3
 
     @pytest.mark.unit
+    def test_pools_are_sized_for_one_user(self):
+        # A session (KB assistant, title, two compactions, the renderer's
+        # polls) never had more than 4 queries in flight at once and held
+        # 6 connections: the pools keep few idle connections and still open
+        # twice the measured peak.
+        assert BUSINESS_POOL_SIZE + KB_STORE_POOL_SIZE <= 3
+        assert BUSINESS_POOL_SIZE + BUSINESS_POOL_MAX_OVERFLOW >= 2 * 4
+        assert KB_STORE_POOL_SIZE + KB_STORE_POOL_MAX_OVERFLOW >= 2
+        assert max_connections() <= 25
+
+    @pytest.mark.unit
     def test_settings_carry_the_computed_max_connections(self):
         assert server_settings()["max_connections"] == str(max_connections())
 
