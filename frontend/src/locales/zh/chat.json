@@ -230,6 +230,9 @@
     "notes": {
       "reducedByMemory": "模型最多支持 {{trained}} 个 token；这台电脑的内存将此对话限制为 {{working}} 个。",
       "reducedByMemoryNoTrained": "这台电脑的内存将此对话限制为 {{working}} 个 token。",
+      "cutByEstimate": "模型最多支持 {{trained}} 个 token；此对话使用 {{working}} 个。Erudi 用对该模型内存需求的审慎估算来确定其窗口，因此可能比这台电脑实际能容纳的更少。",
+      "reducedByBrake": "模型最多支持 {{trained}} 个 token；内存制动将此对话的窗口缩小为 {{working}} 个，以释放内存。",
+      "reducedByBrakeNoTrained": "内存制动将此对话的窗口缩小为 {{working}} 个 token，以释放内存。",
       "notLoaded": "模型尚未加载：这是它训练时的窗口。加载模型后才能知道这台电脑允许的窗口。",
       "unknownWindow": "模型的窗口未知，因此不显示占比。",
       "kbExcluded": "计数不包括每个问题检索到的知识库片段。",

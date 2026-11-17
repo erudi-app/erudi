@@ -122,6 +122,11 @@ class SpawnWindow:
     # Memory (not the trained window, not a sliding-window over-estimate) is
     # what limits the window. The brake's cap never sets it.
     memory_bound: bool
+    # The window is cut below the trained one by the conservative
+    # sliding-window estimate (``GgufShape.swa_overestimated``), not by this
+    # computer's memory: reported apart from ``memory_bound``, which drives
+    # the brake, the compaction reason and the overflow wording.
+    cut_by_estimate: bool
     kv_token_bytes: int
     # The child's anonymous memory at ``window`` without the weights: KV and
     # the compute buffer.
@@ -364,6 +369,7 @@ def window_for(
         trained=trained,
         static_window=static,
         memory_bound=affordable < trained and not shape.swa_overestimated,
+        cut_by_estimate=(affordable < trained and shape.swa_overestimated and window == static),
         kv_token_bytes=kv,
         static_anonymous_bytes=(
             window * kv + LLAMA_COMPUTE_FIXED_BYTES + window * LLAMA_COMPUTE_PER_TOKEN_BYTES

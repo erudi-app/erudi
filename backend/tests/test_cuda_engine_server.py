@@ -164,6 +164,7 @@ class TestSpawnContextAndArgv:
         assert ctx["kv_token_bytes"] == 114_688
         assert ctx["weights_bytes"] == WEIGHTS
         assert ctx["spawn_memory_bound"] is False
+        assert ctx["spawn_cut_by_estimate"] is False
         assert ctx["vram_total_bytes"] == 16 * GIB
         assert ctx["fa_proven"] is True
         assert ctx["tok_embd_bytes"] == 300 * MIB
@@ -183,6 +184,16 @@ class TestSpawnContextAndArgv:
         ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
         assert ctx["ctx_size"] == 20_736
         assert ctx["spawn_memory_bound"] is True
+        assert ctx["spawn_cut_by_estimate"] is False
+
+    def test_a_sliding_window_cut_is_flagged_as_an_estimate_not_memory(self, gpu):
+        gemma = dataclasses.replace(QWEN3, context_length=131_072, sliding_window=1024)
+        gpu.inputs = (gemma, WEIGHTS)
+        gpu.device = _device(total=8 * GIB, free=int(6.5 * GIB))
+        ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
+        assert ctx["ctx_size"] < 131_072
+        assert ctx["spawn_memory_bound"] is False
+        assert ctx["spawn_cut_by_estimate"] is True
 
     def test_the_alias_window_memory_caps_a_load(self, gpu):
         CUDA_Engine._window_memory["erudi-9"] = {"cap": 20_480, "faulty": None, "at": time.time()}
@@ -503,6 +514,29 @@ class TestWindowsFitMargin:
         assert ctx["gpu_layers"] == -2
         assert win661.list_calls == []
         assert _flag(_argv(**ctx), "-fitt") == "1024"
+
+    def test_a_respawn_under_the_static_window_is_not_the_estimates_cut(self, win661, monkeypatch):
+        swa = dataclasses.replace(QWEN3, context_length=131_072, sliding_window=1024)
+        monkeypatch.setattr(gguf_memory, "read_shape", lambda path: swa)
+        live = {
+            "alias": "erudi-9",
+            "window_sized": True,
+            "static_window_tokens": 66_048,
+            "weights_bytes": WEIGHTS,
+            "vram_total_bytes": TOTAL_661,
+            "device_budget_bytes": 8 * GIB,
+            "gpu_uuid": UUID,
+        }
+        capped = CUDA_Engine._prepare_spawn_context(
+            Path("/m.gguf"), "erudi-9", brake_cap=30_720, respawn_from=live
+        )
+        assert capped["ctx_size"] == 30_720
+        assert capped["spawn_cut_by_estimate"] is False
+        whole = CUDA_Engine._prepare_spawn_context(
+            Path("/m.gguf"), "erudi-9", brake_cap=70_000, respawn_from=live
+        )
+        assert whole["ctx_size"] == 66_048
+        assert whole["spawn_cut_by_estimate"] is True
 
     def test_linux_keeps_the_base_margin(self, win661, monkeypatch):
         """No WDDM: cudaMemGetInfo is the card's real free memory."""

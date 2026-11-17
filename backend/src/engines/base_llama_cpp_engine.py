@@ -69,6 +69,7 @@ PRESERVED_SPAWN_KEYS = (
     "static_anonymous_bytes",
     "weights_bytes",
     "spawn_memory_bound",
+    "spawn_cut_by_estimate",
     "mmproj_loaded",
     "window_sized",
     "vram_total_bytes",
@@ -854,6 +855,7 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
             "static_anonymous_bytes": window.static_anonymous_bytes,
             "weights_bytes": window.weights_bytes,
             "spawn_memory_bound": window.memory_bound,
+            "spawn_cut_by_estimate": window.cut_by_estimate,
             "mmproj_loaded": mmproj is not None,
         }
 
