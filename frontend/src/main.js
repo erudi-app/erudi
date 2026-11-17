@@ -25,7 +25,7 @@ const { gracefulShutdown } = require("./utils/backendShutdown");
 const { singleFlight } = require("./utils/singleFlight");
 const { readAppLogTailResult } = require("./utils/appLogTail");
 const { switchAppLogForVersion, appLogVersionLines } = require("./utils/appLogVersion");
-const { describeProcessGone, formatMainRecord } = require("./utils/mainLog");
+const { describeProcessGone, formatMainRecord, stripAnsi } = require("./utils/mainLog");
 const { createBackendStartTracker, requestStop } = require("./utils/backendStartTracker");
 const { configureUpdater, createUpdaterWiring } = require("./utils/updaterWiring");
 
@@ -401,7 +401,9 @@ const startRealBackend = () => {
 
     backendProcess.stdout.on("data", (data) => {
       for (const line of data.toString().split(/\r?\n/)) {
-        const trimmed = line.trim();
+        // The backend's console formatter colours its lines even on a pipe;
+        // the app log is text read by people and parsers.
+        const trimmed = stripAnsi(line).trim();
         if (!trimmed) continue;
         log(`Backend stdout: ${trimmed}`);
         let event = null;
@@ -464,7 +466,7 @@ const startRealBackend = () => {
     });
 
     backendProcess.stderr.on("data", (data) => {
-      const output = data.toString().trim();
+      const output = stripAnsi(data.toString()).trim();
       if (!output) return;
       log(`Backend stderr: ${output}`);
       // stderr is advisory only. The backend emits authoritative startup_error

@@ -99,6 +99,10 @@ two files carry, without leaving the app:
   error this window caught) are one row, dated and identified by their latest
   occurrence. A backend line echoed into the app log is compared without the
   backend's own timestamp and request id, which differ on every occurrence.
+  The main process strips the backend's terminal colour codes before echoing
+  its output, and reads the level that opens an echoed line in the console's
+  spelling (`[WARN]`, `[ERROR]`, `[CRIT]`) or the file's; a level quoted
+  further into a line declares nothing.
   Both readers fold repeats before keeping their last 200, so a line written a
   thousand times holds one place, never all of them. When nothing was recorded, the area says so in one line and asks
   nothing — but only when all three sources answered: a source that could not

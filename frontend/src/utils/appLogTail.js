@@ -7,7 +7,12 @@
 // `[renderer:<ns>] <LEVEL> <msg>`. There is no level column of its own.
 //
 // So the level is read out of the text, and only when the text states one:
-//   - `[WARNING]` / `[ERROR]` / `[CRITICAL]` — the backend's file format;
+//   - an echoed backend line, `Backend stdout|stderr: [LEVEL] ...`, whose
+//     level opens the line: the console formatter's `[WARN]` / `[ERROR]` /
+//     `[CRIT]` (colour codes allowed, from an app log written before main
+//     stripped them) or the file format's `[WARNING]` / `[CRITICAL]`. Only
+//     there: a level quoted later in a line (an INFO record carrying a
+//     pasted "[ERROR]") declares nothing;
 //   - `[renderer:ns] WARN|ERROR ...` — the renderer bridge's format;
 //   - `[main] WARN|ERROR ...` — main's own failures (utils/mainLog.js): a
 //     backend that exited, a spawn that failed, a renderer that crashed.
@@ -54,8 +59,17 @@ export const MAX_MESSAGE_CHARS = 4000;
 /** Start of a record: `[2026-09-05T23:03:14.797Z] `. */
 const RECORD_RE = /^\[(\d{4}-\d{2}-\d{2}T[\d:.]+Z)\]\s?([\s\S]*)$/;
 
-/** The backend's own level marker, as it survives inside a stdout line. */
-const BACKEND_LEVEL_RE = /\[(WARNING|ERROR|CRITICAL)\]/;
+/**
+ * The backend's own level, opening an echoed stdout/stderr line. The console
+ * formatter (backend/src/core/logging.py, `CustomFormatter`) writes `[WARN]`
+ * and `[CRIT]`, padded and coloured; the file format writes the full names.
+ */
+const BACKEND_LEVEL_RE =
+  // eslint-disable-next-line no-control-regex -- the ESC of a colour code is what is matched
+  /^Backend (?:stdout|stderr): (?:\x1b\[[0-9;]*m)?\[(WARNING|WARN|ERROR|CRITICAL|CRIT)\]/;
+
+/** Console spellings to the level names the rest of the app uses. */
+const BACKEND_LEVEL_NAMES = { WARN: "WARNING", CRIT: "CRITICAL" };
 
 /**
  * The shape of the two levelled writers of this process: the renderer bridge
@@ -72,7 +86,7 @@ export function detectLevel(text) {
   const levelled = LEVELLED_PREFIX_RE.exec(text);
   if (levelled) return levelled[1] === "WARN" ? "WARNING" : "ERROR";
   const backend = BACKEND_LEVEL_RE.exec(text);
-  if (backend) return backend[1];
+  if (backend) return BACKEND_LEVEL_NAMES[backend[1]] ?? backend[1];
   return null;
 }
 
