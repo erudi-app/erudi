@@ -80,6 +80,11 @@ class TestSearchRoute:
         )
         assert _ids(client.get(SEARCH, params={"q": "zorblax"})) == []
 
+    def test_the_failed_turn_filter_takes_the_sentinel_literally(self, client, make_conversation):
+        """`_` in the sentinel is not a wildcard: a look-alike text is a real message."""
+        lookalike = make_conversation("Plain title", ("llm", "[ERRORXMESSAGEXSYSTEM] zorblax"))
+        assert _ids(client.get(SEARCH, params={"q": "zorblax"})) == [lookalike.id]
+
     @pytest.mark.parametrize(
         "needle, literal, decoy",
         [
@@ -121,3 +126,33 @@ class TestSearchRoute:
         make_conversation("Shape", ("user", "x"))
         row = client.get(SEARCH, params={"q": "shape"}).json()[0]
         assert {"id", "name", "llm_id", "last_message_time"} <= set(row)
+
+
+class TestHiddenMarkers:
+    """A user message stores its attachments as markers the chat never shows
+    (``[file_path:...]``, ``[image_path:...]``, ``[image]``): they are not text
+    the user can search for."""
+
+    CONTENT = "hello world[file_path:/Users/me/my_report.pdf][image_path:/Users/me/pic.png][image]"
+
+    @pytest.mark.parametrize("needle", ["file", "path", "Users", "pdf", "png", "image", "_", "me/"])
+    def test_a_marker_only_term_finds_nothing(self, client, make_conversation, needle):
+        make_conversation("Plain title", ("user", self.CONTENT))
+        assert _ids(client.get(SEARCH, params={"q": needle})) == []
+
+    def test_the_visible_text_still_matches(self, client, make_conversation):
+        conv = make_conversation("Plain title", ("user", self.CONTENT))
+        assert _ids(client.get(SEARCH, params={"q": "hello"})) == [conv.id]
+        assert _ids(client.get(SEARCH, params={"q": "world"})) == [conv.id]
+
+    def test_a_term_visible_elsewhere_still_matches(self, client, make_conversation):
+        conv = make_conversation(
+            "Plain title", ("user", "see my file[file_path:/a/report.pdf]"), ("llm", "ok")
+        )
+        assert _ids(client.get(SEARCH, params={"q": "file"})) == [conv.id]
+
+    def test_an_encoded_bracket_in_a_path_does_not_end_the_marker_early(
+        self, client, make_conversation
+    ):
+        make_conversation("Plain title", ("user", "hi[file_path:/a/we%5Dird.pdf]"))
+        assert _ids(client.get(SEARCH, params={"q": "ird"})) == []
