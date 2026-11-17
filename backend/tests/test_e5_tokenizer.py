@@ -51,13 +51,19 @@ def _long_text() -> str:
 
 @pytest.fixture(scope="module")
 def reference_tokenizer():
-    """The tokenizer chunking used before: transformers over the e5 snapshot."""
+    """The tokenizer chunking used before: transformers over the e5 snapshot.
+
+    Read from the app's model cache only, never downloaded: without the
+    snapshot (an offline machine, a fresh checkout) the comparisons skip.
+    """
+    if not embedding_model_available():
+        pytest.skip("e5 snapshot not in the model cache (KB embedding model not downloaded)")
     from transformers import AutoTokenizer
 
     return AutoTokenizer.from_pretrained(
         EMBEDDING_MODEL_ID,
         cache_dir=str(config.CACHE_DIR),
-        local_files_only=embedding_model_available(),
+        local_files_only=True,
     )
 
 
@@ -156,14 +162,3 @@ class TestChunkBoundariesUnchanged:
             reference = chunking.chunk_markdown(text, target_tokens=target, overlap_tokens=overlap)
             assert len(reference) > 0, name
             assert current[name] == reference, name
-
-
-class TestRelease:
-    def test_release_drops_the_resident_tokenizer(self):
-        chunking.count_tokens("charge le tokenizer")
-        assert chunking.tokenizer_loaded()
-        chunking.release_tokenizer()
-        assert not chunking.tokenizer_loaded()
-        # The next count loads it again.
-        assert chunking.count_tokens("encore") > 0
-        assert chunking.tokenizer_loaded()

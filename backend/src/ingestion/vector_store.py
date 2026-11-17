@@ -22,7 +22,6 @@ on every call. Do not "simplify" this away.
 
 from __future__ import annotations
 
-import threading
 import time
 import uuid
 from typing import TYPE_CHECKING, Optional
@@ -58,11 +57,6 @@ POOL_K = 20  # hybrid candidates considered per query (recall stage)
 HNSW_INDEX_NAME = "idx_kb_chunks_embedding_hnsw"
 
 METADATA_COLUMNS = ["kb_id", "document_id", "source_file", "page", "chunk_index"]
-
-# Post-ready token-count backfill: batch size, and the batches one start may
-# run (100 000 chunks); what is left waits for the next start.
-TOKEN_COUNT_BACKFILL_BATCH = 500
-TOKEN_COUNT_BACKFILL_MAX_BATCHES = 200
 
 _pg_engine: Optional[PGEngine] = None
 _kb_store: Optional[PGVectorStore] = None
@@ -299,91 +293,3 @@ def search_kb_chunks_scored(
         f"query={truncate_for_log(query, 2000)}"
     )
     return [(doc, similarities[doc.id]) for doc in documents]
-
-
-# Chunks stored before ingestion recorded a token count: no ``token_count``
-# key in the JSON metadata (or no metadata at all).
-_MISSING_TOKEN_COUNT = "langchain_metadata IS NULL OR langchain_metadata->>'token_count' IS NULL"
-
-_backfill_stop = threading.Event()
-
-
-def backfill_chunk_token_counts(
-    *,
-    batch_size: int = TOKEN_COUNT_BACKFILL_BATCH,
-    max_batches: int = TOKEN_COUNT_BACKFILL_MAX_BATCHES,
-    stop: Optional[threading.Event] = None,
-) -> int:
-    """Give the chunks stored without a ``token_count`` their e5 count.
-
-    Idempotent (only rows without the key are read) and bounded: at most
-    ``max_batches`` batches of ``batch_size`` rows, each committed on its own,
-    and ``stop`` is checked between batches. Returns the rows updated. The
-    tokenizer is loaded only when a row needs it, and released afterwards
-    unless it was already resident (an ingestion keeps using it).
-    """
-    if _psycopg_url is None:
-        raise RuntimeError("KB vector store not initialized — call init_kb_store() first.")
-    from src.ingestion import chunking
-
-    was_loaded = chunking.tokenizer_loaded()
-    updated = 0
-    done = False
-    try:
-        with psycopg.connect(_psycopg_url, autocommit=True) as conn:
-            for _ in range(max_batches):
-                if stop is not None and stop.is_set():
-                    break
-                rows = conn.execute(
-                    f'SELECT langchain_id, content FROM "{SCHEMA_NAME}"."{TABLE_NAME}"'
-                    f" WHERE {_MISSING_TOKEN_COUNT} LIMIT %s",
-                    (batch_size,),
-                ).fetchall()
-                if not rows:
-                    done = True
-                    break
-                ids = [row[0] for row in rows]
-                counts = [chunking.count_tokens(row[1] or "") for row in rows]
-                # The JSON column keeps its other keys; a non-object value
-                # (never written by this app) is replaced by an object.
-                conn.execute(
-                    f'UPDATE "{SCHEMA_NAME}"."{TABLE_NAME}" AS c SET langchain_metadata = ('
-                    " CASE WHEN json_typeof(c.langchain_metadata) = 'object'"
-                    " THEN c.langchain_metadata::jsonb ELSE '{}'::jsonb END"
-                    " || jsonb_build_object('token_count', v.n))::json"
-                    " FROM unnest(%s::uuid[], %s::int[]) AS v(id, n)"
-                    " WHERE c.langchain_id = v.id",
-                    (ids, counts),
-                )
-                updated += len(rows)
-                if len(rows) < batch_size:
-                    done = True
-                    break
-    finally:
-        if not was_loaded:
-            chunking.release_tokenizer()
-    if updated:
-        rest = "" if done else ", more left for the next start"
-        logger.info(f"KB chunk token counts backfilled: {updated} chunks{rest}")
-    return updated
-
-
-def backfill_chunk_token_counts_startup() -> int:
-    """Threadpool entrypoint for the post-ready token-count backfill.
-
-    Scheduled by the lifespan after ``ready`` and awaited by nobody, so it
-    never raises: a chunk left without a count is counted on the fly by
-    retrieval, and the next start tries again.
-    """
-    _backfill_stop.clear()
-    try:
-        return backfill_chunk_token_counts(stop=_backfill_stop)
-    except Exception as e:
-        # Runs after ready in a task nobody awaits: this is its only record.
-        logger.warning(f"KB chunk token-count backfill failed: {e}", exc_info=True)
-        return 0
-
-
-def stop_chunk_token_count_backfill() -> None:
-    """Ask a running backfill to stop after its current batch (shutdown)."""
-    _backfill_stop.set()

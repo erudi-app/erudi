@@ -66,7 +66,8 @@ Ingestion runs as a FastAPI background task, one file at a time
    tokenizer as `transformers` builds it (`backend_tokenizer.to_str()`, gzipped), loaded with the
    `tokenizers` package alone. It needs no download and no `transformers`;
    `tests/test_e5_tokenizer.py` checks it gives `transformers`' ids and the same chunks.
-   Loaded, it holds about 250 MB; it stays resident once an ingestion has used it.
+   Loaded, it holds about 250 MB and stays resident once an ingestion, or a retrieval that counts an
+   older chunk, has used it.
 6. **Embed.** `E5Embeddings` (`src/ingestion/embeddings.py`) holds a resident
    `multilingual-e5-small` (384 dimensions, 512-token window). The asymmetric prefixes are
    mandatory: `passage: ` for indexed chunks, `query: ` for searches. Vectors are L2-normalized, so
@@ -130,11 +131,8 @@ vectors (the fusion overwrites per-row scores with rank harmonics, which have no
 3. **Token budget**: keep whole chunks best-first until the model's budget is spent. Each chunk
    costs its stored `token_count`; a chunk without one is counted on the fly.
 
-Chunks stored before token counts were recorded get theirs from a background task the backend
-starts after `ready` (`backfill_chunk_token_counts_startup` in `src/ingestion/vector_store.py`). It
-never delays the start, works in batches of 500 (at most 200 batches per start, the rest waits for
-the next one), logs one INFO line when it has updated chunks, and releases the tokenizer afterwards
-unless an ingestion had it loaded. A shutdown stops it after its current batch.
+Chunks ingested before Erudi stored token counts have none: they are counted with the tokenizer when
+they are retrieved, and keep no count afterwards.
 
 Each excerpt keeps its `source_file` so the prompt can attribute it (`[Document: report.pdf]`).
 

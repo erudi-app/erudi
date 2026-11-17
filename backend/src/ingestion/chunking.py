@@ -73,7 +73,8 @@ def _load_frozen_tokenizer() -> Tokenizer:
 
 
 def _get_tokenizer() -> Tokenizer:
-    """Lazy resident e5 tokenizer, read from the frozen file (about 0.5 s)."""
+    """Lazy resident e5 tokenizer, read from the frozen file (about 0.5 s and
+    250 MB, kept for the life of the process)."""
     global _tokenizer
     tokenizer = _tokenizer
     if tokenizer is None:
@@ -82,23 +83,6 @@ def _get_tokenizer() -> Tokenizer:
                 _tokenizer = _load_frozen_tokenizer()
             tokenizer = _tokenizer
     return tokenizer
-
-
-def tokenizer_loaded() -> bool:
-    """Whether the tokenizer is resident (about 250 MB of the process)."""
-    return _tokenizer is not None
-
-
-def release_tokenizer() -> None:
-    """Drop the resident tokenizer; the next count loads it again.
-
-    The memory goes back to the system: measured on macOS, a process holding
-    only the tokenizer has 258 MB of unique memory, 34 MB after the release.
-    A count in flight keeps its own reference until it ends.
-    """
-    global _tokenizer
-    with _tokenizer_lock:
-        _tokenizer = None
 
 
 def count_tokens(text: str) -> int:

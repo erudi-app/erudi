@@ -91,9 +91,8 @@ def _adaptive_threshold(similarities: Sequence[float]) -> Optional[float]:
 def _token_cost(text: str, stored: object) -> int:
     """The chunk's stored e5 count, or a count now when it has none.
 
-    Chunks carry ``token_count`` in their metadata since ingestion stores it
-    (and the post-ready backfill adds it to older ones); a chunk without a
-    usable one is counted on the fly.
+    Ingestion stores ``token_count`` in each chunk's metadata; a chunk without
+    a usable one (ingested before counts were stored) is counted on the fly.
     """
     if isinstance(stored, int) and not isinstance(stored, bool) and stored >= 0:
         return stored
