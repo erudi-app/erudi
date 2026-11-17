@@ -8,10 +8,10 @@
 # mkdocstrings is still an mkdocs plugin under the hood; Zensical's own build
 # pulls it in as a dependency and drives it through its mkdocs-compatibility
 # layer.
-zensical==0.1.0
+zensical==0.1.1
 mkdocs==1.6.1
 mkdocstrings[python]==1.0.8
-mkdocstrings-python==2.0.10
+mkdocstrings-python==2.0.11
 griffe==2.4.1
 # Floor set by zensical (pymdown-extensions>=11.0); pin exact for reproducibility.
 pymdown-extensions==13.1
