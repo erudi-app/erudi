@@ -634,6 +634,7 @@ class MLX_Engine(BaseChatServerEngine):
         handle: Dict[str, Any],
         *,
         reason: str,
+        purpose: str = "claim",
         barrier_timeout_s: Optional[float] = None,
     ) -> bool:
         """Reset the child's prefix cache; True on success. Never raises.
@@ -644,14 +645,17 @@ class MLX_Engine(BaseChatServerEngine):
         failure is ONE warning and the owner ``<dirty>``, so the next claim
         retries. A child without a prefix cache answers 200
         ``{"enabled": false}``: a success with nothing to clear.
-        ``barrier_timeout_s`` bounds that barrier below the first-chunk
-        ceiling (the memory brake's release: a shielded release must never
-        hold a shutdown that long).
+        ``purpose`` names what a failed barrier costs (``"release"``: the
+        memory brake's). ``barrier_timeout_s`` bounds that barrier below the
+        first-chunk ceiling (the memory brake's release: a shielded release
+        must never hold a shutdown that long).
         """
         api_key = handle.get("api_key")
         headers = {"Authorization": f"Bearer {api_key}"} if api_key else None
         if handle.get("abandoned"):
-            if not cls._send_barrier(handle, headers, reason=reason, timeout_s=barrier_timeout_s):
+            if not cls._send_barrier(
+                handle, headers, reason=reason, purpose=purpose, timeout_s=barrier_timeout_s
+            ):
                 handle["prefix_owner"] = cls._PREFIX_OWNER_DIRTY
                 return False
             handle["abandoned"] = False
@@ -1463,7 +1467,10 @@ class MLX_Engine(BaseChatServerEngine):
         from src.engines import process_footprint
 
         if not cls._reset_prefix_cache(
-            handle, reason="memory_pressure", barrier_timeout_s=cls.RELEASE_BARRIER_TIMEOUT_S
+            handle,
+            reason="memory_pressure",
+            purpose="release",
+            barrier_timeout_s=cls.RELEASE_BARRIER_TIMEOUT_S,
         ):
             return None
         api_key = handle.get("api_key")

@@ -404,6 +404,24 @@ def test_a_claim_barrier_keeps_its_own_text(child, http, caplog):
     assert http.calls[0]["timeout"] != MLX_Engine.RELEASE_BARRIER_TIMEOUT_S
 
 
+def test_a_failed_abandon_barrier_inside_a_release_names_the_release(child, http, sensors, caplog):
+    sensors.level = 4
+    child["last_request_tokens"] = 10
+    child["abandoned"] = True
+    http.fail["/v1/chat/completions"] = 500
+
+    with caplog.at_level(logging.INFO):
+        outcome = MLX_Engine.brake_point("idle")
+
+    assert outcome == BrakeOutcome()
+    assert http.paths() == [("POST", "/v1/chat/completions")]
+    (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    message = warning.getMessage()
+    assert "memory release incomplete" in message
+    assert "deferred to the next claim" not in message
+    _assert_clean(caplog)
+
+
 # ===================== unload and the carry =====================
 
 

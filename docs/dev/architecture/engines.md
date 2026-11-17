@@ -345,8 +345,8 @@ reload.
 `[MLX_Engine] Memory brake: point=..., level=..., action=..., window=A->B, excess_mib=...`
 (a release quotes the excess before and after); an unload is one WARNING, the app having
 degraded on its own (see [Logging](../../logging.md)). A reset or a barrier that fails is
-its own WARNING (a release barrier's says the memory release is incomplete) and no brake
-line follows. A shrink or a grow the child did not apply is the applier's WARNING alone,
+its own WARNING (a barrier sent by a release, the abandon barrier included, says the memory
+release is incomplete) and no brake line follows. A shrink or a grow the child did not apply is the applier's WARNING alone,
 and the brake forgets the decision (cap, episode count, notice) as if it never happened.
 
 ### The window on the CPU engine
