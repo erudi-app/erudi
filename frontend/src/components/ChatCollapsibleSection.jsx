@@ -117,7 +117,10 @@ export default function ChatCollapsibleSection({
       live = false;
       clearTimeout(timer);
     };
-  }, [typed]);
+    // `items` is the history the parent holds: when it changes under a search
+    // (a rename, a new conversation, a delete) the search is asked again, so the
+    // results never keep a title or a row the history no longer has.
+  }, [typed, items]);
 
   const changeResults = (change) =>
     setOutcome((prev) => (prev?.rows ? { ...prev, rows: change(prev.rows) } : prev));
@@ -177,9 +180,28 @@ export default function ChatCollapsibleSection({
       await exportConversation(id, { t });
     } catch (err) {
       log.error(err);
-      alert(t("chat:export.failed", { error: err.message }));
+      setErrorMessage(t("chat:export.failed", { error: err.message }));
     }
   };
+
+  // A row action: a button for the mouse and for the keyboard (Tab reaches it,
+  // Enter and Space press it), never a click on the row behind it.
+  const rowAction = (label, action) => ({
+    role: "button",
+    tabIndex: 0,
+    "aria-label": label,
+    onClick: (e) => {
+      e.stopPropagation();
+      action();
+    },
+    onKeyDown: (e) => {
+      if (e.key === "Enter" || e.key === " ") {
+        e.preventDefault();
+        e.stopPropagation();
+        action();
+      }
+    },
+  });
 
   const renderItems = () => {
     if (loading) {
@@ -232,34 +254,23 @@ export default function ChatCollapsibleSection({
               <span>{displayName(conv.name)}</span>
             )}
 
-            <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-2 opacity-0 group-hover:opacity-100">
+            <div className="absolute right-2 top-1/2 -translate-y-1/2 flex gap-2 opacity-0 group-hover:opacity-100 group-focus-within:opacity-100">
               <Download
-                role="button"
-                aria-label={t("chat:export.action")}
-                onClick={(e) => {
-                  e.stopPropagation();
-                  exportRow(conv.id);
-                }}
+                {...rowAction(t("chat:export.action"), () => exportRow(conv.id))}
                 className="w-4 h-4 text-gray-400 hover:text-gray-200 cursor-pointer"
               />
               <Edit3
-                role="button"
-                aria-label={t("chat:history.renameConversation")}
-                onClick={(e) => {
-                  e.stopPropagation();
+                {...rowAction(t("chat:history.renameConversation"), () => {
                   setEditingId(conv.id);
                   setTempName(conv.name === DEFAULT_CONVERSATION_NAME ? "" : conv.name);
-                }}
+                })}
                 className="w-4 h-4 text-gray-400 hover:text-gray-200 cursor-pointer"
               />
               <X
-                role="button"
-                aria-label={t("chat:history.deleteConversation")}
-                onClick={(e) => {
-                  e.stopPropagation();
+                {...rowAction(t("chat:history.deleteConversation"), () => {
                   setPendingDeleteId(conv.id);
                   setShowDeleteConfirm(true);
-                }}
+                })}
                 className="w-4 h-4 text-red-400 hover:text-red-300 cursor-pointer"
               />
             </div>

@@ -156,6 +156,44 @@ describe("ChatCollapsibleSection search", () => {
     expect(field().value).toBe("air");
   });
 
+  it("asks again when the history changes under a search (rename, new, delete)", async () => {
+    answer([{ id: 2, name: "Airships" }]);
+    const { rerender } = render(<ChatCollapsibleSection title="Previous Chats" items={items} />);
+    type("air");
+    await waitFor(() => expect(screen.queryByText("Cooking")).toBeNull());
+    expect(searchCalls()).toHaveLength(1);
+
+    // The conversation was renamed elsewhere: the next answer carries its new name.
+    answer([{ id: 2, name: "Zeppelins" }]);
+    rerender(
+      <ChatCollapsibleSection
+        title="Previous Chats"
+        items={[...items.slice(0, 1), { id: 2, name: "Zeppelins" }, ...items.slice(2)]}
+      />
+    );
+    await waitFor(() => expect(searchCalls()).toHaveLength(2));
+    expect(await screen.findByText("Zeppelins")).toBeTruthy();
+    expect(screen.queryByText("Airships")).toBeNull();
+    expect(String(searchCalls()[1][0])).toContain("q=air");
+  });
+
+  it("does not ask when the history changes and nothing is searched", async () => {
+    const { rerender } = render(<ChatCollapsibleSection title="Previous Chats" items={items} />);
+    rerender(<ChatCollapsibleSection title="Previous Chats" items={[...items]} />);
+    await new Promise((resolve) => setTimeout(resolve, 400));
+    expect(searchCalls()).toHaveLength(0);
+  });
+
+  it("keeps the old results on screen while the refreshed search is on its way", async () => {
+    answer([{ id: 2, name: "Airships" }]);
+    const { rerender } = render(<ChatCollapsibleSection title="Previous Chats" items={items} />);
+    type("air");
+    await waitFor(() => expect(screen.queryByText("Cooking")).toBeNull());
+    rerender(<ChatCollapsibleSection title="Previous Chats" items={[...items]} />);
+    expect(screen.getByText("Airships")).toBeTruthy();
+    expect(screen.queryByText("Cooking")).toBeNull();
+  });
+
   it("opens a found conversation like any row", async () => {
     answer([{ id: 2, name: "Airships" }]);
     const onSelect = vi.fn();

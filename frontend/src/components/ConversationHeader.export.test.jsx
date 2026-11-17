@@ -47,6 +47,16 @@ describe("ConversationHeader export", () => {
     expect(onExport).toHaveBeenCalledTimes(1);
   });
 
+  it("is disabled while the page says a turn is running, and does nothing then", () => {
+    const onExport = vi.fn();
+    renderHeader({ onExport, exportDisabled: true });
+    openPanel();
+    const button = screen.getByRole("button", { name: "Export as Markdown" });
+    expect(button.disabled).toBe(true);
+    fireEvent.click(button);
+    expect(onExport).not.toHaveBeenCalled();
+  });
+
   it("shows no export button on a page that does not offer one", () => {
     renderHeader();
     openPanel();

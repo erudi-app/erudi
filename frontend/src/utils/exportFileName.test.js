@@ -26,11 +26,16 @@ describe("sanitizeFileName", () => {
     expect(sanitizeFileName("notes...")).toBe("notes");
   });
 
-  it("refuses the names Windows reserves", () => {
-    expect(sanitizeFileName("CON")).toBe("");
-    expect(sanitizeFileName("lpt1")).toBe("");
-    expect(sanitizeFileName("com3.txt")).toBe("");
-    expect(sanitizeFileName("console")).toBe("console");
+  it("drops C1 controls, zero-width and bidirectional formatting characters", () => {
+    expect(sanitizeFileName("a\u0085b\u009fc")).toBe("a b c");
+    expect(sanitizeFileName("a​b‏c")).toBe("a b c");
+    expect(sanitizeFileName("a‮b‪c")).toBe("a b c");
+    expect(sanitizeFileName("a⁦b⁩c")).toBe("a b c");
+    expect(sanitizeFileName("﻿a")).toBe("a");
+  });
+
+  it("keeps ordinary non-ASCII letters next to the dropped characters", () => {
+    expect(sanitizeFileName("Café​量子")).toBe("Café 量子");
   });
 
   it("caps the length without cutting a character in two", () => {
@@ -51,6 +56,11 @@ describe("defaultExportName", () => {
 
   it("is the sanitized title, the date and .md", () => {
     expect(defaultExportName("Airships: a story", day)).toBe("Airships a story 2026-11-03.md");
+  });
+
+  it("is never a Windows device name: the date follows the title", () => {
+    expect(defaultExportName("CON", day)).toBe("CON 2026-11-03.md");
+    expect(defaultExportName("lpt1", day)).toBe("lpt1 2026-11-03.md");
   });
 
   it("falls back to a neutral name when the title leaves nothing", () => {

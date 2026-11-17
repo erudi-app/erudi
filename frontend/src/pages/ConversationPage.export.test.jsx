@@ -33,7 +33,11 @@ vi.mock("../components/QuestionInput", () => ({ default: () => null }));
 vi.mock("../components/TypingIndicator", () => ({ default: () => null }));
 vi.mock("../components/MarkdownRenderer", () => ({ default: () => null }));
 vi.mock("../components/ConversationHeader", () => ({
-  default: ({ onExport }) => <button onClick={onExport}>HEADER_EXPORT</button>,
+  default: ({ onExport, exportDisabled }) => (
+    <button onClick={onExport} disabled={exportDisabled}>
+      HEADER_EXPORT
+    </button>
+  ),
 }));
 
 import ConversationPage from "./ConversationPage.jsx";
@@ -81,11 +85,20 @@ describe("ConversationPage export", () => {
     expect(window.alert).not.toHaveBeenCalled();
   });
 
-  it("tells the user when the export fails", async () => {
+  it("tells the user in the error dialog when the export fails, not in a native alert", async () => {
     exportMock.mockRejectedValue(new Error("disk full"));
     await renderAndSettle();
     fireEvent.click(screen.getByText("HEADER_EXPORT"));
-    await waitFor(() => expect(window.alert).toHaveBeenCalledTimes(1));
-    expect(window.alert.mock.calls[0][0]).toBe("Could not export the conversation: disk full");
+    expect(await screen.findByText("Could not export the conversation: disk full")).toBeTruthy();
+    expect(window.alert).not.toHaveBeenCalled();
+    fireEvent.click(screen.getAllByRole("button", { name: "Close" })[0]);
+    await waitFor(() =>
+      expect(screen.queryByText("Could not export the conversation: disk full")).toBeNull()
+    );
+  });
+
+  it("leaves the header export enabled when no turn is running", async () => {
+    await renderAndSettle();
+    expect(screen.getByText("HEADER_EXPORT").disabled).toBe(false);
   });
 });

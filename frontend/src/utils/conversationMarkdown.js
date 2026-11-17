@@ -14,6 +14,38 @@ const DEFAULT_CONVERSATION_NAME = "New Conversation";
 
 const SEPARATOR = "---";
 
+// A message body is the user's or the model's own Markdown. Two things in it
+// could break what surrounds it, and are handled before it is written:
+//  - a code fence the message left open would swallow the next turn's heading,
+//    so it is closed with the marker that opened it;
+//  - a heading of its own would sit at (or above) the role headings, so every
+//    heading in a body moves two levels down, below `## <role>`, to at most h6.
+const FENCE = /^ {0,3}(`{3,}|~{3,})(.*)$/;
+const HEADING = /^ {0,3}(#{1,6})(?=\s|$)/;
+const HEADING_SHIFT = 2;
+
+function safeBody(text) {
+  let open = null;
+  const lines = text.split("\n").map((line) => {
+    const fence = FENCE.exec(line);
+    if (open) {
+      // A closing fence: the same character, at least as long, nothing after it.
+      if (fence && fence[1][0] === open[0] && fence[1].length >= open.length && !fence[2].trim()) {
+        open = null;
+      }
+      return line;
+    }
+    if (fence && !(fence[1][0] === "`" && fence[2].includes("`"))) {
+      open = fence[1];
+      return line;
+    }
+    return line.replace(HEADING, (_match, hashes) =>
+      "#".repeat(Math.min(6, hashes.length + HEADING_SHIFT))
+    );
+  });
+  return open ? `${lines.join("\n")}\n${open}` : lines.join("\n");
+}
+
 const oneLine = (text) => String(text).replace(/\s+/g, " ").trim();
 
 const compactionBlock = (event, labels) => {
@@ -71,7 +103,7 @@ export function buildConversationMarkdown(conversation, labels) {
       const text = visibleText(content);
       const notes = isUser ? attachmentLines(content, labels) : [];
       if (text || notes.length > 0) {
-        const body = [text, notes.join("\n")].filter(Boolean).join("\n\n");
+        const body = [text && safeBody(text), notes.join("\n")].filter(Boolean).join("\n\n");
         blocks.push(`## ${isUser ? labels.user : labels.assistant}\n\n${body}`);
       }
     }

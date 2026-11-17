@@ -161,6 +161,67 @@ describe("buildConversationMarkdown", () => {
     expect(md).toContain("## You\n\n> Attachment: notes.txt\n");
   });
 
+  describe("a message body cannot break the structure around it", () => {
+    it("closes a code fence the message left open, before the next turn", () => {
+      const md = buildConversationMarkdown(
+        {
+          name: "T",
+          messages: [msg("llm", "Here:\n```js\nconst a = 1;"), msg("user", "thanks")],
+        },
+        labels
+      );
+      expect(md).toContain("```js\nconst a = 1;\n```\n\n## You\n\nthanks\n");
+    });
+
+    it("closes a fence with the marker that opened it", () => {
+      const tilde = buildConversationMarkdown(
+        { name: "T", messages: [msg("llm", "~~~\ncode"), msg("user", "next")] },
+        labels
+      );
+      expect(tilde).toContain("~~~\ncode\n~~~\n\n## You");
+      const long = buildConversationMarkdown(
+        { name: "T", messages: [msg("llm", "````md\n```\ninner"), msg("user", "next")] },
+        labels
+      );
+      expect(long).toContain("````md\n```\ninner\n````\n\n## You");
+    });
+
+    it("leaves a balanced fence alone", () => {
+      const body = "```py\nprint(1)\n```\nafter";
+      const md = buildConversationMarkdown({ name: "T", messages: [msg("llm", body)] }, labels);
+      expect(md).toContain(`## Assistant\n\n${body}\n`);
+    });
+
+    it("closes a fence an attachment note would otherwise end up inside", () => {
+      const md = buildConversationMarkdown(
+        { name: "T", messages: [msg("user", "```\nopen[file_path:/a/b.txt]")] },
+        labels
+      );
+      expect(md).toContain("```\nopen\n```\n\n> Attachment: b.txt\n");
+    });
+
+    it("moves the headings of a body below the role heading", () => {
+      const md = buildConversationMarkdown(
+        {
+          name: "T",
+          messages: [msg("llm", "# Title\n\ntext\n\n## You\n\n###### deep")],
+        },
+        labels
+      );
+      expect(md).toContain("### Title\n");
+      expect(md).toContain("### You\n");
+      expect(md).toContain("###### deep\n");
+      expect(md.match(/^## /gm)).toEqual(["## "]);
+      expect(md.match(/^# /gm)).toEqual(["# "]);
+    });
+
+    it("does not touch a hash line inside a code fence or one that is no heading", () => {
+      const body = "```sh\n# a comment\n```\n#hashtag\n    # indented code";
+      const md = buildConversationMarkdown({ name: "T", messages: [msg("llm", body)] }, labels);
+      expect(md).toContain(`## Assistant\n\n${body}\n`);
+    });
+  });
+
   it("writes only the title for a conversation without messages or anything unexpected", () => {
     expect(buildConversationMarkdown({ name: "T" }, { ...labels, created: "" })).toBe("# T\n");
     expect(buildConversationMarkdown(null, labels)).toBe("");

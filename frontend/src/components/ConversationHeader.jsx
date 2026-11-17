@@ -15,7 +15,8 @@ import { headerCommands } from "../utils/slashCommands";
  * (`commands`, from the slash-command registry, shown in its `headerOrder`),
  * labelled in words, never by slash name, each running the command exactly as
  * typing it does. `onExport` (#430) adds an "Export as Markdown" button after
- * them: it is no command and has no slash form. What the page adds as children
+ * them (`exportDisabled` while a turn runs): it is no command and has no
+ * slash form. What the page adds as children
  * renders in the panel after the buttons.
  *
  * `attention` is the orphaned-conversation state (#225): the model is gone,
@@ -33,6 +34,7 @@ export default function ConversationHeader({
   disabledCommands = [],
   onCommand,
   onExport,
+  exportDisabled = false,
   saveFailed = false,
   children,
 }) {
@@ -149,10 +151,12 @@ export default function ConversationHeader({
                   <button
                     type="button"
                     onClick={onExport}
+                    disabled={exportDisabled}
                     className={[
                       "inline-flex items-baseline rounded-xl px-3.5 py-2 text-sm font-semibold",
                       "bg-white/5 hover:bg-white/10 border border-white/10 hover:border-white/20",
                       "text-gray-100 transition active:scale-95",
+                      "disabled:opacity-40 disabled:cursor-not-allowed disabled:active:scale-100",
                     ].join(" ")}
                   >
                     {t("chat:export.action")}
@@ -183,6 +187,7 @@ ConversationHeader.propTypes = {
   disabledCommands: PropTypes.arrayOf(PropTypes.string),
   onCommand: PropTypes.func.isRequired,
   onExport: PropTypes.func,
+  exportDisabled: PropTypes.bool,
   saveFailed: PropTypes.bool,
   children: PropTypes.node,
 };

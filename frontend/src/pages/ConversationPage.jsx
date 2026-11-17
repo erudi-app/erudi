@@ -18,6 +18,7 @@ import CommandPopups from "../components/CommandPopups";
 import CommandNotice from "../components/CommandNotice";
 import ContextUsagePanel from "../components/ContextUsagePanel";
 import EngineFailureModal from "../components/modals/EngineFailureModal";
+import ErrorModal from "../components/modals/ErrorModal";
 import { AlertTriangle, Copy, Check, FileText, Star } from "lucide-react";
 import TypingIndicator from "../components/TypingIndicator";
 import MarkdownRenderer from "../components/MarkdownRenderer";
@@ -1102,12 +1103,13 @@ export default function ConversationPage() {
 
   // Export this conversation as Markdown (#430): the save dialog is main's; a
   // cancelled dialog is not a failure.
+  const [exportError, setExportError] = useState("");
   const exportThisConversation = async () => {
     try {
       await exportConversation(id, { t });
     } catch (err) {
       log.error("Conversation export failed", err);
-      alert(t("chat:export.failed", { error: err.message }));
+      setExportError(t("chat:export.failed", { error: err.message }));
     }
   };
 
@@ -1355,6 +1357,7 @@ export default function ConversationPage() {
             }
             onCommand={runCommand}
             onExport={exportThisConversation}
+            exportDisabled={loading || compactingHere}
             saveFailed={conversationSettings.saveFailed}
           >
             {/* Re-read the loaded model when a turn has completed (turnsEnded),
@@ -1689,6 +1692,9 @@ export default function ConversationPage() {
         onPickModel={pickModel}
         onCompact={compactConversation}
       />
+
+      {/* The Markdown export failed (#430). */}
+      <ErrorModal errorMessage={exportError} onClose={() => setExportError("")} />
 
       {/* The turn failed for a reason the app can act on. */}
       <EngineFailureModal notice={engineFailure} onDismiss={() => setEngineFailure(null)} />

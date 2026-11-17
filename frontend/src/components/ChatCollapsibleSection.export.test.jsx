@@ -60,13 +60,53 @@ describe("ChatCollapsibleSection export", () => {
     expect(window.alert).not.toHaveBeenCalled();
   });
 
-  it("says so when the export fails", async () => {
+  it("says so in the error dialog when the export fails, never in a native alert", async () => {
     exportMock.mockRejectedValue(new Error("disk full"));
     render(<ChatCollapsibleSection title="Previous Chats" items={items} />);
     fireEvent.click(screen.getAllByLabelText("Export as Markdown")[0]);
 
-    await waitFor(() => expect(window.alert).toHaveBeenCalledTimes(1));
-    expect(window.alert.mock.calls[0][0]).toBe("Could not export the conversation: disk full");
+    expect(await screen.findByText("Could not export the conversation: disk full")).toBeTruthy();
+    expect(window.alert).not.toHaveBeenCalled();
+    fireEvent.click(screen.getAllByRole("button", { name: "Close" })[0]);
+    await waitFor(() =>
+      expect(screen.queryByText("Could not export the conversation: disk full")).toBeNull()
+    );
+  });
+
+  describe("from the keyboard", () => {
+    const icons = () => [
+      screen.getAllByLabelText("Export as Markdown")[0],
+      screen.getAllByLabelText("Rename conversation")[0],
+      screen.getAllByLabelText("Delete conversation")[0],
+    ];
+
+    it("puts the row icons in the tab order", () => {
+      render(<ChatCollapsibleSection title="Previous Chats" items={items} />);
+      icons().forEach((icon) => expect(icon.getAttribute("tabindex")).toBe("0"));
+    });
+
+    it.each(["Enter", " "])("exports on %j without opening the row", async (key) => {
+      const onSelect = vi.fn();
+      render(<ChatCollapsibleSection title="Previous Chats" items={items} onSelect={onSelect} />);
+      fireEvent.keyDown(icons()[0], { key });
+      await waitFor(() => expect(exportMock).toHaveBeenCalledTimes(1));
+      expect(exportMock.mock.calls[0][0]).toBe(7);
+      expect(onSelect).not.toHaveBeenCalled();
+    });
+
+    it("renames on Enter and opens the delete confirmation on Space", () => {
+      render(<ChatCollapsibleSection title="Previous Chats" items={items} />);
+      fireEvent.keyDown(icons()[1], { key: "Enter" });
+      expect(screen.getByDisplayValue("My chat")).toBeTruthy();
+      fireEvent.keyDown(icons()[2], { key: " " });
+      expect(screen.getByText("This action is irreversible.")).toBeTruthy();
+    });
+
+    it("ignores the other keys", () => {
+      render(<ChatCollapsibleSection title="Previous Chats" items={items} />);
+      fireEvent.keyDown(icons()[0], { key: "a" });
+      expect(exportMock).not.toHaveBeenCalled();
+    });
   });
 
   it("stays quiet when the user cancels the save dialog", async () => {
