@@ -1,13 +1,10 @@
-"""Platform selection of the embeddings backend, and the child-backed
-``ChildE5Embeddings`` (#594).
+"""The KB embeddings backend, ``ChildE5Embeddings`` (#594).
 
-- ``get_embeddings()`` serves ``ChildE5Embeddings`` where the dedicated
-  embedding child exists (macOS ARM), the in-process ``E5Embeddings``
-  elsewhere (Windows/Linux until F3), and honors the test seam the suite
-  uses to stay off real children.
+- ``get_embeddings()`` serves ``ChildE5Embeddings`` on every platform.
 - ``ChildE5Embeddings`` applies the asymmetric e5 prefixes, bounds every
   input at 512 tokens Erudi-side (prefix included, through the frozen
   tokenizer), and never instantiates anything at construction.
+- ``build_embedding_text`` writes the frozen [N6] document-name prefix.
 """
 
 from __future__ import annotations
@@ -21,22 +18,8 @@ pytestmark = pytest.mark.unit
 
 
 class TestGetEmbeddings:
-    def test_child_backend_where_the_child_is_supported(self, monkeypatch):
-        monkeypatch.setattr(embeddings, "_forced_backend", None)
-        monkeypatch.setattr(embedder_child, "_adapter_override", object())
+    def test_the_child_backend_on_every_platform(self):
         assert isinstance(embeddings.get_embeddings(), embeddings.ChildE5Embeddings)
-
-    def test_in_process_backend_elsewhere(self, monkeypatch):
-        monkeypatch.setattr(embeddings, "_forced_backend", None)
-        monkeypatch.setattr(embedder_child, "_adapter_override", None)
-        assert isinstance(embeddings.get_embeddings(), embeddings.E5Embeddings)
-
-    def test_suite_seam_forces_in_process(self, monkeypatch):
-        # The conftest autouse fixture sets this for every not-mlx_only test:
-        # the unit suite must never reach a real child.
-        monkeypatch.setattr(embeddings, "_forced_backend", "in-process")
-        monkeypatch.setattr(embedder_child, "_adapter_override", object())
-        assert isinstance(embeddings.get_embeddings(), embeddings.E5Embeddings)
 
 
 class TestChildE5Embeddings:
@@ -83,3 +66,13 @@ class TestChildE5Embeddings:
     def test_short_inputs_pass_through_untouched(self, captured):
         embeddings.ChildE5Embeddings().embed_documents(["bonjour le monde"])
         assert captured[0][0] == "passage: bonjour le monde"
+
+
+class TestBuildEmbeddingText:
+    def test_document_name_prefix_format(self):
+        # [N6] frozen order: "passage: " (added by embed_documents) →
+        # "[document_name:…]" → breadcrumb + chunk text.
+        assert (
+            embeddings.build_embedding_text(file_name="rapport.pdf", chunk_text="# A\n\nContenu.")
+            == "[document_name:rapport.pdf]\n# A\n\nContenu."
+        )

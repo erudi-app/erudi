@@ -481,21 +481,6 @@ class TestGetHardwareInfo:
 
 
 # =====================================================================
-# UNIT - warm_up_accelerator
-# =====================================================================
-
-
-@pytest.mark.unit
-class TestWarmUp:
-    def test_returns_false_without_cuda(self, no_nvml):
-        assert CUDA_Engine.warm_up_accelerator(0.1) is False
-
-    def test_skipped_even_with_cuda(self, fake_nvml):
-        # torch matmul warm-up is intentionally disabled (CPU-only torch)
-        assert CUDA_Engine.warm_up_accelerator(0.1) is False
-
-
-# =====================================================================
 # UNIT - get_performance_evaluation / get_flat_hardware_data
 # =====================================================================
 

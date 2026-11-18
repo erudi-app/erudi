@@ -57,10 +57,6 @@ class _FakeCpuEngineType:
     def get_flat_hardware_data(cls):
         return dict(cls._flat_data)
 
-    @classmethod
-    def warm_up_accelerator(cls, duration):
-        return True
-
 
 # =====================================================================
 # INTEGRATION - Hardware_Repository against the real database
@@ -156,29 +152,6 @@ class TestHardwareServicePaths:
         with patch.object(config, "LLM_Engine", None):
             with pytest.raises(HardwareException):
                 service._detect_hardware()
-
-    def test_warm_up_without_engine_returns_false(self):
-        service = Hardware_Service(repository=None)
-        with patch.object(config, "LLM_Engine", None):
-            assert service.warm_up(1) is False
-
-    def test_warm_up_delegates_to_engine(self):
-        service = Hardware_Service(repository=None)
-        with patch.object(config, "LLM_Engine", _FakeCpuEngineType):
-            assert service.warm_up(1) is True
-
-    def test_warm_up_engine_failure_raises_hardware_exception(self):
-        class BrokenEngine:
-            __name__ = "CPU_Engine"
-
-            @classmethod
-            def warm_up_accelerator(cls, duration):
-                raise RuntimeError("thermal runaway")
-
-        service = Hardware_Service(repository=None)
-        with patch.object(config, "LLM_Engine", BrokenEngine):
-            with pytest.raises(HardwareException):
-                service.warm_up(1)
 
     @pytest.mark.parametrize(
         "score,label",

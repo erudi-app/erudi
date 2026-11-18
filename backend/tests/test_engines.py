@@ -121,3 +121,37 @@ class TestEngineFlatHardwareData:
         assert isinstance(data["available_memory_gb"], (int, float))
         assert isinstance(data["global_inference_score"], (int, float))
         assert isinstance(data["global_inference_label"], str)
+
+
+@pytest.mark.unit
+class TestMlxMetalProbe:
+    """``mps_available`` in the MLX hardware profile is MLX's own Metal probe
+    (``mlx.core.metal.is_available``): no torch, and a failing probe is one
+    WARNING and False, never an exception out of hardware detection."""
+
+    @staticmethod
+    def _fake_mlx(monkeypatch, is_available):
+        import sys
+        import types
+
+        core = types.ModuleType("mlx.core")
+        core.metal = types.SimpleNamespace(is_available=is_available)
+        package = types.ModuleType("mlx")
+        package.core = core
+        monkeypatch.setitem(sys.modules, "mlx", package)
+        monkeypatch.setitem(sys.modules, "mlx.core", core)
+
+    def test_reports_what_mlx_says(self, monkeypatch):
+        self._fake_mlx(monkeypatch, lambda: True)
+        assert MLX_Engine._metal_available() is True
+        self._fake_mlx(monkeypatch, lambda: False)
+        assert MLX_Engine._metal_available() is False
+
+    def test_a_failing_probe_is_a_warning_and_false(self, monkeypatch, caplog):
+        def boom():
+            raise RuntimeError("no Metal device")
+
+        self._fake_mlx(monkeypatch, boom)
+        with caplog.at_level("WARNING", logger="erudi"):
+            assert MLX_Engine._metal_available() is False
+        assert any("Metal availability probe failed" in r.message for r in caplog.records)

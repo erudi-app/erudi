@@ -20,8 +20,8 @@ Architecture:
 #   1. The MLX engine refactor will use `multiprocessing.Process` to spawn
 #      `mlx_lm.server` as a child process. Spawn is the only start method
 #      that works inside PyInstaller frozen builds (`mp.freeze_support()`).
-#   2. On Linux (CI), the default is `fork`, which after importing torch /
-#      sentence_transformers has undefined behaviour.
+#   2. On Linux (CI), the default is `fork`, which is unsafe once threads
+#      exist (the embedded Postgres client, the reaper threads).
 #   3. Setting `force=True` here makes the test environment match production.
 import multiprocessing as _mp
 
@@ -118,34 +118,67 @@ def _no_real_cache_limit(request, monkeypatch):
     monkeypatch.setattr(runner, "_bound_buffer_cache", lambda: None)
 
 
+def pytest_addoption(parser):
+    parser.addoption(
+        "--record-e5-reference",
+        action="store_true",
+        default=False,
+        help=(
+            "Embed every text a strict KB test misses in tests/fixtures/"
+            "e5_reference_vectors.json through the REAL embedding child, and "
+            "merge them into the file (see tests/_e5_reference.py)."
+        ),
+    )
+
+
 @pytest.fixture(scope="session", autouse=True)
-def _in_process_embeddings():
-    """The test session never spawns a real embedding child by accident (#594).
+def _reference_embeddings(request):
+    """The suite's KB embeddings: real e5 reference vectors, no child (#594).
 
-    On macOS ARM the product serves KB embeddings from a dedicated
-    `mlx_vlm.server` child; the suite's KB tests must stay deterministic and
-    runnable on every CI leg, so they run the in-process embedder (still
-    shipped on every platform until F4). SESSION-scoped on purpose: KB
-    module-scoped fixtures (the vector-store/pipeline setups) embed during
-    their own setup, which runs before any function-scoped fixture could
-    force the seam. The child's lifecycle is covered by fakes
-    (`test_embedder_child.py`); the ``mlx_only`` parity test
-    (`test_embedder_child_real.py`) opts back into the real platform adapter
-    itself, and the selection tests override the seam per test.
+    The product embeds through a dedicated child process (an `mlx_vlm.server`
+    on macOS, a `llama-server` on Windows/Linux) that backend-ci cannot run
+    on every leg. ``vector_store`` embeds through
+    ``tests._e5_reference.ReferenceE5Embeddings`` instead: the production
+    ``ChildE5Embeddings`` (prefixes, 512-token bound) over a lookup of
+    vectors recorded from the real child. SESSION-scoped on purpose: KB
+    module-scoped fixtures embed during their own setup, which runs before
+    any function-scoped fixture. The manager is disarmed too: a stray
+    `prewarm_embedder` (a conversation GET on a KB assistant) stays a no-op
+    and never resolves the real platform adapter. Tests of the manager
+    install their own fake over this; the real-child tests opt back in.
+
+    ``--record-e5-reference`` leaves the manager armed: the recording embeds
+    through the real platform child.
     """
-    from src.ingestion import embedder_child, embeddings
+    from src.ingestion import embedder_child, vector_store
+    from tests import _e5_reference
 
-    forced_before = embeddings._forced_backend
+    record = request.config.getoption("--record-e5-reference")
+    _e5_reference.STORE.record = record
+    factory_before = vector_store.get_embeddings
     adapter_before = embedder_child._adapter_override
-    # The factory, pinned: vector_store and the KB tests embed in process.
-    embeddings._forced_backend = "in-process"
-    # The manager, disarmed: a stray `prewarm_embedder` (a conversation GET on
-    # a KB assistant) must stay a no-op, never resolve the real platform
-    # adapter. Tests of the manager install their own fake over this.
-    embedder_child._adapter_override = None
+    vector_store.get_embeddings = _e5_reference.ReferenceE5Embeddings
+    if not record:
+        embedder_child._adapter_override = None
     yield
-    embeddings._forced_backend = forced_before
+    vector_store.get_embeddings = factory_before
     embedder_child._adapter_override = adapter_before
+    if record:
+        embedder_child.shutdown_embedder()
+        written = _e5_reference.write_recorded()
+        print(
+            f"\n[e5-reference] recorded {written} new vector(s) into {_e5_reference.REFERENCE_FILE}"
+        )
+
+
+@pytest.fixture
+def strict_e5_reference():
+    """Fail on any text without a reference vector (see tests/_e5_reference.py)."""
+    from tests import _e5_reference
+
+    _e5_reference.STORE.strict = True
+    yield
+    _e5_reference.STORE.strict = False
 
 
 # ============ Database Fixtures ============

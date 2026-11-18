@@ -293,12 +293,6 @@ class TestPlatformDispatch:
         by_platform("Darwin", "arm64")
         assert embedder_child._get_adapter() is mlx_embedder
 
-    def test_every_platform_serves_a_child(self, by_platform):
-        # F3 closes the gap: there is no longer a platform without a child.
-        for system in ("Windows", "Linux"):
-            by_platform(system)
-            assert embedder_child.embedder_child_supported()
-
 
 # ====================== The gate and the banner (artifact state) ======================
 
@@ -312,14 +306,12 @@ def _fake_adapter(available: bool, downloadable: bool):
 
 class TestArtifactState:
     def test_missing_follows_the_selected_adapter(self, monkeypatch):
-        monkeypatch.setattr(embeddings, "_forced_backend", None)
         monkeypatch.setattr(embedder_child, "_adapter_override", _fake_adapter(False, False))
         assert embeddings.embedding_artifact_missing()
         monkeypatch.setattr(embedder_child, "_adapter_override", _fake_adapter(True, False))
         assert not embeddings.embedding_artifact_missing()
 
     def test_status_of_a_bundled_artifact_never_offers_a_download(self, monkeypatch):
-        monkeypatch.setattr(embeddings, "_forced_backend", None)
         monkeypatch.setattr(embedder_child, "_adapter_override", _fake_adapter(True, False))
         assert embeddings.embedding_artifact_status() == {
             "available": True,
@@ -336,7 +328,6 @@ class TestArtifactState:
         assert status["error"] == embeddings.BUNDLED_ARTIFACT_MISSING_MESSAGE
 
     def test_status_of_a_downloadable_artifact_is_the_146_gate(self, monkeypatch):
-        monkeypatch.setattr(embeddings, "_forced_backend", None)
         monkeypatch.setattr(embedder_child, "_adapter_override", _fake_adapter(False, True))
         monkeypatch.setattr(
             embeddings.embedding_model,
@@ -346,11 +337,10 @@ class TestArtifactState:
         assert embeddings.embedding_artifact_status()["downloading"] is True
 
     def test_download_is_a_no_op_on_a_bundled_artifact(self, monkeypatch, caplog):
-        monkeypatch.setattr(embeddings, "_forced_backend", None)
         monkeypatch.setattr(embedder_child, "_adapter_override", _fake_adapter(False, False))
 
         def boom():
-            raise AssertionError("must not start the sentence-transformers download")
+            raise AssertionError("must not start the e5 snapshot download")
 
         monkeypatch.setattr(embeddings.embedding_model, "start_download", boom)
         with caplog.at_level(logging.INFO):
@@ -360,7 +350,6 @@ class TestArtifactState:
         assert status["error"] == embeddings.BUNDLED_ARTIFACT_MISSING_MESSAGE
 
     def test_download_still_runs_the_gate_where_it_applies(self, monkeypatch):
-        monkeypatch.setattr(embeddings, "_forced_backend", None)
         monkeypatch.setattr(embedder_child, "_adapter_override", _fake_adapter(False, True))
         started = []
         monkeypatch.setattr(
@@ -371,16 +360,6 @@ class TestArtifactState:
         )
         assert embeddings.start_embedding_artifact_download()["downloading"] is True
         assert started == [True]
-
-    def test_in_process_seam_keeps_the_146_gate(self, monkeypatch):
-        monkeypatch.setattr(embeddings, "_forced_backend", "in-process")
-        assert not embeddings.embedding_artifact_missing()
-        monkeypatch.setattr(
-            embeddings.embedding_model,
-            "download_state",
-            lambda: {"available": False, "downloading": False, "error": None},
-        )
-        assert embeddings.embedding_artifact_status()["available"] is False
 
 
 # ====================== CUDA gauges never read this child ======================
