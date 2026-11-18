@@ -66,8 +66,17 @@ Ingestion runs as a FastAPI background task, one file at a time
    tokenizer as `transformers` builds it (`backend_tokenizer.to_str()`, gzipped), loaded with the
    `tokenizers` package alone. It needs no download and no `transformers`;
    `tests/test_e5_tokenizer.py` checks it gives `transformers`' ids and the same chunks.
-   Loaded, it holds about 250 MB and stays resident once an ingestion, or a retrieval that counts an
-   older chunk, has used it.
+   Loaded, it holds about 250 MB, so it is loaded on demand (about half a second) and released
+   60 seconds after its last use (`TOKENIZER_IDLE_SECONDS`, by a reaper thread that exists only while
+   it is loaded and that the backend shutdown stops); on release the backend asks the allocator to
+   hand the freed memory back to the system (`malloc_zone_pressure_relief` on macOS,
+   `malloc_trim` on Linux, no call on Windows). A call in progress holds it: it is never released
+   under one, and chunking a text holds it for the whole text. Bounding an input at the embedding
+   window (`truncate_to_tokens`, step 6) does not load it for a text that provably fits: every
+   token covers at least one character of the normalized, pre-tokenized text, which the
+   tokenizer's normalizer and pre-tokenizer alone (about a megabyte, kept loaded) count. A
+   question under about 500 characters (fewer when the normalizer expands some of them) never
+   loads it.
 6. **Embed.** `get_embeddings()` (`src/ingestion/embeddings.py`) serves `ChildE5Embeddings` for
    `multilingual-e5-small` (384 dimensions, 512-token window) on every platform. The two children
    produce equivalent vectors (the fp32 snapshot on macOS, the Q8_0 GGUF elsewhere: worst cosine

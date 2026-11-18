@@ -654,6 +654,16 @@ class TestLifespanStopsDownloadsFirst:
 
         assert order == ["stop_active_downloads", "stop_postgres"]
 
+    async def test_the_e5_tokenizer_reaper_is_stopped(self, monkeypatch):
+        order: list[str] = []
+        self._arm(monkeypatch, order)
+        monkeypatch.setattr(api, "shutdown_tokenizer", lambda: order.append("stop_e5_tokenizer"))
+
+        async with api.lifespan(FastAPI()):
+            pass
+
+        assert order == ["stop_active_downloads", "stop_e5_tokenizer", "stop_postgres"]
+
     async def test_the_launcher_is_told_once_every_service_has_stopped(self, monkeypatch):
         order: list[str] = []
         self._arm(monkeypatch, order)
