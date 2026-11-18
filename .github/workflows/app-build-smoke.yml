@@ -88,7 +88,7 @@ jobs:
       - name: Restore the KB embedding GGUF (cache)
         if: runner.os != 'macOS'
         id: e5-gguf-cache
-        uses: actions/cache@v4
+        uses: actions/cache@v6
         with:
           path: backend/artifacts/kb-embedder
           key: e5-gguf-${{ runner.os }}-${{ hashFiles('scripts/dev/backend/build_e5_gguf.py', 'scripts/dev/backend/e5-conversion.patch') }}
