@@ -14,7 +14,7 @@ import pytest
 
 from src.core import config
 from src.ingestion import chunking
-from src.ingestion.embedding_model import EMBEDDING_MODEL_ID, embedding_model_available
+from src.ingestion.embedding_model import EMBEDDING_MODEL_ID
 
 pytestmark = pytest.mark.unit
 
@@ -49,22 +49,31 @@ def _long_text() -> str:
     return (REPO_ROOT / "docs" / "architecture.md").read_text(encoding="utf-8")
 
 
+def _cached_snapshot() -> "Path | None":
+    """A local e5 snapshot holding the tokenizer, from either cache that
+    keeps one: the app's model cache (the macOS embedding child's snapshot)
+    or the GGUF build script's own cache (``backend/data/e5-build-cache``,
+    where a Windows/Linux dev tree has it)."""
+    folder = "models--" + EMBEDDING_MODEL_ID.replace("/", "--")
+    for cache in (config.CACHE_DIR, config.ROOT_DIR / "data" / "e5-build-cache"):
+        for tokenizer in sorted((Path(cache) / folder / "snapshots").glob("*/tokenizer.json")):
+            return tokenizer.parent
+    return None
+
+
 @pytest.fixture(scope="module")
 def reference_tokenizer():
     """The tokenizer chunking used before: transformers over the e5 snapshot.
 
-    Read from the app's model cache only, never downloaded: without the
-    snapshot (an offline machine, a fresh checkout) the comparisons skip.
+    Read from a local cache only, never downloaded: without the snapshot (an
+    offline machine, a fresh checkout) the comparisons skip.
     """
-    if not embedding_model_available():
-        pytest.skip("e5 snapshot not in the model cache (KB embedding model not downloaded)")
+    snapshot = _cached_snapshot()
+    if snapshot is None:
+        pytest.skip("no local e5 snapshot (models_cache or data/e5-build-cache)")
     from transformers import AutoTokenizer
 
-    return AutoTokenizer.from_pretrained(
-        EMBEDDING_MODEL_ID,
-        cache_dir=str(config.CACHE_DIR),
-        local_files_only=True,
-    )
+    return AutoTokenizer.from_pretrained(str(snapshot), local_files_only=True)
 
 
 @pytest.fixture(scope="module")

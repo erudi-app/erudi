@@ -1,11 +1,9 @@
 """Real `mlx_vlm.server` embedding child on the cached e5 snapshot (#594).
 
-Spawns the ACTUAL child through the platform adapter and checks the S2
-claim end to end: the vectors the child serves from the local
-``intfloat/multilingual-e5-small`` snapshot match the in-process
-sentence-transformers vectors (cosine >= 0.9999), including an input past
-the 512-token window — which is what lets existing macOS Knowledge Bases
-keep their vectors with no re-indexing.
+Spawns the ACTUAL child through the platform adapter and holds it to the
+suite's reference vectors (``tests/_e5_reference.py``, cosine >= 0.9999),
+an input past the 512-token window included: the vectors every KB test
+runs on are the ones the shipped child serves.
 
 Skips cleanly when the snapshot is not already in ``data/models_cache``:
 tests never download the ~470 MB model.
@@ -21,7 +19,8 @@ import requests
 
 from src.ingestion import embedder_child
 from src.ingestion.embedding_model import embedding_model_available
-from src.ingestion.embeddings import ChildE5Embeddings, E5Embeddings
+from src.ingestion.embeddings import ChildE5Embeddings
+from tests._e5_reference import PARITY_DOCUMENTS, PARITY_QUERIES, ReferenceE5Embeddings
 from tests._helpers import is_mlx_platform
 
 pytestmark = pytest.mark.mlx_only
@@ -43,16 +42,6 @@ def _cosine(a, b):
     return dot / (norm_a * norm_b)
 
 
-TEXTS = [
-    "Paris est la capitale de la France.",
-    "[document_name:rapport.pdf]\n# Introduction > ## Contexte\n\nLe projet vise "
-    "à réduire la consommation énergétique des bâtiments publics de 30 %.",
-    "The quarterly report shows a sharp increase in customer retention.",
-    # Past the 512-token window: both sides must truncate identically.
-    "Phrase utile numéro un, qui décrit un fait précis sur le produit. " * 120,
-]
-
-
 @pytest.fixture(scope="module")
 def real_child():
     # Opt back into the REAL platform adapter: the session-wide conftest
@@ -68,24 +57,27 @@ def real_child():
 
 
 class TestRealEmbeddingChild:
-    def test_vectors_match_in_process_embedder(self, real_child):
+    def test_vectors_match_the_reference(self, real_child, strict_e5_reference):
         spawn_start = time.monotonic()
         child_backend = ChildE5Embeddings()
-        child_docs = child_backend.embed_documents(TEXTS)
+        child_docs = child_backend.embed_documents(PARITY_DOCUMENTS)
         spawn_s = time.monotonic() - spawn_start
-        child_query = child_backend.embed_query(TEXTS[0])
+        child_queries = [child_backend.embed_query(q) for q in PARITY_QUERIES]
 
-        in_process = E5Embeddings()
-        reference_docs = in_process.embed_documents(TEXTS)
-        reference_query = in_process.embed_query(TEXTS[0])
+        reference = ReferenceE5Embeddings()
+        reference_docs = reference.embed_documents(PARITY_DOCUMENTS)
+        reference_queries = [reference.embed_query(q) for q in PARITY_QUERIES]
 
-        assert all(len(vector) == 384 for vector in child_docs)
+        for vector in child_docs + child_queries:
+            assert len(vector) == 384
+            # L2-normalized, as the store assumes (cosine == dot product).
+            assert abs(math.sqrt(sum(v * v for v in vector)) - 1.0) < 1e-3
         cosines = [_cosine(c, r) for c, r in zip(child_docs, reference_docs)]
+        cosines += [_cosine(c, r) for c, r in zip(child_queries, reference_queries)]
         assert min(cosines) >= 0.9999, f"cosines={cosines}"
-        assert _cosine(child_query, reference_query) >= 0.9999
         # Not an assertion — recorded for the PR's measurements.
         print(f"\n[measure] first embed_documents call (spawn+load+probe+embed): {spawn_s:.1f}s")
-        print(f"[measure] cosines child vs in-process: {[f'{c:.7f}' for c in cosines]}")
+        print(f"[measure] cosines child vs reference: {[f'{c:.7f}' for c in cosines]}")
 
     def test_child_refuses_requests_without_the_key(self, real_child):
         handle = embedder_child.ensure_embedder_running()

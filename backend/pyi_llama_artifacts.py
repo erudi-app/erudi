@@ -47,7 +47,7 @@ class LlamaArtifacts:
     # (source path, destination directory) pairs for the spec's `datas`.
     datas: List[Tuple[str, str]] = field(default_factory=list)
     # (destination file name, source path) pairs the spec appends to `a.datas`
-    # verbatim AFTER Analysis and the torch-CUDA strip (see backend.spec).
+    # verbatim AFTER Analysis (see backend.spec).
     runtime_files: List[Tuple[str, str]] = field(default_factory=list)
     # Server paths that were absent and tolerated (allow_missing).
     skipped: List[str] = field(default_factory=list)

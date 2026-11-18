@@ -45,6 +45,20 @@ def test_mac_silicon_spec_excludes_unused_heavy_deps():
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("name", ["backend-mac-silicon.spec", "backend.spec"])
+def test_specs_bundle_no_torch(name):
+    # The KB embeddings run in a child process on every platform: no spec
+    # collects torch or sentence-transformers, and each excludes them so a dev
+    # venv that still carries them cannot leak them into a bundle.
+    spec = _read(name)
+    assert 'collect_data_files("torch"' not in spec
+    assert 'collect_data_files("sentence_transformers")' not in spec
+    assert "_cuda_fragments" not in spec
+    for module in ("torch", "sentence_transformers", "sklearn"):
+        assert f'"{module}",' in spec
+
+
+@pytest.mark.unit
 def test_mac_silicon_spec_bundles_py3langid_data():
     # The langid model (model.plzma) is package data loaded at runtime by
     # src/agents/language.py; without collecting it the systematic KB path
@@ -178,18 +192,18 @@ def test_release_asserts_the_bundle_actually_contains_the_binary():
 def test_backend_spec_bundles_the_llama_artifacts_through_the_helper():
     # What ships is decided by pyi_llama_artifacts.collect_llama_artifacts (unit
     # tested on every OS): the spec passes it the build variant and appends its
-    # output -- datas before Analysis, the runtime libraries verbatim after the
-    # torch-CUDA strip. No flavour path is hardcoded in the spec.
+    # output -- datas before Analysis, the runtime libraries verbatim after
+    # it. No flavour path is hardcoded in the spec.
     spec = _read("backend.spec")
     assert "from pyi_llama_artifacts import collect_llama_artifacts" in spec
     assert "ERUDI_BUILD_VARIANT" in spec
     assert ".runtime_files" in spec
     assert '"llama-cpp" / "cuda" / "bin"' not in spec
     assert '"llama-cpp" / "cpu" / "bin"' not in spec
-    # The runtime libraries are appended after the strip, never ridden in datas.
-    strip = spec.index("_cuda_fragments")
+    # The runtime libraries are appended after Analysis, never ridden in datas.
+    analysis = spec.index("a = Analysis(")
     append = spec.index('a.datas.append((_name, _src, "DATA"))')
-    assert append > strip
+    assert append > analysis
 
 
 def _release_steps():

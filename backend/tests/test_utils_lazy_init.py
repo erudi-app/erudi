@@ -40,8 +40,6 @@ _FORBIDDEN = (
     "langchain_postgres",
     "tokenizers",
     "transformers",
-    "torch",
-    "sentence_transformers",
 )
 
 _PROBE = f"""

@@ -743,40 +743,6 @@ class BaseEngine(ABC, metaclass=EngineMeta):
 
     @classmethod
     @abstractmethod
-    def warm_up_accelerator(cls, duration_seconds: float = 1.0) -> bool:
-        """Warm up the hardware accelerator (GPU/Neural Engine) for optimal performance.
-
-        Runs compute-intensive operations to bring the accelerator to optimal
-        performance state before benchmarking or inference. Implementation varies:
-        - MLX: Matrix operations on MPS device
-        - CUDA: CUDA kernel warm-up on GPU
-        - CPU: CPU cache warm-up (minimal effect)
-
-        Args:
-            duration_seconds: How long to run warm-up operations (default: 1.0).
-
-        Returns:
-            bool: True if warm-up completed successfully, False otherwise.
-
-        Raises:
-            EngineException: If warm-up fails critically (rare, usually returns False).
-
-        Note:
-            This is particularly important for GPUs that dynamically adjust clocks.
-            MLX/MPS benefits significantly from warm-up due to power management.
-            CPU backend may implement minimal warm-up or skip entirely.
-
-        Examples:
-            >>> engine = BaseEngine.get_engine()
-            >>> success = engine.warm_up_accelerator(1.5)
-            >>> if success:
-            ...     print("Accelerator ready for benchmarking")
-
-        """
-        pass
-
-    @classmethod
-    @abstractmethod
     def get_performance_evaluation(cls) -> Dict[str, Any]:
         """Calculate comprehensive performance metrics and scores for this backend.
 
@@ -844,12 +810,10 @@ class BaseEngine(ABC, metaclass=EngineMeta):
 
         Note:
             Scores are platform-specific estimates based on hardware specs.
-            Should call warm_up_accelerator() before evaluation for accuracy.
             Returns fallback scores if evaluation fails rather than raising.
 
         Examples:
             >>> engine = BaseEngine.get_engine()
-            >>> engine.warm_up_accelerator(1.5)
             >>> eval_result = engine.get_performance_evaluation()
             >>> print(f"Inference: {eval_result['global_inference_score']}/100")
 

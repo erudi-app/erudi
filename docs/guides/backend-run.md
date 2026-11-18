@@ -15,15 +15,15 @@ protocol below.
 
 ## Responsibilities
 
-- Configure third-party libraries for deterministic, low-noise startup (Torch,
-  tokenizers, MKL).
+- Configure third-party libraries for deterministic, low-noise startup (BLAS
+  threads, tokenizers, transformers' advisory warnings).
 - Force the Windows selector event-loop policy for library compatibility.
 - Normalize stdout/stderr to line-buffered mode so lifecycle events flush immediately.
 - Detect PyInstaller bundles and relocate runtime data and logs to OS-appropriate,
   user-writable folders.
 - Preserve the macOS `~/Library/Application Support/erudi/backend/prod` symlink behaviour.
 - Initialize multiprocessing with the `spawn` strategy before importing heavy modules
-  (Torch, FastAPI) — the MLX engine depends on it.
+  (FastAPI and the app) — the MLX children depend on it.
 - Launch uvicorn on `127.0.0.1:27182` (scanning 27182-27199 if busy) in a background
   thread, monitor readiness, and emit structured error events for crashes, timeouts, or
   port conflicts.

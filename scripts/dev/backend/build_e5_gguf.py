@@ -2,12 +2,14 @@
 
 The Knowledge Base embedding child on Windows and Linux is the bundled CPU
 ``llama-server --embedding`` serving ``multilingual-e5-small`` as a Q8_0
-GGUF (worst cosine against sentence-transformers 0.99981 over the spike-S4
+GGUF (worst cosine against the fp32 model 0.99981 over the spike-S4
 corpus). Community e5 GGUFs carry a WRONG WordPiece vocab (cosine ~0.897),
 so Erudi converts its own, reproducibly:
 
-1. the e5 snapshot is fetched at the PINNED revision into the app's model
-   cache (``backend/data/models_cache``; already-present files are reused);
+1. the e5 snapshot is fetched at the PINNED revision into the script's own
+   cache (``backend/data/e5-build-cache``; already-present files are reused).
+   Not the backend's ``models_cache``: on Windows and Linux the backend
+   deletes the e5 snapshot it finds there at start, once the GGUF exists;
 2. the conversion toolchain of the pinned llama.cpp submodule is copied to
    a scratch directory and ``e5-conversion.patch`` (kept beside this
    script) is applied THERE -- the submodule is never modified;
@@ -21,9 +23,9 @@ so Erudi converts its own, reproducibly:
 
 Run it from the repo root with the CONVERSION venv, never the app's: the
 converter needs torch, transformers, sentencepiece and protobuf, and the
-app's Windows/Linux locks carry none of the last two (and lose torch with
-the in-process embedder's removal). The venv comes from the per-OS build
-lock (hash-checked, reproducible on a bare runner):
+app's locks carry neither torch nor sentencepiece nor protobuf. The venv
+comes from the per-OS build lock (hash-checked, reproducible on a bare
+runner):
 
     python3.12 -m venv e5-gguf-venv
     e5-gguf-venv/bin/pip install -r backend/requirements/lock/linux-e5-gguf.txt \
@@ -32,7 +34,8 @@ lock (hash-checked, reproducible on a bare runner):
     ... build_e5_gguf.py --print-sha   # after a deliberate change (new
         revision/patch): print the new hash to pin
 
-(A macOS dev venv already carries every dependency and works as-is.) CI
+There is no macOS build lock: on a Mac, install
+``backend/requirements/meta/e5-gguf.txt`` into a venv of its own. CI
 (release.yml, app-build-smoke.yml) builds that venv and runs this script
 behind an ``actions/cache`` keyed on this file and the patch, so the
 conversion is paid once per change and OS.
@@ -58,6 +61,9 @@ E5_REPO_ID = "intfloat/multilingual-e5-small"
 # The snapshot the app always embedded with (hub `main` on 2026-11-10); the
 # GGUF must come from the same weights so existing KBs keep their vectors.
 E5_SNAPSHOT_REVISION = "614241f622f53c4eeff9890bdc4f31cfecc418b3"
+# The script's own snapshot cache, apart from the backend's models_cache (see
+# step 1 of the module docstring). backend/data/ is gitignored.
+E5_BUILD_CACHE = BACKEND / "data" / "e5-build-cache"
 
 OUTPUT_NAME = "multilingual-e5-small-q8_0.gguf"
 OUTPUT_FILE = BACKEND / "artifacts" / "kb-embedder" / OUTPUT_NAME
@@ -105,7 +111,7 @@ def fetch_snapshot() -> Path:
         snapshot_download(
             E5_REPO_ID,
             revision=E5_SNAPSHOT_REVISION,
-            cache_dir=str(BACKEND / "data" / "models_cache"),
+            cache_dir=str(E5_BUILD_CACHE),
         )
     )
 

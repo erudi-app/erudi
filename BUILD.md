@@ -73,8 +73,12 @@ e5-gguf-venv/bin/python scripts/dev/backend/build_e5_gguf.py
 The script needs the llama.cpp submodule (its converter and `gguf-py`); its
 Python dependencies are declared in `backend/requirements/meta/e5-gguf.txt`
 and locked per OS in `lock/{win,linux}-e5-gguf.txt` (see
-`backend/requirements/README.md` — a macOS dev venv already carries them
-all and works as-is). Community e5 GGUFs carry a wrong WordPiece vocab, and
+`backend/requirements/README.md`; there is no macOS build lock: on a Mac,
+install `meta/e5-gguf.txt` into a venv of its own — the app's venv has no
+torch, sentencepiece or protobuf). The snapshot is fetched into the script's
+own cache, `backend/data/e5-build-cache` (reused across runs), never into the
+backend's `models_cache`: there, on Windows and Linux, the backend deletes
+the e5 snapshot at start once the GGUF exists. Community e5 GGUFs carry a wrong WordPiece vocab, and
 the pinned converter refuses the model outright, so the script copies the
 conversion toolchain to a scratch directory, normalizes it to LF (a Windows
 checkout can be CRLF) and applies `scripts/dev/backend/e5-conversion.patch`
@@ -295,16 +299,18 @@ more, nor a file of 260 or more. On the first file it cannot move, it moves the
 others back and exits with code 2, and electron-builder's installer stops with
 "Failed to uninstall old application files".
 
-The deepest files of the install are the license notices that wheels ship in
+The deepest files of an install of version 1.2.0 or earlier are the license
+notices that wheels ship in
 `resources\backend\_internal\<name>.dist-info\licenses\`: torch's vendored
 `third_party` tree puts a `LICENSE.txt` 200 characters below the install
-directory, in a directory 188 characters below it. The destination prefix
+directory, in a directory 188 characters below it. Later versions ship no torch,
+but updating one of those installs still runs its uninstaller over that tree. The destination prefix
 `C:\Users\<user>\AppData\Local\Temp\nsXXXX.tmp\old-install` is 48 characters
 plus the user name plus the 1 to 4 hex digits of the plugins directory name
 (`nsX`, hex, `.tmp`, picked at random), and both limits are reached at the same
 length: the failure starts at a user name of 8 to 11 characters, possible from
-8, certain from 11. The notices ship on purpose (torch's BSD license requires
-them).
+8, certain from 11. Those versions ship the notices on purpose (torch's BSD
+license requires them).
 
 `nsis.include` in `electron-builder.yml` adds
 `frontend/assets/installers/installer.nsh` to the installer. It removes the
@@ -314,7 +320,7 @@ The old install's directory comes from the registry (`InstallLocation`, as
 electron-builder reads it), must be an absolute drive path holding `Erudi.exe`
 and the frozen backend, and is addressed through a `\\?\` path so the deletion
 itself has no length limit. Nothing else is deleted, and the new install ships
-the same notices again. The removal runs at two points:
+its own packages' notices again. The removal runs at two points:
 
 - **Before the old uninstaller, on every install over an existing one** (an
   update, which electron-updater starts with `--updated`, silently at quit or

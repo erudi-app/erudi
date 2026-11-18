@@ -68,19 +68,18 @@ Ingestion runs as a FastAPI background task, one file at a time
    `tests/test_e5_tokenizer.py` checks it gives `transformers`' ids and the same chunks.
    Loaded, it holds about 250 MB and stays resident once an ingestion, or a retrieval that counts an
    older chunk, has used it.
-6. **Embed.** `get_embeddings()` (`src/ingestion/embeddings.py`) picks the platform's backend for
-   `multilingual-e5-small` (384 dimensions, 512-token window) — the two produce equivalent vectors
-   (cosine >= 0.9999 measured, 1.0000000 on the parity set, inputs past 512 tokens included; past
-   the window the truncation boundary token may differ), so a Knowledge Base never needs
-   re-indexing across platforms or updates:
-   - **Every platform** — `ChildE5Embeddings`: a dedicated embedding child
+6. **Embed.** `get_embeddings()` (`src/ingestion/embeddings.py`) serves `ChildE5Embeddings` for
+   `multilingual-e5-small` (384 dimensions, 512-token window) on every platform. The two children
+   produce equivalent vectors (the fp32 snapshot on macOS, the Q8_0 GGUF elsewhere: worst cosine
+   0.99981), so a Knowledge Base never needs re-indexing across platforms or updates:
+   - `ChildE5Embeddings`: a dedicated embedding child
      (`src/ingestion/embedder_child.py`) serves `POST /v1/embeddings` on its own port slice
      (27400-27499) with a per-spawn API key. On Apple Silicon the child is a second
      `mlx_vlm.server` over the local e5 snapshot (`src/ingestion/mlx_embedder.py`); on Windows and
      Linux it is the bundled CPU `llama-server --embedding` over the e5 Q8_0 GGUF that ships
      inside the installers (`src/ingestion/llama_embedder.py`; the GGUF is produced at build time
-     — see BUILD.md — and never downloaded at runtime; worst measured cosine vs
-     sentence-transformers 0.99981, so existing Knowledge Bases keep their vectors). Nothing stays
+     — see BUILD.md — and never downloaded at runtime; worst measured cosine vs the fp32 model
+     0.99981, so existing Knowledge Bases keep their vectors). Nothing stays
      resident in the backend: the child spawns on first use (or ahead, when a conversation with a
      Knowledge Base opens), an ingestion holds a lease so it is never stopped mid-job, and it is
      released after a fixed 5 minutes unused (no setting). Inputs are bounded at e5's 512-token
@@ -88,10 +87,15 @@ Ingestion runs as a FastAPI background task, one file at a time
      llama-server refuses longer inputs rather than truncating them. On a CUDA install the child
      runs the CPU binary with every GPU masked and is read by none of the CUDA gauges (see
      `docs/dev/architecture/engines.md`).
-   - `E5Embeddings` — the in-process sentence-transformers singleton: unused on every platform
-     since F3 of #594 (the test suite's deterministic backend only, removed with F4).
 
-   The asymmetric prefixes are mandatory on both backends: `passage: ` for indexed chunks,
+   The app ships no torch and no sentence-transformers. The test suite embeds through
+   `tests/_e5_reference.py`: `ChildE5Embeddings` with its transport replaced by vectors recorded
+   from the real child (`tests/fixtures/e5_reference_vectors.json`). A test that asserts e5
+   semantics (rankings, golden queries) uses the `strict_e5_reference` fixture, which fails on a
+   text without a recorded vector; record new ones on macOS with
+   `pytest <test files> --record-e5-reference`.
+
+   The asymmetric prefixes are mandatory: `passage: ` for indexed chunks,
    `query: ` for searches. Vectors are L2-normalized, so cosine similarity is a dot product. The
    embedded text is
    `passage: [document_name:<file>]\n<breadcrumb>\n\n<chunk>` — the document-name prefix boosts
@@ -230,15 +234,17 @@ are in `backend/tests/fixtures/kb/README.md`.
 
 ## The embedding-model gate
 
-The KB needs `intfloat/multilingual-e5-small` for its embeddings. The model is **not** bundled: it is
-downloaded on demand into the app's own cache directory (`config.CACHE_DIR`, i.e.
-`data/models_cache`). Chunking does not use that download: its tokenizer ships with the app (see
-step 5 of the ingestion pipeline).
+On Apple Silicon the embedding child serves the `intfloat/multilingual-e5-small` snapshot, which
+is **not** bundled: it is downloaded on demand into the app's own cache directory
+(`config.CACHE_DIR`, i.e. `data/models_cache`, the Hugging Face cache layout), by
+`snapshot_download` restricted to the files the child reads (`REQUIRED_FILES` in
+`src/ingestion/embedding_model.py`: config, weights, `1_Pooling/config.json`, tokenizer files).
+Chunking does not use that download: its tokenizer ships with the app (see step 5 of the ingestion
+pipeline).
 
-Presence is filesystem-driven, never a database flag: `embedding_model_available()` checks every file
-a `SentenceTransformer` load touches, so a partial download reads as unavailable and the gate
-reappears. Once the cache is complete, loads run with `local_files_only=True` and never touch the
-network — an offline machine works.
+Presence is filesystem-driven, never a database flag: `embedding_model_available()` checks every
+required file, so a partial download reads as unavailable and the gate reappears. The child loads
+the snapshot by local path and never touches the network — an offline machine works.
 
 ```bash
 curl http://127.0.0.1:27182/erudi/knowledge_base/embedding-model/status
@@ -252,14 +258,16 @@ curl -X POST http://127.0.0.1:27182/erudi/knowledge_base/embedding-model/downloa
 already running. The download runs in a background thread, so navigating away from the KB page does
 not lose it; the UI polls the status route.
 
-On Apple Silicon the same snapshot is what the dedicated embedding child serves (by LOCAL path,
-never by repo id — `embedding_snapshot_path()`), so one gate covers both backends.
+The child serves the snapshot by LOCAL path, never by repo id (`embedding_snapshot_path()`).
 
 On Windows and Linux the artifact the child needs is the bundled GGUF, not the snapshot: the
 status route answers its on-disk presence (always there in a packaged install — no download is
 ever offered or needed), and the download route is a no-op for it. A development tree without the
 file produces it with `python scripts/dev/backend/build_e5_gguf.py`; until then the missing-model
-state below applies.
+state below applies. A snapshot left in `models_cache` there by an earlier version is dead weight
+(~470 MB): once the GGUF is on disk, every start deletes it if present
+(`embedder_child.remove_obsolete_e5_snapshot`, one INFO line with the size freed; a failed delete
+is one WARNING and the next start retries). macOS never deletes it: its child serves it.
 
 A Knowledge Base whose embedding artifact has left the disk (a cleared `models_cache` on macOS, a
 dev tree without the GGUF elsewhere) is a **state**, not a turn error: a conversation or Arena
@@ -360,7 +368,7 @@ Deleting the **base** model of an assistant is guarded: without `?orphan_depende
   overridden explicitly, otherwise the wide pool silently degrades to 4 + 4 candidates.
 - The adaptive cut runs on **dense cosine similarities**, never on RRF scores.
 - `langchain_text_splitters` is imported in function scope only: its package `__init__` eagerly
-  imports `sentence_transformers`, which would tax every backend start.
+  imports every splitter it ships, which would tax every backend start.
 - `pypdf`, `python-docx` (with `lxml`) and `openpyxl` are imported in function scope only, inside
   the extractor that needs them: the backend loads none of them at boot, and the first PDF, DOCX or
   XLSX read (an ingestion or a file attached to a question) pays the import. The PyInstaller specs

@@ -144,21 +144,17 @@ service = Hardware_Service(repository)
 
 profile = service.get_or_create_profile()   # cached singleton, detects on first call
 scores = service.calculate_boosted_scores(profile)
-service.warm_up(duration_seconds=5)         # warm the accelerator before benchmarking
 profile = service.refresh_profile()         # force re-detection
 db.commit()
 ```
 
 ## Engine contract
 
-Every engine implements the same three hardware class methods:
+Every engine implements the same two hardware class methods:
 
 ```python
 @classmethod
 def get_hardware_info(cls) -> Dict[str, Any]: ...
-
-@classmethod
-def warm_up_accelerator(cls, duration_seconds: float) -> bool: ...
 
 @classmethod
 def get_performance_evaluation(cls) -> Dict[str, Any]: ...

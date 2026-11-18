@@ -705,7 +705,7 @@ class UnsupportedPlatformException(AppBaseException):
 
     Examples:
         from src.core.exceptions import UnsupportedPlatformException
-        if not torch.cuda.is_available():
+        if not CUDA_Engine._cuda_available():
             raise UnsupportedPlatformException("CUDA", "No NVIDIA GPU detected")
 
     """

@@ -126,6 +126,16 @@ def test_lock_pins_the_build_tool(entrypoint):
 
 
 @pytest.mark.unit
+@pytest.mark.parametrize("entrypoint", ENTRYPOINTS, ids=lambda path: path.name)
+def test_app_locks_carry_no_torch(entrypoint):
+    # The KB embeddings run in a child process (mlx_vlm or llama-server) on
+    # every platform: torch and sentence-transformers only ever live in the
+    # e5-GGUF build venv, never in what the app installs and freezes.
+    pins = set(lock_tool.read_lock(lock_tool.lock_path(entrypoint)).pins)
+    assert not pins & {"torch", "sentence-transformers", "scikit-learn"}
+
+
+@pytest.mark.unit
 @pytest.mark.parametrize("entrypoint", BUILD_ENTRYPOINTS, ids=lambda path: path.name)
 def test_build_locks_leave_the_freeze_tool_out(entrypoint):
     # A build/ entrypoint is a standalone tool venv (the e5-GGUF conversion):

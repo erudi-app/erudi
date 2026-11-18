@@ -1,8 +1,8 @@
 # Production Dependencies Only (Linux CUDA)
-# Python env = the CPU stack (CPU torch via cpu.txt). GPU acceleration is the
-# CUDA-compiled llama-server binary (built separately), NOT torch — so there is no
-# torch+cuXXX. The CUDA toolkit version lives in the binary build, not in pip;
-# that is why linux-cuda-118/121 collapsed into this single file.
+# Python env = the CPU stack (cpu.txt). GPU acceleration is the CUDA-compiled
+# llama-server binary (built separately). The CUDA toolkit version lives in the
+# binary build, not in pip; that is why linux-cuda-118/121 collapsed into this
+# single file.
 -r ../../meta/base.txt
 -r ../../meta/cpu.txt
 -r ../../meta/linux-specs.txt

@@ -61,30 +61,6 @@ class TestGetHardwareInfo:
 
 
 # =====================================================================
-# UNIT - warm_up_accelerator
-# =====================================================================
-
-
-@pytest.mark.unit
-class TestWarmUp:
-    def test_completes_quickly_and_returns_true(self):
-        assert CPU_Engine.warm_up_accelerator(0.06) is True
-
-    def test_failure_returns_false(self, monkeypatch):
-        class BrokenClock:
-            @staticmethod
-            def time():
-                raise RuntimeError("clock unavailable")
-
-            sleep = staticmethod(lambda s: None)
-
-        # Swap only cpu_engine's module-level `time` reference so the logging
-        # machinery (which also uses the real time module) keeps working.
-        monkeypatch.setattr(cpu_mod, "time", BrokenClock)
-        assert CPU_Engine.warm_up_accelerator(0.05) is False
-
-
-# =====================================================================
 # UNIT - get_performance_evaluation / get_flat_hardware_data
 # =====================================================================
 

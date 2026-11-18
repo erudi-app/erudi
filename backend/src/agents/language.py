@@ -37,7 +37,7 @@ _load_failed = False
 
 
 def _get_identifier() -> Optional[LanguageIdentifier]:
-    """Resident classifier (lazy singleton — same pattern as E5Embeddings).
+    """Resident classifier (lazy singleton).
 
     Returns None if the pickled model cannot be loaded (e.g. the data file is
     missing from a packaged build); callers then fall back to the generic
