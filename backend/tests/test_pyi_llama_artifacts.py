@@ -30,11 +30,20 @@ CRT = ("msvcp140.dll", "vcruntime140.dll", "vcruntime140_1.dll")
 CUDA_RUNTIME = ("cublas64_12.dll", "cublasLt64_12.dll", "cudart64_12.dll")
 
 
+def _gguf(root: Path) -> Path:
+    """The KB embedding GGUF (#594) the Windows/Linux installers bundle."""
+    path = root / "artifacts" / "kb-embedder" / "multilingual-e5-small-q8_0.gguf"
+    path.parent.mkdir(parents=True)
+    path.write_bytes(b"GGUF")
+    return path
+
+
 @pytest.mark.unit
 class TestCudaVariant:
     def test_windows_ships_both_flavours_to_distinct_destinations(self, tmp_path):
         cpu = _flavour(tmp_path, "cpu", exe="llama-server.exe", dlls=CRT)
         cuda = _flavour(tmp_path, "cuda", exe="llama-server.exe", dlls=CRT + CUDA_RUNTIME)
+        gguf = _gguf(tmp_path)
 
         out = collect_llama_artifacts(variant="cuda", root=tmp_path, os_tag="win")
 
@@ -42,6 +51,7 @@ class TestCudaVariant:
             [
                 (str(cpu / "llama-server.exe"), "artifacts/llama-cpp/cpu/bin"),
                 (str(cuda / "llama-server.exe"), "artifacts/llama-cpp/cuda/bin"),
+                (str(gguf), "artifacts/kb-embedder"),
             ]
         )
         cpu_files = {n for n, _ in out.runtime_files if n.startswith("artifacts/llama-cpp/cpu/")}
@@ -58,6 +68,7 @@ class TestCudaVariant:
     def test_linux_ships_both_flavours(self, tmp_path):
         cpu = _flavour(tmp_path, "cpu", exe="llama-server")
         cuda = _flavour(tmp_path, "cuda", exe="llama-server")
+        gguf = _gguf(tmp_path)
 
         out = collect_llama_artifacts(variant="cuda", root=tmp_path, os_tag="linux")
 
@@ -65,6 +76,7 @@ class TestCudaVariant:
             [
                 (str(cpu / "llama-server"), "artifacts/llama-cpp/cpu/bin"),
                 (str(cuda / "llama-server"), "artifacts/llama-cpp/cuda/bin"),
+                (str(gguf), "artifacts/kb-embedder"),
             ]
         )
         assert out.runtime_files == []
@@ -73,6 +85,7 @@ class TestCudaVariant:
     def test_a_missing_flavour_fails_the_build_naming_it(self, tmp_path, missing):
         present = "cuda" if missing == "cpu" else "cpu"
         _flavour(tmp_path, present, exe="llama-server.exe")
+        _gguf(tmp_path)
 
         with pytest.raises(RuntimeError) as excinfo:
             collect_llama_artifacts(variant="cuda", root=tmp_path, os_tag="win")
@@ -92,12 +105,21 @@ class TestCudaVariant:
 
     def test_allow_missing_tolerates_absent_flavours(self, tmp_path):
         cuda = _flavour(tmp_path, "cuda", exe="llama-server.exe")
+        _gguf(tmp_path)
 
         out = collect_llama_artifacts(
             variant="cuda", root=tmp_path, os_tag="win", allow_missing=True
         )
 
-        assert out.datas == [(str(cuda / "llama-server.exe"), "artifacts/llama-cpp/cuda/bin")]
+        assert sorted(out.datas) == sorted(
+            [
+                (str(cuda / "llama-server.exe"), "artifacts/llama-cpp/cuda/bin"),
+                (
+                    str(tmp_path / "artifacts" / "kb-embedder" / "multilingual-e5-small-q8_0.gguf"),
+                    "artifacts/kb-embedder",
+                ),
+            ]
+        )
         assert [Path(p).parent.name for p in out.skipped] == ["bin"]
         assert "cpu" in out.skipped[0].replace("\\", "/").split("/")
 
@@ -107,29 +129,38 @@ class TestCpuVariant:
     def test_ships_the_cpu_flavour_only_even_when_cuda_is_built(self, tmp_path):
         cpu = _flavour(tmp_path, "cpu", exe="llama-server.exe", dlls=CRT)
         _flavour(tmp_path, "cuda", exe="llama-server.exe", dlls=CRT + CUDA_RUNTIME)
+        gguf = _gguf(tmp_path)
 
         out = collect_llama_artifacts(variant="cpu", root=tmp_path, os_tag="win")
 
-        assert out.datas == [(str(cpu / "llama-server.exe"), "artifacts/llama-cpp/cpu/bin")]
+        assert sorted(out.datas) == sorted(
+            [
+                (str(cpu / "llama-server.exe"), "artifacts/llama-cpp/cpu/bin"),
+                (str(gguf), "artifacts/kb-embedder"),
+            ]
+        )
         assert sorted(n for n, _ in out.runtime_files) == sorted(
             f"artifacts/llama-cpp/cpu/bin/{d}" for d in CRT
         )
 
     def test_does_not_require_the_cuda_flavour(self, tmp_path):
         _flavour(tmp_path, "cpu", exe="llama-server")
+        _gguf(tmp_path)
 
         out = collect_llama_artifacts(variant="cpu", root=tmp_path, os_tag="linux")
 
-        assert len(out.datas) == 1
+        assert len(out.datas) == 2
 
     def test_missing_cpu_flavour_fails_unless_allowed(self, tmp_path):
+        _gguf(tmp_path)
         with pytest.raises(RuntimeError, match="build-llamacpp-cpu-win.ps1"):
             collect_llama_artifacts(variant="cpu", root=tmp_path, os_tag="win")
 
         out = collect_llama_artifacts(
             variant="cpu", root=tmp_path, os_tag="win", allow_missing=True
         )
-        assert out.datas == [] and out.runtime_files == [] and len(out.skipped) == 1
+        assert [d for _, d in out.datas] == ["artifacts/kb-embedder"]
+        assert out.runtime_files == [] and len(out.skipped) == 1
 
 
 @pytest.mark.unit
@@ -143,3 +174,38 @@ def test_macos_bundles_no_llama_server(tmp_path):
 def test_an_unknown_variant_is_refused(tmp_path):
     with pytest.raises(ValueError, match="ERUDI_BUILD_VARIANT"):
         collect_llama_artifacts(variant="rocm", root=tmp_path, os_tag="linux")
+
+
+@pytest.mark.unit
+class TestEmbedderGguf:
+    """The KB embedding GGUF (#594, F3) ships in EVERY Windows/Linux
+    installer; a build without it would gate the Knowledge Base on a
+    download that does not exist."""
+
+    @pytest.mark.parametrize("variant", ["cpu", "cuda"])
+    def test_a_missing_gguf_fails_the_build_naming_its_script(self, tmp_path, variant):
+        _flavour(tmp_path, "cpu", exe="llama-server")
+        if variant == "cuda":
+            _flavour(tmp_path, "cuda", exe="llama-server")
+
+        with pytest.raises(RuntimeError) as excinfo:
+            collect_llama_artifacts(variant=variant, root=tmp_path, os_tag="linux")
+
+        message = str(excinfo.value).replace("\\", "/")
+        assert "artifacts/kb-embedder" in message
+        assert "scripts/dev/backend/build_e5_gguf.py" in message
+
+    def test_allow_missing_tolerates_an_absent_gguf(self, tmp_path):
+        cpu = _flavour(tmp_path, "cpu", exe="llama-server")
+
+        out = collect_llama_artifacts(
+            variant="cpu", root=tmp_path, os_tag="linux", allow_missing=True
+        )
+
+        assert out.datas == [(str(cpu / "llama-server"), "artifacts/llama-cpp/cpu/bin")]
+        assert any("kb-embedder" in p.replace("\\", "/") for p in out.skipped)
+
+    def test_macos_bundles_no_gguf(self, tmp_path):
+        # The macOS embedding child serves the downloadable snapshot (F2).
+        out = collect_llama_artifacts(variant="cuda", root=tmp_path, os_tag="mac")
+        assert out.datas == []

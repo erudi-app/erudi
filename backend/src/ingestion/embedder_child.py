@@ -55,10 +55,11 @@ Lifecycle policy (product decisions on #594):
   the lifespan must never respawn a child into a stopping backend.
 
 Platform dispatch: `_get_adapter` serves `src.ingestion.mlx_embedder` on
-macOS ARM and ``None`` elsewhere — Windows and Linux keep the in-process
-embedder until F3. ``ERUDI_FORCE_CPU`` is deliberately ignored: it picks the
-CHAT engine, and the embedder is not a chat engine (mlx_vlm is the only
-embedding server shipped on macOS).
+macOS ARM and `src.ingestion.llama_embedder` (the bundled CPU ``llama-server
+--embedding``, F3) everywhere else — every platform serves KB embeddings
+from a dedicated child. ``ERUDI_FORCE_CPU`` is deliberately ignored: it
+picks the CHAT engine, and the embedder is not a chat engine (the llama
+adapter always runs the CPU binary anyway).
 """
 
 from __future__ import annotations
@@ -167,19 +168,41 @@ _prewarm_missing_logged = False
 
 
 def _get_adapter() -> Any:
-    """The platform's adapter module, or ``None`` where no child exists."""
+    """The platform's adapter module (every platform has one since F3)."""
     if _adapter_override is not _PLATFORM:
         return _adapter_override
     if platform.system().lower() == "darwin" and "arm" in platform.machine().lower():
         from src.ingestion import mlx_embedder
 
         return mlx_embedder
-    return None
+    from src.ingestion import llama_embedder
+
+    return llama_embedder
 
 
 def embedder_child_supported() -> bool:
     """Whether this platform serves KB embeddings from a dedicated child."""
     return _get_adapter() is not None
+
+
+def artifact_available() -> bool:
+    """Whether the adapter's embedding artifact is on disk — the e5 snapshot
+    on macOS, the bundled GGUF on Windows/Linux. True where no child exists
+    (a test seam set the adapter to ``None``): there is nothing to miss."""
+    adapter = _get_adapter()
+    if adapter is None:
+        return True
+    return bool(adapter.artifact_available())
+
+
+def artifact_downloadable() -> bool:
+    """Whether the #146 download gate can produce the adapter's artifact
+    (True on macOS — the child serves the downloadable snapshot; False on
+    Windows/Linux — the GGUF ships inside the installers)."""
+    adapter = _get_adapter()
+    if adapter is None:
+        return True
+    return bool(adapter.artifact_downloadable)
 
 
 def _require_adapter() -> Any:
@@ -431,7 +454,7 @@ def ensure_embedder_running() -> Dict[str, Any]:
             logger.warning(
                 f"The embedding child is no longer running (pid "
                 f"{handle.get('pid')}, port {handle.get('port')}, exit code "
-                f"{getattr(handle.get('proc'), 'exitcode', None)}); respawning. "
+                f"{adapter.exit_code(handle.get('proc'))}); respawning. "
                 f"{_read_tail(adapter, handle)}"
             )
             _drop_dead_locked(handle)
@@ -500,7 +523,7 @@ def _request_error(adapter: Any, handle: Dict[str, Any], cause: str) -> EngineEx
             message=(
                 f"{adapter.server_name} died during an embedding request "
                 f"(pid {handle.get('pid')}, port {handle.get('port')}, exit code "
-                f"{getattr(handle.get('proc'), 'exitcode', None)}): {cause}. "
+                f"{adapter.exit_code(handle.get('proc'))}): {cause}. "
                 f"{_read_tail(adapter, handle)}"
             ),
         )

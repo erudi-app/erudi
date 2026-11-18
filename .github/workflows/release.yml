@@ -172,6 +172,38 @@ jobs:
         if: matrix.llama_build == 'cuda' && runner.os == 'Linux'
         run: bash scripts/dev/backend/build-llamacpp-cpu-linux.sh
 
+      # ── Windows/Linux: the KB embedding GGUF the installers bundle (#594).
+      #    Converted reproducibly from the pinned e5 snapshot with the
+      #    converter patch kept in the repo; the script verifies the result
+      #    against its pinned sha256. The conversion runs in its OWN venv,
+      #    installed hash-checked from the per-OS build lock
+      #    (lock/{win,linux}-e5-gguf.txt) and never put on PATH: the app's
+      #    prod lock carries neither sentencepiece nor protobuf, and the
+      #    frozen backend must not inherit conversion packages. Cached per OS
+      #    on the script+patch hash; the produce step still runs on a hit —
+      #    it re-hashes the restored file first, so a corrupt cache entry can
+      #    never reach a release.
+      - name: Restore the KB embedding GGUF (cache)
+        if: matrix.llama_build != ''
+        uses: actions/cache@v4
+        with:
+          path: backend/artifacts/kb-embedder
+          key: e5-gguf-${{ runner.os }}-${{ hashFiles('scripts/dev/backend/build_e5_gguf.py', 'scripts/dev/backend/e5-conversion.patch') }}
+
+      - name: Produce the KB embedding GGUF
+        if: matrix.llama_build != ''
+        run: |
+          set -euo pipefail
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            lock=win-e5-gguf.txt; venv_py=e5-gguf-venv/Scripts/python
+          else
+            lock=linux-e5-gguf.txt; venv_py=e5-gguf-venv/bin/python
+          fi
+          python -m venv e5-gguf-venv
+          "$venv_py" -m pip install --quiet --disable-pip-version-check -r "backend/requirements/lock/$lock" --require-hashes --no-deps
+          "$venv_py" scripts/ci/check_backend_lock.py installed "backend/requirements/lock/$lock"
+          "$venv_py" scripts/dev/backend/build_e5_gguf.py
+
       - name: Build backend bundle
         run: pyinstaller backend/${{ matrix.spec }} --distpath backend/dist
 
@@ -231,6 +263,22 @@ jobs:
           cpu_exe=$(locate cpu)
           cpu_dir=$(dirname "$cpu_exe")
           echo "Found the CPU inference binary: $cpu_exe"
+          # The KB embedding GGUF (#594): exactly one copy, byte-identical to
+          # the produced file. Without it every Knowledge Base on this
+          # install would be gated on a download that does not exist.
+          gguf=$(find backend/dist -type f -path "*/artifacts/kb-embedder/multilingual-e5-small-q8_0.gguf")
+          count=$(printf '%s' "$gguf" | grep -c . || true)
+          if [ "$count" -ne 1 ]; then
+            echo "::error::Expected exactly one multilingual-e5-small-q8_0.gguf under artifacts/kb-embedder in the frozen backend, found $count. The Knowledge Base embedder would have no model; refusing to package." >&2
+            exit 1
+          fi
+          frozen_sha=$(sha256sum "$gguf" | cut -d' ' -f1)
+          source_sha=$(sha256sum backend/artifacts/kb-embedder/multilingual-e5-small-q8_0.gguf | cut -d' ' -f1)
+          if [ "$frozen_sha" != "$source_sha" ]; then
+            echo "::error::The frozen KB embedding GGUF differs from the produced file ($frozen_sha != $source_sha); the freeze corrupted it."
+            exit 1
+          fi
+          echo "Found the KB embedding GGUF: $gguf"
           if [ "$LLAMA_FLAVOUR" = "cuda" ]; then
             cuda_exe=$(locate cuda)
             echo "Found the CUDA inference binary: $cuda_exe"

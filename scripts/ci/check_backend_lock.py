@@ -10,13 +10,14 @@ installed   This interpreter must hold exactly the lock's packages at their
             locked versions, pip aside (the venv brings it).
             scripts/ci/install_backend_requirements.sh runs it in the venv it
             installs the lock into.
-resolution  Run by backend-ci on each OS, for the prod entrypoints of that OS,
-            with this machine's own pip and markers, no install: (1) the
-            entrypoint and meta/build.txt, constrained to the lock's versions,
-            resolve to exactly the lock's set; (2) installing the lock in
-            hash-checking mode selects the locked file of every package. The
-            CUDA locks are installed by a release tag only, so this is what
-            proves them on every pull request.
+resolution  Run by backend-ci on each OS, for the prod and build entrypoints
+            of that OS, with this machine's own pip and markers, no install:
+            (1) the entrypoint (and meta/build.txt for a prod one),
+            constrained to the lock's versions, resolve to exactly the lock's
+            set; (2) installing the lock in hash-checking mode selects the
+            locked file of every package. The CUDA and build locks are
+            installed by a release tag only, so this is what proves them on
+            every pull request.
 constraints The lock's `name==version` lines, without hashes, for `pip -c`: a
             hash in a constraints file turns on hash-checking for the whole
             install. backend-ci installs the dev entrypoints within them.
@@ -95,11 +96,10 @@ def resolution(entrypoint: Path) -> int:
         work = Path(tmp)
         constraints = work / "constraints.txt"
         constraints.write_text(_constraints(lock), encoding="utf-8")
-        resolved = _report(
-            ["-r", str(entrypoint), "-r", str(locks.build_requirements()), "-c", str(constraints)],
-            work,
-            "resolution",
-        )
+        arguments = ["-r", str(entrypoint)]
+        if locks.includes_build_tool(entrypoint):
+            arguments += ["-r", str(locks.build_requirements())]
+        resolved = _report(arguments + ["-c", str(constraints)], work, "resolution")
         found = {
             locks.canonical_name(item["metadata"]["name"]): item["metadata"]["version"]
             for item in resolved

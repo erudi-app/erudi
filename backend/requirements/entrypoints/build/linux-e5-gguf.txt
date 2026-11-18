@@ -1,0 +1,5 @@
+# Build-only: the e5-GGUF conversion venv on Linux (#594). Locked WITHOUT
+# meta/build.txt (PyInstaller has no business in it); installed hash-checked
+# into a venv of its own by the "Produce the KB embedding GGUF" steps of
+# release.yml and app-build-smoke.yml. See backend/requirements/README.md.
+-r ../../meta/e5-gguf.txt

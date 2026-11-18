@@ -34,23 +34,29 @@ def _payload(**overrides) -> dict:
 
 @pytest.mark.integration
 class TestEmbeddingModelEndpoints:
-    def test_status_returns_download_state(self, client, monkeypatch):
+    def test_status_returns_the_selected_backend_artifact_state(self, client, monkeypatch):
         monkeypatch.setattr(
-            kb_endpoints, "download_state", lambda: {"present": True, "status": "idle"}
+            kb_endpoints,
+            "embedding_artifact_status",
+            lambda: {"available": True, "downloading": False, "error": None},
         )
         resp = client.get("/erudi/knowledge_base/embedding-model/status")
         assert resp.status_code == 200
-        assert resp.json() == {"present": True, "status": "idle"}
+        assert resp.json() == {"available": True, "downloading": False, "error": None}
 
     def test_download_kicks_off_background_download(self, client, monkeypatch):
-        monkeypatch.setattr(kb_endpoints, "start_download", lambda: {"status": "downloading"})
+        monkeypatch.setattr(
+            kb_endpoints,
+            "start_embedding_artifact_download",
+            lambda: {"status": "downloading"},
+        )
         resp = client.post("/erudi/knowledge_base/embedding-model/download")
         assert resp.status_code == 200
         assert resp.json() == {"status": "downloading"}
 
     def test_embedding_model_is_not_captured_as_llm_id(self, client, monkeypatch):
         """Route ordering regression: 'embedding-model' must never 422 as llm_id."""
-        monkeypatch.setattr(kb_endpoints, "download_state", lambda: {})
+        monkeypatch.setattr(kb_endpoints, "embedding_artifact_status", lambda: {})
         resp = client.get("/erudi/knowledge_base/embedding-model/status")
         assert resp.status_code == 200
 

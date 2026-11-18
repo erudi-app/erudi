@@ -1,0 +1,5 @@
+# Patch files are applied with `git apply` against LF sources
+# (scripts/dev/backend/build_e5_gguf.py normalizes the target to LF first):
+# a CRLF checkout of the patch itself would make every context line mismatch
+# on the Windows runners, so it is never EOL-converted.
+*.patch -text

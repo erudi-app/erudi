@@ -40,18 +40,21 @@ jobs:
             reqs: linux-cpu.txt
             lock: linux-cpu-prod.txt
             prod_entrypoints: linux-cpu-prod.txt linux-cuda-prod.txt
+            build_entrypoints: linux-e5-gguf.txt
             venv_bin: bin
             fail_fast: '-x'
           - os: windows-latest # x64 CPU
             reqs: win-cpu.txt
             lock: win-cpu-prod.txt
             prod_entrypoints: win-cpu-prod.txt win-cuda-prod.txt
+            build_entrypoints: win-e5-gguf.txt
             venv_bin: Scripts
             fail_fast: '-x'
           - os: macos-15 # Apple Silicon
             reqs: mac-silicon.txt
             lock: mac-silicon-prod.txt
             prod_entrypoints: mac-silicon-prod.txt
+            build_entrypoints: ''
             venv_bin: bin
             fail_fast: '-x'
     env:
@@ -87,14 +90,18 @@ jobs:
           $py scripts/ci/check_backend_lock.py constraints backend/requirements/lock/${{ matrix.lock }} > backend/venv/lock-constraints.txt
           $py -m pip install -r backend/requirements/entrypoints/dev/${{ matrix.reqs }} -c backend/venv/lock-constraints.txt
 
-      # The prod locks of this OS, checked with this machine's own pip and
-      # markers: each entrypoint resolves to exactly its lock, and installing
-      # the lock selects its locked files. The CUDA locks are installed by a
-      # release tag only, so this is their check on every pull request.
-      - name: Check the prod locks of this OS
+      # The prod and build locks of this OS, checked with this machine's own
+      # pip and markers: each entrypoint resolves to exactly its lock, and
+      # installing the lock selects its locked files. The CUDA locks and the
+      # build locks (the e5-GGUF conversion venv) are installed by a release
+      # tag only, so this is their check on every pull request.
+      - name: Check the prod and build locks of this OS
         run: |
           for entrypoint in ${{ matrix.prod_entrypoints }}; do
             backend/venv/${{ matrix.venv_bin }}/python scripts/ci/check_backend_lock.py resolution backend/requirements/entrypoints/prod/$entrypoint
+          done
+          for entrypoint in ${{ matrix.build_entrypoints }}; do
+            backend/venv/${{ matrix.venv_bin }}/python scripts/ci/check_backend_lock.py resolution backend/requirements/entrypoints/build/$entrypoint
           done
 
       - name: Syntax check

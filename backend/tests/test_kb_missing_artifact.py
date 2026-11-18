@@ -113,16 +113,15 @@ class TestArtifactMissingPredicate:
         monkeypatch.setattr(embeddings, "_forced_backend", "in-process")
         assert not embeddings.embedding_artifact_missing()
 
-    def test_child_backend_reports_the_absent_artifact(self, monkeypatch):
+    def test_child_backend_reports_the_adapter_absent_artifact(self, monkeypatch):
+        adapter = SimpleNamespace(artifact_available=lambda: False)
         monkeypatch.setattr(embeddings, "_forced_backend", None)
-        monkeypatch.setattr(embedder_child, "_adapter_override", object())
-        monkeypatch.setattr(embeddings, "embedding_model_available", lambda: False)
+        monkeypatch.setattr(embedder_child, "_adapter_override", adapter)
         assert embeddings.embedding_artifact_missing()
-        monkeypatch.setattr(embeddings, "embedding_model_available", lambda: True)
+        adapter.artifact_available = lambda: True
         assert not embeddings.embedding_artifact_missing()
 
     def test_no_child_platform_never_reports_missing(self, monkeypatch):
         monkeypatch.setattr(embeddings, "_forced_backend", None)
         monkeypatch.setattr(embedder_child, "_adapter_override", None)
-        monkeypatch.setattr(embeddings, "embedding_model_available", lambda: False)
         assert not embeddings.embedding_artifact_missing()

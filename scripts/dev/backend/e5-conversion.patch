@@ -1,0 +1,53 @@
+Teach the pinned llama.cpp converter (backend/forks/llama-cpp @ 91f6a6cf) to
+convert intfloat/multilingual-e5-small correctly (issue #594, spike S4).
+
+The submodule is NEVER modified: scripts/dev/backend/build_e5_gguf.py copies
+the conversion toolchain to a scratch directory and applies this patch there.
+
+Hunk 1 (required): e5 is a BertModel whose tokenizer is the XLM-RoBERTa
+SentencePiece (Unigram) one. The stock BertModel.set_vocab takes the
+BPE/WordPiece path, which raises on the unknown pre-tokenizer hash -- and
+community GGUFs that forced it carry a WordPiece vocab that embeds at cosine
+~0.897 of the correct vectors. Routing to _xlmroberta_set_vocab writes the
+Unigram vocab; deliberately WITHOUT _xlmroberta_tokenizer_init, because a
+BertModel's position ids start at 0 (no RoBERTa pad_token_id+1 offset).
+
+Hunk 2 (recommended): <mask> (id 250001) lives in tokenizer.json's
+added_tokens but not in sentencepiece.bpe.model; without this it is written
+as [PAD250001] and a text containing a literal "<mask>" tokenizes differently
+(measured cosine 0.945/0.970 on two such strings; 0.999999 with the hunk).
+
+With both hunks, tokenization is identical to tokenizer.json on 267/267
+corpus texts and 120/120 edge cases (spike S4). Upstream master (2026-11-10)
+has the same defect; this patch is a reasonable upstream contribution.
+
+diff --git a/conversion/bert.py b/conversion/bert.py
+--- a/conversion/bert.py
++++ b/conversion/bert.py
+@@ -38,6 +38,12 @@ class BertModel(TextModel):
+             self.gguf_writer.add_classifier_output_labels([v for k, v in sorted(self.cls_out_labels.items())])
+
+     def set_vocab(self):
++        tokenizer_json = self.dir_model / "tokenizer.json"
++        if tokenizer_json.is_file() and json.loads(tokenizer_json.read_text(encoding="utf-8"))["model"]["type"] == "Unigram":
++            # BertModel paired with the XLM-RoBERTa SentencePiece (Unigram) tokenizer,
++            # e.g. intfloat/multilingual-e5-*: write the Unigram vocab, not WordPiece
++            return self._xlmroberta_set_vocab()
++
+         tokens, toktypes, tokpre = self.get_vocab_base()
+         self.vocab_size = len(tokens)
+
+@@ -224,6 +230,13 @@ class BertModel(TextModel):
+                 tokens[250001] = b'<mask>'
+                 scores[250001] = 0.0
+                 toktypes[250001] = SentencePieceTokenTypes.CONTROL
++            elif (tokenizer_json_path := self.dir_model / "tokenizer.json").is_file():
++                # Add the special tokens tokenizer.json appends after the sentencepiece vocab (e.g. <mask>)
++                for added in json.loads(tokenizer_json_path.read_text(encoding="utf-8")).get("added_tokens", []):
++                    if added.get("special") and added["id"] < vocab_size and toktypes[added["id"]] == SentencePieceTokenTypes.UNUSED:
++                        tokens[added["id"]] = added["content"].encode("utf-8")
++                        scores[added["id"]] = 0.0
++                        toktypes[added["id"]] = SentencePieceTokenTypes.CONTROL
+
+         self.gguf_writer.add_tokenizer_model("t5")
+         self.gguf_writer.add_tokenizer_pre("default")
