@@ -2026,25 +2026,39 @@ async def _await_child_death(engine, exc: BaseException) -> Any:
     return death
 
 
-def _observe_child_output(engine) -> str:
-    """The inference child's last output (``child_output_tail``), or "" when
-    the engine has none to read or reading it fails."""
+def _observe_child_output_mark(engine) -> Optional[int]:
+    """A position in the inference child's output (``child_output_mark``),
+    taken when the turn starts; None when the engine cannot tell."""
+    probe = getattr(engine, "child_output_mark", None)
+    if probe is None:
+        return None
+    try:
+        return probe()
+    except Exception:  # a diagnostic must never mask the turn it describes
+        return None
+
+
+def _observe_child_output(engine, since_mark: Optional[int]) -> str:
+    """What the inference child wrote since ``since_mark``
+    (``child_output_tail``), or "" when the engine has none to read or
+    reading it fails."""
     probe = getattr(engine, "child_output_tail", None)
     if probe is None:
         return ""
     try:
-        return probe() or ""
+        return probe(since_mark=since_mark) or ""
     except Exception:  # a diagnostic must never mask the failure it describes
         return ""
 
 
-def _metal_out_of_memory_in(exc: BaseException, engine, death: Any) -> Optional[str]:
+def _metal_out_of_memory_in(exc: BaseException, engine, since_mark: Optional[int]) -> Optional[str]:
     """The line that says the GPU ran out of memory (#504), when it did: in
-    the failure's own messages, the observed death's report, or the child's
-    last output (the only place a surviving child leaves it)."""
+    the failure's own messages, or in what the child wrote during this turn
+    (the only place a surviving child leaves it, and where a dead one's last
+    words are). Never the child's older output: an earlier turn's out-of-memory
+    the child survived is not this failure's cause."""
     messages = [str(e) for e in exception_chain(exc)]
-    report = death.report if death is not None else ""
-    return find_metal_out_of_memory(*messages, report, _observe_child_output(engine))
+    return find_metal_out_of_memory(*messages, _observe_child_output(engine, since_mark))
 
 
 def _child_crash_suffix(death: Any) -> str:
@@ -2321,6 +2335,8 @@ class AgentRunner:
                     # Each call's usage feeds the turn's memory measurement
                     # (MLX); the summary and title clients push nothing.
                     record_usage=True,
+                    # One INFO line per model call of the turn (``Model call:``).
+                    call_log_label=f"thread_id={thread_id}" if thread_id else "arena",
                 )
                 # The compaction (memory accounting, windows, summary client
                 # and middleware), built AFTER build_chat_model so the child
@@ -2462,6 +2478,9 @@ class AgentRunner:
                 # picks the curated empty-answer wording and lands in the
                 # completion log for field-report attribution.
                 stream_start_s = time.perf_counter()
+                # Where the child's output stood when the turn began: a failure
+                # is attributed only to what the child wrote after it (#504).
+                child_output_mark = _observe_child_output_mark(engine)
                 first_token_s: Optional[float] = None
                 chunk_count = 0
                 char_count = 0
@@ -2880,7 +2899,7 @@ class AgentRunner:
                             # waits, so a client gone meanwhile cannot lose it; only
                             # the Details leaf waits for a death not visible yet.
                             death = _observe_child_death(engine)
-                            metal_line = _metal_out_of_memory_in(exc, engine, death)
+                            metal_line = _metal_out_of_memory_in(exc, engine, child_output_mark)
                             metal_note = (
                                 f"; Metal out of memory: {sanitize(metal_line)}"
                                 if metal_line

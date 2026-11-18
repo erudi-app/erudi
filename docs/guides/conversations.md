@@ -609,9 +609,10 @@ Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)` to i
 the curated `metal_out_of_memory` turn instead of the generic apology: the model is probably too
 large for this computer's memory right now, with the hint to close other apps or pick a smaller
 model. The runner recognises it, whether the child survived the error or died with it, with
-`find_metal_out_of_memory` (`src/engines/metal_oom.py`) over the failure's own messages, the
-observed death's report and the child's last output (`BaseChatServerEngine.child_output_tail()`,
-the only place a surviving child leaves it). It matches the
+`find_metal_out_of_memory` (`src/engines/metal_oom.py`) over the failure's own messages and what
+the child wrote to its log during this turn (`BaseChatServerEngine.child_output_tail(since_mark)`,
+the only place a surviving child leaves it; the mark is the log's size when the turn began, so an
+out-of-memory a surviving child reported on an earlier turn is never pinned on a later failure). It matches the
 `kIOGPUCommandBufferCallbackErrorOutOfMemory` token, or `Insufficient Memory` on a `[METAL]` line,
 never a vague word: a Python `MemoryError`, a CUDA or llama.cpp allocation failure and the other
 `[METAL]` errors stay generic failures. The operation did not happen, so the record is the same

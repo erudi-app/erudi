@@ -105,7 +105,7 @@ def _engine(monkeypatch, *, tail=None, death=None):
             return death
 
         @classmethod
-        def child_output_tail(cls):
+        def child_output_tail(cls, since_mark=None):
             return tail or ""
 
     monkeypatch.setattr(config, "LLM_Engine", _Turn)
@@ -218,3 +218,95 @@ async def test_a_python_memory_error_stays_generic(monkeypatch):
     answer = await _turn(monkeypatch, MemoryError(), "m-pymem")
 
     assert answer["text"] == ERROR_MESSAGE
+
+
+# ===== A line written before the turn started is not this turn's =====
+
+
+def _marked_engine(monkeypatch, lines):
+    """An engine whose child log is ``lines`` (a list the test appends to):
+    its mark is the log's length, its tail what was written after a mark."""
+
+    class _Turn(BaseEngine):
+        @classmethod
+        def child_death(cls):
+            return None
+
+        @classmethod
+        def child_output_mark(cls):
+            return len(lines)
+
+        @classmethod
+        def child_output_tail(cls, since_mark=None):
+            return "\n".join(lines[since_mark or 0 :])
+
+    monkeypatch.setattr(config, "LLM_Engine", _Turn)
+
+
+async def test_an_old_metal_line_is_not_pinned_on_a_later_generic_failure(monkeypatch):
+    # The child survived an earlier out-of-memory: its line is still in the log.
+    _marked_engine(monkeypatch, ["old turn", METAL_LINE, "next request served"])
+
+    answer = await _turn(monkeypatch, RuntimeError("bad sampling value"), "m-stale")
+
+    assert answer["text"] == ERROR_MESSAGE
+    assert "curated_error" not in answer
+    assert answer["detail"] == "bad sampling value"
+
+
+async def test_a_line_written_during_the_turn_is_found(monkeypatch):
+    lines = ["old turn", METAL_LINE]
+    _marked_engine(monkeypatch, lines)
+
+    class _Writes(_RaisingModel):
+        async def _astream(self, messages, stop=None, run_manager=None, **kwargs):
+            lines.append(METAL_LINE)  # the child reports it while answering
+            raise RuntimeError("stream ended")
+            yield  # pragma: no cover
+
+    model = _Writes(messages=iter([]))
+    monkeypatch.setattr(runner_module, "build_chat_model", lambda llm, **kw: model)
+    runner = AgentRunner(checkpointer=InMemorySaver())
+    events = [
+        e
+        async for e in runner.astream_text(
+            llm=_Llm(), user_message="hi", system_prompt="s", params=_PARAMS, thread_id="m-fresh"
+        )
+    ]
+    answer = [e for e in events if e["t"] == "answer"][-1]
+
+    assert answer["curated_error"]["kind"] == "metal_out_of_memory"
+
+
+def test_the_mlx_engine_reads_only_what_its_log_gained_since_the_mark(tmp_path):
+    from src.engines.mlx_engine import MLX_Engine
+
+    log = tmp_path / "mlx-child-27300.log"
+    log.write_text(f"{METAL_LINE}\nserved\n", encoding="utf-8")
+
+    class _Proc:
+        pass
+
+    proc = _Proc()
+    setattr(proc, MLX_Engine._CHILD_LOG_ATTR, str(log))
+
+    class _Loaded(MLX_Engine):
+        _model = {"proc": proc, "port": 27300}
+
+    mark = _Loaded.child_output_mark()
+    assert find_metal_out_of_memory(_Loaded.child_output_tail(since_mark=mark)) is None
+    with log.open("a", encoding="utf-8") as handle:
+        handle.write(f"{METAL_LINE}\n")
+    assert find_metal_out_of_memory(_Loaded.child_output_tail(since_mark=mark)) == METAL_LINE
+
+
+def test_a_log_rolled_since_the_mark_is_read_whole(tmp_path):
+    from src.engines import mlx_child_log
+
+    log = tmp_path / "child.log"
+    log.write_text("x" * 500, encoding="utf-8")
+    mark = mlx_child_log.log_size(log)
+    log.write_text(f"{METAL_LINE}\n", encoding="utf-8")  # truncated by a roll
+
+    assert METAL_LINE in mlx_child_log.read_child_log_from(log, mark, max_chars=4000)
+    assert mlx_child_log.log_size(tmp_path / "absent.log") == 0

@@ -174,14 +174,23 @@ class BaseChatServerEngine(BaseEngine):
         return ChildDeath(cause=cause, report=f"{cause}. {cls._read_child_output(proc)}")
 
     @classmethod
-    def child_output_tail(cls) -> str:
+    def child_output_mark(cls) -> Optional[int]:
+        """A position in the loaded child's output, for `child_output_tail`'s
+        ``since_mark``; None when the engine cannot tell (no captured file)."""
+        return None
+
+    @classmethod
+    def child_output_tail(cls, since_mark: Optional[int] = None) -> str:
         """The loaded child's last output, running or not; "" when nothing is
         loaded.
 
         A failure the child survives (the GPU ran out of memory mid-answer)
         leaves its cause only here, never in the exception the client raises:
         the agent layer reads it to recognise such a cause
-        (`src.engines.metal_oom`).
+        (`src.engines.metal_oom`). With ``since_mark`` (a `child_output_mark`
+        taken when the turn started) an engine that can only returns what the
+        child wrote after it, so an earlier failure's line is never read as
+        this one's.
         """
         proc = cls._model.get("proc") if isinstance(cls._model, dict) else None
         if proc is None:

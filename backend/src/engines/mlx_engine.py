@@ -1715,6 +1715,25 @@ class MLX_Engine(BaseChatServerEngine):
         return path if isinstance(path, str) and path else None
 
     @classmethod
+    def child_output_mark(cls) -> Optional[int]:
+        """The size of the loaded child's log file now (None without one)."""
+        proc = cls._model.get("proc") if isinstance(cls._model, dict) else None
+        path = cls._child_log_path_of(proc)
+        return child_log.log_size(path) if path is not None else None
+
+    @classmethod
+    def child_output_tail(cls, since_mark: Optional[int] = None) -> str:
+        """What the loaded child wrote after ``since_mark`` (all the tail when
+        it is None), so a line of an earlier turn is never read as this one's."""
+        proc = cls._model.get("proc") if isinstance(cls._model, dict) else None
+        path = cls._child_log_path_of(proc)
+        if path is None or since_mark is None:
+            return super().child_output_tail()
+        return child_log.read_child_log_from(
+            path, since_mark, max_chars=cls._CHILD_OUTPUT_TAIL_CHARS
+        )
+
+    @classmethod
     def _read_child_output(cls, proc: Any) -> str:
         """Tail of the child's own stdout+stderr file (#361 for llama-server).
 
