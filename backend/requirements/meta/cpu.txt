@@ -1,15 +1,5 @@
+# The llama.cpp builds' Python bits, REUSED by the CUDA entrypoints (their GPU
+# work is the CUDA-compiled llama-server binary, not Python).
 # Read the GGUF chat-template metadata for static tool-calling detection
 # (transformers AutoTokenizer(gguf_file=...) on the llama.cpp CPU path).
 gguf==0.19.0
-
-# torch (CPU): required transitively by sentence-transformers (e5 KB embeddings),
-# NOT by LLM inference (that's the compiled llama-server). transformers (pinned in
-# base.txt) needs torch>=2.7 at import (torch.float8_e8m0fnu). 2.13.0 is the first
-# release without the torch.jit.script memory-corruption advisory
-# (GHSA-rrmf-rvhw-rf47, fixed in 2.13.0); mac resolves a later torch transitively
-# through the mlx/sentence-transformers stack (its version is in
-# lock/mac-silicon-prod.txt), so this only closes the gap on the pinned CPU builds. Taken from the official CPU index. This file is ALSO reused by
-# the CUDA entrypoints (their GPU work is the llama-server binary; their
-# Python/torch stack is CPU). Reproducible, GPU-free resolution.
---extra-index-url https://download.pytorch.org/whl/cpu
-torch==2.13.0

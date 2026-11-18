@@ -20,4 +20,3 @@ mlx==0.32.2
 
 # transformers is pinned in meta/base.txt (5.14.1, normalized for all platforms).
 # Its floor is dictated here by mlx-vlm 0.6.17 (requires transformers>=5.14.0).
-# mac resolves torch (>=2.7, has float8_e8m0fnu) transitively via the mlx/ST stack.

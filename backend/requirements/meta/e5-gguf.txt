@@ -1,15 +1,16 @@
 # The e5-GGUF conversion toolchain (#594): what scripts/dev/backend/build_e5_gguf.py
 # needs to run the patched llama.cpp converter over the pinned e5 snapshot.
 # Installed into a DEDICATED build venv from lock/{win,linux}-e5-gguf.txt --
-# never into the app's venv: the app's prod locks do not carry sentencepiece or
-# protobuf (and F4 removes torch from them), and the conversion must stay
-# reproducible from scratch on a release runner.
+# never into the app's venv: the app's prod locks carry neither torch nor
+# sentencepiece nor protobuf, and the conversion must stay reproducible from
+# scratch on a release runner.
 #
 # gguf-py is NOT here: the converter imports the submodule's own copy through
 # PYTHONPATH (build_e5_gguf.py sets it), so gguf-py's runtime dependencies are
 # declared directly below (numpy/tqdm/pyyaml/requests).
 
-# torch (CPU, module-level import of the converter). Keep in step with meta/cpu.txt.
+# torch (CPU, module-level import of the converter): this build venv only, the
+# app ships no torch.
 --extra-index-url https://download.pytorch.org/whl/cpu
 torch==2.13.0
 # AutoConfig at import, AutoTokenizer on the _xlmroberta_set_vocab path.
