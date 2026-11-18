@@ -109,19 +109,13 @@ class TestIngestionRefusal:
 
 
 class TestArtifactMissingPredicate:
-    def test_in_process_backend_never_reports_missing(self, monkeypatch):
-        monkeypatch.setattr(embeddings, "_forced_backend", "in-process")
-        assert not embeddings.embedding_artifact_missing()
-
-    def test_child_backend_reports_the_adapter_absent_artifact(self, monkeypatch):
+    def test_reports_the_adapter_absent_artifact(self, monkeypatch):
         adapter = SimpleNamespace(artifact_available=lambda: False)
-        monkeypatch.setattr(embeddings, "_forced_backend", None)
         monkeypatch.setattr(embedder_child, "_adapter_override", adapter)
         assert embeddings.embedding_artifact_missing()
         adapter.artifact_available = lambda: True
         assert not embeddings.embedding_artifact_missing()
 
-    def test_no_child_platform_never_reports_missing(self, monkeypatch):
-        monkeypatch.setattr(embeddings, "_forced_backend", None)
+    def test_a_disarmed_manager_never_reports_missing(self, monkeypatch):
         monkeypatch.setattr(embedder_child, "_adapter_override", None)
         assert not embeddings.embedding_artifact_missing()

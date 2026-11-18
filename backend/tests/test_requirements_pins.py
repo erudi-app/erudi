@@ -17,8 +17,6 @@ def test_numpy_is_2x():
     import numpy as np
 
     assert int(np.__version__.split(".")[0]) >= 2, np.__version__
-    # The only numpy surface src actually touches (E5Embeddings .tolist()).
-    assert np.asarray([1.0, 2.0]).tolist() == [1.0, 2.0]
 
 
 @pytest.mark.unit
@@ -49,6 +47,5 @@ def test_common_stack_imports_under_numpy2():
     import langchain_postgres  # noqa: F401
     import pgserver  # noqa: F401
     import psycopg  # noqa: F401
-    import sentence_transformers  # noqa: F401
-    import torch  # noqa: F401
+    import jinja2  # noqa: F401
     import transformers  # noqa: F401

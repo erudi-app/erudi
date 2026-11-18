@@ -159,8 +159,9 @@ src/engines/
 The MLX engine runs `mlx_vlm.server` (pinned `mlx-vlm==0.6.17`), which is a
 superset of `mlx_lm.server`: same wire protocol, plus vision and native tool
 calling. There is no `embedder_engine.py` — embeddings are handled outside the
-engine layer by `E5Embeddings` in `src/ingestion/embeddings.py`
-(`intfloat/multilingual-e5-small`, 384 dimensions).
+engine layer by `ChildE5Embeddings` in `src/ingestion/embeddings.py`, over a
+dedicated embedding child process (`intfloat/multilingual-e5-small`, 384
+dimensions; `src/ingestion/embedder_child.py`).
 
 All three inference engines follow the same pattern: they spawn an
 OpenAI-compatible HTTP server in a child process and talk to it over

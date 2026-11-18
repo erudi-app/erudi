@@ -2,13 +2,12 @@
 
 This module implements the CUDA backend for local LLM inference on systems
 with NVIDIA GPUs. It provides:
-- Hardware detection via PyTorch CUDA and NVML
+- Hardware detection via NVML and the CUDA driver API
 - Performance evaluation for inference
-- GPU warm-up for optimal benchmarking
 - Cross-platform support (Windows and Linux)
 
 Architecture:
-    CUDA Engine → PyTorch CUDA + NVML
+    CUDA Engine → NVML + CUDA driver API
     ┌───────────────────────────────────────────────────────────┐
     │ get_hardware_info()                                       │
     │  └─> Detect GPU, VRAM, compute capability via NVML       │
@@ -20,14 +19,9 @@ Architecture:
     │  2. Measure memory bandwidth                              │
     │  3. Score inference performance                           │
     └───────────────────────────────────────────────────────────┘
-                            ↓
-    ┌───────────────────────────────────────────────────────────┐
-    │ warm_up_accelerator()                                     │
-    │  └─> Matrix operations to boost GPU clocks               │
-    └───────────────────────────────────────────────────────────┘
 
 Hardware Detection:
-    - CUDA availability: torch.cuda.is_available()
+    - CUDA availability: NVML (pynvml), at least one GPU detected
     - GPU information: NVML (pynvml library)
     - Best GPU selection: highest VRAM capacity
     - OS-agnostic: Works on Windows and Linux
@@ -50,9 +44,6 @@ Example:
         hw_info = CUDA_Engine.get_hardware_info()
         print(f"GPU: {hw_info['gpu']['gpu_name']}")
         print(f"VRAM: {hw_info['gpu']['vram_total_gb']} GB")
-
-        # Warm up GPU
-        CUDA_Engine.warm_up_accelerator(1.5)
 
         # Evaluate performance
         perf = CUDA_Engine.get_performance_evaluation()
@@ -83,7 +74,6 @@ Inference (llama.cpp compiled with CUDA, a llama-server subprocess):
       user set.
 
 Note:
-    - Requires torch with CUDA support
     - Requires pynvml for GPU monitoring and the window sizing
     - All methods return fallback values if CUDA unavailable
     - Thread-safe through BaseEngine._lock
@@ -122,7 +112,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
     """Engine for NVIDIA CUDA GPU inference.
 
     Provides hardware detection and performance evaluation for NVIDIA GPUs
-    using PyTorch CUDA backend and NVML monitoring library.
+    using the NVML monitoring library and the CUDA driver API.
 
     Hardware Specs Reference Tables:
         CUDA_PER_SM: CUDA cores and Tensor cores per SM by compute capability
@@ -1304,8 +1294,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
             bool: True if NVML initialises and at least one GPU is detected.
 
         Note:
-            Uses pynvml so that a CPU-only torch installation does not affect
-            GPU detection.
+            Uses pynvml: the driver library alone, no CUDA toolkit.
         """
         try:
             if not cls._init_nvml():
@@ -1356,7 +1345,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
         """Return the SM count for a device using the CUDA Driver API (nvcuda.dll).
 
         nvcuda.dll is installed with every NVIDIA driver — no CUDA toolkit
-        or torch required.  Falls back to 0 on any error.
+        required.  Falls back to 0 on any error.
         """
         try:
             import ctypes
@@ -1726,39 +1715,6 @@ class CUDA_Engine(BaseLlamaCppEngine):
             raise HardwareException("Failed to detect CUDA hardware", trace=str(e))
 
     @classmethod
-    def warm_up_accelerator(cls, duration_seconds: float = 1.0) -> bool:
-        """Warm up NVIDIA GPU to boost clock speeds for benchmarking.
-
-        Runs matrix multiplication operations on GPU to bring it to optimal
-        performance state before measurements. Important for GPUs with
-        dynamic clock management.
-
-        Args:
-            duration_seconds: How long to run warm-up operations (default: 1.0).
-
-        Returns:
-            bool: True if warm-up completed successfully, False otherwise.
-
-        Note:
-            Silently returns False if CUDA unavailable rather than raising.
-            Uses 4096x4096 matrix multiplications on primary GPU.
-
-        Examples:
-            >>> success = CUDA_Engine.warm_up_accelerator(1.5)
-            >>> if success:
-            ...     print("GPU ready for benchmarking")
-        """
-        if not cls._cuda_available():
-            logger.warning("CUDA not available, skipping GPU warm-up")
-            return False
-
-        # GPU warm-up via torch matmul is skipped — the packaged build uses
-        # CPU-only torch.  llama-server warms up its own CUDA context on first
-        # inference, so this has no effect on LLM performance.
-        logger.info("GPU warm-up skipped (not required for llama-server inference)")
-        return False
-
-    @classmethod
     def get_performance_evaluation(cls) -> Dict[str, Any]:
         """Calculate comprehensive performance metrics for NVIDIA CUDA backend.
 
@@ -1808,10 +1764,8 @@ class CUDA_Engine(BaseLlamaCppEngine):
 
         Note:
             Returns fallback scores if CUDA unavailable.
-            Should call warm_up_accelerator() before evaluation for accuracy.
 
         Examples:
-            >>> CUDA_Engine.warm_up_accelerator(1.5)
             >>> eval_result = CUDA_Engine.get_performance_evaluation()
             >>> print(f"Inference: {eval_result['global_inference_score']}/100")
             >>> print(f"Label: {eval_result['global_inference_label']}")
@@ -1853,7 +1807,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
                         sm_clock_ghz = 1.5  # Fallback
                         bandwidth_gbs = hw_info["gpu"]["memory_bandwidth_gbs"]
 
-                    # Get compute capability and SM count (no torch required)
+                    # Get compute capability and SM count
                     compute_cap_major, compute_cap_minor = cls._get_compute_capability(handle)
                     sm_count = cls._get_sm_count(device_id)
 

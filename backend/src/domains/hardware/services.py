@@ -293,47 +293,6 @@ class Hardware_Service:
             logger.exception(f"Hardware detection failed: {e}")
             raise HardwareException("Failed to detect hardware", trace=str(e))
 
-    def warm_up(self, duration_seconds: int = 5) -> bool:
-        """Warm up hardware accelerator (GPU/MPS/CUDA).
-
-        Delegates to LLM_Engine's warm_up_accelerator() method. Useful before
-        benchmarking or first inference to ensure accurate performance.
-
-        Args:
-            duration_seconds: How long to run warm-up routine.
-
-        Returns:
-            bool: True if warm-up succeeded, False otherwise.
-
-        Raises:
-            HardwareException: If warm-up fails critically.
-
-        Example:
-            >>> service = Hardware_Service(repo)
-            >>> success = service.warm_up(duration_seconds=5)
-            >>> if success:
-            ...     print("Accelerator ready")
-        """
-        try:
-            logger.info(f"Starting hardware warm-up: duration={duration_seconds}s")
-
-            if not config.LLM_Engine:
-                logger.warning("LLM_Engine not initialized, skipping warm-up")
-                return False
-
-            success = config.LLM_Engine.warm_up_accelerator(duration_seconds)
-
-            if success:
-                logger.info("Hardware warm-up completed successfully")
-            else:
-                logger.warning("Hardware warm-up failed or not available")
-
-            return success
-
-        except Exception as e:
-            logger.exception(f"Hardware warm-up failed: {e}")
-            raise HardwareException("Failed to warm up hardware accelerator", trace=str(e))
-
     def calculate_boosted_scores(self, profile: HardwareProfile) -> Dict[str, Any]:
         """Calculate UI-friendly scores with +20 boost for frontend display.
 

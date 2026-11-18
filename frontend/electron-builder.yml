@@ -87,8 +87,8 @@ nsis:
 # first-install artifact. electron-builder signs (with the entitlements below),
 # notarizes and staples in one pass — no manual codesign dance.
 mac:
-  # The frozen backend needs macOS 14 (Sonoma): mlx/mlx-metal 0.32.x and torch (2.12+)
-  # only ship macosx_14_0+ arm64 wheels, and numpy/scipy ship 14_0 builds too.
+  # The frozen backend needs macOS 14 (Sonoma): mlx/mlx-metal 0.32.x only ship
+  # macosx_14_0+ arm64 wheels, and numpy/scipy ship 14_0 builds too.
   # Below 14 the app launched and the backend died at import time ("built for
   # macOS 14.0 which is newer than running OS") behind a generic "Backend failed
   # to load" screen (#343). Declare the real floor so the installer refuses older

@@ -1,6 +1,7 @@
 """P6 — hybrid KB vector store on rag.kb_chunks (PGVectorStore).
 
-Real embedded cluster, real e5 embeddings, no mocks:
+Real embedded cluster and real e5 vectors (recorded from the embedding
+child, strict: see tests/_e5_reference.py):
 - schema/table/HNSW/FK wiring (cross-schema ON DELETE CASCADE [M3]),
 - idempotent boot-time init,
 - kb_id-filtered hybrid search (dense HNSW + sparse tsvector, RRF k=60),
@@ -16,7 +17,7 @@ import psycopg
 
 from src.ingestion.chunking import Chunk
 
-pytestmark = pytest.mark.integration
+pytestmark = [pytest.mark.integration, pytest.mark.usefixtures("strict_e5_reference")]
 
 
 @pytest.fixture(scope="module")

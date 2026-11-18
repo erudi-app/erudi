@@ -72,7 +72,7 @@ from src.database.migrations import run_migrations
 from src.database.seed import backfill_wire_tools_startup, startup_populate_database
 from src.launcher.postgres_runtime import start_postgres, stop_postgres
 from src.launcher.db_watchdog import start_watchdog, stop_watchdog
-from src.ingestion.embedder_child import shutdown_embedder
+from src.ingestion.embedder_child import remove_obsolete_e5_snapshot, shutdown_embedder
 from src.ingestion.vector_store import close_kb_store, init_kb_store
 
 from src.core.exceptions import (
@@ -375,10 +375,8 @@ def apply_idle_unload_preference() -> None:
     attribute, so it must land on the engine left once CUDA may have been
     swapped for CPU, and before the idle monitor starts. The settings PUT
     applies later changes to the same ``config.LLM_Engine``. The knowledge-base
-    embedder is not governed by it: on macOS its dedicated child is released
-    after a fixed 5 minutes unused (``embedder_child.EMBEDDER_IDLE_SECONDS``);
-    on Windows and Linux the in-process embedding model stays loaded until the
-    backend stops (until F3 of #594).
+    embedder is not governed by it: its dedicated child is released after a
+    fixed 5 minutes unused (``embedder_child.EMBEDDER_IDLE_SECONDS``).
     """
     from src.domains.user_settings.repository import read_idle_unload_minutes
 
@@ -447,6 +445,9 @@ async def _start_services(app: FastAPI, _phase) -> None:
     # Only now, on the engine that actually won, is the pre-flight meaningful:
     # a user who already chose CPU must not be nagged about their GPU.
     await run_in_threadpool(emit_engine_notice, app)
+    # Windows/Linux: the fp32 e5 snapshot an earlier version downloaded for the
+    # in-process embedder is dead weight once the bundled GGUF is in place.
+    await run_in_threadpool(remove_obsolete_e5_snapshot)
     # Hybrid KB vector store (rag.kb_chunks) — AFTER the schema migration: its
     # cross-schema FKs reference the business tables.
     app.state.kb_store = init_kb_store(app.state.postgres)

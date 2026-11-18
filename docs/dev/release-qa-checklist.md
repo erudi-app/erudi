@@ -72,8 +72,8 @@ Run on the downloaded draft, **not** a local build:
 | Linux CPU (AppImage) | `latest` (`latest-linux.yml`) | (Linux machine) |
 | Linux CUDA (AppImage) | `cuda` (`cuda-linux.yml`) | (Linux + NVIDIA machine) |
 
-> macOS Intel is **not a shipped target**: the current `transformers`/`torch≥2.7`
-> stack has no x86-mac wheels, and the app is Apple-Silicon-first. The runtime
+> macOS Intel is **not a shipped target**: the MLX stack (`mlx`, `mlx-vlm`) has
+> no x86-mac wheels, and the app is Apple-Silicon-first. The runtime
 > `CPU_Engine` still selects on `darwin+x86` for anyone running from source.
 
 Record who tested which artifact in the release notes.

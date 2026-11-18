@@ -78,6 +78,7 @@ import requests
 
 from src.core.exceptions import EmbeddingModelMissingException, EngineException
 from src.core.logging import logger
+from src.ingestion import embedding_model
 
 # The embedder's own port slice: above the llama.cpp pools (27200-27299), the
 # MLX chat pool (27300-27399) and the backend's 27182-27199 scan.
@@ -98,8 +99,8 @@ PROBE_TIMEOUT_S = 120.0
 PROBE_POLL_INTERVAL_S = 0.3
 
 #: Texts per ``/v1/embeddings`` request. The server pads a request's texts
-#: into ONE batch; 32 bounds that batch the way sentence-transformers'
-#: internal ``encode`` batching did.
+#: into ONE batch; 32 bounds that batch (sentence-transformers' default
+#: ``encode`` batch size, the reference e5 is measured against).
 EMBED_BATCH_SIZE = 32
 EMBED_REQUEST_TIMEOUT_S = 120.0
 
@@ -148,7 +149,8 @@ class _FifoLock:
 
 
 #: Sentinel: "resolve the adapter from the platform". Tests override
-#: ``_adapter_override`` with a fake module (or ``None`` for "unsupported").
+#: ``_adapter_override`` with a fake module, or with ``None`` to disarm the
+#: manager (no child: nothing spawns, the artifact reads as present).
 _PLATFORM = object()
 _adapter_override: Any = _PLATFORM
 
@@ -168,7 +170,8 @@ _prewarm_missing_logged = False
 
 
 def _get_adapter() -> Any:
-    """The platform's adapter module (every platform has one since F3)."""
+    """The platform's adapter module (every platform has one), or the test
+    seam's override (``None``: the suite's disarmed manager)."""
     if _adapter_override is not _PLATFORM:
         return _adapter_override
     if platform.system().lower() == "darwin" and "arm" in platform.machine().lower():
@@ -180,15 +183,10 @@ def _get_adapter() -> Any:
     return llama_embedder
 
 
-def embedder_child_supported() -> bool:
-    """Whether this platform serves KB embeddings from a dedicated child."""
-    return _get_adapter() is not None
-
-
 def artifact_available() -> bool:
     """Whether the adapter's embedding artifact is on disk — the e5 snapshot
-    on macOS, the bundled GGUF on Windows/Linux. True where no child exists
-    (a test seam set the adapter to ``None``): there is nothing to miss."""
+    on macOS, the bundled GGUF on Windows/Linux. True when the manager is
+    disarmed (the test seam set the adapter to ``None``): nothing to miss."""
     adapter = _get_adapter()
     if adapter is None:
         return True
@@ -205,11 +203,28 @@ def artifact_downloadable() -> bool:
     return bool(adapter.artifact_downloadable)
 
 
+def remove_obsolete_e5_snapshot() -> bool:
+    """Delete the fp32 e5 snapshot where nothing reads it anymore (#594).
+
+    Called once per start (idempotent: an absent snapshot is a no-op). The
+    snapshot is obsolete only where the platform's artifact ships with the
+    installation (Windows/Linux: the bundled GGUF) AND that artifact is on
+    disk; on macOS it IS the child's artifact and is never touched.
+    Returns whether a snapshot was deleted; never raises.
+    """
+    adapter = _get_adapter()
+    if adapter is None or adapter.artifact_downloadable:
+        return False
+    if not adapter.artifact_available():
+        return False
+    return embedding_model.remove_snapshot()
+
+
 def _require_adapter() -> Any:
     adapter = _get_adapter()
     if adapter is None:
         raise EngineException(
-            message="No dedicated embedding child exists on this platform",
+            message="The embedding child manager is disarmed (no adapter)",
         )
     return adapter
 

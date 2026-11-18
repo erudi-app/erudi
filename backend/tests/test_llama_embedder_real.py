@@ -1,5 +1,5 @@
 """The REAL ``llama-server --embedding`` child over the REAL bundled GGUF
-(#594, F3) — vector parity with the in-process backend, real authentication,
+(#594, F3) — vector parity with the suite's reference vectors, real authentication,
 the real oversized-input refusal.
 
 Needs two artifacts backend-ci does not build, so it SKIPS there and runs on
@@ -9,7 +9,8 @@ a dev machine (and in release QA) where both exist:
 - the e5 Q8_0 GGUF (``scripts/dev/backend/build_e5_gguf.py``).
 
 The parity bar is the spike-S4 measurement: Q8_0's worst cosine against
-sentence-transformers was 0.99981, so 0.9998 with margin here. The CI-run
+the fp32 model was 0.99981, so 0.9998 with margin here. The reference is
+the fp32 snapshot's (``tests/_e5_reference.py``, recorded on macOS). The CI-run
 sibling of this file is ``test_embedder_child_http.py`` (the HTTP double
 serving vectors captured from this very binary).
 """
@@ -26,8 +27,8 @@ import requests
 
 from src.core.exceptions import EngineException
 from src.ingestion import embedder_child, llama_embedder
-from src.ingestion.embeddings import ChildE5Embeddings, E5Embeddings
-from src.ingestion.embedding_model import embedding_model_available
+from src.ingestion.embeddings import ChildE5Embeddings
+from tests._e5_reference import PARITY_DOCUMENTS, PARITY_QUERIES, ReferenceE5Embeddings
 
 pytestmark = pytest.mark.integration
 
@@ -66,36 +67,22 @@ def real_child(monkeypatch, tmp_path):
     embedder_child._reset_for_tests()
 
 
-TEXTS = [
-    "[document_name:guide.md]\n# Guide > ## Install\n\n"
-    "Erudi runs open-source language models locally, with no account and no cloud.",
-    "[document_name:notes.md]\nLa sécurité des données est un préalable, pas une option : "
-    "aucun document n'est envoyé dans le cloud.",
-    "[document_name:table.md]\n| Model | Dimensions |\n|---|---|\n| e5-small | 384 |",
-    "[document_name:nihongo.md]\n日本語のテキストを埋め込みます。",
-    "OK",
-]
-QUERIES = ["how does the knowledge base work?", "sécurité des données locales"]
-
-
 @requires_real
 class TestRealChildParity:
-    def test_vectors_match_the_in_process_backend(self, real_child):
-        if not embedding_model_available():
-            pytest.skip("the sentence-transformers e5 snapshot is not downloaded")
+    def test_vectors_match_the_reference(self, real_child, strict_e5_reference):
         backend = ChildE5Embeddings()
-        child_docs = backend.embed_documents(TEXTS)
-        child_queries = [backend.embed_query(q) for q in QUERIES]
+        child_docs = backend.embed_documents(PARITY_DOCUMENTS)
+        child_queries = [backend.embed_query(q) for q in PARITY_QUERIES]
 
-        reference = E5Embeddings()
-        ref_docs = reference.embed_documents(TEXTS)
-        ref_queries = [reference.embed_query(q) for q in QUERIES]
+        reference = ReferenceE5Embeddings()
+        ref_docs = reference.embed_documents(PARITY_DOCUMENTS)
+        ref_queries = [reference.embed_query(q) for q in PARITY_QUERIES]
 
         worst = min(
             min(_cosine(a, b) for a, b in zip(child_docs, ref_docs)),
             min(_cosine(a, b) for a, b in zip(child_queries, ref_queries)),
         )
-        print(f"\n[real-parity] worst cosine vs in-process: {worst:.6f}")
+        print(f"\n[real-parity] worst cosine vs the reference: {worst:.6f}")
         assert worst >= 0.9998
 
         # L2-normalized, as the store assumes (cosine == dot product).

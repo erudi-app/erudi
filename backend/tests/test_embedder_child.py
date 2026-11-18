@@ -598,16 +598,6 @@ class TestParentWatch:
 
 
 class TestPlatformSelection:
-    def test_supported_on_every_platform_since_f3(self, monkeypatch):
-        # F3 (#594): Windows and Linux resolve the llama-server adapter, so
-        # no platform is without a child. The per-platform adapter choice is
-        # covered by tests/test_llama_embedder.py::TestPlatformDispatch.
-        monkeypatch.setattr(embedder_child, "_adapter_override", embedder_child._PLATFORM)
-        for system, machine in (("Darwin", "arm64"), ("Linux", "x86_64"), ("Windows", "AMD64")):
-            monkeypatch.setattr(embedder_child.platform, "system", lambda s=system: s)
-            monkeypatch.setattr(embedder_child.platform, "machine", lambda m=machine: m)
-            assert embedder_child.embedder_child_supported()
-
     def test_darwin_arm_resolves_the_mlx_adapter(self, monkeypatch):
         monkeypatch.setattr(embedder_child, "_adapter_override", embedder_child._PLATFORM)
         monkeypatch.setattr(embedder_child.platform, "system", lambda: "Darwin")

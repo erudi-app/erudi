@@ -77,7 +77,7 @@ Warning:
 from __future__ import annotations
 import os
 import platform
-import time  # used by hardware warm-up loop
+import time
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
@@ -418,48 +418,6 @@ class CPU_Engine(BaseLlamaCppEngine):
                 "backend_type": "cpu",
                 "timestamp": time.time(),
             }
-
-    @classmethod
-    def warm_up_accelerator(cls, duration_seconds: float = 1.0) -> bool:
-        """Warm up CPU with compute workload.
-
-        Runs lightweight computation loop to bring CPU to stable performance
-        state. Less critical than GPU warm-up but still useful for consistent
-        benchmarking results.
-
-        Args:
-            duration_seconds: How long to run warm-up operations (default: 1.0).
-
-        Returns:
-            bool: True if warm-up completed successfully, False otherwise.
-
-        Note:
-            CPU warm-up is minimal compared to GPU since CPUs don't have
-            dynamic clock management like modern GPUs.
-        """
-        try:
-            logger.info(f"Warming up CPU for {duration_seconds}s...")
-            t0 = time.time()
-
-            # Run bounded compute loop
-            n = 0
-            iterations = 0
-            while time.time() - t0 < max(0.05, float(duration_seconds)):
-                # Lightweight integer arithmetic to engage CPU
-                for _ in range(10000):
-                    n += (_ * 7) % 13
-                iterations += 1
-
-                # Small sleep to prevent complete CPU saturation
-                if iterations % 10 == 0:
-                    time.sleep(0.001)
-
-            logger.info(f"CPU warm-up completed successfully ({iterations} iterations)")
-            return True
-
-        except Exception as e:
-            logger.warning(f"CPU warm-up failed: {e}")
-            return False
 
     @classmethod
     def get_performance_evaluation(cls) -> Dict[str, Any]:

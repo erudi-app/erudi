@@ -302,12 +302,6 @@ def force_mp_spawn() -> None:
             mp.set_start_method("spawn", force=True)
         except RuntimeError:
             pass
-        try:
-            import torch.multiprocessing as tmp
-
-            tmp.set_start_method("spawn", force=True)
-        except Exception:
-            pass  # torch absent (CPU build without it) or already configured
     except Exception:
         # Expected only on exotic interpreters; on the ones we ship the MLX
         # child would then fail to spawn, and that failure is logged by the
@@ -539,7 +533,7 @@ def _win_wait_for_stdin_eof(fd: int) -> None:
     enters the UCRT's ``_read()``, which takes the per-fd lock and then parks in
     ``ReadFile`` for the entire life of the process; while this daemon thread is
     parked there, ANY off-main-thread native import that pulls the OpenBLAS
-    chain (scipy/sklearn via transformers or sentence_transformers) blocks
+    chain (numpy's bundled OpenBLAS) blocks
     forever inside ``LoadLibraryExW``. Bisected to this single env var: with
     ERUDI_WATCH_STDIN unset the same frozen bundle imports fine from a worker
     thread; with it set, the import never returns (identical frames, zero CPU).

@@ -7,14 +7,12 @@
    them before the FIRST conversation/arena turn, so their imports are
    deferred to function scope in ``src.agents.{runner,model_factory,kb_mode}``.
 
-2. The ingestion ML stack — ``langchain_text_splitters`` and everything it
-   drags in at module level (``sentence_transformers`` → ``torch`` +
-   ``sklearn``, plus ``transformers``). It was reached at boot through
-   seed → src.utils → kb_utils → src.ingestion.chunking and cost ~80 % of
-   the remaining import time (2.9–4.4 s measured). The splitters are only
-   needed at KB ingestion time, so ``chunking.py`` imports them in function
-   scope. ``transformers`` (AutoTokenizer) is likewise function-scoped in
-   chunking/engines, and ``sentence_transformers`` in ``embeddings.py``.
+2. The ingestion stack — ``langchain_text_splitters`` (it imports every
+   splitter it ships at module level) and ``transformers``. They are reached
+   at boot through seed → src.utils → kb_utils → src.ingestion.chunking, and
+   are only needed at KB ingestion time, so ``chunking.py`` imports the
+   splitters in function scope. ``transformers`` (AutoTokenizer) is likewise
+   function-scoped in the engines.
 
 Deliberately OUT of this guard (still boot-loaded, out of #160-partial scope):
   - ``langchain_core`` — cheap (~10 ms), pulled by ``src.ingestion.embeddings``
@@ -71,19 +69,16 @@ def test_import_src_main_does_not_load_agent_langchain_stack():
     )
 
 
-def test_import_src_main_does_not_load_ingestion_ml_stack():
+def test_import_src_main_does_not_load_the_ingestion_stack():
     offenders = _offenders(
         _boot_modules(),
         (
             "langchain_text_splitters",
-            "sentence_transformers",
-            "torch",
-            "sklearn",
             "transformers",
         ),
     )
     assert offenders == [], (
-        "boot (import src.main) must not load the ingestion ML stack "
-        "(splitters/tokenizer/embedder are KB-ingestion-time only); "
+        "boot (import src.main) must not load the ingestion stack "
+        "(splitters/tokenizer are KB-ingestion-time only); "
         f"loaded: {offenders}"
     )

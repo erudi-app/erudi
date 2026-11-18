@@ -38,18 +38,8 @@ datas = []
 binaries = []
 hiddenimports = []
 
-# torch: collect only config data files, NOT the CUDA DLLs.
-datas += collect_data_files("torch", includes=[
-    "**/*.json",
-    "**/*.yaml",
-    "**/*.pyi",
-])
-
 # transformers: tokenizer configs, model cards, generation configs
 datas += collect_data_files("transformers")
-
-# sentence_transformers: module configs, pooling configs
-datas += collect_data_files("sentence_transformers")
 
 # tqdm: needs its locale data on some systems
 datas += collect_data_files("tqdm")
@@ -131,12 +121,11 @@ else:
 #
 # The runtime DLLs beside each server (MSVC C++ runtime, plus cudart/cublas/
 # cublasLt for CUDA) are NOT appended to `datas`: PyInstaller reclassifies PE
-# files found in `datas` as binaries, so these land in `a.binaries` — where the
-# Windows torch-CUDA strip below removes every name matching "cublaslt", taking
-# the inference runtime's cublasLt64_12.dll with torch's. These files are opaque
-# cargo for the subprocess, not link targets of the frozen app: they are appended
-# to `a.datas` AFTER Analysis and after the strip (`_llama_runtime_dlls`, below),
-# which copies them verbatim and keeps them out of both mechanisms. The release
+# files found in `datas` as binaries, so these would land in `a.binaries` and go
+# through its dependency analysis. These files are opaque cargo for the
+# subprocess, not link targets of the frozen app: they are appended to `a.datas`
+# AFTER Analysis (`_llama_runtime_dlls`, below), which copies them verbatim
+# beside the server. The release
 # workflow's "Verify the bundled inference binary" step guards the outcome.
 #
 # PyInstaller runs a spec through exec() and does not put its directory on
@@ -283,7 +272,6 @@ _hidden_common = [
     # ── ML / inference
     "numpy",
         "transformers",
-    "sentence_transformers",
     "huggingface_hub",
     "tokenizers",
     # Document parsers: imported at FUNCTION scope only (the extractors in
@@ -367,6 +355,13 @@ _excludes_common = [
     "bitsandbytes",
     "llmcompressor",
     "compressed_tensors",
+    # No torch in the app (the KB embeddings run in a child process): kept
+    # out even when a dev venv still carries them.
+    "torch",
+    "torchvision",
+    "torchaudio",
+    "sentence_transformers",
+    "sklearn",
 ]
 
 # MLX is Apple-Silicon only — exclude it on the llama.cpp platforms (Windows + Linux).
@@ -414,25 +409,10 @@ a = Analysis(
     optimize=0,
 )
 
-# ── Strip CUDA DLLs (Windows only) ────────────────────────────────────────────
-# PyInstaller's torch hook auto-collects CUDA DLLs into a.binaries; they add
-# ~3.8 GB but the packaged embedder runs CPU-only. Strip them on Windows.
-if IS_WIN:
-    _cuda_fragments = (
-        "torch_cuda", "cublaslt", "cufft", "curand",
-        "cusolver", "cusolvermg", "cusparse", "cudnn",
-        "nvrtc", "nvjitlink", "nvjpeg", "nvperf",
-        "cupti", "nvtoolsext",
-    )
-    a.binaries = [
-        b for b in a.binaries
-        if not any(frag in b[0].replace("\\", "/").lower() for frag in _cuda_fragments)
-    ]
-
 # ── llama-server runtime DLLs, verbatim ───────────────────────────────────────
 # Collected next to the compiled server by the build scripts and listed above
 # (see the llama.cpp block for why they must not ride in `datas`): appended
-# here, after Analysis and after the strip, as plain TOC data entries that
+# here, after Analysis, as plain TOC data entries that
 # nothing re-analyses or filters. COLLECT copies them beside llama-server,
 # which is the only place Windows looks when the subprocess loads them.
 for _name, _src in _llama_runtime_dlls:

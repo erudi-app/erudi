@@ -17,7 +17,6 @@ const BENIGN_ON_CPU = [
   "NVML",
   "mlx.core",
   "MLX",
-  "torch.cuda",
   "database",
   "psycopg",
   "sqlalchemy",

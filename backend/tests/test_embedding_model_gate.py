@@ -1,7 +1,7 @@
 """KB embedding-model gate (#146, #164): availability is filesystem-driven
-over the FULL required file set, post-availability loads are offline
-(``local_files_only=True``), download is an idempotent background task, and
-the routes don't collide with the parametric ``/{llm_id}/status`` KB route.
+over the FULL required file set, the download fetches exactly that set into
+the hub cache as an idempotent background task, and the routes don't collide
+with the parametric ``/{llm_id}/status`` KB route.
 """
 
 import logging
@@ -39,15 +39,13 @@ def test_available_false_when_cache_empty(monkeypatch):
 
 
 @pytest.mark.unit
-def test_required_files_cover_the_sentence_transformer_load():
-    # A SentenceTransformer load needs more than the weights (#164): the ST
-    # architecture, the transformer config, the pooling module and the
-    # tokenizer files must ALL be present for an offline load to succeed.
+def test_required_files_cover_the_child_load():
+    # The mlx_vlm embedding child needs more than the weights (#164): the
+    # model config, the pooling module (mean pooling is read from
+    # 1_Pooling/config.json) and the tokenizer files must ALL be present.
     assert {
-        "modules.json",
         "config.json",
         "model.safetensors",
-        "sentence_bert_config.json",
         "1_Pooling/config.json",
         "tokenizer.json",
         "tokenizer_config.json",
@@ -83,55 +81,39 @@ def test_download_state_shape(monkeypatch):
     assert em.download_state() == {"available": False, "downloading": False, "error": None}
 
 
-class _SpySentenceTransformer:
-    """Records constructor kwargs; stands in for the real SentenceTransformer."""
+@pytest.mark.unit
+def test_fetch_downloads_exactly_the_required_files_into_the_cache(monkeypatch, tmp_path):
+    # What the gate checks, what it fetches and what the child loads are one
+    # list: the download is a snapshot_download restricted to it, into the
+    # hub cache layout under CACHE_DIR (where try_to_load_from_cache looks).
+    import huggingface_hub
 
-    calls: list[dict] = []
+    calls = []
+    monkeypatch.setattr(
+        huggingface_hub, "snapshot_download", lambda repo_id, **kw: calls.append((repo_id, kw))
+    )
+    monkeypatch.setattr(em.config, "CACHE_DIR", tmp_path)
 
-    def __init__(self, model_id, **kwargs):
-        type(self).calls.append({"model_id": model_id, **kwargs})
+    em._fetch()
 
-
-@pytest.fixture
-def spy_sentence_transformer(monkeypatch):
-    import sentence_transformers
-
-    _SpySentenceTransformer.calls = []
-    monkeypatch.setattr(sentence_transformers, "SentenceTransformer", _SpySentenceTransformer)
-    return _SpySentenceTransformer
+    assert calls == [
+        (
+            em.EMBEDDING_MODEL_ID,
+            {"cache_dir": str(tmp_path), "allow_patterns": list(em.REQUIRED_FILES)},
+        )
+    ]
 
 
 @pytest.mark.unit
-def test_load_model_is_offline_when_available(monkeypatch, spy_sentence_transformer):
-    # Once the cache is complete, loads must NEVER touch the network (#164):
-    # online, hub HEAD-revalidates every file; offline, the failed DNS probe
-    # surfaces as a bogus load error despite a fully pre-downloaded model.
-    _set_cached(monkeypatch, True)
-
-    em._load_model()
-
-    assert spy_sentence_transformer.calls[0]["local_files_only"] is True
-
-
-@pytest.mark.unit
-def test_load_model_allows_network_when_unavailable(monkeypatch, spy_sentence_transformer):
-    _set_cached(monkeypatch, False)
-
-    em._load_model()
-
-    assert spy_sentence_transformer.calls[0]["local_files_only"] is False
-
-
-@pytest.mark.unit
-def test_start_download_runs_load_when_absent(monkeypatch):
+def test_start_download_fetches_when_absent(monkeypatch):
     _set_cached(monkeypatch, False)
     monkeypatch.setattr(em, "_spawn", lambda target: target())  # run synchronously
     calls = []
-    monkeypatch.setattr(em, "_load_model", lambda **kwargs: calls.append(kwargs))
+    monkeypatch.setattr(em, "_fetch", lambda: calls.append("fetched"))
 
     em.start_download()
 
-    assert calls == [{"local_files_only": False}]  # the download path IS the fetch
+    assert calls == ["fetched"]
     assert em._state["downloading"] is False  # finished
     assert em._state["error"] is None
 
@@ -140,7 +122,7 @@ def test_start_download_runs_load_when_absent(monkeypatch):
 def test_download_success_logs_completion(monkeypatch, caplog):
     _set_cached(monkeypatch, False)
     monkeypatch.setattr(em, "_spawn", lambda target: target())
-    monkeypatch.setattr(em, "_load_model", lambda **kwargs: None)
+    monkeypatch.setattr(em, "_fetch", lambda: None)
 
     with caplog.at_level(logging.INFO, logger="erudi"):
         em.start_download()
@@ -153,7 +135,7 @@ def test_start_download_noop_when_already_available(monkeypatch):
     _set_cached(monkeypatch, True)
     calls = []
     monkeypatch.setattr(em, "_spawn", lambda target: calls.append("spawned"))
-    monkeypatch.setattr(em, "_load_model", lambda: calls.append("loaded"))
+    monkeypatch.setattr(em, "_fetch", lambda: calls.append("fetched"))
 
     state = em.start_download()
 
@@ -179,10 +161,10 @@ def test_download_error_is_surfaced(monkeypatch):
     _set_cached(monkeypatch, False)
     monkeypatch.setattr(em, "_spawn", lambda target: target())
 
-    def boom(**kwargs):
+    def boom():
         raise RuntimeError("disk full")
 
-    monkeypatch.setattr(em, "_load_model", boom)
+    monkeypatch.setattr(em, "_fetch", boom)
 
     em.start_download()
 
@@ -197,7 +179,7 @@ def _offline_exceptions():
     yield OfflineModeIsEnabled("Cannot reach https://huggingface.co: offline mode is enabled.")
     yield requests.exceptions.ConnectionError("Max retries exceeded with url: /intfloat/...")
     yield OSError("[Errno 8] getaddrinfo failed")
-    # transformers often re-wraps the network failure; the original cause
+    # huggingface_hub often re-wraps the network failure; the original cause
     # survives on __cause__/__context__ and must still be recognized.
     wrapped = RuntimeError("Cannot send a request, as the client has been closed.")
     wrapped.__cause__ = OSError("[Errno 8] nodename nor servname provided, or not known")
@@ -207,15 +189,15 @@ def _offline_exceptions():
 @pytest.mark.unit
 @pytest.mark.parametrize("exc", _offline_exceptions(), ids=lambda e: type(e).__name__)
 def test_offline_download_error_maps_to_clear_message(monkeypatch, exc):
-    # Raw transformers/hub network errors are useless to the user (#164):
+    # Raw hub network errors are useless to the user (#164):
     # any offline-shaped failure must surface as a clear no-internet message.
     _set_cached(monkeypatch, False)
     monkeypatch.setattr(em, "_spawn", lambda target: target())
 
-    def boom(**kwargs):
+    def boom():
         raise exc
 
-    monkeypatch.setattr(em, "_load_model", boom)
+    monkeypatch.setattr(em, "_fetch", boom)
 
     em.start_download()
 
@@ -242,19 +224,3 @@ def test_embedding_model_routes_do_not_collide_with_llm_id_status(monkeypatch):
 
     assert resp.status_code == 200
     assert resp.json() == {"available": False, "downloading": False, "error": None}
-
-
-@pytest.mark.unit
-@pytest.mark.parametrize("available", [True, False])
-def test_e5_embeddings_load_is_offline_when_available(
-    monkeypatch, spy_sentence_transformer, available
-):
-    from src.ingestion import embeddings as embeddings_module
-    from src.ingestion.embeddings import E5Embeddings
-
-    monkeypatch.setattr(embeddings_module, "embedding_model_available", lambda: available)
-    monkeypatch.setattr(E5Embeddings, "_model", None)  # reset the resident singleton
-
-    E5Embeddings._get_model()
-
-    assert spy_sentence_transformer.calls[0]["local_files_only"] is available

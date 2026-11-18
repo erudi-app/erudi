@@ -1,7 +1,6 @@
 # CUDA build: the GPU work is done by the CUDA-compiled llama-server binary, so
-# the Python environment is the SAME as the CPU build (CPU torch, pulled via
-# cpu.txt) — there is no torch+cuXXX anymore. This file only adds the CUDA-specific,
-# non-torch bits. The fine-tuning stack (peft/accelerate/datasets/bitsandbytes) and
+# the Python environment is the CPU build's (cpu.txt) plus the CUDA-specific bits
+# below. The fine-tuning stack (peft/accelerate/datasets/bitsandbytes) and
 # sentencepiece/protobuf were removed: training is unimplemented dead code (see the
 # fine-tuning cleanup issue) and mac/CPU load tokenizers without them.
 pynvml==12.0.0

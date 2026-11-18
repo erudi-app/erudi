@@ -1,35 +1,39 @@
-"""On-demand availability + download of the KB embedding model (#146).
+"""On-demand availability + download of the e5 snapshot the macOS KB
+embedding child serves (#146, #594).
 
-The Knowledge Base needs ``intfloat/multilingual-e5-small`` for its embeddings
-(``E5Embeddings``), loaded from ``config.CACHE_DIR`` (``data/models_cache``).
-Token-accurate chunking does not wait for it: its tokenizer ships frozen in
-the app (``chunking.E5_TOKENIZER_FILE``).
+On macOS the Knowledge Base embeddings come from a dedicated `mlx_vlm.server`
+child (``mlx_embedder``) serving ``intfloat/multilingual-e5-small`` BY PATH
+from ``config.CACHE_DIR`` (``data/models_cache``). Token-accurate chunking
+does not wait for it: its tokenizer ships frozen in the app
+(``chunking.E5_TOKENIZER_FILE``). On Windows and Linux the embedding child
+serves a GGUF that ships with the installers instead, and nothing here is
+used to produce it.
 
-This module gates that download behind an explicit user action instead of the
-implicit lazy Hugging Face fallback, so a fresh/offline install no longer fails
-its first Knowledge Base use silently.
+This module gates that download behind an explicit user action instead of an
+implicit lazy fetch, so a fresh/offline install never fails its first
+Knowledge Base use silently.
 
 Design invariants:
 - **Presence is filesystem-driven, never a DB flag.** ``embedding_model_available``
-  checks EVERY file a ``SentenceTransformer`` load needs (#164) — huggingface_hub
-  only links a file into ``snapshots/`` once it is fully downloaded, so a
+  checks EVERY file the child's load reads (#164) — huggingface_hub only links
+  a file into ``snapshots/`` once it is fully downloaded, so a
   partial/interrupted download reads as unavailable and the gate re-appears.
   This also makes the state self-heal across backend restarts (in-memory flags
   are lost, the file check is not).
-- **A complete cache means OFFLINE loads** (#164). Without ``local_files_only=True``
-  huggingface_hub HEAD-revalidates every file against the hub on each load —
-  offline, the failed DNS probe surfaces as a bogus load error despite a fully
-  pre-downloaded model, defeating the whole point of the gate.
-  ``E5Embeddings`` applies the same rule.
-- **Download == the real load path** (``SentenceTransformer(..., cache_folder=CACHE_DIR)``),
-  not a parallel ``snapshot_download`` — so the download target is ISO with where
-  the app loads from, by construction, and it warms the resident singleton.
+- **The child never touches the network.** It loads the local snapshot
+  directory (``embedding_snapshot_path``), so an offline machine with a
+  complete cache embeds as well as an online one.
+- **The download fetches exactly the required files** into the hub cache
+  layout under ``CACHE_DIR`` (``snapshot_download`` with ``allow_patterns``),
+  so what the gate checks, what it fetches and what the child loads are the
+  same list by construction.
 - **The download runs in a background thread**, decoupled from the HTTP request,
   so leaving the KB page never loses it; the UI polls a boolean status.
 """
 
 from __future__ import annotations
 
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -41,17 +45,14 @@ from src.core import config
 from src.core.logging import logger
 
 EMBEDDING_MODEL_ID = "intfloat/multilingual-e5-small"
-# Everything a SentenceTransformer load of multilingual-e5-small touches, as
-# present in its hub snapshot: the ST architecture (modules.json), the
-# transformer config + weights, the pooling module, and the tokenizer files.
-# Checking only the weights false-positived on a partial download (#164).
-# NB: config_sentence_transformers.json is NOT required — the upstream repo
-# does not ship it (it lives in the cache's .no_exist/ markers).
+# The files of the multilingual-e5-small snapshot the embedding child reads:
+# the model config and weights, the pooling module (mlx_vlm's
+# ``read_pooling_config`` takes the mean pooling from ``1_Pooling/config.json``)
+# and the tokenizer files. Checking only the weights false-positived on a
+# partial download (#164).
 REQUIRED_FILES = (
-    "modules.json",
     "config.json",
     "model.safetensors",
-    "sentence_bert_config.json",
     "1_Pooling/config.json",
     "tokenizer.json",
     "tokenizer_config.json",
@@ -62,7 +63,7 @@ REQUIRED_FILES = (
 OFFLINE_ERROR_MESSAGE = "no internet connection — the embedding model could not be downloaded"
 
 # Lowercased substrings that mark a network-down failure anywhere in the
-# exception chain. transformers/hub re-wrap connection errors liberally, so
+# exception chain. huggingface_hub re-wraps connection errors liberally, so
 # matching by message (defensively, alongside types) is deliberate.
 _OFFLINE_MESSAGE_MARKERS = (
     "getaddrinfo",
@@ -119,96 +120,50 @@ def download_state() -> dict:
     }
 
 
-# Cached verdict for "MPS says available but cannot actually allocate" (#335).
-# Sticky for the process: once an allocation has failed, retrying it on every
-# load would pay the failure again on a hot path (the resident singleton is
-# rebuilt whenever it is dropped), and nothing about the machine has changed.
-_MPS_UNUSABLE = False
+def remove_snapshot() -> bool:
+    """Delete the e5 snapshot from ``CACHE_DIR`` (its hub repo folder and its
+    download locks). Returns whether there was one to delete.
 
-
-def _mps_is_available() -> bool:
-    """True when torch reports a usable-looking MPS backend (never raises)."""
-    try:
-        import torch
-
-        return bool(torch.backends.mps.is_available())
-    except Exception:  # noqa: BLE001 - no torch, no backends.mps, probe error
+    Never raises: a failed delete is one WARNING and the snapshot stays for
+    the next start to retry. The caller decides when the snapshot is
+    obsolete (``embedder_child.remove_obsolete_e5_snapshot``).
+    """
+    folder = "models--" + EMBEDDING_MODEL_ID.replace("/", "--")
+    repo = Path(config.CACHE_DIR) / folder
+    if not repo.exists():
         return False
-
-
-def resolve_embedding_device() -> Optional[str]:
-    """Device for the embedding model. ``None`` = let sentence-transformers pick.
-
-    Apple Silicon is the primary desktop platform, so MPS stays preferred
-    whenever Metal genuinely works. ``is_available()`` is only a support flag
-    though: a virtualised macOS host can answer True and then refuse
-    the model's ~366 MiB allocation, and a real Mac under
-    memory pressure fails the same way (#335). ``load_sentence_transformer``
-    turns that failure into this cached CPU verdict.
-
-    Off Apple Silicon the choice is left untouched (``None``), so a CUDA host
-    keeps auto-selecting its GPU.
-    """
-    if _MPS_UNUSABLE:
-        return "cpu"
-    if _mps_is_available():
-        return "mps"
-    return None
-
-
-def _is_mps_allocation_failure(exc: BaseException) -> bool:
-    """True when the load died inside the Metal backend rather than elsewhere."""
-    return "mps" in str(exc).lower()
-
-
-def load_sentence_transformer(model_name: str, *, cache_folder: str, local_files_only: bool):
-    """Load a SentenceTransformer on the best device the machine can actually use.
-
-    Single entry point for every embedding-model load (the #146 download gate
-    and the resident ``E5Embeddings`` singleton), so the MPS fallback is decided
-    once and applies to both.
-    """
-    global _MPS_UNUSABLE
-    from sentence_transformers import SentenceTransformer
-
-    device = resolve_embedding_device()
     try:
-        return SentenceTransformer(
-            model_name,
-            cache_folder=cache_folder,
-            local_files_only=local_files_only,
-            device=device,
+        # Regular files only: the hub links snapshots/<rev>/<file> into
+        # blobs/ (symlinks on Linux), so following links counts twice.
+        freed = sum(
+            f.stat(follow_symlinks=False).st_size
+            for f in repo.rglob("*")
+            if not f.is_symlink() and f.is_file()
         )
-    except RuntimeError as exc:
-        if device != "mps" or not _is_mps_allocation_failure(exc):
-            raise
-        _MPS_UNUSABLE = True
+        shutil.rmtree(repo)
+        shutil.rmtree(Path(config.CACHE_DIR) / ".locks" / folder, ignore_errors=True)
+    except OSError as exc:
         logger.warning(
-            f"MPS is available but the embedding model could not be allocated on it; "
-            f"falling back to CPU: {exc}"
+            f"Could not delete the obsolete embedding model snapshot {repo} "
+            f"(the next start retries): {type(exc).__name__}: {exc}"
         )
-
-    return SentenceTransformer(
-        model_name,
-        cache_folder=cache_folder,
-        local_files_only=local_files_only,
-        device="cpu",
+        return False
+    logger.info(
+        f"Deleted the obsolete embedding model snapshot {repo} "
+        f"({freed / 1e6:.0f} MB): the knowledge base uses the bundled model file"
     )
+    return True
 
 
-def _load_model(local_files_only: Optional[bool] = None):
-    """The real load path — downloads into ``CACHE_DIR`` if absent (ISO with runtime).
+def _fetch() -> None:
+    """Download the required snapshot files into ``CACHE_DIR`` (the network
+    call; resumes a partial download, skips files already complete)."""
+    from huggingface_hub import snapshot_download
 
-    ``local_files_only`` defaults to the availability check: once the cache is
-    complete the load NEVER touches the network (#164). The download path
-    passes ``False`` explicitly — that IS the fetch.
-    """
-    if local_files_only is None:
-        local_files_only = embedding_model_available()
-    return load_sentence_transformer(
+    snapshot_download(
         EMBEDDING_MODEL_ID,
-        cache_folder=str(config.CACHE_DIR),
-        local_files_only=local_files_only,
+        cache_dir=str(config.CACHE_DIR),
+        allow_patterns=list(REQUIRED_FILES),
     )
 
 
@@ -231,7 +186,7 @@ def _is_offline_error(exc: BaseException) -> bool:
 
 
 def _describe_download_error(exc: BaseException) -> str:
-    """Map raw transformers/hub failures to a message the user can act on."""
+    """Map raw hub failures to a message the user can act on."""
     if _is_offline_error(exc):
         return OFFLINE_ERROR_MESSAGE
     return str(exc)
@@ -245,7 +200,7 @@ def _run_download() -> None:
     start_s = time.perf_counter()
     try:
         logger.info(f"Downloading embedding model {EMBEDDING_MODEL_ID} -> {config.CACHE_DIR}")
-        _load_model(local_files_only=False)
+        _fetch()
         _state["error"] = None
         logger.info(f"Embedding model download complete ({time.perf_counter() - start_s:.1f}s)")
     except Exception as exc:  # noqa: BLE001 - any failure is surfaced to the UI

@@ -99,7 +99,7 @@ import platform
 import re
 import secrets
 import subprocess
-import time  # used by hardware warm-up loop
+import time
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, Optional, Tuple, Union
@@ -2031,22 +2031,18 @@ class MLX_Engine(BaseChatServerEngine):
             return None
 
     @classmethod
-    def _mps_available(cls) -> bool:
-        """Check if Metal Performance Shaders (MPS) is available.
+    def _metal_available(cls) -> bool:
+        """Whether MLX can run on the Metal GPU (``mlx.core.metal.is_available``).
 
-        Returns:
-            bool: True if MPS backend is available in PyTorch.
+        Never raises: a failing probe degrades the hardware profile only, so
+        it is a WARNING and the answer is False.
         """
-        # Import required modules for hardware detection
         try:
-            import torch
-        except ImportError as e:
-            logger.warning(f"Optional hardware detection dependency missing: {e}")
-            return False
+            import mlx.core as mx
 
-        try:
-            return torch.backends.mps.is_available()
-        except Exception:
+            return bool(mx.metal.is_available())
+        except Exception as e:
+            logger.warning(f"Metal availability probe failed: {type(e).__name__}: {e}")
             return False
 
     @classmethod
@@ -2054,7 +2050,7 @@ class MLX_Engine(BaseChatServerEngine):
         """Get comprehensive hardware information for Apple Silicon.
 
         Returns detailed hardware specifications including Apple chip model,
-        unified memory, MPS availability, and Neural Engine specs.
+        unified memory, Metal availability, and Neural Engine specs.
 
         Returns:
             Dict containing hardware specifications following BaseEngine contract:
@@ -2121,8 +2117,8 @@ class MLX_Engine(BaseChatServerEngine):
             # Estimate TFLOPS (Apple doesn't publish official values)
             estimated_tflops = gpu_cores * 0.35 if gpu_cores else 0.0
 
-            # Check MPS availability
-            mps_supported = cls._mps_available()
+            # Metal availability (stored as mps_available in the hardware profile)
+            mps_supported = cls._metal_available()
 
             # Build hardware info dictionary
             hardware_info = {
@@ -2177,61 +2173,6 @@ class MLX_Engine(BaseChatServerEngine):
         except Exception as e:
             logger.exception(f"MLX hardware detection failed: {e}")
             raise HardwareException("Failed to detect Apple Silicon hardware", trace=str(e))
-
-    @classmethod
-    def warm_up_accelerator(cls, duration_seconds: float = 1.0) -> bool:
-        """Warm up Apple Silicon GPU using Metal Performance Shaders.
-
-        Runs matrix operations on MPS device to bring GPU to optimal performance
-        state before benchmarking or inference.
-
-        Args:
-            duration_seconds: How long to run warm-up operations (default: 1.0).
-
-        Returns:
-            bool: True if warm-up completed successfully, False otherwise.
-
-        Note:
-            Particularly important for Apple Silicon due to dynamic clock management.
-
-        Examples:
-            >>> success = MLX_Engine.warm_up_accelerator(1.5)
-            >>> if success:
-            ...     print("MPS device ready")
-        """
-        if not cls._mps_available():
-            logger.warning("MPS not available, skipping GPU warm-up")
-            return False
-
-        try:
-            # Import required modules for hardware detection
-            try:
-                import torch
-            except ImportError as e:
-                logger.warning(f"Optional hardware detection dependency missing: {e}")
-
-            logger.info(f"Warming up MPS device for {duration_seconds}s...")
-            start_time = time.time()
-
-            # Create tensors on MPS device
-            device = torch.device("mps")
-            size = 4096
-
-            while (time.time() - start_time) < duration_seconds:
-                # Matrix multiplication on GPU
-                a = torch.randn(size, size, device=device)
-                b = torch.randn(size, size, device=device)
-                c = torch.matmul(a, b)
-
-                # Small sleep to prevent CPU overload
-                time.sleep(0.05)
-
-            logger.info("MPS warm-up completed successfully")
-            return True
-
-        except Exception as e:
-            logger.exception(f"MPS warm-up failed: {e}")
-            return False
 
     @classmethod
     def get_performance_evaluation(cls) -> Dict[str, Any]:

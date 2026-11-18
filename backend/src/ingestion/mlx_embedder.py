@@ -4,7 +4,7 @@ started with ONLY an embedding model.
 This module implements the platform-adapter protocol `embedder_child`
 consumes (``server_name``, ``resolve_model``, ``model_value``,
 ``prepare_log``, ``spawn``, ``terminate``, ``is_alive``, ``read_tail``,
-``discard_log``). F3 adds the Windows/Linux sibling around the bundled CPU
+``discard_log``); `llama_embedder` is its Windows/Linux sibling around the bundled CPU
 ``llama-server --embedding``.
 
 What is deliberately REUSED from the chat child, and what is not:
@@ -44,8 +44,7 @@ from src.launcher import ensure_runtime_paths_initialized
 SERVER_NAME = "mlx_vlm.server (embedding child)"
 server_name = SERVER_NAME
 
-#: The #146 gate downloads the snapshot this child serves: one gate covers
-#: the in-process and the child backend alike on macOS.
+#: The #146 gate downloads the snapshot this child serves.
 artifact_downloadable = True
 
 #: One file per spawn beside ``backend.log``, named after the child's port —
