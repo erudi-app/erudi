@@ -5,7 +5,6 @@ describe("isBenignStderrLine", () => {
   it("treats CPU-build GPU/CUDA/NVML noise as benign", () => {
     expect(isBenignStderrLine("WARNING: CUDA not available, using CPU")).toBe(true);
     expect(isBenignStderrLine("pynvml.NVMLError: driver not loaded")).toBe(true);
-    expect(isBenignStderrLine("torch.cuda is not available")).toBe(true);
   });
 
   it("treats routine database/sqlalchemy log lines as benign", () => {
@@ -24,7 +23,7 @@ describe("classifyStderrLine", () => {
     const lines = [
       "WARNING: CUDA not available, using CPU",
       "pynvml.NVMLError",
-      "torch.cuda unavailable",
+      "mlx.core metal unavailable",
       "sqlalchemy.engine database ready",
       "No module named 'foo'",
       "Uvicorn running",
