@@ -233,7 +233,8 @@ class Llm_Repository:
         )
 
     def count_conversations(self, llm_id: int) -> int:
-        """Number of conversations currently bound to this model.
+        """Number of conversations currently bound to this model, the
+        ephemeral ones (#428) left out: the user never finds them again.
 
         Args:
             llm_id: The model id to count conversations for.
@@ -243,7 +244,11 @@ class Llm_Repository:
         """
         from src.entities.Conversation import Conversation
 
-        return self.db.query(Conversation).filter(Conversation.llm_id == llm_id).count()
+        return (
+            self.db.query(Conversation)
+            .filter(Conversation.llm_id == llm_id, Conversation.ephemeral.is_(False))
+            .count()
+        )
 
     def update(self, llm: Llm, **kwargs) -> Llm:
         """Update LLM fields (partial update).

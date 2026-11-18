@@ -41,6 +41,10 @@ BASE = 2 * GIB
 TOTAL = 10 * GIB
 
 
+async def _no_sweep(_checkpointer):
+    return None
+
+
 class _Proc:
     def __init__(self):
         self.alive = True
@@ -402,6 +406,207 @@ def test_a_claim_barrier_keeps_its_own_text(child, http, caplog):
     (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
     assert "reset deferred to the next claim" in warning.getMessage()
     assert http.calls[0]["timeout"] != MLX_Engine.RELEASE_BARRIER_TIMEOUT_S
+
+
+def test_a_failed_abandon_barrier_inside_a_release_names_the_release(child, http, sensors, caplog):
+    sensors.level = 4
+    child["last_request_tokens"] = 10
+    child["abandoned"] = True
+    http.fail["/v1/chat/completions"] = 500
+
+    with caplog.at_level(logging.INFO):
+        outcome = MLX_Engine.brake_point("idle")
+
+    assert outcome == BrakeOutcome()
+    assert http.paths() == [("POST", "/v1/chat/completions")]
+    (warning,) = [r for r in caplog.records if r.levelno == logging.WARNING]
+    message = warning.getMessage()
+    assert "memory release incomplete" in message
+    assert "deferred to the next claim" not in message
+    _assert_clean(caplog)
+
+
+# ===================== a release that timed out =====================
+
+
+def _timed_out():
+    return mlx_engine_module.requests.ReadTimeout("read timed out")
+
+
+@pytest.mark.parametrize("level", [2, 4])
+@pytest.mark.parametrize("abandoned", [False, True])
+def test_a_release_whose_barrier_times_out_at_idle_unloads_the_child(
+    child, http, sensors, caplog, level, abandoned
+):
+    """A child that cannot answer one token within the bound is swapped out:
+    the unload returns its memory without paging it back in. Under warning
+    too, and whichever of the release's barriers timed out."""
+    sensors.level = level
+    child["last_request_tokens"] = 10  # no useful shrink: the release alone
+    child["abandoned"] = abandoned
+    child["brake"] = BrakeState(cap=20_000)
+    http.fail["/v1/chat/completions"] = _timed_out()
+
+    with caplog.at_level(logging.INFO):
+        outcome = MLX_Engine.brake_point("idle")
+
+    assert outcome == BrakeOutcome(acted=True, action="unload")
+    assert MLX_Engine._model is None
+    assert child["proc"].alive is False
+    record = MLX_Engine._brake_reload
+    assert record["alias"] == "erudi-7"
+    assert record["cap"] == 20_000
+    assert record["in_episode"] is True
+    assert record["episode_level"] == level
+    assert record["unloaded_this_episode"] is True
+    assert MLX_Engine.brake_reload_pending(7)
+    # ONE record: the unload names the timed-out release; the barrier's own
+    # failure line is not doubled.
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1, [r.getMessage() for r in warnings]
+    assert warnings[0].getMessage() == (
+        f"[MLX_Engine] Memory brake: point=idle, level={level}, action=unload, "
+        "window=20000->20000, excess_mib=1024; release timed out; "
+        "the model reloads at the next message"
+    )
+    _assert_clean(caplog)
+
+
+def test_a_release_whose_reset_times_out_at_idle_unloads_the_child(child, http, sensors, caplog):
+    """The reset does no computation: a child that cannot answer it within
+    its bound is no more reachable than one that cannot answer the barrier
+    (a stopped process answers neither)."""
+    sensors.level = 2
+    child["last_request_tokens"] = 10
+    http.fail["/v1/cache/reset"] = _timed_out()
+
+    with caplog.at_level(logging.INFO):
+        outcome = MLX_Engine.brake_point("idle")
+
+    assert outcome == BrakeOutcome(acted=True, action="unload")
+    assert http.paths() == [("POST", "/v1/cache/reset")]
+    (warning,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert "action=unload" in warning.getMessage()
+    assert "release timed out" in warning.getMessage()
+
+
+def test_a_release_barrier_timeout_at_turn_end_does_not_unload(child, http, sensors, caplog):
+    sensors.level = 4
+    child["last_request_tokens"] = 10
+    http.fail["/v1/chat/completions"] = _timed_out()
+
+    with caplog.at_level(logging.INFO):
+        outcome = MLX_Engine.brake_point("turn_end")
+
+    assert outcome == BrakeOutcome()
+    assert MLX_Engine._model is child
+    assert child["proc"].alive is True
+    assert MLX_Engine._brake_reload is None
+    assert not child["brake"].unloaded_this_episode
+    (warning,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warning.getMessage() == (
+        "[MLX_Engine] Prefix cache barrier failed (ReadTimeout); "
+        "memory release incomplete, a later release returns it: reason=memory_pressure"
+    )
+
+
+def test_a_second_timeout_in_the_same_episode_does_not_unload_again(child, http, sensors, caplog):
+    # The child a brake reload spawned: the carried episode already took its
+    # unload, and the grace is over.
+    sensors.level = 2
+    child["last_request_tokens"] = 10
+    child["brake"] = BrakeState(
+        in_episode=True,
+        episode_level=2,
+        unloaded_this_episode=True,
+        reloaded_at=time.time() - mb.RELOAD_GRACE_S - 60,
+    )
+    http.fail["/v1/chat/completions"] = _timed_out()
+
+    with caplog.at_level(logging.INFO):
+        outcome = MLX_Engine.brake_point("idle")
+
+    assert outcome == BrakeOutcome()
+    assert MLX_Engine._model is child
+    assert MLX_Engine._brake_reload is None
+    (warning,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert "Prefix cache barrier failed (ReadTimeout)" in warning.getMessage()
+    assert "memory release incomplete" in warning.getMessage()
+
+
+def test_a_timeout_within_the_reload_grace_does_not_unload(child, http, sensors):
+    sensors.level = 4
+    child["last_request_tokens"] = 10
+    child["brake"] = BrakeState(reloaded_at=time.time() - 10)
+    http.fail["/v1/chat/completions"] = _timed_out()
+
+    outcome = MLX_Engine.brake_point("idle")
+
+    assert outcome == BrakeOutcome()
+    assert MLX_Engine._model is child
+
+
+@pytest.mark.parametrize(
+    "brake",
+    [
+        BrakeState(reloaded_at=time.time() - 10),
+        BrakeState(in_episode=True, unloaded_this_episode=True),
+    ],
+    ids=["grace", "second-in-episode"],
+)
+def test_a_reset_timeout_the_law_does_not_unload_keeps_its_warning(
+    child, http, sensors, caplog, brake
+):
+    """The unload's line stands for the timeout only when there is an
+    unload: when the law refuses it, the reset's own WARNING is the record."""
+    sensors.level = 4
+    child["last_request_tokens"] = 10
+    child["brake"] = brake
+    http.fail["/v1/cache/reset"] = _timed_out()
+
+    with caplog.at_level(logging.INFO):
+        outcome = MLX_Engine.brake_point("idle")
+
+    assert outcome == BrakeOutcome()
+    assert MLX_Engine._model is child
+    (warning,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warning.getMessage() == (
+        "[MLX_Engine] Prefix cache reset failed (ReadTimeout); "
+        "memory release incomplete, a later release returns it: reason=memory_pressure"
+    )
+
+
+def test_a_failed_reset_inside_a_release_names_the_release(child, http, sensors, caplog):
+    sensors.level = 4
+    child["last_request_tokens"] = 10
+    http.fail["/v1/cache/reset"] = 500
+
+    with caplog.at_level(logging.INFO):
+        MLX_Engine.brake_point("idle")
+
+    (warning,) = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert warning.getMessage() == (
+        "[MLX_Engine] Prefix cache reset failed (HTTP 500); "
+        "memory release incomplete, a later release returns it: reason=memory_pressure"
+    )
+
+
+@pytest.mark.parametrize(
+    "failure", [500, mlx_engine_module.requests.ConnectionError("refused")], ids=["http", "conn"]
+)
+def test_a_release_failure_that_is_not_a_timeout_does_not_unload(child, http, sensors, failure):
+    sensors.level = 2
+    child["last_request_tokens"] = 10
+    http.fail["/v1/chat/completions"] = [failure]
+
+    first = MLX_Engine.brake_point("idle")
+
+    assert first == BrakeOutcome()
+    assert MLX_Engine._model is child
+    assert MLX_Engine._brake_reload is None
+    # Retried at the next eligible sample, as before.
+    _past_pacing(child)
+    assert MLX_Engine.brake_point("idle").action == "release"
 
 
 # ===================== unload and the carry =====================
@@ -1053,6 +1258,9 @@ async def test_shutdown_stops_the_monitor_and_drains_before_cleanup(monkeypatch)
     monkeypatch.setattr(api, "init_kb_store", lambda *_: None)
     monkeypatch.setattr(api, "close_kb_store", lambda *_a, **_k: None)
     monkeypatch.setattr(api, "open_checkpointer", lambda *_: _Checkpointer())
+    # The ephemeral sweeps (#428) need a database; not under test here.
+    monkeypatch.setattr(api, "sweep_at_start", _no_sweep)
+    monkeypatch.setattr(api, "purge_at_shutdown", _no_sweep)
 
     async def _populate():
         return {}

@@ -22,6 +22,13 @@ const APP_NAME = "erudi";
 // it carries this file.
 export const OWNERSHIP_SENTINEL = ".erudi-owned";
 
+// The folder, inside the data folder, where a pasted image is written
+// (utils/pastedImage.js). The backend removes a conversation's pasted images
+// from it, and only from it, when the conversation is deleted
+// (runtime_paths.PASTED_IMAGES_FOLDER; both pinned by
+// backend/tests/fixtures/runtime_paths_layout.json).
+export const PASTED_IMAGES_FOLDER = "pasted-images";
+
 // Electron's own files that Erudi writes in the user data folder (main.js,
 // "Updated to X.Y.Z"). The rest of that folder is Chromium's profile, which
 // Clear All Data empties through the session, not by deleting files under a
@@ -145,7 +152,7 @@ export function resolveDataLocations({
     dataDir,
     backendLogDir,
     appLogDir: instanceRoot ? backendLogDir : tmpdir,
-    pastedImagesDir: p.join(dataDir, "pasted-images"),
+    pastedImagesDir: p.join(dataDir, PASTED_IMAGES_FOLDER),
     backendHome,
     legacyPastedImagesDir,
     instanceRoot,

@@ -32,6 +32,7 @@ out, is resolved for that model rather than hard-coded. The first value that exi
 | `web_search_enabled` | bool | saved for the model, else the global default from `GET /erudi/user_settings/` |
 | `reasoning_effort` | `none` \| `low` \| `medium` \| `high` \| `xhigh` | saved for the model, else the global default from `GET /erudi/user_settings/` |
 | `compaction_threshold` | int, 50–90 in steps of 5 (percent) | saved for the model, else the global default from `GET /erudi/user_settings/` — see [compaction](#how-conversation-state-is-kept) |
+| `ephemeral` | bool | `false` — see [Ephemeral conversations](#ephemeral-conversations); set at creation only |
 
 "Saved for the model" is what `/config global` stored with `PUT
 /erudi/llms/{id}/conversation_defaults` (see [Conversation defaults per
@@ -45,9 +46,77 @@ global compaction threshold never retro-affects it.
 
 The response (`ConversationResponse`) carries `id`, `llm_id`, `name`, `created_at`,
 `last_message_time`, `temperature`, `top_p`, `max_tokens`, `custom_prompt`, `web_search_enabled`,
-`reasoning_effort`, `compaction_threshold`.
+`reasoning_effort`, `compaction_threshold`, `ephemeral`.
 `llm_id` is nullable: deleting the bound model nulls it server-side and the conversation survives,
 unbound, until it is pointed at another model.
+
+## Ephemeral conversations
+
+A conversation created with `"ephemeral": true` is deleted when the user leaves it. In the app, the
+new-conversation page has an **Ephemeral conversation** toggle under the header, off by default,
+which reads "This conversation is deleted when you leave it."; it applies to the conversation the
+next message creates. The flag is a column of the conversation (`conversations.ephemeral`, `NOT
+NULL`, `false` by default) and never changes afterwards: `PATCH` ignores it.
+
+What differs from a regular conversation:
+
+- **Never found again.** `GET /erudi/conversations/` and `GET /erudi/conversations/search` leave it
+  out, so the sidebar never lists it, and the count of conversations a model shows before its
+  deletion does not include it. `GET /erudi/conversations/{id}` still reads it: the open page needs
+  it.
+- **A badge.** The conversation header shows an **Ephemeral** badge, whose tooltip says the same
+  thing as the toggle and that the conversation is not in the history.
+- **No title.** The page asks for none, and `generate_title` streams nothing and stores nothing for
+  it; the stored name stays `New Conversation`.
+- **No export.** The header offers no **Export as Markdown**, and `conversationExport.js` refuses
+  an ephemeral conversation before anything reaches the main process.
+
+**Leaving deletes it.** Leaving is the conversation id of the route changing (another conversation,
+the Chat page, a new chat, any other page) or the window closing or reloading (`pagehide`; on
+macOS closing the window does not quit the app). `EphemeralConversationGuard`
+(`frontend/src/components/`, mounted once inside the router in `App.jsx`) watches the route, not a
+page unmounting (the conversation page stays mounted from one conversation to the next), and the
+`pagehide` event, and calls `leaveConversation` (`frontend/src/utils/ephemeralConversations.js`).
+It aborts the answer the conversation is streaming, if any (`abortTurns`,
+`frontend/src/utils/conversationTurns.js`, where the conversation page registers every answer it
+streams), then sends `DELETE /erudi/conversations/{id}` without asking; on `pagehide` the request
+is sent with `keepalive` so it outlives the page. The abandoned answer is neither an error record nor
+a red bubble. A conversation is deleted once, whatever the route does next, and a regular
+conversation is never touched. A window reloaded on an ephemeral conversation then finds it gone and
+says the conversation cannot be read.
+
+The delete removes the row, its messages, its checkpointer thread and its pasted images (see
+[Delete](#delete)). It waits for the turn in flight: the renderer's abort reaches the backend as a
+disconnect, possibly after the DELETE, and the turn persists its partial answer in its `finally`,
+after the generation lock is released. Each turn, title and manual compaction is registered as
+work on its conversation from its first statement to its last write
+(`backend/src/domains/conversations/turns.py`); the delete marks the conversation as closing, waits
+for that work to end, and only then deletes. While it closes, a new turn is refused (`error` then
+`done`, nothing written), a title is skipped, `/compact` is a 404, and `GET
+/erudi/conversations/{id}` is a 404 as for a deleted conversation (a page navigated back to during the
+wait does not reload it). Nothing can therefore write a row or a thread after the delete.
+
+What the renderer cannot delete, the backend does (`backend/src/domains/conversations/ephemeral.py`):
+
+- **When the app quits**, the lifespan tries to delete every ephemeral conversation before it closes
+  the checkpointer (for at most `SHUTDOWN_PURGE_SECONDS`, 10 s). This is best effort: uvicorn first
+  waits for the requests in flight, and the Electron main process kills the backend 8 s after asking
+  it to stop (`frontend/src/utils/backendShutdown.js`), so the purge may not run or not finish. The
+  sweep of the next start is the guarantee.
+- **At the next start** (a crash, a force-quit, a killed backend), once the checkpointer is open
+  and before the first request, every ephemeral conversation left over is deleted, then every
+  checkpointer thread whose conversation no longer exists: a delete interrupted between the rows
+  and the thread leaves one, and once the row is gone nothing tells whether the conversation was
+  ephemeral. Such a thread is never read again and would be handed to a later conversation that got
+  the same id, so every one goes.
+
+Each sweep writes one `INFO` line with its count (`Ephemeral conversations purged at startup: N`,
+`Orphan conversation threads purged at startup: N`, `Ephemeral conversations purged at shutdown:
+N`).
+
+What the flag does not cover: the model's own memory while it stays loaded, the backend log (which
+records each question at `INFO`, see [privacy](../privacy.md)), and whatever the operating system
+keeps. The interface says what happens and nothing more.
 
 ## Asking a question
 
@@ -208,7 +277,8 @@ that handle must be a regular file of at most 20 MB, the composer's own limit
 (`frontend/src/utils/imageLimits.js`), whose first bytes are one of those formats' signatures; the
 MIME type is taken from those bytes. Pasting writes only those five formats. A refused file shows "Image not shown" with the reason where the
 image was; a file that is gone shows the plain image placeholder. Pasted images are written to
-`pasted-images/` in the data folder.
+`pasted-images/` in the data folder, and deleted with their conversation (see [Delete](#delete));
+an image pasted before pasted images moved into the data folder stays where it is.
 
 ### Event types
 
@@ -220,7 +290,7 @@ image was; a file that is gone shows the plain image placeholder. Pasted images 
 | `tool_result` | `name`, `text` | What that tool returned |
 | `compaction` | `phase`; with `phase: "done"`: `summarized`, `reason`, `summary` | Earlier messages are summarized (see [compaction](#what-the-thread-shows-of-a-compaction)). `phase: "start"`: the summary call is about to run; never persisted. `phase: "done"`: the history was rewritten — `summarized` = the user messages and answers summarized (tool calls, tool results and the previous summary not counted), `reason` = `"memory"` (the computer's memory bounds the window) or `"length"`, `summary` = the summary text. A summary that could not be written or was rejected rewrites nothing and sends no `done`. Persisted in the turn's trace. Several per turn are possible: one before each model call that needs it |
 | `memory_reload` | `reason` (`"memory"`, `"idle"` or `"manual"`) | Why this turn reloads the model, which picks the renderer's copy. `reason: "memory"`: the memory brake unloaded the model (or, on the llama.cpp engines, restarted it with a smaller window) while the computer's memory was under pressure, and this turn reloads it or re-reads the conversation (see below). `reason: "idle"` (any engine): the model was unloaded after the Settings idle delay without use, and this turn reloads it; the copy names no duration. `reason: "manual"` (any engine): the user unloaded it with the header's Unload button ("You unloaded the model; reloading it…"). The idle and manual reasons only reach a conversation that already has messages (a new one shows its first-reply hint); a model switch never sends the event, and a turn announces at most one reload. Sent before anything else the model produces; never persisted |
-| `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one, by precedence: a brake notice, then `gpu_contention`, then `bound`. `reason: "pressure"`: the computer's memory is under pressure and the memory brake shrank the window, so the conversation will be summarized sooner. `reason: "pressure_external"`: the computer's memory is under pressure from other apps and this conversation uses little of it. `reason: "gpu_contention"` (the CUDA engine on Windows): another app is taking the graphics card's memory from the model, so answers are slower; sent at every turn end while it lasts, and the renderer polls `GET /hardware/gpu_contention/status` to drop the notice once it ends (see below). `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
+| `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one, by precedence (and `gpu_contention` also at the start of a turn, see below): a brake notice, then `gpu_contention`, then `bound`. `reason: "pressure"`: the computer's memory is under pressure and the memory brake shrank the window, so the conversation will be summarized sooner. `reason: "pressure_external"`: the computer's memory is under pressure from other apps and this conversation uses little of it. `reason: "gpu_contention"` (the CUDA engine on Windows): another app is taking the graphics card's memory from the model, so answers are slower; sent at the start of a turn when the contention is already detected (then not again at that turn's end) and otherwise at the turn end, at every turn while it lasts; the notice offers **Free the graphics card**, which unloads the model, and the renderer polls `GET /hardware/gpu_contention/status` to drop the notice once it ends (see below). `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
 | `error` | `text`; optional `code`, `raw`, `detail`, `request_id`, `curated`, `curated_error` | The turn failed. `text` is the red message: the generic apology, or a curated sentence in English (a prompt that does not fit, a model that did not start answering in time or went silent mid-answer, the tool-loop limit). A generic failure carries `detail` (the cleaned cause, see [Errors](#when-a-turn-fails)) and `request_id`; a curated one carries `curated: true`, `curated_error` (`{"kind", "params", "text"}`, what the renderer translates it from) and no detail. `code`/`raw` are the engine's typed cause (CUDA remedies). Text streamed before the failure stays in the answer; the error event follows it |
 | `done` | — | Terminal event, always sent, including after an `error` |
 
@@ -738,6 +808,9 @@ in a French title; Latin words and lone Greek letters are always kept, so "iPhon
 so the sidebar shows what is stored. If nothing usable remains, the conversation keeps the default
 name.
 
+An [ephemeral conversation](#ephemeral-conversations) gets no title: the app does not ask for one,
+and the endpoint streams nothing, calls no model and stores nothing for it.
+
 A first message that is only a greeting ("Bonjour !", "Hi", "Salut, ça va ?", or a greeting followed
 by a short request to introduce oneself, "in two sentences", "briefly") gets no title: the stream is empty, no model is called, and the
 stored name stays `New Conversation`, which the sidebar shows in the interface language (the stored
@@ -772,7 +845,8 @@ curl 'http://127.0.0.1:27182/erudi/conversations/search?q=zeppelin'
 
 Returns the conversations (the same rows as `GET /erudi/conversations/`) whose **title** or whose
 **message text** contains `q`, newest first, at most 50. The match is a case-insensitive substring
-(`ILIKE`); the `%`, `_` and `\` the user types are taken literally (`ESCAPE`), so `100%` finds
+(`ILIKE`); an ephemeral conversation is never found. The `%`, `_` and `\` the user types are
+taken literally (`ESCAPE`), so `100%` finds
 "100%" and never "1000". Only `messages.content` is searched: the model's reasoning lives in the
 message's `trace`, so text that appears only in a reasoning block finds nothing, and a failed turn
 (the `[ERROR_MESSAGE_SYSTEM]` line) is not conversation text and never matches. The attachment
@@ -818,6 +892,9 @@ the answer a `/compact` run was saved on. The summary itself is not written. **L
 model's reasoning and tool activity, and the failed turns. **Named, not embedded**: an image is
 `> Image: <file name>` (`> Image` for a pasted one that has no file), an attached document is
 `> Attachment: <file name>`; no file path is written.
+
+An [ephemeral conversation](#ephemeral-conversations) is not exported: it has no history row, its
+header has no export button, and `conversationExport.js` throws on one before calling main.
 
 ### Update a conversation
 
@@ -1034,7 +1111,24 @@ Returns `{"message": ..., "error_message_id": <id>}`.
 curl -X DELETE http://127.0.0.1:27182/erudi/conversations/42
 ```
 
-Permanent; messages cascade.
+Permanent. The app's history row aborts the answer the conversation is streaming before it sends
+the DELETE, and sends no second DELETE of a conversation while the first is on its way. It removes, in order, the conversation's row and its messages (they cascade), its
+checkpointer thread, and its pasted images. It first waits for a turn, a title or a manual
+compaction still writing to the conversation (see [Ephemeral
+conversations](#ephemeral-conversations)), so a delete sent during an answer returns once that
+answer has ended.
+
+A pasted image is deleted only when the real path of its `[image_path:...]` marker (symlinks
+resolved) is inside the app's pasted-images folder: `PASTED_IMAGES_FOLDER` in the data folder
+(`backend/src/launcher/runtime_paths.py`, the folder the Electron main process writes a pasted
+image to; the name is pinned on both sides by `backend/tests/fixtures/runtime_paths_layout.json`).
+An image attached from the disk is the user's own file and is never touched, nor is a link in that
+folder that leads out of it, nor an image another conversation still references. An image pasted
+before pasted images moved into the data folder (`pasted-images/` under `~/Library/Application
+Support/erudi` or `%LOCALAPPDATA%\erudi`) is not inside that folder either and stays on disk; Clear
+All Data removes those. A file already
+gone is not a failure; one that cannot be deleted stays on disk with one `WARNING`
+(`backend/src/utils/pasted_images.py`).
 
 ## How conversation state is kept
 
@@ -1083,12 +1177,17 @@ There is **no multi-tier memory**. Two mechanisms, and only two:
      per-token KV-cache cost (`2 × layers × kv_heads × head_dim × 2 bytes f16`, read from the local
      artifact's `config.json`), `step × vocab × 2 bytes` the last prefill chunk's logits, and three
      named priors measured on an M4 16 GB (`c0 = 3.5` KV units per token — the cache, its
-     prefix-cache copy and MLX's buffer cache as measured with its default limit; the child now bounds it at 0, which only lowers the peak —, `t0 = 1 GiB`, a margin `m = 1.10`; provisional
-     until the release measurement campaign). The ceiling reserves the output budget's 512-token
+     prefix-cache copy and MLX's buffer cache as measured with its default limit —, `t0 = 1 GiB`,
+     a margin `m = 1.10`). The child bounds that cache at 0 and the prior is recorded as is for
+     that limit, where it is conservative by about 2× (median measured/predicted 0.48 on the
+     clean limit-0 points; Phi-3.5, 7B models and windows of 32k and more were not measured at
+     limit 0). The ceiling reserves the output budget's 512-token
      floor and stacks no further margin. Nothing is learned while the app runs: every turn's real
      peak is recorded next to its prediction in `memory_calibration.json` in the data folder, and a
-     peak above the prediction writes one warning to `backend.log`, the memory the previous turn left in the child at the start of the turn being set aside (see
-     [Privacy](../privacy.md)). Requests that carry images are outside the prediction (a vision
+     peak above the prediction writes one warning to `backend.log`, the memory the previous turn left in the child at the start of the turn (its residue) being set aside (see
+     [Privacy](../privacy.md)). The residue is set aside for that warning only and kept out of
+     the admission: on the measured limit-0 points a turn's peak, residue included, stays under
+     the prediction for the larger of its own size and the previous turn's. Requests that carry images are outside the prediction (a vision
      tower's activations do not scale with the conversation). The ceiling exists only on MLX because only
      MLX grows its KV cache lazily with usage; on both llama.cpp engines (CPU and CUDA) the cache is
      allocated **in full at load**, for a window sized to fit at spawn (the CPU engine's own RAM
@@ -1287,16 +1386,34 @@ the prompt names it
    about it: on Windows, when a game or another GPU app evicts the model from the card, the CUDA
    engine's eviction gauge (sampled at the start of a turn and while the model is idle, see
    [the eviction gauge](../dev/architecture/engines.md#the-memory-brake-cuda)) makes every turn
-   end carry `memory_warning` with `reason: "gpu_contention"` for as long as it lasts — after a
-   brake notice, before `bound`, which is then not evaluated. While the renderer shows that
+   carry `memory_warning` with `reason: "gpu_contention"` for as long as it lasts. When the
+   gauge's cached reading already says so at the start of a turn whose model is the one loaded (right after the turn's start
+   sample; nothing more is read), the event goes out then, before the answer the user would
+   otherwise wait for unwarned, and the turn end does not send it again; otherwise the turn end
+   sends it — after a brake notice, before `bound`, which is then not evaluated. A brake notice
+   at the turn end still replaces a contention said at its start. While the renderer shows that
    notice, and no turn runs, it polls `GET /hardware/gpu_contention/status` about every 10 s and
    drops the notice once `active` is false; a failed poll, or `active: null` (no reading),
-   keeps it.
+   keeps it. The notice carries **Free the graphics card**: it unloads the conversation's model
+   (`POST /erudi/llms/loaded/unload` with its `llm_id`, the request of the header's Unload
+   button), is disabled while an answer is being written, says why on a `409` ("The model is
+   busy; try again in a moment." or "Another model is loaded now.") and keeps the notice then,
+   and drops the notice once the model is unloaded (the header's Unload button then reads the
+   loaded model again). Said before the answer, the notice leaves the typing indicator up for
+   the prefill (a `memory_warning` is not the model's first reply), and picking another model
+   for the conversation drops it. The next message shows the reload state
+   (`reason: "manual"`), and that load sizes the model against the card's free memory at that
+   moment, so llama.cpp's fit places on the card only the layers that fit. Erudi never unloads
+   the model on its own for a contention.
    When the brake unloaded the model while the user was away, the next turn first sends
    `memory_reload` with `reason: "memory"` (after the idle delay's own unload it carries
    `reason: "idle"` and the copy names the pause instead of memory; after the Unload button,
    `reason: "manual"`) and the renderer shows a reload state in the pending answer until the model
-   speaks, an error arrives or the turn ends; the model reloads with the reduced window. On the CPU
+   speaks, an error arrives or the turn ends; the model reloads with the reduced window. On Apple
+   Silicon the brake unloads the model either after two idle samples under critical pressure or,
+   under warning or critical, when its memory release gets no answer while the user is away
+   (30 s for its one-token requests, 5 s for the prefix-cache reset) (the model is swapped out, and every request would page it back in); both carry the
+   same `reason: "memory"`. On the CPU
    engine a smaller window means restarting the model with it (about 1-2 s, then the
    conversation is read again): under critical pressure at the next turn boundary — a restart at
    the start of a turn sends `memory_reload` in that same turn —, under warning once the user has

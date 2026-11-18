@@ -18,6 +18,7 @@ import { tracedFetch } from "../services/api/client";
 import { createLogger } from "../utils/logger";
 import { conversationPath } from "../utils/routes";
 import { exportConversation } from "../utils/conversationExport";
+import { abortTurns } from "../utils/conversationTurns";
 const log = createLogger("ChatCollapsibleSection");
 // Route of the new-chat screen (mirrors the Sidebar link).
 const CHAT_PATH = "/erudi/chat";
@@ -54,6 +55,9 @@ ChatCollapsibleSection.defaultProps = {
   onRefresh: null,
   disabled: false,
 };
+
+// The conversations whose DELETE is on its way (shared by every history list).
+const deletesInFlight = new Set();
 
 export default function ChatCollapsibleSection({
   title,
@@ -152,7 +156,15 @@ export default function ChatCollapsibleSection({
   // single DELETE request, then calls onDelete for post-delete UI only. Parents'
   // onDelete callbacks must NOT repeat the DELETE (state/navigation only), or the
   // request fires twice ~10ms apart with distinct request ids.
+  //
+  // The answer the conversation is streaming, if any, is aborted first: the
+  // backend deletes a conversation only once its turn has ended, and the abort
+  // ends it now rather than at the end of the generation. A second delete of
+  // the same conversation while the first is on its way sends nothing.
   const deleteConversation = async (id) => {
+    if (deletesInFlight.has(String(id))) return;
+    deletesInFlight.add(String(id));
+    abortTurns(id);
     try {
       const res = await tracedFetch(`${API_BASE_URL}/conversations/${id}`, {
         method: "DELETE",
@@ -169,6 +181,7 @@ export default function ChatCollapsibleSection({
       log.error(err);
       alert(t("chat:history.deleteFailed", { error: err.message }));
     } finally {
+      deletesInFlight.delete(String(id));
       setEditingId(null);
     }
   };

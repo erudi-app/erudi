@@ -51,6 +51,10 @@ from tests._helpers import FakeDownloadQuery
 SHARDS = [f"model-0000{i}-of-00003.safetensors" for i in (1, 2, 3)]
 
 
+async def _no_sweep(_checkpointer):
+    return None
+
+
 @pytest.fixture(autouse=True)
 def _fresh_download_registry(monkeypatch):
     """Every test starts with no download registered and the shutdown not
@@ -625,6 +629,9 @@ class TestLifespanStopsDownloadsFirst:
         monkeypatch.setattr(api, "init_kb_store", lambda *_: None)
         monkeypatch.setattr(api, "close_kb_store", lambda *_a, **_k: None)
         monkeypatch.setattr(api, "open_checkpointer", lambda *_: _FakeCheckpointerCM())
+        # The ephemeral sweeps (#428) need a database; not under test here.
+        monkeypatch.setattr(api, "sweep_at_start", _no_sweep)
+        monkeypatch.setattr(api, "purge_at_shutdown", _no_sweep)
 
         async def _fake_populate():
             return {}
