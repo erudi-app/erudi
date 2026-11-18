@@ -601,7 +601,7 @@ so chunking needs neither `transformers` nor a download. Each chunk stores its t
 (`token_count` in `langchain_metadata`), which the retrieval token budget reads.
 
 The `query:` and `passage:` prefixes required by the e5 model family are mandatory and
-applied by `E5Embeddings`; skipping them silently degrades retrieval.
+applied by `ChildE5Embeddings`; skipping them silently degrades retrieval.
 
 `DocumentReader` has a second caller: `backend/src/utils/attachment_utils.py`, which turns the
 documents and folders attached to a single chat or arena question into delimited text blocks for

@@ -38,7 +38,7 @@ Logs survive reinstalls: always filter by the run's start timestamp.
 | Inference child (Windows/Linux) | `llama-server[.exe]`, child of the backend, `--port 272xx`, `--alias erudi-<llm_id>` identifies the model |
 | Inference child (macOS) | a `multiprocessing` spawn of the frozen `backend` executable: same executable as the backend, **child of the backend PID**, listening on a port in 27300–27399; its OS cmdline shows multiprocessing bootstrap args, not `mlx_vlm.server` |
 | Transient | `pg_ctl`, `initdb`, `pg_dump` (next to `postgres`) |
-| KB embedder | **in-process inside the backend** (sentence-transformers + torch), no separate process; never unloaded |
+| KB embedder | a dedicated child of the backend on ports 27400–27499: a second `mlx_vlm.server` spawn of the `backend` executable on macOS, `llama-server[.exe] --embedding` over the bundled e5 GGUF on Windows/Linux; released after 5 minutes unused |
 
 The inference child requires a per-spawn API key held only by the backend: always drive inference through the Erudi API.
 

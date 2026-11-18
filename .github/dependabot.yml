@@ -12,7 +12,7 @@
 #
 # The backend's Python requirements are the second kind and are deliberately
 # absent. Its packages are coupled -- langchain moves with langgraph,
-# transformers with torch and mlx-vlm, pgserver pins the Python version itself
+# transformers with mlx-vlm, pgserver pins the Python version itself
 # -- so a one-package pull request is often unmergeable on its own and needs a
 # companion bump nobody asked Dependabot for. And what a release installs is
 # locked (backend/requirements/lock/, every transitive package pinned):

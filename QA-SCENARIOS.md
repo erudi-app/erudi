@@ -419,19 +419,20 @@ non-functional behavior.
 - [ ] When I add a `.docx` saved by **TextEdit** (no styles part) to a Knowledge Base in the **packaged** app, then it is indexed like a Word document. When any file of a batch fails, the end of the job names that file, and points to Diagnostics for the reason, instead of a plain success; adding the same file again later indexes it (a failed file never blocks its own re-ingestion).
 
 **Embeddings run without the torch stack (footprint)**
-- [ ] *(Apple Silicon)* When I create an assistant and ask a document question, then ingestion and retrieval work exactly as before — embeddings come from a **dedicated child** (`mlx_vlm.server`, ports 27400-27499, visible in Activity Monitor while a KB operation runs), not from the in-process sentence-transformers stack.
-- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* *(Windows/Linux)* When I create an assistant and ask a document question, then embeddings come from a dedicated `llama-server --embeddings` child, not from the in-process sentence-transformers stack.
+- [ ] *(Apple Silicon)* When I create an assistant and ask a document question, then ingestion and retrieval work exactly as before — embeddings come from a **dedicated child** (`mlx_vlm.server`, ports 27400-27499, visible in Activity Monitor while a KB operation runs).
+- [ ] *(Windows/Linux)* When I create an assistant and ask a document question, then embeddings come from a dedicated `llama-server --embedding` child (ports 27400-27499, visible in Task Manager / `ps` while a KB operation runs).
 - [ ] When retrieval is compared to the previous version on the **same KB** (golden questions), then answers ground on the same passages — no regression from the engine swap.
 - [ ] *(Apple Silicon)* When the embedding child has been **idle**, then it is unloaded after 5 minutes unused (no setting), and the next KB operation transparently reloads it.
 - [ ] *(Apple Silicon)* When a conversation or Arena panel uses a KB assistant while the **embedding model is not on disk** (cleared `models_cache`), then a banner names the state and offers the download — a document question is answered without the documents, never a red error turn.
-- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When I inspect the installed app, then on Windows/Linux the **torch/transformers tree is gone**, and on Apple Silicon torch/sklearn/sentence-transformers are gone (transformers stays as an mlx-vlm dependency) — with no loss of KB function.
+- [ ] When I inspect the installed app (`resources/backend/_internal/`, `Contents/Resources/backend/_internal/` on macOS), then there is no `torch`, `sentence_transformers` or `sklearn` folder on any platform (`transformers` stays: the capability probes and mlx-vlm use it) — with no loss of KB function.
 - [ ] *(Apple Silicon)* When the KB embeds, then the app serves `intfloat/multilingual-e5-small` **as-is** through mlx_vlm — vectors match the previous output, so **no reindex** is needed.
-- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* *(Windows/Linux)* When the KB embeds, then the app serves the **GGUF shipped in the installer** through `llama-server --embeddings` — 384-dim, mean-pooled, L2-normalized, with the `query:`/`passage:` prefixes applied.
+- [ ] *(Windows/Linux)* When the KB embeds, then the app serves the **GGUF shipped in the installer** through `llama-server --embedding` — 384-dim, mean-pooled, L2-normalized, with the `query:`/`passage:` prefixes applied.
 - [ ] When chunking counts tokens, then it uses the pure `tokenizers` package (no HF `transformers`) and produces the same chunk boundaries as before.
-- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* *(Windows/Linux)* When I open Knowledge Base on a fresh install while offline, then no download is offered and an assistant can be created at once.
+- [ ] *(Windows/Linux)* When I open Knowledge Base on a fresh install while offline, then no download is offered and an assistant can be created at once.
+- [ ] *(Windows/Linux)* When I start the new version over one that had downloaded the embedding model (a `models_cache/models--intfloat--multilingual-e5-small` folder in the data folder), then the folder is deleted at start, `backend.log` says so at INFO with the size freed, and existing Knowledge Bases keep answering; the next start finds nothing to delete.
 - [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When existing Knowledge Bases are re-embedded at first start (only if the shipped vectors differ), then they stay usable meanwhile and the log says when it is done.
 - [ ] *(Apple Silicon)* When a conversation with a Knowledge Base opens, then the embedder starts ahead (`Embedding child ready` in `backend.log` within seconds of opening); the first Knowledge Base use after a start is at most 1-2 s slower.
-- [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* *(Windows)* When I install 1.3.0 over 1.2.0, then the install succeeds and leaves no torch tree.
+- [ ] *(Windows)* When I install 1.3.0 over 1.2.0, then the install succeeds and leaves no torch tree.
 
 ## Settings — `/erudi/settings`
 

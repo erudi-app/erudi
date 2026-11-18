@@ -950,13 +950,14 @@ sampled, nor is any child off Windows.
 
 ## Embeddings
 
-Embeddings are **not** an engine. The Knowledge Base uses `E5Embeddings`
+Embeddings are **not** an engine. The Knowledge Base uses `ChildE5Embeddings`
 (`backend/src/ingestion/embeddings.py`), a LangChain `Embeddings` implementation over a
-resident `intfloat/multilingual-e5-small` singleton (384 dimensions), cached inside the
-app data directory. The `passage: ` and `query: ` prefixes required by the e5 family are
-applied by `embed_documents` and `embed_query` respectively and are mandatory. Vectors go
-to `rag.kb_chunks` through langchain-postgres' `PGVectorStore`. See the
-[Knowledge Base guide](../../guides/knowledge_base.md).
+dedicated embedding child process (`backend/src/ingestion/embedder_child.py`) serving
+`intfloat/multilingual-e5-small` (384 dimensions): a second `mlx_vlm.server` on Apple Silicon,
+the bundled CPU `llama-server --embedding` on Windows and Linux. The `passage: ` and `query: `
+prefixes required by the e5 family are applied by `embed_documents` and `embed_query`
+respectively and are mandatory. Vectors go to `rag.kb_chunks` through langchain-postgres'
+`PGVectorStore`. See the [Knowledge Base guide](../../guides/knowledge_base.md).
 
 ## Error handling
 

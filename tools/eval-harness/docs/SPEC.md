@@ -26,7 +26,7 @@ The harness **observes and drives**; it never modifies the app, and it never del
 | `electron_renderer` | renderer helper(s) |
 | `electron_gpu` | GPU helper |
 | `electron_utility` | utility/network/other helpers |
-| `backend` | Python backend (includes the in-process KB embedder today) |
+| `backend` | Python backend |
 | `database` | embedded Postgres: postmaster + all its processes |
 | `inference` | llama-server or MLX child |
 | `embedding` | reserved for a future dedicated embedding server (#594); empty today |

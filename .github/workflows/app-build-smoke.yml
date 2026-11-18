@@ -177,8 +177,8 @@ jobs:
       # uninstaller, which fails on a directory of 248 characters or a file of
       # 260 under %TEMP%; frontend/assets/installers/installer.nsh removes the
       # deepest files before it runs. The base release is pinned: v1.1.2 carries
-      # the torch license tree that reaches the limit on this runner, with no
-      # margin. The script fails when the run cannot reach that limit, when the
+      # the torch license tree (every release up to 1.2.0 does) that reaches the
+      # limit on this runner, with no margin. The script fails when the run cannot reach that limit, when the
       # new build comes too close to it, and on any download error (the release
       # is read with this workflow's token).
       - name: Update over v1.1.2

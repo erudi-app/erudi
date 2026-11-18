@@ -76,8 +76,7 @@ if (-not $VenvPython) {
 }
 
 # -------- CUDA toolkit detection --------
-# No version is pinned here on purpose. Since torch-CUDA was dropped (#98) the
-# toolkit only compiles llama-server, and any CUDA 12.x can do that. What the
+# No version is pinned here on purpose. The toolkit only compiles llama-server, and any CUDA 12.x can do that. What the
 # toolkit version DOES decide is which GPU architectures nvcc can emit native
 # code for -- 12.8 is the first that knows Blackwell (sm_120), which is why the
 # release installs 12.8 (see .github/workflows/release.yml). Build with an older

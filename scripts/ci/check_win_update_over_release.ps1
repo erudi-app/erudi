@@ -35,7 +35,7 @@
 # runners are) for the duration of each update and counts those starts.
 #
 # The base release is pinned (-BaseTag, v1.1.2): it carries the torch license
-# tree, and the reproduction margin is zero. The uninstaller's destination is
+# tree (every release up to 1.2.0 does), and the reproduction margin is zero. The uninstaller's destination is
 #   <TEMP>\<plugins dir: nsX + 1 to 4 hex digits + .tmp>\old-install
 # followed by the file's path relative to the install directory. The script
 # points TEMP and TMP at %LOCALAPPDATA%\Temp, the long form of a user's temp
