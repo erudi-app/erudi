@@ -172,6 +172,39 @@ def read_child_log_tail(
     return tail
 
 
+def log_size(path: Union[str, Path]) -> int:
+    """The live file's size in bytes, the mark ``read_child_log_from`` reads
+    from; 0 when it is absent or unreadable."""
+    try:
+        return Path(path).stat().st_size
+    except OSError:
+        return 0
+
+
+def read_child_log_from(
+    path: Union[str, Path], offset: int, max_chars: int = DEFAULT_TAIL_CHARS
+) -> str:
+    """What the live file gained after ``offset`` (a ``log_size`` mark), at
+    most its last ``max_chars`` characters, or ``""``.
+
+    A file smaller than the mark was rolled or truncated since (the size cap,
+    ``roll_open_log``): everything in it is newer, so it is read whole. The
+    rolled ``.1`` is not read: a line is attributed to a turn only when it is
+    certainly from the turn. Never raises.
+    """
+    path = Path(path)
+    if log_size(path) < offset:
+        offset = 0
+    try:
+        with path.open("rb") as handle:
+            handle.seek(offset)
+            raw = handle.read()
+    except OSError:
+        return ""
+    text = raw.decode("utf-8", errors="replace")
+    return text[-max_chars:] if len(text) > max_chars else text
+
+
 def _belongs_to_spawn(path: Path, since: Optional[float]) -> bool:
     """Whether ``path`` was last written after the spawn at ``since`` began.
 

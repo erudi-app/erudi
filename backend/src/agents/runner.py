@@ -69,6 +69,7 @@ from typing import TYPE_CHECKING, Any, AsyncIterator, Optional, Protocol
 from fastapi.concurrency import run_in_threadpool
 
 from src.agents.curated_turns import ERROR_SENTINEL, curated_answer
+from src.engines.metal_oom import find_metal_out_of_memory
 from src.agents.chat_model import (
     CONSERVATIVE_PREFILL_TOKENS_PER_SEC,
     INTER_CHUNK_BUDGET_S,
@@ -2025,6 +2026,41 @@ async def _await_child_death(engine, exc: BaseException) -> Any:
     return death
 
 
+def _observe_child_output_mark(engine) -> Optional[int]:
+    """A position in the inference child's output (``child_output_mark``),
+    taken when the turn starts; None when the engine cannot tell."""
+    probe = getattr(engine, "child_output_mark", None)
+    if probe is None:
+        return None
+    try:
+        return probe()
+    except Exception:  # a diagnostic must never mask the turn it describes
+        return None
+
+
+def _observe_child_output(engine, since_mark: Optional[int]) -> str:
+    """What the inference child wrote since ``since_mark``
+    (``child_output_tail``), or "" when the engine has none to read or
+    reading it fails."""
+    probe = getattr(engine, "child_output_tail", None)
+    if probe is None:
+        return ""
+    try:
+        return probe(since_mark=since_mark) or ""
+    except Exception:  # a diagnostic must never mask the failure it describes
+        return ""
+
+
+def _metal_out_of_memory_in(exc: BaseException, engine, since_mark: Optional[int]) -> Optional[str]:
+    """The line that says the GPU ran out of memory (#504), when it did: in
+    the failure's own messages, or in what the child wrote during this turn
+    (the only place a surviving child leaves it, and where a dead one's last
+    words are). Never the child's older output: an earlier turn's out-of-memory
+    the child survived is not this failure's cause."""
+    messages = [str(e) for e in exception_chain(exc)]
+    return find_metal_out_of_memory(*messages, _observe_child_output(engine, since_mark))
+
+
 def _child_crash_suffix(death: Any) -> str:
     """`; llama-server child is dead (...). <last output>` for an observed
     death (``_observe_child_death``), else ""."""
@@ -2299,6 +2335,12 @@ class AgentRunner:
                     # Each call's usage feeds the turn's memory measurement
                     # (MLX); the summary and title clients push nothing.
                     record_usage=True,
+                    # One INFO line per model call of the turn (``Model call:``).
+                    call_log_label=(
+                        f"thread_id={thread_id}"
+                        if thread_id
+                        else f"thread_id=arena:{getattr(llm, 'id', '?')}"
+                    ),
                 )
                 # The compaction (memory accounting, windows, summary client
                 # and middleware), built AFTER build_chat_model so the child
@@ -2440,6 +2482,9 @@ class AgentRunner:
                 # picks the curated empty-answer wording and lands in the
                 # completion log for field-report attribution.
                 stream_start_s = time.perf_counter()
+                # Where the child's output stood when the turn began: a failure
+                # is attributed only to what the child wrote after it (#504).
+                child_output_mark = _observe_child_output_mark(engine)
                 first_token_s: Optional[float] = None
                 chunk_count = 0
                 char_count = 0
@@ -2858,11 +2903,24 @@ class AgentRunner:
                             # waits, so a client gone meanwhile cannot lose it; only
                             # the Details leaf waits for a death not visible yet.
                             death = _observe_child_death(engine)
-                            logger.exception(
+                            metal_line = _metal_out_of_memory_in(exc, engine, child_output_mark)
+                            metal_note = (
+                                f"; Metal out of memory: {sanitize(metal_line)}"
+                                if metal_line
+                                else ""
+                            )
+                            failure_record = (
                                 f"Agent streaming failed: llm={getattr(llm, 'id', '?')} "
                                 f"({getattr(llm, 'name', '?')}), thread_id={thread_id}"
-                                f"{_child_crash_suffix(death)}"
+                                f"{_child_crash_suffix(death)}{metal_note}"
                             )
+                            if metal_line:
+                                # #504: the app answers it with its own curated turn
+                                # (like the other curated kinds): WARNING, no
+                                # traceback, and no bug badge (docs/logging.md).
+                                logger.warning(failure_record)
+                            else:
+                                logger.exception(failure_record)
                             if death is None:
                                 death = await _await_child_death(engine, exc)
                             child_death = death.cause if death is not None else None
@@ -2874,13 +2932,29 @@ class AgentRunner:
                             for text in hop_text_buffer:
                                 yield _record({"t": "answer", "text": text})
                             hop_text_buffer.clear()
-                            yield _record(
-                                {
-                                    "t": "answer",
-                                    "text": ERROR_MESSAGE,
-                                    **_generic_failure_detail(exc, child_death),
-                                }
-                            )
+                            if metal_line:
+                                # #504: the model is probably too large for this
+                                # machine's graphics memory right now. The curated
+                                # turn says so; Details keeps the technical cause
+                                # (the process that stopped, when it did, then
+                                # the engine's own line).
+                                cause = (
+                                    f"{child_death}: {metal_line}" if child_death else metal_line
+                                )
+                                yield _record(
+                                    {
+                                        **curated_answer("metal_out_of_memory"),
+                                        **_generic_failure_detail(exc, cause),
+                                    }
+                                )
+                            else:
+                                yield _record(
+                                    {
+                                        "t": "answer",
+                                        "text": ERROR_MESSAGE,
+                                        **_generic_failure_detail(exc, child_death),
+                                    }
+                                )
             except BaseException as exit_in_flight:
                 _flag_abandoned(abandon_hook)
                 # Synchronous on purpose: the exit in flight (a closed

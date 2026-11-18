@@ -59,6 +59,7 @@ def build_chat_model(
     kb_additions: str = "",
     preflight_retry: bool = True,
     record_usage: bool = False,
+    call_log_label: Optional[str] = None,
 ) -> ChatOpenAI:
     """Resolve the engine child for ``llm`` and wrap it as a ``ChatOpenAI``.
 
@@ -94,6 +95,8 @@ def build_chat_model(
     pushes each call's usage to the engine handle the client was built
     against (``note_call_usage``), where the MLX engine measures what a turn
     really used; the summary and title clients push nothing.
+    ``call_log_label`` (``thread_id=<id>``) makes the client write one INFO
+    line per call with its hop and token counts (``Model call: ...``).
 
     ``effort_plan`` carries the turn's reasoning effort (1.1.2). Its
     ``wire_effort`` rides the NATIVE ``reasoning_effort`` request field, not
@@ -238,6 +241,7 @@ def build_chat_model(
         complete_hook=complete_hook,
         usage_hook=usage_hook,
         call_start_hook=call_start_hook,
+        call_log_label=call_log_label,
         streaming=True,
         # ``stream_options.include_usage``: both local servers then end the
         # stream with a usage chunk (mlx_vlm 0.6.17 and llama-server alike);

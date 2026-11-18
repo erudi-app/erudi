@@ -217,7 +217,25 @@ A child of either kind that dies during an answer is also what the failed turn's
 **Details** names: `<server> child is dead (pid …, port …, exit code …)`, the
 line that follows `Agent streaming failed: llm=…` in that record (ahead of the
 child's last output), instead of the HTTP error the broken connection raised
-(see [When a turn fails](guides/conversations.md#when-a-turn-fails)).
+(see [When a turn fails](guides/conversations.md#when-a-turn-fails)). When that tail (or the
+failure's own message) holds the Metal out-of-memory line, the record is one `WARNING` without
+traceback (the app answers with its own curated turn, like the other curated kinds, so no bug
+badge), ending with `; Metal out of memory: <the line>`, and the turn is the curated "model too
+large for this computer" one, its Details keeping the line. Only what the child wrote since the
+turn began counts.
+
+Each model call of a conversation or Arena turn writes one `INFO` line to `backend.log`:
+`Model call: thread_id=<id> hop=<n> prompt_tokens=<n> completion_tokens=<n>`, from the usage the
+server reports with the call. `hop` is the call's ordinal in the turn (the tool round-trips of the
+agent loop); `<id>` is the conversation's thread, or `arena:<llm id>` for an Arena panel (one per
+model). A call that ends without usage (it failed, was cut or abandoned: the fatal hop of an
+out-of-memory) writes, once, `Model call: thread_id=<id> hop=<n> failed est_prompt_tokens=<n>`,
+where the count is the app's own estimate of the request (about 4 characters per token, tool
+schemas included), not a measure; a call the engine rejects on its preflight and the app retries
+once is one call and writes the single line of the attempt that answered. The lines carry counts
+only, no content and no path; they are one per call, like the `ChatOpenAI built` line of each turn,
+and the summary and title clients write none. They are what the prompt size per hop is read from
+when a memory problem is measured.
 
 ## What the libraries say
 

@@ -64,6 +64,7 @@ describe("curatedTurnText", () => {
       prefill_timeout: { minutes: 5 },
       decode_timeout: { seconds: 120 },
       loop_limit: {},
+      metal_out_of_memory: {},
       empty_answer_length: {},
       empty_answer_stop: {},
     };
@@ -73,6 +74,19 @@ describe("curatedTurnText", () => {
       expect(text, kind).not.toMatch(/\{\{|\}\}/);
       expect(text, kind).not.toContain(SENTINEL);
     }
+  });
+
+  it("translates the Metal out-of-memory turn, never showing the English line", async () => {
+    const curated = { t: "curated_error", kind: "metal_out_of_memory", params: {} };
+    const sentences = {};
+    for (const lang of ["en", "fr", "es", "zh"]) {
+      await i18n.changeLanguage(lang);
+      sentences[lang] = curatedTurnText(curated);
+    }
+    expect(sentences.fr).toMatch(/^La mémoire graphique de cet ordinateur/);
+    expect(sentences.es).toMatch(/^La memoria gráfica de este ordenador/);
+    expect(sentences.zh).toMatch(/显存/);
+    expect(new Set(Object.values(sentences)).size).toBe(4);
   });
 
   it("formats the minutes of a first-token timeout", async () => {

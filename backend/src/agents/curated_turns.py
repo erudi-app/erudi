@@ -2,7 +2,7 @@
 
 A curated turn names why a turn has no regular answer -- a prompt that does
 not fit the window or the machine's memory, a model that did not start
-answering in time or went silent, the tool-loop limit, a turn that ended
+answering in time or went silent, the tool-loop limit, a Metal out-of-memory, a turn that ended
 during reasoning -- in words the app chose, never a traceback.
 
 Each kind is one entry of ``CURATED_KINDS``:
@@ -100,6 +100,14 @@ CURATED_KINDS: dict[str, CuratedKind] = {
         "messages could not be summarized to make room (with room for an answer the request "
         "needs about {prompt_tokens} tokens; the window holds {context_tokens}). Start a new "
         "conversation, or use Compact in this conversation's settings to summarize it now."
+    ),
+    # The MLX child's GPU ran out of memory (#504): the model is probably too
+    # large for this computer's memory right now. No numbers: the engine's own
+    # line travels as the turn's Details.
+    "metal_out_of_memory": CuratedKind(
+        "The graphics memory of this computer ran out while the model was answering: "
+        "this model is probably too large for it right now. Close other apps that use a "
+        "lot of memory, or switch to a smaller model, then try again."
     ),
     # No first chunk within the budget (#573): retrying makes it worse, the
     # history only grows.
