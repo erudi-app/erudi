@@ -133,7 +133,10 @@ def _loaded_tokenizer() -> Tokenizer:
 def _tokenizer_lease() -> Iterator[Tokenizer]:
     """Hold the tokenizer for the length of the block: it is never released
     while a lease is held, and the idle clock starts when the last one ends.
-    Leases nest (``chunk_markdown`` holds one around its ``count_tokens``)."""
+    Leases nest (``chunk_markdown`` holds one around its ``count_tokens``).
+    The last one out also starts a reaper when the tokenizer has none (a
+    ``shutdown_tokenizer`` under a lease, a reaper that died), so a loaded
+    tokenizer is always on its way out."""
     global _users, _idle_since
     with _state:
         _users += 1
@@ -144,6 +147,8 @@ def _tokenizer_lease() -> Iterator[Tokenizer]:
             _users -= 1
             if _users == 0:
                 _idle_since = time.monotonic()
+                if _tokenizer is not None:
+                    _start_reaper_locked()
                 _state.notify_all()
 
 
@@ -210,7 +215,8 @@ def _reaper_loop(stop: threading.Event) -> None:
             logger.info(f"e5 tokenizer released after {TOKENIZER_IDLE_SECONDS:.0f} s unused")
     except Exception as exc:
         # Nobody joins this thread: this record is the only trace. The
-        # tokenizer stays loaded until the next load starts a new reaper.
+        # tokenizer stays loaded until the next call ends and starts a new
+        # reaper.
         logger.error(f"e5 tokenizer idle release failed: {exc}", exc_info=True)
         with _state:
             if _reaper is threading.current_thread():
@@ -220,8 +226,9 @@ def _reaper_loop(stop: threading.Event) -> None:
 def shutdown_tokenizer() -> None:
     """Stop the reaper and release the tokenizer (lifespan shutdown).
 
-    A call still holding it keeps it until the process ends; a later call
-    loads it again and starts a new reaper. Idempotent.
+    A call still holding it keeps it: when that call ends, a new reaper
+    starts and releases it after the idle delay. A later call loads it again
+    and starts a new reaper. Idempotent.
     """
     global _reaper, _reaper_stop, _tokenizer
     with _state:
@@ -253,7 +260,7 @@ def _allocator_relief() -> Callable[[], object] | None:
     """
     try:
         if sys.platform == "darwin":
-            relief = ctypes.CDLL("libSystem.B.dylib").malloc_zone_pressure_relief
+            relief = ctypes.CDLL("/usr/lib/libSystem.B.dylib").malloc_zone_pressure_relief
             relief.argtypes = [ctypes.c_void_p, ctypes.c_size_t]
             relief.restype = ctypes.c_size_t
             return lambda: relief(None, 0)

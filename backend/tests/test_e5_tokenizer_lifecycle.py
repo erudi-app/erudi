@@ -110,6 +110,13 @@ class _BlockingTokenizer:
         return types.SimpleNamespace(ids=[0] * len(text.split()), offsets=[])
 
 
+def _released_within(seconds: float) -> bool:
+    deadline = time.monotonic() + seconds
+    while chunking.tokenizer_loaded() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return not chunking.tokenizer_loaded()
+
+
 class _CountingLoader:
     def __init__(self, factory) -> None:
         self.factory = factory
@@ -233,15 +240,22 @@ class TestIdleRelease:
         assert not chunking.tokenizer_loaded()
 
     def test_the_idle_clock_restarts_when_the_last_call_ends(self, monkeypatch):
+        # A simulated clock: the call holds the tokenizer 50 s, so an idle
+        # clock stamped at the lease's entry would release it 50 s early.
+        clock = [1000.0]
+        monkeypatch.setattr(chunking, "time", types.SimpleNamespace(monotonic=lambda: clock[0]))
         fake = _BlockingTokenizer()
         monkeypatch.setattr(chunking, "_load_frozen_tokenizer", lambda: fake)
         worker = threading.Thread(target=lambda: chunking.count_tokens("a"))
         worker.start()
         assert fake.entered.wait(timeout=10)
+        clock[0] = 1050.0
         fake.proceed.set()
         worker.join(timeout=10)
-        ended = time.monotonic()
-        assert not chunking.release_if_idle(now=ended + chunking.TOKENIZER_IDLE_SECONDS - 1)
+        idle = chunking.TOKENIZER_IDLE_SECONDS
+        assert chunking._idle_since == 1050.0
+        assert not chunking.release_if_idle(now=1000.0 + idle + 1)
+        assert chunking.release_if_idle(now=1050.0 + idle + 1)
 
     def test_the_reaper_thread_releases_it(self, monkeypatch):
         monkeypatch.setattr(chunking, "TOKENIZER_IDLE_SECONDS", 0.05)
@@ -277,6 +291,40 @@ class TestIdleRelease:
         assert chunking.tokenizer_loaded()
         fake.proceed.set()
         worker.join(timeout=10)
+
+    def test_a_tokenizer_left_loaded_by_a_shutdown_is_still_released(self, monkeypatch):
+        # shutdown_tokenizer under a lease stops the reaper but cannot release:
+        # the lease's end starts a new reaper, which releases after the delay.
+        monkeypatch.setattr(chunking, "TOKENIZER_IDLE_SECONDS", 0.05)
+        fake = _BlockingTokenizer()
+        monkeypatch.setattr(chunking, "_load_frozen_tokenizer", lambda: fake)
+        worker = threading.Thread(target=lambda: chunking.count_tokens("a b"))
+        worker.start()
+        assert fake.entered.wait(timeout=10)
+        chunking.shutdown_tokenizer()
+        assert chunking._reaper is None
+        assert chunking.tokenizer_loaded()
+        fake.proceed.set()
+        worker.join(timeout=10)
+        assert _released_within(10)
+
+    def test_a_reaper_that_died_is_replaced_at_the_next_call(self, monkeypatch):
+        monkeypatch.setattr(chunking, "TOKENIZER_IDLE_SECONDS", 3600.0)
+        chunking.count_tokens("Bonjour le monde")
+        # A reaper that died: the tokenizer loaded, no reaper left.
+        with chunking._state:
+            reaper, stop = chunking._reaper, chunking._reaper_stop
+            chunking._reaper = None
+            chunking._reaper_stop = None
+        stop.set()
+        with chunking._state:
+            chunking._state.notify_all()
+        reaper.join(timeout=10)
+        assert chunking.tokenizer_loaded()
+        monkeypatch.setattr(chunking, "TOKENIZER_IDLE_SECONDS", 0.05)
+        chunking.count_tokens("encore")
+        assert chunking._reaper is not None
+        assert _released_within(10)
 
 
 class TestAllocatorRelief:
