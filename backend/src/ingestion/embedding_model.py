@@ -133,7 +133,13 @@ def remove_snapshot() -> bool:
     if not repo.exists():
         return False
     try:
-        freed = sum(f.stat().st_size for f in repo.rglob("*") if f.is_file())
+        # Regular files only: the hub links snapshots/<rev>/<file> into
+        # blobs/ (symlinks on Linux), so following links counts twice.
+        freed = sum(
+            f.stat(follow_symlinks=False).st_size
+            for f in repo.rglob("*")
+            if not f.is_symlink() and f.is_file()
+        )
         shutil.rmtree(repo)
         shutil.rmtree(Path(config.CACHE_DIR) / ".locks" / folder, ignore_errors=True)
     except OSError as exc:

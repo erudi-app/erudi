@@ -68,6 +68,28 @@ class TestRemoveObsoleteSnapshot:
         records = [r for r in caplog.records if "obsolete" in r.message]
         assert len(records) == 1 and records[0].levelno == logging.INFO
 
+    def test_the_freed_size_counts_each_blob_once(self, cache, monkeypatch, caplog):
+        # The hub cache links snapshots/<rev>/<file> into blobs/ (symlinks on
+        # Linux): following them would count every file twice.
+        repo = cache / "models--intfloat--multilingual-e5-small"
+        (repo / "blobs").mkdir(parents=True)
+        blob = repo / "blobs" / "0123abcd"
+        blob.write_bytes(b"x" * 3_000_000)
+        snapshot = repo / "snapshots" / "614241f6"
+        snapshot.mkdir(parents=True)
+        try:
+            (snapshot / "model.safetensors").symlink_to(blob)
+        except OSError:
+            pytest.skip("this host cannot create symlinks")
+        _adapter(monkeypatch, downloadable=False, available=True)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            assert embedder_child.remove_obsolete_e5_snapshot() is True
+
+        (record,) = [r for r in caplog.records if "obsolete" in r.message]
+        assert "(3 MB)" in record.message
+        assert not repo.exists()
+
     def test_macos_keeps_the_snapshot_its_child_serves(self, cache, monkeypatch):
         repo, _, _ = _put_snapshot(cache)
         _adapter(monkeypatch, downloadable=True, available=True)
