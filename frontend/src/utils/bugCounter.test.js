@@ -298,6 +298,15 @@ describe("isCountableError", () => {
     expect(isCountableError({ level: "WARNING", message: "a fallback was taken" })).toBe(false);
   });
 
+  it("does not count the curated Metal out-of-memory record (a WARNING)", () => {
+    const message =
+      "Agent streaming failed: llm=7 (Qwen 32B), thread_id=abc; Metal out of memory: " +
+      "[METAL] Command buffer execution failed: Insufficient Memory " +
+      "(00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)";
+    expect(isCountableError({ level: "WARNING", message })).toBe(false);
+    expect(isCountableError({ level: "ERROR", message })).toBe(true);
+  });
+
   it("does not count an environmental ERROR", () => {
     expect(isCountableError({ level: "ERROR", message: "you appear to be offline" })).toBe(false);
   });

@@ -615,8 +615,9 @@ the only place a surviving child leaves it; the mark is the log's size when the 
 out-of-memory a surviving child reported on an earlier turn is never pinned on a later failure). It matches the
 `kIOGPUCommandBufferCallbackErrorOutOfMemory` token, or `Insufficient Memory` on a `[METAL]` line,
 never a vague word: a Python `MemoryError`, a CUDA or llama.cpp allocation failure and the other
-`[METAL]` errors stay generic failures. The operation did not happen, so the record is the same
-`ERROR` `Agent streaming failed: llm=…` one, ending with `; Metal out of memory: <the line>`; the
+`[METAL]` errors stay generic failures. Like the other curated kinds, the app answers it on its
+own: the record is one `WARNING`, without traceback, `Agent streaming failed: llm=…` ending with
+`; Metal out of memory: <the line>`, so it does not count as a bug; the
 turn carries `curated: true` (no bug badge) and keeps Details, whose leaf names the stopped process
 when there is one, then the engine's line.
 

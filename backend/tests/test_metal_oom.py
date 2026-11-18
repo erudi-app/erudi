@@ -169,15 +169,18 @@ async def test_a_dead_child_names_the_process_and_the_metal_cause(monkeypatch):
     assert "kIOGPUCommandBufferCallbackErrorOutOfMemory" in answer["detail"]
 
 
-async def test_the_record_is_one_error_with_the_cause(monkeypatch, caplog):
+async def test_the_record_is_one_warning_without_traceback_with_the_cause(monkeypatch, caplog):
+    # Like the other curated kinds (docs/logging.md): the app degraded on its
+    # own, so no ERROR (which would badge the bug counter) and no traceback.
     _engine(monkeypatch, tail=METAL_LINE)
 
-    with caplog.at_level(logging.ERROR, logger="erudi"):
+    with caplog.at_level(logging.INFO, logger="erudi"):
         await _turn(monkeypatch, RuntimeError("stream ended"), "m-log")
 
-    records = [r for r in caplog.records if "Metal" in r.getMessage()]
+    records = [r for r in caplog.records if "Agent streaming failed" in r.getMessage()]
     assert len(records) == 1
-    assert records[0].levelno == logging.ERROR
+    assert records[0].levelno == logging.WARNING
+    assert records[0].exc_info is None
     assert records[0].getMessage().isascii()
     assert "kIOGPUCommandBufferCallbackErrorOutOfMemory" in records[0].getMessage()
 

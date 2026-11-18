@@ -575,7 +575,6 @@ def erudi_chat_openai_class():
 
         def _push_usage(self, usage: Any, stamp: Optional[dict]) -> None:
             if self.call_log_label:
-                self._calls += 1
                 logger.info(
                     f"Model call: {self.call_log_label} hop={self._calls} "
                     f"prompt_tokens={int(usage.get('input_tokens') or 0)} "
@@ -706,6 +705,9 @@ def erudi_chat_openai_class():
             if budget is not None:
                 kwargs["max_tokens"] = budget
             self._announce_call(messages, tools)
+            # The call's ordinal in the turn (``Model call:`` lines): taken once
+            # here, so a preflight retry below is still the same call.
+            self._calls += 1
 
             # Every attempt is consumed under ``aclosing``: when this
             # generator is closed (GeneratorExit at the yield) or cancelled,
@@ -780,6 +782,17 @@ def erudi_chat_openai_class():
                 ended_normally = True
                 self._notify_completed(started_at)
             finally:
+                if self.call_log_label and not usage_seen:
+                    # The call ended without the server's usage (it failed, was
+                    # cut or abandoned): the one line it still writes carries
+                    # the request's estimate, the only size known. Once per
+                    # call, after the preflight retry, which writes the usage
+                    # line when it succeeds.
+                    est = (stamp or {}).get(REQUEST_EST_KEY)
+                    logger.info(
+                        f"Model call: {self.call_log_label} hop={self._calls} failed"
+                        + (f" est_prompt_tokens={est}" if est is not None else "")
+                    )
                 if not ended_normally:
                     self._notify_abandoned()
 

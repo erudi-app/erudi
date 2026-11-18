@@ -2336,7 +2336,11 @@ class AgentRunner:
                     # (MLX); the summary and title clients push nothing.
                     record_usage=True,
                     # One INFO line per model call of the turn (``Model call:``).
-                    call_log_label=f"thread_id={thread_id}" if thread_id else "arena",
+                    call_log_label=(
+                        f"thread_id={thread_id}"
+                        if thread_id
+                        else f"thread_id=arena:{getattr(llm, 'id', '?')}"
+                    ),
                 )
                 # The compaction (memory accounting, windows, summary client
                 # and middleware), built AFTER build_chat_model so the child
@@ -2905,11 +2909,18 @@ class AgentRunner:
                                 if metal_line
                                 else ""
                             )
-                            logger.exception(
+                            failure_record = (
                                 f"Agent streaming failed: llm={getattr(llm, 'id', '?')} "
                                 f"({getattr(llm, 'name', '?')}), thread_id={thread_id}"
                                 f"{_child_crash_suffix(death)}{metal_note}"
                             )
+                            if metal_line:
+                                # #504: the app answers it with its own curated turn
+                                # (like the other curated kinds): WARNING, no
+                                # traceback, and no bug badge (docs/logging.md).
+                                logger.warning(failure_record)
+                            else:
+                                logger.exception(failure_record)
                             if death is None:
                                 death = await _await_child_death(engine, exc)
                             child_death = death.cause if death is not None else None
