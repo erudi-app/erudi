@@ -74,8 +74,8 @@ server_name = SERVER_NAME
 artifact_downloadable = False
 
 #: The file ``scripts/dev/backend/build_e5_gguf.py`` produces and the
-#: PyInstaller specs bundle (Q8_0, 132 MB; worst cosine vs
-#: sentence-transformers 0.99981 — spike S4).
+#: PyInstaller specs bundle (Q8_0, 132 MB; worst cosine vs the fp32
+#: model 0.99981 — spike S4).
 E5_GGUF_NAME = "multilingual-e5-small-q8_0.gguf"
 
 #: The ``model`` field of every request and the server's ``--alias``.

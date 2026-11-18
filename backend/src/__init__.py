@@ -1,9 +1,9 @@
 """Erudi Backend Package.
 
 This module sets up environment variables required for thread-safe operation
-of numerical libraries (NumPy, PyTorch) before any heavy imports occur.
+of numerical libraries (NumPy and the BLAS it links) before any heavy imports occur.
 
-CRITICAL: These must be set BEFORE any import of numpy/torch/sentence_transformers.
+CRITICAL: These must be set BEFORE any import of numpy.
 Python's import system guarantees __init__.py runs first when importing from this package.
 """
 

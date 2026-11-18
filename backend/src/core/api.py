@@ -375,10 +375,8 @@ def apply_idle_unload_preference() -> None:
     attribute, so it must land on the engine left once CUDA may have been
     swapped for CPU, and before the idle monitor starts. The settings PUT
     applies later changes to the same ``config.LLM_Engine``. The knowledge-base
-    embedder is not governed by it: on macOS its dedicated child is released
-    after a fixed 5 minutes unused (``embedder_child.EMBEDDER_IDLE_SECONDS``);
-    on Windows and Linux the in-process embedding model stays loaded until the
-    backend stops (until F3 of #594).
+    embedder is not governed by it: its dedicated child is released after a
+    fixed 5 minutes unused (``embedder_child.EMBEDDER_IDLE_SECONDS``).
     """
     from src.domains.user_settings.repository import read_idle_unload_minutes
 

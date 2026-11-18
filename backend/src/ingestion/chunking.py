@@ -37,10 +37,10 @@ if TYPE_CHECKING:  # pragma: no cover - typing only
     from tokenizers import Tokenizer
 
 # NB: langchain_text_splitters is imported in FUNCTION scope only (issue #160).
-# Its package __init__ eagerly imports sentence_transformers -> torch/sklearn
-# (~3-4 s), and this module sits on the boot path (seed -> utils -> kb_utils),
-# so a module-level import here taxes every backend start for a splitter that
-# is only needed at KB ingestion time.
+# Its package __init__ eagerly imports every splitter it ships and probes the
+# optional NLP stacks they wrap, and this module sits on the boot path (seed ->
+# utils -> kb_utils), so a module-level import here taxes every backend start
+# for a splitter that is only needed at KB ingestion time.
 
 # The intfloat/multilingual-e5-small tokenizer (snapshot 614241f6), frozen once
 # as transformers 5.14.1 builds it: ``AutoTokenizer.from_pretrained(...)
@@ -56,12 +56,11 @@ DEFAULT_TARGET_TOKENS = 180
 DEFAULT_OVERLAP_TOKENS = 27  # ~15 %
 
 # What fits in e5's 512-token window once ``<s>`` and ``</s>`` are counted.
-# sentence-transformers truncated the PREFIXED text's ids at 512 specials
-# included; bounding the raw text at 510 content tokens keeps every input
-# inside the same window, but is NOT byte-identical at the boundary: the
-# re-tokenized prefix can end on a different final token than the id-level
-# cut (measured: 27 of 300 long texts differ there; the embedding server
-# truncates at 512 itself too, and vector parity stays >= 0.9999). The bound
+# Bounding the raw text at 510 content tokens keeps every input inside the
+# window, but is NOT byte-identical to an id-level cut at 512 specials
+# included: the re-tokenized prefix can end on a different final token
+# (measured: 27 of 300 long texts differ there; vector parity stays >=
+# 0.9999). The bound
 # exists Erudi-side because llama-server (the Windows/Linux embedding child,
 # #594) refuses, not truncates, past 512 -- and fails the whole batch.
 E5_MAX_CONTENT_TOKENS = 510
