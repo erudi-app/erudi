@@ -539,7 +539,7 @@ the card only appears where the setting does something.*
 - [ ] When I relaunch the app, then it comes back in the language I chose (the backend value wins over the local mirror).
 - [ ] When it is my **first** launch, then the language is derived from my system locale.
 - [ ] When I change the language, then the **native application menu** (Help → Clear All Data…) is rebuilt in that language.
-- [ ] When I use **Clear All Data**, then the app comes back in English on the next boot (settings deleted; the backend default wins).
+- [ ] When I use **Clear All Data**, then the next start is a **first** launch: the language is derived from my system locale again (settings and the local mirror deleted), whatever language I had chosen before.
 
 **Diagnostics page**
 - [ ] When I open Diagnostics (the bug icon in the left rail) with the backend running, then the page shows my Erudi version, operating system, inference engine, CPU/GPU, the model in memory (or none), the backend's Python version and the database state — no log-file paths are listed on screen, and there is no text preview of the report.
