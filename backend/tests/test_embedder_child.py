@@ -29,7 +29,7 @@ import pytest
 import requests as requests_lib
 
 from src.core.exceptions import EmbeddingModelMissingException, EngineException
-from src.ingestion import embedder_child
+from src.ingestion import chunking, embedder_child
 
 pytestmark = pytest.mark.unit
 
@@ -123,6 +123,14 @@ class FakeHttp:
             ]
         }
         return FakeResponse(status_code=200, payload=payload)
+
+
+@pytest.fixture(autouse=True)
+def _no_e5_tokenizer_reaper():
+    """The thread-count assertions below must see no e5 tokenizer reaper:
+    one an earlier test started can exit between two reads. Shutting the
+    tokenizer down joins it (none of these tests loads the tokenizer)."""
+    chunking.shutdown_tokenizer()
 
 
 @pytest.fixture
