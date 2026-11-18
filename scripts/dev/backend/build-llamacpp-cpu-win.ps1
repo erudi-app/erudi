@@ -184,6 +184,7 @@ $CmakeArgs = @(
     # ---- backend flags: CPU only ----
     "-DGGML_CUDA=OFF",
     "-DGGML_CPU=ON",
+    "-DLLAMA_USE_PREBUILT_UI=OFF",       # no web UI: llama-server runs with --no-webui; the build must not fetch the unpinned "latest" UI
     "-DGGML_NATIVE=OFF",                # portable: no host-specific ISA baked in (clients vary)
     "-DGGML_METAL=OFF",
     "-DGGML_VULKAN=OFF",

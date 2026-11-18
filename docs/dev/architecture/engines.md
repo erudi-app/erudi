@@ -1029,6 +1029,7 @@ on a Mac, not as a distribution target.
    | Flag | Why |
    |---|---|
    | `GGML_CPU=ON`, `GGML_NATIVE=ON` | let ggml pick the Apple M-series optimized kernels |
+   | `LLAMA_USE_PREBUILT_UI=OFF` | no web UI is embedded: the engines run `llama-server --no-webui`, and the build never downloads llama.cpp's unpinned "latest" UI (every build script sets it) |
    | `GGML_ACCELERATE=ON` | link Apple's Accelerate framework for BLAS |
    | `GGML_BLAS=OFF` | no third-party BLAS |
    | `GGML_OPENMP=OFF` | AppleClang ships no libomp; skips a slow probe |

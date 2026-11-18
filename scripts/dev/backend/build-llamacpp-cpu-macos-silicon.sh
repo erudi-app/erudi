@@ -94,6 +94,7 @@ echo "[build] Configuring for Apple Silicon CPU backend (arm64)..."
   -DCMAKE_INSTALL_RPATH="@executable_path/../lib" \
   \
   -DGGML_CPU=ON \
+  -DLLAMA_USE_PREBUILT_UI=OFF \
   -DGGML_NATIVE=ON \
   -DGGML_CPU_ALL_VARIANTS=OFF \
   -DGGML_ACCELERATE=ON \
