@@ -274,6 +274,7 @@ $CmakeArgs = @(
     "-DGGML_CUDA=ON",                   # Enable NVIDIA CUDA backend
     "-DCMAKE_CUDA_ARCHITECTURES=$CudaArchs",
     "-DGGML_CPU=ON",                    # Keep CPU layers for overflow beyond VRAM
+    "-DLLAMA_USE_PREBUILT_UI=OFF",       # no web UI: llama-server runs with --no-webui; the build must not fetch the unpinned "latest" UI
     "-DGGML_NATIVE=OFF",                # OFF for portable binary across same-gen GPUs
     "-DGGML_METAL=OFF",
     "-DGGML_VULKAN=OFF",

@@ -75,6 +75,7 @@ echo "[build] Configuring llama.cpp (Linux CPU)..."
   -DLLAMA_CURL=OFF \
   -DGGML_CUDA=OFF \
   -DGGML_CPU=ON \
+  -DLLAMA_USE_PREBUILT_UI=OFF \
   -DGGML_NATIVE=OFF \
   -DGGML_METAL=OFF \
   -DGGML_VULKAN=OFF \
