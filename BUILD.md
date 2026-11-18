@@ -73,8 +73,12 @@ e5-gguf-venv/bin/python scripts/dev/backend/build_e5_gguf.py
 The script needs the llama.cpp submodule (its converter and `gguf-py`); its
 Python dependencies are declared in `backend/requirements/meta/e5-gguf.txt`
 and locked per OS in `lock/{win,linux}-e5-gguf.txt` (see
-`backend/requirements/README.md` — a macOS dev venv already carries them
-all and works as-is). Community e5 GGUFs carry a wrong WordPiece vocab, and
+`backend/requirements/README.md`; there is no macOS build lock: on a Mac,
+install `meta/e5-gguf.txt` into a venv of its own — the app's venv has no
+torch, sentencepiece or protobuf). The snapshot is fetched into the script's
+own cache, `backend/data/e5-build-cache` (reused across runs), never into the
+backend's `models_cache`: there, on Windows and Linux, the backend deletes
+the e5 snapshot at start once the GGUF exists. Community e5 GGUFs carry a wrong WordPiece vocab, and
 the pinned converter refuses the model outright, so the script copies the
 conversion toolchain to a scratch directory, normalizes it to LF (a Windows
 checkout can be CRLF) and applies `scripts/dev/backend/e5-conversion.patch`
