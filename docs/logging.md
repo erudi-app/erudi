@@ -217,7 +217,10 @@ A child of either kind that dies during an answer is also what the failed turn's
 **Details** names: `<server> child is dead (pid …, port …, exit code …)`, the
 line that follows `Agent streaming failed: llm=…` in that record (ahead of the
 child's last output), instead of the HTTP error the broken connection raised
-(see [When a turn fails](guides/conversations.md#when-a-turn-fails)).
+(see [When a turn fails](guides/conversations.md#when-a-turn-fails)). When that tail (or the
+failure's own message) holds the Metal out-of-memory line, the same record ends with
+`; Metal out of memory: <the line>` and the turn is the curated "model too large for this computer"
+one, its Details keeping the line.
 
 ## What the libraries say
 

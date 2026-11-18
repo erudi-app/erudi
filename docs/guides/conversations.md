@@ -291,7 +291,7 @@ an image pasted before pasted images moved into the data folder stays where it i
 | `compaction` | `phase`; with `phase: "done"`: `summarized`, `reason`, `summary` | Earlier messages are summarized (see [compaction](#what-the-thread-shows-of-a-compaction)). `phase: "start"`: the summary call is about to run; never persisted. `phase: "done"`: the history was rewritten — `summarized` = the user messages and answers summarized (tool calls, tool results and the previous summary not counted), `reason` = `"memory"` (the computer's memory bounds the window) or `"length"`, `summary` = the summary text. A summary that could not be written or was rejected rewrites nothing and sends no `done`. Persisted in the turn's trace. Several per turn are possible: one before each model call that needs it |
 | `memory_reload` | `reason` (`"memory"`, `"idle"` or `"manual"`) | Why this turn reloads the model, which picks the renderer's copy. `reason: "memory"`: the memory brake unloaded the model (or, on the llama.cpp engines, restarted it with a smaller window) while the computer's memory was under pressure, and this turn reloads it or re-reads the conversation (see below). `reason: "idle"` (any engine): the model was unloaded after the Settings idle delay without use, and this turn reloads it; the copy names no duration. `reason: "manual"` (any engine): the user unloaded it with the header's Unload button ("You unloaded the model; reloading it…"). The idle and manual reasons only reach a conversation that already has messages (a new one shows its first-reply hint); a model switch never sends the event, and a turn announces at most one reload. Sent before anything else the model produces; never persisted |
 | `memory_warning` | `reason`, `footprint_bytes` (`bound` only) | At the end of a turn, at most one, by precedence (and `gpu_contention` also at the start of a turn, see below): a brake notice, then `gpu_contention`, then `bound`. `reason: "pressure"`: the computer's memory is under pressure and the memory brake shrank the window, so the conversation will be summarized sooner. `reason: "pressure_external"`: the computer's memory is under pressure from other apps and this conversation uses little of it. `reason: "gpu_contention"` (the CUDA engine on Windows): another app is taking the graphics card's memory from the model, so answers are slower; sent at the start of a turn when the contention is already detected (then not again at that turn's end) and otherwise at the turn end, at every turn while it lasts; the notice offers **Free the graphics card**, which unloads the model, and the renderer polls `GET /hardware/gpu_contention/status` to drop the notice once it ends (see below). `reason: "bound"`: the machine's memory bounds the model's window and, even after compacting, the next request would fill 85 % of the working window (see below); `footprint_bytes` = the loaded model and the projected conversation together, the size the notice quotes |
-| `error` | `text`; optional `code`, `raw`, `detail`, `request_id`, `curated`, `curated_error` | The turn failed. `text` is the red message: the generic apology, or a curated sentence in English (a prompt that does not fit, a model that did not start answering in time or went silent mid-answer, the tool-loop limit). A generic failure carries `detail` (the cleaned cause, see [Errors](#when-a-turn-fails)) and `request_id`; a curated one carries `curated: true`, `curated_error` (`{"kind", "params", "text"}`, what the renderer translates it from) and no detail. `code`/`raw` are the engine's typed cause (CUDA remedies). Text streamed before the failure stays in the answer; the error event follows it |
+| `error` | `text`; optional `code`, `raw`, `detail`, `request_id`, `curated`, `curated_error` | The turn failed. `text` is the red message: the generic apology, or a curated sentence in English (a prompt that does not fit, a model that did not start answering in time or went silent mid-answer, the tool-loop limit). A generic failure carries `detail` (the cleaned cause, see [Errors](#when-a-turn-fails)) and `request_id`; a curated one carries `curated: true`, `curated_error` (`{"kind", "params", "text"}`, what the renderer translates it from) and no detail, except `metal_out_of_memory`, which keeps its `detail` and `request_id`. `code`/`raw` are the engine's typed cause (CUDA remedies). Text streamed before the failure stays in the answer; the error event follows it |
 | `done` | — | Terminal event, always sent, including after an `error` |
 
 `done` is also the refetch signal: the assistant message is committed to the database *before* it is
@@ -458,6 +458,7 @@ mid-answer, or hit the tool-loop limit, is a **curated turn**: one entry of `CUR
 | `prefill_timeout` | `minutes` | No first token within the budget |
 | `decode_timeout` | `seconds` | Silent mid-answer past the inter-chunk budget |
 | `loop_limit` | — | The tool-loop limit, with no tool result to fall back to |
+| `metal_out_of_memory` | — | The MLX child's GPU ran out of memory (Metal); keeps its Details |
 | `empty_answer_length` | — | Cut during reasoning, no answer written (a normal answer, not red) |
 | `empty_answer_stop` | — | The turn closed without an answer (a normal answer, not red) |
 
@@ -565,7 +566,8 @@ A turn that ends in error shows a red bubble. Two kinds exist:
 - **Curated turn** (the prompt does not fit the window or the machine's memory, the model did not
   start answering in time or went silent mid-answer, the tool-loop limit): the app's own sentence,
   in the interface language with its numbers in that language's format (see
-  [Curated turns](#curated-turns)), without Details. The runner sets `curated: true` on these
+  [Curated turns](#curated-turns)), without Details (`metal_out_of_memory` is the exception, see
+  below). The runner sets `curated: true` on these
   turns and it rides on the error event;
   the renderer logs them at WARNING, so they do not count as a bug in the sidebar or in
   Diagnostics. A model that fails to load (a missing folder, a corrupt file, a child that died on
@@ -601,6 +603,21 @@ running and the failure is a transport error, the runner looks again for up to a
 handle reports the exit; a death seen then is the Details leaf, and the record, already written,
 does not name it. A child still running after that is not the cause, and the exception's leaf is
 shown.
+
+When the GPU ran out of memory (the MLX child writes `[METAL] Command buffer execution failed:
+Insufficient Memory (00000008:kIOGPUCommandBufferCallbackErrorOutOfMemory)` to its log), the turn is
+the curated `metal_out_of_memory` turn instead of the generic apology: the model is probably too
+large for this computer's memory right now, with the hint to close other apps or pick a smaller
+model. The runner recognises it, whether the child survived the error or died with it, with
+`find_metal_out_of_memory` (`src/engines/metal_oom.py`) over the failure's own messages, the
+observed death's report and the child's last output (`BaseChatServerEngine.child_output_tail()`,
+the only place a surviving child leaves it). It matches the
+`kIOGPUCommandBufferCallbackErrorOutOfMemory` token, or `Insufficient Memory` on a `[METAL]` line,
+never a vague word: a Python `MemoryError`, a CUDA or llama.cpp allocation failure and the other
+`[METAL]` errors stay generic failures. The operation did not happen, so the record is the same
+`ERROR` `Agent streaming failed: llm=…` one, ending with `; Metal out of memory: <the line>`; the
+turn carries `curated: true` (no bug badge) and keeps Details, whose leaf names the stopped process
+when there is one, then the engine's line.
 
 It is built where the exception is caught (agent construction, agent streaming, the conversation
 service's last-resort handler), sent on the `error` event with the request id (`X-Request-ID`, the

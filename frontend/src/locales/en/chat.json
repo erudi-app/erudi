@@ -323,6 +323,7 @@
     "prefill_timeout": "This model did not start answering within {{minutes}} min on this machine. Before writing a word it has to read everything this turn sends it (the whole conversation so far), and it did not get through that in time. Sending the same thing again will take longer, not less: start a new conversation, send less at once, or pick a smaller model.",
     "decode_timeout": "This model started answering, then went silent for {{seconds}} seconds, so the turn was stopped. Anything it had already written is kept above. Please try asking your question again.",
     "loop_limit": "I couldn't reach a final answer for this request (the model kept retrying without making progress). Please try rephrasing your question.",
+    "metal_out_of_memory": "The graphics memory of this computer ran out while the model was answering: this model is probably too large for it right now. Close other apps that use a lot of memory, or switch to a smaller model, then try again.",
     "empty_answer_length": "Generation stopped during reasoning, before an answer was written. Send a follow-up asking for the final answer directly, or lower the reasoning effort.",
     "empty_answer_stop": "The model finished its turn without writing an answer. Send a follow-up asking it to continue."
   },

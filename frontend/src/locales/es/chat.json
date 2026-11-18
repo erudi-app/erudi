@@ -323,6 +323,7 @@
     "prefill_timeout": "Este modelo no empezó a responder en {{minutes}} min en este equipo. Antes de escribir una palabra tiene que leer todo lo que este turno le envía (toda la conversación hasta ahora), y no lo terminó a tiempo. Enviar lo mismo otra vez tardará más, no menos: empieza una conversación nueva, envía menos texto a la vez o elige un modelo más pequeño.",
     "decode_timeout": "Este modelo empezó a responder y luego se quedó en silencio durante {{seconds}} segundos, así que el turno se detuvo. Lo que ya había escrito se conserva arriba. Vuelve a hacer tu pregunta.",
     "loop_limit": "No pude llegar a una respuesta final para esta solicitud (el modelo siguió reintentando sin avanzar). Intenta reformular tu pregunta.",
+    "metal_out_of_memory": "La memoria gráfica de este ordenador se agotó mientras el modelo respondía: este modelo probablemente es demasiado grande para él en este momento. Cierra otras aplicaciones que consuman mucha memoria o cambia a un modelo más pequeño, y vuelve a intentarlo.",
     "empty_answer_length": "La generación se detuvo durante el razonamiento, antes de escribir una respuesta. Envía un mensaje pidiendo directamente la respuesta final, o baja el esfuerzo de razonamiento.",
     "empty_answer_stop": "El modelo terminó su turno sin escribir una respuesta. Envía un mensaje pidiéndole que continúe."
   },

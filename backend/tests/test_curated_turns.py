@@ -141,6 +141,7 @@ def test_every_kind_is_english_ascii_and_formats_with_its_params():
         "prefill_timeout": {"minutes": 5},
         "decode_timeout": {"seconds": 120},
         "loop_limit": {},
+        "metal_out_of_memory": {},
         "empty_answer_length": {},
         "empty_answer_stop": {},
     }

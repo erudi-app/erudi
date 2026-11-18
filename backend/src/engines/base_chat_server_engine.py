@@ -174,6 +174,21 @@ class BaseChatServerEngine(BaseEngine):
         return ChildDeath(cause=cause, report=f"{cause}. {cls._read_child_output(proc)}")
 
     @classmethod
+    def child_output_tail(cls) -> str:
+        """The loaded child's last output, running or not; "" when nothing is
+        loaded.
+
+        A failure the child survives (the GPU ran out of memory mid-answer)
+        leaves its cause only here, never in the exception the client raises:
+        the agent layer reads it to recognise such a cause
+        (`src.engines.metal_oom`).
+        """
+        proc = cls._model.get("proc") if isinstance(cls._model, dict) else None
+        if proc is None:
+            return ""
+        return cls._read_child_output(proc)
+
+    @classmethod
     @abstractmethod
     def _resolve_model_artifact(cls, llm_local_path: Union[str, Path]) -> Path:
         """Resolve the artifact handed to `_spawn_child`.
