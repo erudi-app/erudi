@@ -597,7 +597,9 @@ KnowledgeDocument rows (SHA-256 dedup, per-file status)
 Chunk defaults live in `backend/src/ingestion/chunking.py`
 (`DEFAULT_TARGET_TOKENS = 180`, `DEFAULT_OVERLAP_TOKENS = 27`). The tokenizer is the e5 one,
 frozen in `backend/src/ingestion/e5_tokenizer.json.gz` and loaded with the `tokenizers` package,
-so chunking needs neither `transformers` nor a download. Each chunk stores its token count
+so chunking needs neither `transformers` nor a download. It is loaded on demand and released
+60 seconds after its last use (`TOKENIZER_IDLE_SECONDS`), and `truncate_to_tokens` does not load it
+for a text that provably fits the embedding window. Each chunk stores its token count
 (`token_count` in `langchain_metadata`), which the retrieval token budget reads.
 
 The `query:` and `passage:` prefixes required by the e5 model family are mandatory and

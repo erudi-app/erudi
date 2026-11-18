@@ -32,7 +32,7 @@ from src.ingestion.reader import IMAGE_EXTENSIONS, DocumentReader
 
 # One question's attachment text is capped so a single large document cannot
 # crowd the model's context out of the answer. The cap is expressed in
-# CHARACTERS on purpose: the only tokenizer resident in the backend is the e5
+# CHARACTERS on purpose: the only tokenizer the backend loads is the e5
 # retrieval tokenizer, which is not the chat model's, so counting with it would
 # buy a precision the number does not have while adding work to the request
 # path. At the ~4 characters/token rule of thumb that holds for the Latin-script

@@ -235,7 +235,10 @@ class TestWebToolDoesNotLoadKbTokenizer:
         def boom():
             raise AssertionError("the web tool must not load the e5 tokenizer")
 
-        monkeypatch.setattr("src.ingestion.chunking._get_tokenizer", boom)
+        from src.ingestion import chunking
+
+        chunking.shutdown_tokenizer()
+        monkeypatch.setattr(chunking, "_load_frozen_tokenizer", boom)
         results = [
             {
                 "title": "Python 3.13 released",
