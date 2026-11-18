@@ -78,6 +78,7 @@ import requests
 
 from src.core.exceptions import EmbeddingModelMissingException, EngineException
 from src.core.logging import logger
+from src.ingestion import embedding_model
 
 # The embedder's own port slice: above the llama.cpp pools (27200-27299), the
 # MLX chat pool (27300-27399) and the backend's 27182-27199 scan.
@@ -200,6 +201,23 @@ def artifact_downloadable() -> bool:
     if adapter is None:
         return True
     return bool(adapter.artifact_downloadable)
+
+
+def remove_obsolete_e5_snapshot() -> bool:
+    """Delete the fp32 e5 snapshot where nothing reads it anymore (#594).
+
+    Called once per start (idempotent: an absent snapshot is a no-op). The
+    snapshot is obsolete only where the platform's artifact ships with the
+    installation (Windows/Linux: the bundled GGUF) AND that artifact is on
+    disk; on macOS it IS the child's artifact and is never touched.
+    Returns whether a snapshot was deleted; never raises.
+    """
+    adapter = _get_adapter()
+    if adapter is None or adapter.artifact_downloadable:
+        return False
+    if not adapter.artifact_available():
+        return False
+    return embedding_model.remove_snapshot()
 
 
 def _require_adapter() -> Any:

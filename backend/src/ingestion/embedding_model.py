@@ -33,6 +33,7 @@ Design invariants:
 
 from __future__ import annotations
 
+import shutil
 import threading
 import time
 from pathlib import Path
@@ -117,6 +118,35 @@ def download_state() -> dict:
         "downloading": _state["downloading"],
         "error": _state["error"],
     }
+
+
+def remove_snapshot() -> bool:
+    """Delete the e5 snapshot from ``CACHE_DIR`` (its hub repo folder and its
+    download locks). Returns whether there was one to delete.
+
+    Never raises: a failed delete is one WARNING and the snapshot stays for
+    the next start to retry. The caller decides when the snapshot is
+    obsolete (``embedder_child.remove_obsolete_e5_snapshot``).
+    """
+    folder = "models--" + EMBEDDING_MODEL_ID.replace("/", "--")
+    repo = Path(config.CACHE_DIR) / folder
+    if not repo.exists():
+        return False
+    try:
+        freed = sum(f.stat().st_size for f in repo.rglob("*") if f.is_file())
+        shutil.rmtree(repo)
+        shutil.rmtree(Path(config.CACHE_DIR) / ".locks" / folder, ignore_errors=True)
+    except OSError as exc:
+        logger.warning(
+            f"Could not delete the obsolete embedding model snapshot {repo} "
+            f"(the next start retries): {type(exc).__name__}: {exc}"
+        )
+        return False
+    logger.info(
+        f"Deleted the obsolete embedding model snapshot {repo} "
+        f"({freed / 1e6:.0f} MB): the knowledge base uses the bundled model file"
+    )
+    return True
 
 
 def _fetch() -> None:

@@ -72,7 +72,7 @@ from src.database.migrations import run_migrations
 from src.database.seed import backfill_wire_tools_startup, startup_populate_database
 from src.launcher.postgres_runtime import start_postgres, stop_postgres
 from src.launcher.db_watchdog import start_watchdog, stop_watchdog
-from src.ingestion.embedder_child import shutdown_embedder
+from src.ingestion.embedder_child import remove_obsolete_e5_snapshot, shutdown_embedder
 from src.ingestion.vector_store import close_kb_store, init_kb_store
 
 from src.core.exceptions import (
@@ -445,6 +445,9 @@ async def _start_services(app: FastAPI, _phase) -> None:
     # Only now, on the engine that actually won, is the pre-flight meaningful:
     # a user who already chose CPU must not be nagged about their GPU.
     await run_in_threadpool(emit_engine_notice, app)
+    # Windows/Linux: the fp32 e5 snapshot an earlier version downloaded for the
+    # in-process embedder is dead weight once the bundled GGUF is in place.
+    await run_in_threadpool(remove_obsolete_e5_snapshot)
     # Hybrid KB vector store (rag.kb_chunks) — AFTER the schema migration: its
     # cross-schema FKs reference the business tables.
     app.state.kb_store = init_kb_store(app.state.postgres)
