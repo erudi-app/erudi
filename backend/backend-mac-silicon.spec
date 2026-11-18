@@ -29,19 +29,8 @@ datas = []
 binaries = []
 hiddenimports = []
 
-# torch: CPU tensor ops for the embedder (sentence-transformers).
-# MLX handles LLM inference independently; torch is CPU-only here.
-datas += collect_data_files("torch", includes=[
-    "**/*.json",
-    "**/*.yaml",
-    "**/*.pyi",
-])
-
 # transformers: tokenizer configs, model cards, generation configs
 datas += collect_data_files("transformers")
-
-# sentence_transformers: module configs, pooling configs
-datas += collect_data_files("sentence_transformers")
 
 # tqdm: locale data
 datas += collect_data_files("tqdm")
@@ -244,7 +233,6 @@ a = Analysis(
         # ── ML / inference
         "numpy",
                 "transformers",
-        "sentence_transformers",
         "huggingface_hub",
         "tokenizers",
         # Document parsers: imported at FUNCTION scope only (the extractors in
@@ -298,6 +286,13 @@ a = Analysis(
         "bitsandbytes",
         "llmcompressor",
         "compressed_tensors",
+        # No torch in the app (the KB embeddings run in a child process): kept
+        # out even when a dev venv still carries them.
+        "torch",
+        "torchvision",
+        "torchaudio",
+        "sentence_transformers",
+        "sklearn",
     ],
     # python-docx opens its default parts (styles, settings, header, footer,
     # comments) through <docx/parts>/../templates/. "pyz" alone leaves no
