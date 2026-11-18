@@ -460,7 +460,7 @@ def erudi_chat_openai_class():
     assumptions both rest on are pinned by ``tests/test_stream_watchdog.py``.
     """
     from langchain_openai import ChatOpenAI
-    from pydantic import Field
+    from pydantic import Field, PrivateAttr
 
     class Erudi_Chat_OpenAI(ChatOpenAI):
         """``ChatOpenAI`` with the #573 watchdog and the #554 reasoning carry."""
@@ -556,6 +556,12 @@ def erudi_chat_openai_class():
         # at that estimate.
         call_start_hook: Optional[Callable[[int], None]] = Field(default=None, exclude=True)
 
+        # ``thread_id=<id>`` of the turn this client serves (the conversation
+        # and Arena clients only): each call then writes one INFO line with its
+        # hop number and token counts, never any content. ``None``: no line.
+        call_log_label: Optional[str] = Field(default=None, exclude=True)
+        _calls: int = PrivateAttr(default=0)
+
         def _announce_call(self, messages, tools) -> None:
             hook = self.call_start_hook
             if hook is None:
@@ -568,6 +574,13 @@ def erudi_chat_openai_class():
                 logger.warning("Announcing a call's estimated size failed", exc_info=True)
 
         def _push_usage(self, usage: Any, stamp: Optional[dict]) -> None:
+            if self.call_log_label:
+                self._calls += 1
+                logger.info(
+                    f"Model call: {self.call_log_label} hop={self._calls} "
+                    f"prompt_tokens={int(usage.get('input_tokens') or 0)} "
+                    f"completion_tokens={int(usage.get('output_tokens') or 0)}"
+                )
             hook = self.usage_hook
             if hook is None:
                 return

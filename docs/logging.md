@@ -220,7 +220,15 @@ child's last output), instead of the HTTP error the broken connection raised
 (see [When a turn fails](guides/conversations.md#when-a-turn-fails)). When that tail (or the
 failure's own message) holds the Metal out-of-memory line, the same record ends with
 `; Metal out of memory: <the line>` and the turn is the curated "model too large for this computer"
-one, its Details keeping the line.
+one, its Details keeping the line. Only what the child wrote since the turn began counts.
+
+Each model call of a conversation or Arena turn writes one `INFO` line to
+`backend.log`, `Model call: thread_id=<id> hop=<n> prompt_tokens=<n> completion_tokens=<n>`
+(`hop` counts the calls of the turn, the tool round-trips of the agent loop; Arena turns read
+`thread_id=arena`), from the usage the server reports with the call. It carries counts only, no
+content and no path; it is one line per call, like the `ChatOpenAI built` line of each turn, and
+the summary and title clients write none. It is what the prompt size per hop is read from when a
+memory problem is measured.
 
 ## What the libraries say
 
