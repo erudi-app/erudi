@@ -52,6 +52,37 @@ def test_frozen_with_missing_default_cafile_sets_certifi():
 
 
 @pytest.mark.unit
+def test_linux_prefers_first_existing_system_bundle():
+    env: dict[str, str] = {}
+    fedora = "/etc/pki/tls/certs/ca-bundle.crt"
+    message = _call(env, platform_name="linux", existing=(fedora, "/etc/ssl/cert.pem", CERTIFI))
+    assert env["SSL_CERT_FILE"] == fedora
+    assert fedora in message
+
+
+@pytest.mark.unit
+@pytest.mark.parametrize("bundle", run.LINUX_SYSTEM_CA_BUNDLES)
+def test_linux_each_system_bundle_is_used_when_alone(bundle):
+    env: dict[str, str] = {}
+    _call(env, platform_name="linux", existing=(bundle, CERTIFI))
+    assert env["SSL_CERT_FILE"] == bundle
+
+
+@pytest.mark.unit
+def test_linux_without_system_bundle_falls_back_to_certifi():
+    env: dict[str, str] = {}
+    _call(env, platform_name="linux")
+    assert env["SSL_CERT_FILE"] == CERTIFI
+
+
+@pytest.mark.unit
+def test_macos_ignores_linux_bundles():
+    env: dict[str, str] = {}
+    _call(env, platform_name="darwin", existing=(*run.LINUX_SYSTEM_CA_BUNDLES, CERTIFI))
+    assert env["SSL_CERT_FILE"] == CERTIFI
+
+
+@pytest.mark.unit
 def test_user_ssl_cert_file_is_left_alone():
     env = {"SSL_CERT_FILE": "/corp/proxy-ca.pem"}
     assert _call(env) is None

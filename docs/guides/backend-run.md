@@ -20,9 +20,9 @@ protocol below.
 - Give the packaged backend a TLS trust store (macOS and Linux bundles): when
   `SSL_CERT_FILE` is unset and the default CA file of the bundled OpenSSL does not exist
   (the macOS bundle links psycopg's `libcrypto`, whose default path is a build directory),
-  point `SSL_CERT_FILE` at the bundled certifi file before anything creates an SSL context,
-  and log that once at INFO. A `SSL_CERT_FILE` you set (a corporate proxy's CA) is never
-  replaced, an existing default CA file is kept, and Windows is untouched because Python
+  point `SSL_CERT_FILE` at the first existing system CA bundle on Linux (`/etc/ssl/certs/ca-certificates.crt`, `/etc/pki/tls/certs/ca-bundle.crt`, `/etc/ssl/cert.pem`, `/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem`), else at the bundled certifi file (always on macOS), before anything creates an SSL context,
+  and log that once at INFO. A `SSL_CERT_FILE` set in the environment (a corporate proxy's CA; one written in a
+  `.env` file is read too late) is never replaced, an existing default CA file is kept, and Windows is untouched because Python
   reads the Windows certificate store there. This is what lets the web search tool's
   DuckDuckGo engine verify its connection.
 - Force the Windows selector event-loop policy for library compatibility.

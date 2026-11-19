@@ -32,7 +32,7 @@ CUDA, MLX, and CPU builds.
 **Key responsibilities:**
     * Parse command-line arguments (--port) for flexible port binding.
     * Normalize environment variables for deterministic third-party libs (TOKENIZERS_PARALLELISM, etc.).
-    * Point SSL_CERT_FILE at the bundled certifi file in a frozen build whose OpenSSL has no
+    * Point SSL_CERT_FILE at the system CA bundle (Linux) or the bundled certifi file in a frozen build whose OpenSSL has no
       default CA file (#758).
     * Configure asyncio selector policy on Windows for library compatibility.
     * Redirect data/log directories to user-writable locations on bundled builds.
@@ -221,6 +221,16 @@ def configure_library_env() -> None:
         os.environ["LANGCHAIN_TRACING_V2"] = "false"
 
 
+# Where the Linux distributions keep their CA bundle, in the order tried
+# (Debian/Ubuntu, Fedora/RHEL, Alpine/Arch, RHEL extracted store).
+LINUX_SYSTEM_CA_BUNDLES = (
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/cert.pem",
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+)
+
+
 def configure_tls_trust_store(
     *,
     environ=None,
@@ -238,7 +248,7 @@ def configure_tls_trust_store(
     every verified HTTPS connection built on it (ddgs' DuckDuckGo engine, whose
     httpx client passes no cafile) fails with ``CERTIFICATE_VERIFY_FAILED``.
     OpenSSL reads ``SSL_CERT_FILE`` whenever a context loads its default paths,
-    so pointing it at the bundled certifi file fixes every such caller at once.
+    so pointing it at a CA file fixes every such caller at once.
 
     Acts only when all of these hold, and returns the line to log (ASCII, no
     secret) when it acted, ``None`` otherwise:
@@ -249,10 +259,12 @@ def configure_tls_trust_store(
     * the user set no ``SSL_CERT_FILE`` (a corporate proxy's CA stays theirs);
     * the default cafile does not exist (a Linux distro with a real store is
       left alone);
-    * certifi's file exists.
+    * a CA file is found: on Linux the first existing system bundle of
+      ``LINUX_SYSTEM_CA_BUNDLES``, else (and always on macOS) certifi's file.
 
     ``SSL_CERT_DIR`` is not consulted: OpenSSL loads it in addition to the
-    file, so a user's directory keeps working next to certifi's file. Must run
+    file, so a user's directory keeps working next to certifi's file. A ``SSL_CERT_FILE`` in a ``.env`` file is not seen (loaded later); only the
+    process environment counts. Must run
     before anything creates an SSL context.
     """
     import ssl
@@ -278,16 +290,28 @@ def configure_tls_trust_store(
     if default_cafile and path_exists(default_cafile):
         return None
 
-    if certifi_where is None:
-        import certifi
+    chosen = None
+    label = "the bundled certifi file"
+    if platform_name.startswith("linux"):
+        # The bundled libcrypto is the build runner's (Ubuntu, /usr/lib/ssl):
+        # on Fedora or Arch its default path does not exist but a real system
+        # store does, and it may carry the user's corporate CAs.
+        for candidate in LINUX_SYSTEM_CA_BUNDLES:
+            if path_exists(candidate):
+                chosen = candidate
+                label = "the system CA bundle"
+                break
+    if chosen is None:
+        if certifi_where is None:
+            import certifi
 
-        certifi_where = certifi.where
-    bundled = certifi_where()
-    if not path_exists(bundled):
-        return None
+            certifi_where = certifi.where
+        chosen = certifi_where()
+        if not path_exists(chosen):
+            return None
 
-    environ["SSL_CERT_FILE"] = bundled
-    return "TLS trust store: the default CA file is missing, SSL_CERT_FILE set to the bundled certifi file"
+    environ["SSL_CERT_FILE"] = chosen
+    return f"TLS trust store: the default CA file is missing, SSL_CERT_FILE set to {label} {chosen}"
 
 
 def set_event_loop_policy() -> None:
