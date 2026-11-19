@@ -17,6 +17,14 @@ protocol below.
 
 - Configure third-party libraries for deterministic, low-noise startup (BLAS
   threads, tokenizers, transformers' advisory warnings).
+- Give the packaged backend a TLS trust store (macOS and Linux bundles): when
+  `SSL_CERT_FILE` is unset and the default CA file of the bundled OpenSSL does not exist
+  (the macOS bundle links psycopg's `libcrypto`, whose default path is a build directory),
+  point `SSL_CERT_FILE` at the bundled certifi file before anything creates an SSL context,
+  and log that once at INFO. A `SSL_CERT_FILE` you set (a corporate proxy's CA) is never
+  replaced, an existing default CA file is kept, and Windows is untouched because Python
+  reads the Windows certificate store there. This is what lets the web search tool's
+  DuckDuckGo engine verify its connection.
 - Force the Windows selector event-loop policy for library compatibility.
 - Normalize stdout/stderr to line-buffered mode so lifecycle events flush immediately.
 - Detect PyInstaller bundles and relocate runtime data and logs to OS-appropriate,
