@@ -32,6 +32,8 @@ CUDA, MLX, and CPU builds.
 **Key responsibilities:**
     * Parse command-line arguments (--port) for flexible port binding.
     * Normalize environment variables for deterministic third-party libs (TOKENIZERS_PARALLELISM, etc.).
+    * Point SSL_CERT_FILE at the system CA bundle (Linux) or the bundled certifi file in a frozen build whose OpenSSL has no
+      default CA file (#758).
     * Configure asyncio selector policy on Windows for library compatibility.
     * Redirect data/log directories to user-writable locations on bundled builds.
     * Preserve macOS symlink behavior while adopting OS-appropriate folders on Windows/Linux.
@@ -217,6 +219,99 @@ def configure_library_env() -> None:
     if os.getenv("ERUDI_ALLOW_LANGSMITH_TRACING") != "1":
         os.environ["LANGSMITH_TRACING"] = "false"
         os.environ["LANGCHAIN_TRACING_V2"] = "false"
+
+
+# Where the Linux distributions keep their CA bundle, in the order tried
+# (Debian/Ubuntu, Fedora/RHEL, Alpine/Arch, RHEL extracted store).
+LINUX_SYSTEM_CA_BUNDLES = (
+    "/etc/ssl/certs/ca-certificates.crt",
+    "/etc/pki/tls/certs/ca-bundle.crt",
+    "/etc/ssl/cert.pem",
+    "/etc/pki/ca-trust/extracted/pem/tls-ca-bundle.pem",
+)
+
+
+def configure_tls_trust_store(
+    *,
+    environ=None,
+    frozen: bool | None = None,
+    platform_name: str | None = None,
+    default_verify_paths=None,
+    certifi_where=None,
+    path_exists=None,
+) -> str | None:
+    """Give the frozen backend a TLS trust store when OpenSSL's default is empty (#758).
+
+    In the packaged macOS app ``_ssl`` links ``libcrypto`` from psycopg_binary,
+    compiled with an OPENSSLDIR (``/tmp/libpq.build``) that does not exist on
+    the user's machine. ``ssl.create_default_context()`` then loads no CA, and
+    every verified HTTPS connection built on it (ddgs' DuckDuckGo engine, whose
+    httpx client passes no cafile) fails with ``CERTIFICATE_VERIFY_FAILED``.
+    OpenSSL reads ``SSL_CERT_FILE`` whenever a context loads its default paths,
+    so pointing it at a CA file fixes every such caller at once.
+
+    Acts only when all of these hold, and returns the line to log (ASCII, no
+    secret) when it acted, ``None`` otherwise:
+
+    * the process is frozen (a dev venv has a working store);
+    * the platform is not Windows (there ``load_default_certs`` reads the
+      system certificate store whatever OpenSSL's default file is);
+    * the user set no ``SSL_CERT_FILE`` (a corporate proxy's CA stays theirs);
+    * the default cafile does not exist (a Linux distro with a real store is
+      left alone);
+    * a CA file is found: on Linux the first existing system bundle of
+      ``LINUX_SYSTEM_CA_BUNDLES``, else (and always on macOS) certifi's file.
+
+    ``SSL_CERT_DIR`` is not consulted: OpenSSL loads it in addition to the
+    file, so a user's directory keeps working next to certifi's file. A ``SSL_CERT_FILE`` in a ``.env`` file is not seen (loaded later); only the
+    process environment counts. Must run
+    before anything creates an SSL context.
+    """
+    import ssl
+
+    if environ is None:
+        environ = os.environ
+    if frozen is None:
+        frozen = is_frozen()
+    if platform_name is None:
+        platform_name = sys.platform
+    if default_verify_paths is None:
+        default_verify_paths = ssl.get_default_verify_paths
+    if path_exists is None:
+        path_exists = os.path.exists
+
+    if not frozen or platform_name == "win32":
+        return None
+    if environ.get("SSL_CERT_FILE"):
+        return None
+
+    paths = default_verify_paths()
+    default_cafile = paths.cafile or paths.openssl_cafile
+    if default_cafile and path_exists(default_cafile):
+        return None
+
+    chosen = None
+    label = "the bundled certifi file"
+    if platform_name.startswith("linux"):
+        # The bundled libcrypto is the build runner's (Ubuntu, /usr/lib/ssl):
+        # on Fedora or Arch its default path does not exist but a real system
+        # store does, and it may carry the user's corporate CAs.
+        for candidate in LINUX_SYSTEM_CA_BUNDLES:
+            if path_exists(candidate):
+                chosen = candidate
+                label = "the system CA bundle"
+                break
+    if chosen is None:
+        if certifi_where is None:
+            import certifi
+
+            certifi_where = certifi.where
+        chosen = certifi_where()
+        if not path_exists(chosen):
+            return None
+
+    environ["SSL_CERT_FILE"] = chosen
+    return f"TLS trust store: the default CA file is missing, SSL_CERT_FILE set to {label} {chosen}"
 
 
 def set_event_loop_policy() -> None:
@@ -776,6 +871,7 @@ def main() -> None:
     host = "127.0.0.1"
 
     configure_library_env()
+    tls_trust_note = configure_tls_trust_store()
     set_event_loop_policy()
     configure_stdio()
 
@@ -836,6 +932,11 @@ def main() -> None:
     # the file; AFTER the data-folder lock, so the previous backend (the one
     # an update replaced) has stopped writing to it.
     start_versioned_log(runtime_paths.log_dir)
+
+    if tls_trust_note:
+        from src.core.logging import logger
+
+        logger.info(tls_trust_note)
 
     # Windows-only: bind Postgres/llama-server's lifetime to this process at
     # the kernel level, before either is ever spawned. Unlike the parent-death
