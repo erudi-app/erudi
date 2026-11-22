@@ -681,6 +681,14 @@ direction — such a child may be classified partial and run brake-off. A partia
 its cap, so the brake re-arms at the next load. No signal at all (Windows without PDH)
 is assumed full.
 
+A child whose window Erudi did not size (floor unfit, MLA or unreadable header,
+`ERUDI_CTX=0`, or a window unknown after `/props`) is never classified, yet its load
+still leaves a placement line: the `offloaded N/M` line when it reached the output
+(`partly on the GPU` when N < M, else `full offload`), otherwise the child's device bytes
+(`signal=bytes, measured_mib=…`, with no full or partial verdict, since there is no
+window to model a floor from), otherwise one DEBUG. The brake is off for such a child
+whatever the line says.
+
 **The post-load device check.** On a full child, its device bytes above
 `1.1 × (KV + compute + CUDA context + weights) + 256 MiB` are one WARNING — a
 mis-calibrated constant or a Flash-Attention mis-prediction. Skipped with a vision

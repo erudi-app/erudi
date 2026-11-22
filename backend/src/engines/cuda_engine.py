@@ -775,6 +775,8 @@ class CUDA_Engine(BaseLlamaCppEngine):
             logged = cuda_memory.flash_attention_in(tail)
             handle["fa_on"] = bool(handle.get("fa_proven")) if logged is None else logged
         device_bytes = shared_bytes = None
+        if not handle.get("window_sized"):
+            cls._log_unsized_placement(handle, tail)
         if handle.get("window_sized"):
             try:
                 device_bytes, shared_bytes = cls._measure_device(handle)
@@ -830,6 +832,55 @@ class CUDA_Engine(BaseLlamaCppEngine):
         return cuda_memory.healthy_shared_bytes(
             handle["context_tokens"], fa_on=bool(handle.get("fa_on"))
         )
+
+    @classmethod
+    def _log_unsized_placement(cls, handle: Dict[str, Any], tail: Optional[str]) -> None:
+        """Say where llama-server placed a child whose window Erudi did not
+        size (floor unfit, MLA or unreadable header, ``ERUDI_CTX``): fit
+        placed the layers, and without this line ``backend.log`` would never
+        name the placement. Read from the same ``offloaded N/M`` line as
+        :meth:`_classify_placement`; the brake is already off for such a child,
+        so nothing here decides anything. The line is INFO in llama.cpp and the
+        default verbosity hides it, so without it the child's device bytes are
+        logged instead, with no full/partial verdict (no window, so no KV to
+        model a floor from). Neither signal: one DEBUG."""
+        port = handle.get("port")
+        after = " after a brake respawn" if handle.get("brake_respawn") else ""
+        line = cuda_memory.placement_from_tail(tail)
+        if line is None:
+            try:
+                device_bytes, _ = cls._measure_device(handle)
+            except Exception as exc:
+                # A diagnostic line, never a precondition: the model is loaded.
+                logger.debug(
+                    f"[{cls.__name__}] GPU placement unreadable ({type(exc).__name__}) "
+                    f"(port {port})"
+                )
+                return
+            if device_bytes is None:
+                logger.debug(
+                    f"[{cls.__name__}] GPU placement unknown (no offload line, no device "
+                    f"reading); the window was not sized (port {port})"
+                )
+                return
+            logger.info(
+                f"[{cls.__name__}] GPU placement{after}: the child holds "
+                f"{device_bytes // _MIB} MiB on the device (signal=bytes, "
+                f"measured_mib={device_bytes // _MIB}); the window was not sized, so no "
+                f"full or partial verdict; the memory brake is off for this child (port {port})"
+            )
+            return
+        signal = f"signal=line, offloaded {line[0]}/{line[1]} layers"
+        if line[0] < line[1]:
+            logger.info(
+                f"[{cls.__name__}] llama-server placed the model partly on the GPU{after} "
+                f"({signal}); the memory brake is off for this child (port {port})"
+            )
+        else:
+            logger.info(
+                f"[{cls.__name__}] GPU placement: full offload{after} ({signal}); "
+                f"the window was not sized, the memory brake is off for this child (port {port})"
+            )
 
     @classmethod
     def _classify_placement(
