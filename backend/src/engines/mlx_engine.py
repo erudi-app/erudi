@@ -128,14 +128,22 @@ class MLX_Engine(BaseChatServerEngine):
     # searching filter="mlx" (any author), so no hand-maintained mapping is needed.
     FORMAT_TAG = "mlx"
 
-    # Stored links that download but crash at load.
+    # Stored links that download but cannot hold a conversation on this engine:
+    # they crash at load, or answer nothing usable. An entry hides a catalog
+    # row only when it is the exact link the catalog ships.
     # gemma-4 E2B (the 0.6.2 140-weight ValueError) was re-probed on real
     # mlx-vlm 0.6.13 during the #273 hardware pass — loads via the native
     # gemma4 module and generates cleanly, so its entry was removed.
     KNOWN_BROKEN = frozenset(
         {
-            # multi_modality/vision.py (DeepSeek-VL v1) hard-imports cv2,
-            # which the macOS PyInstaller build does not bundle (#512).
+            # DeepSeek-VL v1 has three blockers, so bundling cv2 alone does not
+            # make it runnable (#721, measured on mlx-vlm 0.6.17, unchanged in
+            # 0.8.0): multi_modality/vision.py hard-imports cv2, which the macOS
+            # PyInstaller build excludes (#512); with a system message (every
+            # Erudi turn) the rendered prompt loses its <image> marker and
+            # prepare_inputs raises IndexError; without one the child aborts on
+            # "There is no Stream(gpu, 2) in current thread" (multi_modality.py
+            # reads a lazy array from another thread; upstream #1614, PR #1854).
             "mlx-community/deepseek-vl-1.3b-chat-4bit",
             "mlx-community/deepseek-vl-1.3b-chat-8bit",
             "mlx-community/deepseek-vl-7b-chat-4bit",
@@ -145,6 +153,19 @@ class MLX_Engine(BaseChatServerEngine):
             # declares PreTrainedTokenizerFast and stays runnable.
             "mlx-community/Llama-3_3-Nemotron-Super-49B-v1-mlx-4bit",
             "mlx-community/Llama-3_3-Nemotron-Super-49B-v1-mlx-6bit",
+            # config.json writes its booleans as integers ("use_cache": 0,
+            # "tie_word_embeddings": 0), which the strict config load rejects
+            # (huggingface_hub 1.10.1 and 1.33.0 alike). The only MLX quant (#721).
+            "ekryski/OLMo-2-0425-1B-Instruct-4bit",
+            # Ships tokenizer.model without tokenizer.json: transformers converts
+            # it only with protobuf, which the macOS build does not bundle
+            # ("Unrecognized processing class", #721). internlm2_5-7b ships a
+            # tokenizer.json and stays runnable.
+            "ekryski/internlm2-chat-1_8b-4bit",
+            # A base for fine-tuning function calls, "not intended for use as a
+            # direct dialogue model" per Google's card: malformed calls and
+            # incoherent text in a chat (#721).
+            "mlx-community/functiongemma-270m-it-4bit",
         }
     )
 

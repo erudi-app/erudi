@@ -8,6 +8,8 @@ the lone exclusion is KNOWN_BROKEN (quants that load-crash). These are pure
 class-attribute / schema checks — no network, CI-safe.
 """
 
+from pathlib import Path
+
 import pytest
 
 from src.core import config
@@ -369,6 +371,41 @@ class TestRunnabilityPredicate:
         ]
         for link in broken:
             assert MLX_Engine.is_runnable(link) is False, link
+
+    def test_catalog_quants_that_cannot_chat_on_mlx_are_not_runnable(self):
+        # #721: OLMo-2-1B's config.json writes booleans as ints (strict config
+        # load rejects it), internlm2-chat-1.8B ships no tokenizer.json (its
+        # conversion needs protobuf, absent from the macOS build), and
+        # functiongemma is a base for fine-tuning, not a dialogue model.
+        for link in (
+            "ekryski/OLMo-2-0425-1B-Instruct-4bit",
+            "ekryski/internlm2-chat-1_8b-4bit",
+            "mlx-community/functiongemma-270m-it-4bit",
+        ):
+            assert MLX_Engine.is_runnable(link) is False, link
+
+    def test_every_known_broken_mlx_entry_names_a_catalog_link_exactly(self):
+        """A KNOWN_BROKEN entry hides a row only when it is the exact link the
+        catalog ships (case included); the deepseek-vl 8-bit and 1.3B/7B
+        siblings and the Nemotron v1 quants are by-link only."""
+        import json
+
+        snapshot = Path(__file__).resolve().parents[1] / "src/database/catalog_snapshot_mlx.json"
+        links = {e["link"] for e in json.loads(snapshot.read_text(encoding="utf-8"))}
+        for link in (
+            "ekryski/OLMo-2-0425-1B-Instruct-4bit",
+            "ekryski/internlm2-chat-1_8b-4bit",
+            "mlx-community/functiongemma-270m-it-4bit",
+            "mlx-community/deepseek-vl-1.3b-chat-4bit",
+            "mlx-community/deepseek-vl-7b-chat-4bit",
+        ):
+            assert link in links, link
+            assert link in MLX_Engine.KNOWN_BROKEN, link
+
+    def test_internlm2_5_stays_runnable(self):
+        # Same `output.*` head as the 1.8B, fixed in the child, and it ships a
+        # tokenizer.json: no protobuf needed.
+        assert MLX_Engine.is_runnable("mlx-community/internlm2_5-7b-chat-4bit") is True
 
     def test_deepseek_vl2_and_nemotron_v1_5_siblings_stay_runnable(self):
         # deepseek-vl2 does not hard-import cv2 (#512), and the v1_5 Nemotron
