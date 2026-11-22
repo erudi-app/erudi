@@ -377,19 +377,19 @@ PARENT_WATCH_INTERVAL_S = 2.0
 def _parent_watch_loop(initial_ppid, *, getppid, hard_exit, sleep, interval_s=None) -> None:
     """Exit this process once its parent is gone (ppid changed).
 
-    The chat child is stopped by the backend's orderly paths (lifespan
+    The MLX children are stopped by the backend's orderly paths (lifespan
     cleanup, atexit); but a backend ended by ``os._exit`` -- run.py's
-    ``arm_exit_deadline`` -- runs no atexit, and a non-daemon ``mp.Process``
-    then survives, reparented. For the embedding child that would orphan
-    ~1.2 GB with nothing left to reap it, so the child watches its parent
-    itself. On POSIX a dead parent shows as a CHANGED ppid (reparenting to
+    ``arm_exit_deadline`` -- or killed outright runs no atexit, and a
+    non-daemon ``mp.Process`` then survives, reparented. That would orphan
+    ~1 GB with nothing left to reap it, so the chat and the embedding child
+    both watch their parent themselves. On POSIX a dead parent shows as a CHANGED ppid (reparenting to
     launchd/init). Injected callables keep the loop unit-testable.
     """
     interval = PARENT_WATCH_INTERVAL_S if interval_s is None else interval_s
     while True:
         sleep(interval)
         if getppid() != initial_ppid:
-            child_warning("parent process is gone; the embedding child exits")
+            child_warning("parent process is gone; this child exits")
             hard_exit(0)
             return
 
@@ -432,10 +432,10 @@ def run_mlx_vlm_server(
         token_queue_timeout_s: The child's per-token wait, sized by the parent
             above its own first-chunk watchdog ceiling; ``None`` leaves
             mlx-vlm's 600 s default. See ``_apply_child_runtime_env``.
-        watch_parent: Exit when the parent process dies (ppid changes). The
-            EMBEDDING child (#594) opts in: a backend ended by ``os._exit``
-            (run.py's exit deadline) runs no atexit and would orphan it.
-            The chat child keeps today's behaviour (``False``).
+        watch_parent: Exit when the parent process dies (ppid changes). Both
+            MLX children opt in (the embedding child since #594, the chat
+            child since #749): a backend ended by ``os._exit`` (run.py's exit
+            deadline) or killed outright runs no atexit and would orphan them.
 
     Returns:
         None. This call blocks for the lifetime of the HTTP server.
@@ -455,7 +455,7 @@ def run_mlx_vlm_server(
             # last words. Reported on the inherited stderr, which the Electron
             # main process writes to the app log.
             print(f"[WARNING] mlx-vlm child output capture disabled: {exc}", file=sys.stderr)
-    # Before the server blocks: the embedding child must not outlive a parent
+    # Before the server blocks: a child must not outlive a parent
     # that could not run its orderly stops (see _parent_watch_loop).
     if watch_parent:
         _start_parent_watch()

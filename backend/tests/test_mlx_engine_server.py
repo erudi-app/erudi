@@ -1397,6 +1397,14 @@ class TestSpawnApcAndTimeout:
         assert args[3] > first_chunk_ceiling_s(None)
         assert args[3] > first_chunk_ceiling_s(60_000)
 
+    def test_chat_child_watches_its_parent(self, tmp_path):
+        """The chat child exits with the backend (#749): an `os._exit` of the
+        backend runs no atexit and would orphan a ~1 GB process."""
+        _handle, args = self._spawn_capture_args(tmp_path, {"max_position_embeddings": 4096})
+        # args = (argv, log_path, apc_num_blocks, token_queue_timeout_s, watch_parent)
+        assert len(args) == 5
+        assert args[4] is True
+
     def test_spawn_stamps_the_trained_window(self, tmp_path):
         handle, _args = self._spawn_capture_args(tmp_path, {"max_position_embeddings": 32768})
         assert handle["trained_context_tokens"] == 32768

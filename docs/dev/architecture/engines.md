@@ -109,12 +109,14 @@ is bounded Erudi-side first (`chunking.truncate_to_tokens`, whose frozen tokeniz
 GGUF tokenizes identically to).
 
 Two deliberate touch points with the rest of the system. First, crash containment:
-the MLX child watches its parent and exits if the backend dies without its orderly
-stops (the `os._exit` deadline paths run no atexit); the llama-server embedding child
-has no parent watch — on Windows the backend's kill-on-close Job Object takes it down
-with a crashed backend, and on Linux a backend killed outright leaves it running
-until Electron's process-group kill or its own idle exit, the same exposure as the
-chat llama-server child. Second, the MLX memory brake, when it acts under CRITICAL
+both MLX children (chat and embedding) watch their parent and exit if the backend dies
+without its orderly stops (the `os._exit` deadline paths and a `kill -9` run no atexit);
+the llama-server children (embedding and chat) have no parent watch. On Windows the
+backend's kill-on-close Job Object takes them down with a crashed backend. On Linux a
+backend killed outright leaves them running until Electron's process-group kill or
+their own idle exit; `PR_SET_PDEATHSIG` is no fix, because it fires on the death of the
+thread that spawned the child, and the spawn runs on a threadpool worker that expires
+after a few idle seconds. Second, the MLX memory brake, when it acts under CRITICAL
 pressure, first asks the manager to release an idle, unleased child
 (`embedder_child.release_now`) — ~1.2 GB back for a ~5 s respawn on the next KB use,
 before it shrinks or unloads the chat model. The CPU/CUDA brakes never govern the
