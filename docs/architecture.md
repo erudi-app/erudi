@@ -37,14 +37,6 @@ database, ingestion, launcher) live outside the domains.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
-The window's session connects directly (`session.setProxy({ mode: "direct" })`,
-applied before the window loads): the renderer only talks to the loopback
-backend, and Chromium would otherwise resolve a system proxy (PAC/WPAD) for each
-of those requests before opening a socket. Updates are unaffected: electron-updater
-downloads through its own `electron-updater` session and keeps the system proxy.
-The window does not clear the HTTP cache when it opens (the packaged app loads
-`file://`); only Clear All Data does.
-
 ## Domains
 
 Routers are mounted under the `/erudi` prefix in `register_routers`
@@ -129,6 +121,18 @@ Routers are mounted under the `/erudi` prefix in `register_routers`
 - Connectivity for the status pill is read in the renderer from `navigator.onLine`
   and the `online` / `offline` events, corrected by requests that fail on the wire
   (`frontend/src/utils/networkStatus.js`). No request is made to answer it.
+
+## The app window (Electron main process)
+
+The main process (`frontend/src/main.js`) creates one window. Its session
+connects directly (`session.setProxy({ mode: "direct" })`, applied before the
+window loads): the renderer only talks to the loopback backend, and Chromium
+holds a request until the system proxy configuration (PAC/WPAD) is ready, loopback
+included. Updates are unaffected: electron-updater downloads through its own
+`electron-updater` session and keeps the system proxy. The window does not clear
+the HTTP cache when it opens (the packaged app loads `file://`); only Clear All
+Data does. See [Logging](logging.md) for diagnosing a startup whose first
+requests stall.
 
 ## Multi-engine architecture
 

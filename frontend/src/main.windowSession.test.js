@@ -10,6 +10,7 @@
  */
 import { describe, it, expect } from "vitest";
 import { readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { fileURLToPath } from "node:url";
 
 const source = readFileSync(fileURLToPath(new URL("./main.js", import.meta.url)), "utf8");
@@ -26,16 +27,28 @@ describe("main window session", () => {
   it("connects directly, awaited, before the window loads anything", () => {
     const body = createWindowBody();
     const proxy = body.search(
-      /await\s+mainWindow\.webContents\.session\.setProxy\(\{ mode: "direct" \}\)/
+      /await\s+win\.webContents\.session\.setProxy\(\{ mode: "direct" \}\)/
     );
     expect(proxy).toBeGreaterThan(-1);
-    expect(proxy).toBeLessThan(body.indexOf("mainWindow.loadFile("));
-    expect(proxy).toBeLessThan(body.indexOf("mainWindow.loadURL(RENDERER_DEV_URL)"));
+    expect(proxy).toBeLessThan(body.indexOf("win.loadFile("));
+    expect(proxy).toBeLessThan(body.indexOf("win.loadURL(RENDERER_DEV_URL)"));
   });
 
   it("still loads the window when the proxy setting fails, and says so", () => {
     expect(createWindowBody()).toMatch(
-      /try \{\s*await mainWindow\.webContents\.session\.setProxy\(\{ mode: "direct" \}\);\s*\} catch \(error\) \{\s*logWarn\(/
+      /try \{\s*await win\.webContents\.session\.setProxy\(\{ mode: "direct" \}\);\s*\} catch \(error\) \{\s*logWarn\(/
+    );
+  });
+
+  it("loads the window it created, not whichever one is current after the await", () => {
+    const body = createWindowBody();
+    expect(body).toMatch(/if \(win\.isDestroyed\(\) \|\| mainWindow !== win\) return;/);
+    expect(body).not.toMatch(/mainWindow\.(loadFile|loadURL)\(/);
+  });
+
+  it("releases the creation flag on every exit, unless another window owns it", () => {
+    expect(createWindowBody()).toMatch(
+      /\} finally \{[^}]*if \(!mainWindow \|\| mainWindow === win\) isCreatingWindow = false;/s
     );
   });
 
@@ -51,9 +64,7 @@ describe("main window session", () => {
     // electron-updater downloads through session.fromPartition("electron-updater"),
     // so the window's direct connection never reaches it.
     const executor = readFileSync(
-      fileURLToPath(
-        new URL("../node_modules/electron-updater/out/electronHttpExecutor.js", import.meta.url)
-      ),
+      createRequire(import.meta.url).resolve("electron-updater/out/electronHttpExecutor.js"),
       "utf8"
     );
     expect(executor).toMatch(/NET_SESSION_NAME = "electron-updater"/);

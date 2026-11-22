@@ -407,16 +407,26 @@ before it propagates, because uvicorn reports it on stderr only.
 
 When the window's first requests to the backend take seconds to start, the
 backend's own log shows nothing wrong: it answers as soon as a request reaches
-it. Launch the app with Chromium's network log to see which phase holds each
-request (proxy resolution, DNS, connect, or a wait before the socket opens):
+it. Quit the running Erudi first (a second launch hands over to the running
+instance and quits, so the flag would never reach it), then launch the app with
+Chromium's network log:
 
 ```bash
-Erudi --log-net-log=/tmp/erudi-netlog.json
+# macOS
+/Applications/Erudi.app/Contents/MacOS/Erudi --log-net-log=/tmp/erudi-netlog.json
 ```
 
-Open the file in the [NetLog viewer](https://netlog-viewer.appspot.com/). The
-renderer already records `duration_ms` for every request in `erudi-backend.log`,
-which tells which requests to look for.
+```powershell
+# Windows: the installed Erudi.exe
+& "<install folder>\Erudi.exe" --log-net-log="$env:TEMP\erudi-netlog.json"
+```
+
+Open the file in the [NetLog viewer](https://netlog-viewer.appspot.com/) and look
+at the phase that holds each request: `PROXY_RESOLUTION_SERVICE` (waiting for the
+system proxy configuration), `HTTP_CACHE`, or a socket-pool wait such as
+`SOCKET_POOL_STALLED_MAX_SOCKETS_PER_GROUP` (Chromium opens at most 6 sockets per
+host). The API client records `duration_ms` for each of its requests in
+`erudi-backend.log`, which tells which requests to look for.
 
 ## Tracing a bug (QA recipe)
 
