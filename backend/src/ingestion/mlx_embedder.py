@@ -31,6 +31,7 @@ chat child's ``mlx-child-<port>.log`` (see docs/logging.md).
 from __future__ import annotations
 
 import multiprocessing as mp
+import os
 from pathlib import Path
 from typing import Any, Optional
 
@@ -124,12 +125,14 @@ def spawn(*, port: int, api_key: str, model_path: Path, log_path: Optional[str])
         "--api-key",
         api_key,
     ]
-    # (argv, log_path, apc_num_blocks, token_queue_timeout_s, watch_parent):
+    # (argv, log_path, apc_num_blocks, token_queue_timeout_s, watch_parent, parent_pid):
     # the chat knobs stay at their defaults; watch_parent makes the child
     # exit if the backend dies without its orderly stops (os._exit paths),
     # so nothing orphans a ~1.2 GB process.
     proc = mp.Process(
-        target=run_mlx_vlm_server, args=(argv, log_path, None, None, True), daemon=False
+        target=run_mlx_vlm_server,
+        args=(argv, log_path, None, None, True, os.getpid()),
+        daemon=False,
     )
     try:
         proc.start()

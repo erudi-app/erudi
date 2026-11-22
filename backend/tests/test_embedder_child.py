@@ -20,6 +20,7 @@ Contract under test (`src.ingestion.embedder_child`):
 
 from __future__ import annotations
 
+import os
 import threading
 import time
 from pathlib import Path
@@ -601,8 +602,43 @@ class TestParentWatch:
         assert captured["target"] is run_mlx_vlm_server
         argv = captured["args"][0]
         assert "--embedding-model" in argv
-        # (argv, log_path, apc_num_blocks, token_queue_timeout_s, watch_parent)
+        # (argv, log_path, apc_num_blocks, token_queue_timeout_s, watch_parent, parent_pid)
         assert captured["args"][4] is True
+        assert captured["args"][5] == os.getpid()
+
+
+class TestParentWatchBaseline:
+    def test_the_watch_starts_from_the_parent_pid_the_spawner_gave(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        started = {}
+
+        class _Thread:
+            def __init__(self, *, target, args, kwargs, name, daemon):
+                started["args"] = args
+
+            def start(self):
+                started["started"] = True
+
+        monkeypatch.setattr("threading.Thread", _Thread)
+        # The real ppid is not the spawner's: the parent died before the
+        # child read it and the child was reparented.
+        monkeypatch.setattr(runner.os, "getppid", lambda: 1)
+        runner._start_parent_watch(4242)
+        assert started["args"] == (4242,)
+        assert started["started"]
+
+    def test_a_parent_dead_before_the_watch_started_is_seen(self):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        exits = []
+        runner._parent_watch_loop(
+            4242,
+            getppid=lambda: 1,
+            hard_exit=exits.append,
+            sleep=lambda s: None,
+        )
+        assert exits == [0]
 
 
 class TestPlatformSelection:

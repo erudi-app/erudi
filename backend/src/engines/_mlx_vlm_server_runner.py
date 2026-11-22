@@ -62,15 +62,16 @@ mlx-vlm bump that moves what they patch must not pass unnoticed.
 
 Contract
 --------
-`run_mlx_vlm_server(argv, log_path, apc_num_blocks, token_queue_timeout_s)`
-replaces `sys.argv` with the supplied list and calls the real
+`run_mlx_vlm_server(argv, log_path, apc_num_blocks, token_queue_timeout_s,
+watch_parent, parent_pid)` replaces `sys.argv` with the supplied list and calls the real
 `mlx_vlm.server.cli.main()`. The first element of `argv` is the conventional
 program name; the rest are the CLI flags that mlx-vlm's argparse expects
 (`--model`, `--host`, `--port`, `--log-level`, ...). `main()` parses them,
 exports the matching env vars (e.g. `MLX_VLM_PRELOAD_MODEL` from `--model`), and
 launches `uvicorn.run("mlx_vlm.server:app", ...)`.
 
-The last two parameters are the runtime knobs this build turns on, applied to
+`watch_parent` and `parent_pid` make the child exit when the backend dies
+(see `_parent_watch_loop`). The two parameters before them are the runtime knobs this build turns on, applied to
 the child's own `os.environ` BEFORE the server is imported (mlx-vlm reads them
 at import/init): `apc_num_blocks` sizes the Automatic Prefix Caching pool so a
 2nd+ turn prefills only the suffix of the conversation, and
@@ -394,11 +395,17 @@ def _parent_watch_loop(initial_ppid, *, getppid, hard_exit, sleep, interval_s=No
             return
 
 
-def _start_parent_watch() -> None:
-    """Daemon thread running :func:`_parent_watch_loop` on the real process."""
+def _start_parent_watch(parent_pid: Optional[int] = None) -> None:
+    """Daemon thread running :func:`_parent_watch_loop` on the real process.
+
+    ``parent_pid`` is the spawner's own pid, handed over as an argument: read
+    here with ``os.getppid()`` after the spawn bootstrap (seconds in a frozen
+    build), a backend that died meanwhile would leave 1 as the baseline and the
+    watch would never fire. Without it the current ppid is the baseline.
+    """
     import threading
 
-    initial = os.getppid()
+    initial = os.getppid() if parent_pid is None else parent_pid
     threading.Thread(
         target=_parent_watch_loop,
         args=(initial,),
@@ -414,6 +421,7 @@ def run_mlx_vlm_server(
     apc_num_blocks: Optional[int] = None,
     token_queue_timeout_s: Optional[float] = None,
     watch_parent: bool = False,
+    parent_pid: Optional[int] = None,
 ) -> None:
     """Child-process entry: set `sys.argv = argv` then run `mlx_vlm.server`'s main().
 
@@ -436,6 +444,10 @@ def run_mlx_vlm_server(
             MLX children opt in (the embedding child since #594, the chat
             child since #749): a backend ended by ``os._exit`` (run.py's exit
             deadline) or killed outright runs no atexit and would orphan them.
+        parent_pid: The spawner's pid, the baseline the watch compares the
+            ppid with (``os.getpid()`` of the backend at the spawn). ``None``
+            reads the ppid in the child, too late if the parent died during
+            the spawn bootstrap.
 
     Returns:
         None. This call blocks for the lifetime of the HTTP server.
@@ -458,7 +470,7 @@ def run_mlx_vlm_server(
     # Before the server blocks: a child must not outlive a parent
     # that could not run its orderly stops (see _parent_watch_loop).
     if watch_parent:
-        _start_parent_watch()
+        _start_parent_watch(parent_pid)
     # Before the server is imported, so no buffer is pooled under the default.
     _bound_buffer_cache()
     # APC on, the aligned token-queue timeout and the one-sequence batch,
