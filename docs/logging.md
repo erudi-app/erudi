@@ -403,6 +403,21 @@ launcher (`backend/run.py`) writes every `startup_error` it emits to
 `backend.log` with its traceback, and the lifespan logs a failed startup
 before it propagates, because uvicorn reports it on stderr only.
 
+## First requests that stall at startup
+
+When the window's first requests to the backend take seconds to start, the
+backend's own log shows nothing wrong: it answers as soon as a request reaches
+it. Launch the app with Chromium's network log to see which phase holds each
+request (proxy resolution, DNS, connect, or a wait before the socket opens):
+
+```bash
+Erudi --log-net-log=/tmp/erudi-netlog.json
+```
+
+Open the file in the [NetLog viewer](https://netlog-viewer.appspot.com/). The
+renderer already records `duration_ms` for every request in `erudi-backend.log`,
+which tells which requests to look for.
+
 ## Tracing a bug (QA recipe)
 
 1. Reproduce the problem and note the time (remember: logs are in UTC).

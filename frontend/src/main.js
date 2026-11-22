@@ -780,7 +780,7 @@ const createApplicationMenu = () => {
   Menu.setApplicationMenu(menu);
 };
 
-const createWindow = () => {
+const createWindow = async () => {
   if (isCreatingWindow || mainWindow) {
     log("Window creation already in progress or window exists, skipping...");
     return;
@@ -856,10 +856,6 @@ const createWindow = () => {
     event.preventDefault();
   });
 
-  mainWindow.webContents.session
-    .clearCache()
-    .catch((error) => logWarn("Could not clear the session cache", error));
-
   mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
     // Skip header modification for backend API responses to preserve
     // chunked transfer-encoding and avoid buffering streaming responses.
@@ -883,6 +879,24 @@ const createWindow = () => {
       },
     });
   });
+
+  // The window only talks to loopback (the CSP's connect-src allows nothing
+  // else), and Chromium resolves a system proxy (PAC/WPAD) for every URL before
+  // opening a socket, loopback included: a slow resolution holds the first
+  // requests (#746). A direct connection skips it. electron-updater downloads
+  // through its own session (fromPartition("electron-updater")), so updates
+  // keep the system proxy. A failure here never blocks the window.
+  try {
+    await mainWindow.webContents.session.setProxy({ mode: "direct" });
+  } catch (error) {
+    logWarn("Could not set the window session to a direct connection", error);
+  }
+
+  // The window may have been closed while the setting was applied.
+  if (!mainWindow || mainWindow.isDestroyed()) {
+    isCreatingWindow = false;
+    return;
+  }
 
   if (app.isPackaged) {
     mainWindow.loadFile(MAIN_WINDOW_RENDERER_INDEX);

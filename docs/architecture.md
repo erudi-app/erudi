@@ -37,6 +37,14 @@ database, ingestion, launcher) live outside the domains.
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+The window's session connects directly (`session.setProxy({ mode: "direct" })`,
+applied before the window loads): the renderer only talks to the loopback
+backend, and Chromium would otherwise resolve a system proxy (PAC/WPAD) for each
+of those requests before opening a socket. Updates are unaffected: electron-updater
+downloads through its own `electron-updater` session and keeps the system proxy.
+The window does not clear the HTTP cache when it opens (the packaged app loads
+`file://`); only Clear All Data does.
+
 ## Domains
 
 Routers are mounted under the `/erudi` prefix in `register_routers`
