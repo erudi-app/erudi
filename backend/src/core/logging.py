@@ -80,6 +80,7 @@ import sys
 import time
 from logging.handlers import RotatingFileHandler
 
+from src.core.logutils import reduce_data_urls
 from src.core.request_context import request_id_var
 from src.launcher import ensure_runtime_paths_initialized
 
@@ -158,6 +159,34 @@ class RequestIdFilter(logging.Filter):
 
 
 _REQUEST_ID_FILTER = RequestIdFilter()
+
+
+class DataUrlFilter(logging.Filter):
+    """Reduce every ``data:<mime>;base64,`` payload to its length, in the message
+    and in the traceback (#760).
+
+    A failed image decode quotes the whole data URL back in its exception, and
+    `logger.exception` would write it. The message is rendered here and the
+    traceback text cached on the record (`Formatter.format` reuses
+    ``exc_text``), so every formatter and handler sees the reduced text.
+    Attached to the handlers, so records bridged from other libraries are
+    covered too.
+    """
+
+    _traceback = logging.Formatter()
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        message = record.getMessage()
+        if "base64," in message:
+            record.msg, record.args = reduce_data_urls(message), None
+        if record.exc_info and not record.exc_text:
+            record.exc_text = self._traceback.formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = reduce_data_urls(record.exc_text)
+        return True
+
+
+_DATA_URL_FILTER = DataUrlFilter()
 
 
 # ----------------------------
@@ -331,6 +360,7 @@ def configure_logger(name: str = APP_LOGGER_NAME) -> logging.Logger:
     ch.setLevel(level)
     ch.setFormatter(CustomFormatter())
     ch.addFilter(_REQUEST_ID_FILTER)
+    ch.addFilter(_DATA_URL_FILTER)
     logger.addHandler(ch)
 
     # File handler (rotating)
@@ -343,6 +373,7 @@ def configure_logger(name: str = APP_LOGGER_NAME) -> logging.Logger:
     fh.setLevel(level)
     fh.setFormatter(utc_formatter(FILE_LOG_FORMAT))
     fh.addFilter(_REQUEST_ID_FILTER)
+    fh.addFilter(_DATA_URL_FILTER)
     logger.addHandler(fh)
 
     # Other libraries log to their own names, which reach the root logger and

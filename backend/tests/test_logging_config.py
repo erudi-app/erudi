@@ -20,6 +20,7 @@ from src.core.logging import (
     FILE_LOG_FORMAT,
     LOG_FILE_NAME,
     CustomFormatter,
+    DataUrlFilter,
     RequestIdFilter,
     configure_logger,
     resolve_log_level,
@@ -510,3 +511,28 @@ def test_new_request_id_format_and_uniqueness():
 @pytest.mark.unit
 def test_get_request_id_defaults_to_dash_outside_requests():
     assert get_request_id() == "-"
+
+
+@pytest.mark.unit
+def test_data_url_filter_reduces_base64_in_message_and_traceback():
+    # #760: a failed image decode quotes the data URL back in the exception;
+    # base64 never reaches a log line, whichever logger wrote it.
+    payload = "Tm90ZSBpcyBub3QgYW4gaW1hZ2U="
+    try:
+        raise ValueError(f"Failed to load image from data:image/png;base64,{payload}: bad")
+    except ValueError:
+        exc_info = sys.exc_info()
+    record = logging.LogRecord(
+        "erudi",
+        logging.ERROR,
+        __file__,
+        1,
+        "failed: data:image/png;base64,%s",
+        (payload,),
+        exc_info,
+    )
+    record.request_id = "-"
+    assert DataUrlFilter().filter(record) is True
+    out = utc_formatter(FILE_LOG_FORMAT).format(record)
+    assert "Tm90" not in out
+    assert out.count("data:image/png;base64,<28 chars>") == 2

@@ -1,6 +1,6 @@
 // @vitest-environment jsdom
 import React from "react";
-import { describe, it, expect, vi, afterEach } from "vitest";
+import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/react";
 
 // Composer behaviors beyond the pasted-image persistence already pinned in
@@ -10,8 +10,17 @@ import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/re
 
 import QuestionInput from "./QuestionInput.jsx";
 
-const pngFile = () =>
-  new File([new Uint8Array([137, 80, 78, 71])], "shot.png", { type: "image/png" });
+// The composer checks an image's signature and has the browser decode it
+// (#760); jsdom cannot decode, so a successful decode is stubbed.
+const PNG_HEADER = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
+beforeEach(() => {
+  vi.stubGlobal(
+    "createImageBitmap",
+    vi.fn(async () => ({ close: () => {} }))
+  );
+});
+
+const pngFile = () => new File([new Uint8Array(PNG_HEADER)], "shot.png", { type: "image/png" });
 
 const pasteImage = (node, file) => {
   const event = new Event("paste", { bubbles: true, cancelable: true });
@@ -24,6 +33,7 @@ const pasteImage = (node, file) => {
 const fileInput = () => document.querySelector('input[type="file"]');
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   cleanup();
   delete window.imageAPI;
   delete window.electron;

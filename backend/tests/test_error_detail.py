@@ -371,3 +371,14 @@ def test_a_quoted_key_names_its_exception_type():
             raise RuntimeError("meaningful wrapper") from inner
     except RuntimeError as exc:
         assert error_detail(exc) == "meaningful wrapper"
+
+
+def test_data_url_payload_is_reduced_to_its_length():
+    # #760: a failed image decode quotes the whole data URL back.
+    detail = _detail(
+        "Failed to load image from data:image/png;base64,Tm90ZSBpcyBub3QgYW4gaW1hZ2U=: "
+        "cannot identify image file"
+    )
+    assert "Tm90" not in detail
+    assert "data:image/png;base64,<28 chars>" in detail
+    assert "cannot identify image file" in detail

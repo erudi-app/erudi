@@ -11,6 +11,16 @@ import { render, screen, cleanup, fireEvent, waitFor } from "@testing-library/re
 
 import QuestionInput from "./QuestionInput.jsx";
 
+// The composer checks an image's signature and has the browser decode it
+// (#760); jsdom cannot decode, so a successful decode is stubbed.
+const PNG_HEADER = [0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a, 0, 0, 0, 0];
+beforeEach(() => {
+  vi.stubGlobal(
+    "createImageBitmap",
+    vi.fn(async () => ({ close: () => {} }))
+  );
+});
+
 const FAKE_PATH = "C:\\Users\\me\\AppData\\Local\\erudi\\pasted-images\\paste-1.png";
 
 // Dispatch a native "paste" carrying a clipboard image file. React reads
@@ -23,8 +33,7 @@ const pasteImage = (node, file) => {
   fireEvent(node, event);
 };
 
-const pngFile = () =>
-  new File([new Uint8Array([137, 80, 78, 71])], "pasted.png", { type: "image/png" });
+const pngFile = () => new File([new Uint8Array(PNG_HEADER)], "pasted.png", { type: "image/png" });
 
 const svgFile = () => new File(["<svg/>"], "vector.svg", { type: "image/svg+xml" });
 
@@ -33,6 +42,7 @@ beforeEach(() => {
 });
 
 afterEach(() => {
+  vi.unstubAllGlobals();
   cleanup();
   delete window.imageAPI;
   delete window.electron;

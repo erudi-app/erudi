@@ -13,9 +13,25 @@ NEVER pass base64/image bytes here — log their byte length instead.
 
 from __future__ import annotations
 
+import re
+
 DEFAULT_LIMIT = 500
 
 _TRUNCATION_SUFFIX = "… [+{n} chars]"
+
+_DATA_URL = re.compile(r"(data:[\w.+\-/]+;base64,)([A-Za-z0-9+/=_\-]+)")
+
+
+def reduce_data_urls(text: str) -> str:
+    """Replace the payload of every ``data:<mime>;base64,`` URL by its length.
+
+    A failed image decode quotes the whole URL back in its exception text, so
+    this is the net under every sink that can carry one (the log handlers, the
+    Details line of a failed turn).
+    """
+    if "base64," not in text:
+        return text
+    return _DATA_URL.sub(lambda m: f"{m.group(1)}<{len(m.group(2))} chars>", text)
 
 
 def truncate_for_log(value, limit: int = DEFAULT_LIMIT) -> str:

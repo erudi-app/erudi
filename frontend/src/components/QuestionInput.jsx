@@ -4,6 +4,7 @@ import { ArrowRight, FileText, ImagePlus, Paperclip, Plus, X } from "lucide-reac
 import { useTranslation } from "react-i18next";
 import { matchCommands, parseSlashCommand } from "../utils/slashCommands";
 import { IMAGE_EXTENSIONS, MAX_IMAGE_BYTES, SUPPORTED_IMAGE_TYPES } from "../utils/imageLimits";
+import { SIGNATURE_BYTES, sniffImageType } from "../utils/imageSignature";
 
 const DEFAULT_MAX_IMAGES = 4;
 
@@ -29,6 +30,22 @@ const hasExtension = (name, extensions) => {
 // document candidate, judged on its extension.
 const looksLikeImage = (file) =>
   file.type?.startsWith("image/") || hasExtension(file.name, IMAGE_EXTENSIONS);
+
+// The MIME type an image file's bytes announce, once the browser has decoded
+// them too; null for anything else (text renamed .png, truncated data, ...).
+const verifiedImageType = async (file) => {
+  try {
+    const head = new Uint8Array(await file.slice(0, SIGNATURE_BYTES).arrayBuffer());
+    const mime = sniffImageType(head);
+    if (!mime || !SUPPORTED_IMAGE_TYPES.includes(mime)) return null;
+    const bitmap = await createImageBitmap(file);
+    bitmap.close?.();
+    return mime;
+  } catch {
+    // Unreadable or undecodable: the caller reports it as an unreadable image.
+    return null;
+  }
+};
 
 export default function QuestionInput({
   placeholder,
@@ -157,8 +174,15 @@ export default function QuestionInput({
     }
     setAttachError(message);
 
-    toAdd.forEach((file) => {
+    toAdd.forEach(async (file) => {
       const knownPath = window.electron?.getFilePath?.(file) || "";
+      // A name and a declared type prove nothing (#760): the bytes must be a
+      // supported image and the browser must decode them before it is attached.
+      const mime = await verifiedImageType(file);
+      if (!mime) {
+        setAttachError(t("chat:composer.errors.unreadable"));
+        return;
+      }
       const reader = new FileReader();
       reader.onerror = () => setAttachError(t("chat:composer.errors.unreadable"));
       reader.onload = async () => {
@@ -172,7 +196,8 @@ export default function QuestionInput({
         setImages((prev) => (prev.length >= maxImages ? prev : [...prev, result]));
         setImagePaths((prev) => (prev.length >= maxImages ? prev : [...prev, filePath]));
       };
-      reader.readAsDataURL(file);
+      // The data URL carries the detected type, not the declared one.
+      reader.readAsDataURL(file.slice(0, file.size, mime));
     });
   };
 
