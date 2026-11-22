@@ -866,7 +866,7 @@ class TestLLM_Endpoints:
         test_db_session.add(base)
         test_db_session.commit()
 
-        engine = _FakeEngine(model_id="38", model_path=str(other_dir / "model.gguf"))
+        engine = _FakeEngine(model_id=str(base.id + 1000), model_path=str(other_dir / "model.gguf"))
         with patch("src.core.config.LLM_Engine", engine):
             response = client.delete(f"/erudi/llms/{base.id}")
 
