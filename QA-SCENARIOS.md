@@ -677,7 +677,7 @@ say which hardware was missing. The rest run on any machine.*
 
 **Interrupted downloads**
 - [ ] When a download **completes** but the app is killed before the job row is finalized, then on relaunch the model is **kept and marked installed** — it is never silently deleted (a multi-GB artifact must survive; if it *is* deleted, that is a data-loss regression).
-- [ ] When a download is **genuinely truncated** and the app is killed, then on relaunch the incomplete files are removed and the log states the path and the size reclaimed (deletion is never silent).
+- [ ] When a download is **genuinely truncated** and the app is killed, then on relaunch the incomplete files are removed and one INFO line says the download was interrupted and gives the path and the size reclaimed (deletion is never silent); no WARNING blames the model, and Diagnostics gains no entry.
 - [ ] When a download finishes and I stay on the screen, then the progress widget resolves and the UI **never stays stuck at 100%** — if finalization wedges, the poll gives up after a few minutes, the sidebar and contact icon come back, and the message says the files were saved (not "Download failed", which would push me to re-download gigabytes I already have).
 - [ ] When I cancel a slow download (on Windows above all), then its partial files are gone once the transfer has stopped — on a slow line that can be a few seconds after the widget reads **Download cancelled** — with nothing left in `models\temp_*` and no `Could not remove` WARNING, and the cancel records nothing in Diagnostics. When I cancel in the last moment, once every file is transferred, then the cancel is refused without an error and the model ends installed.
 

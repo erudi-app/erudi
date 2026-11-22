@@ -210,7 +210,9 @@ installed, its control says so ("Waiting for the download to finish installingâ€
 Quitting the app is not a cancel: the backend interrupts the download, leaves the job
 `running` and its partial files on disk, and the next start resolves them (the job ends
 `failed` with "Download interrupted due to application shutdown" and the files are
-removed, unless the transfer had already completed).
+removed, unless the transfer had already completed). The cleanup logs one INFO line
+saying the download was interrupted; the integrity-check WARNING is kept for a download
+whose transfer had reached 100 % yet whose files fail the engine's check.
 
 ## Searching
 
