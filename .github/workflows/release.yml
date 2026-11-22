@@ -321,6 +321,21 @@ jobs:
             done
             echo "CUDA runtime DLLs present next to the CUDA server."
           fi
+          # cuBLAS belongs beside the CUDA server alone (cuda/bin). PyInstaller
+          # scans llama-server.exe's imports and, with the toolkit on PATH, can
+          # collect cublas64_12.dll and cublasLt64_12.dll (643 MB) into the top
+          # of _internal as well; nothing in the backend loads them. The spec
+          # strips and guards them; this checks the frozen tree on disk, on
+          # every Windows leg (a CPU bundle carries no cuBLAS at all).
+          if [ "${RUNNER_OS}" = "Windows" ]; then
+            stray=$(find backend/dist -type f -iname 'cublas*.dll' -not -path '*/artifacts/llama-cpp/cuda/bin/*')
+            if [ -n "$stray" ]; then
+              echo "::error::cuBLAS DLL(s) outside artifacts/llama-cpp/cuda/bin in the frozen backend (dead weight, ~750 MB on the CUDA installer):"
+              echo "$stray" >&2
+              exit 1
+            fi
+            echo "No cuBLAS DLL outside cuda/bin."
+          fi
           # Presence is not startability: `find` matches a filename, and would
           # be just as happy with a truncated file, a wrong-architecture build,
           # or one whose libraries do not resolve. So start the bundled copy.
