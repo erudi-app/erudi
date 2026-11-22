@@ -30,9 +30,10 @@ embedding child serves the downloadable snapshot.
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import List, Tuple
+from typing import List, Sequence, Tuple
 
 _FLAVOURS = {"cuda": ("cuda", "cpu"), "cpu": ("cpu",)}
 
@@ -118,3 +119,56 @@ def collect_llama_artifacts(
         )
     out.skipped = [str(path) for _what, path, _producer in missing]
     return out
+
+
+#: Where the CUDA llama-server loads its cuBLAS from: beside itself.
+CUDA_BIN_DIR = "artifacts/llama-cpp/cuda/bin"
+
+#: cublas64_12.dll / cublasLt64_12.dll (Windows). Linux builds are static and
+#: out of scope.
+_CUBLAS_DLL = re.compile(r"^cublas(lt)?(64)?(_\d+)?\.dll$", re.IGNORECASE)
+
+
+def _norm(dest: str) -> str:
+    return str(dest).replace("\\", "/")
+
+
+def is_cublas_dll(dest: str) -> bool:
+    return bool(_CUBLAS_DLL.match(_norm(dest).rsplit("/", 1)[-1]))
+
+
+def drop_toplevel_cublas(toc: Sequence[tuple]) -> Tuple[list, List[str]]:
+    """Remove cuBLAS DLLs from a PyInstaller binaries TOC; return (kept, dropped).
+
+    PyInstaller reclassifies the PE files found in ``datas`` -- the
+    ``llama-server.exe`` entries -- as binaries and scans their imports. On the
+    CUDA leg the server imports ``cublas64_12.dll``, which resolves on PATH to
+    the CUDA toolkit the runner installed, and that DLL imports
+    ``cublasLt64_12.dll`` (643 MB): both land at the top of ``_internal``. The
+    frozen backend never loads cuBLAS (only the llama-server child does, from
+    ``cuda/bin``, which ``_llama_runtime_dlls`` ships verbatim after Analysis),
+    so those copies are dead weight. Only ``a.binaries`` is filtered: the
+    ``cuda/bin`` copies live in ``a.datas`` and are never touched.
+    """
+    kept, dropped = [], []
+    for entry in toc:
+        (dropped if is_cublas_dll(entry[0]) else kept).append(entry)
+    return kept, [_norm(e[0]) for e in dropped]
+
+
+def assert_cublas_only_in_cuda_bin(*tocs: Sequence[tuple]) -> None:
+    """Fail the build when a cuBLAS DLL is bundled anywhere but ``cuda/bin``."""
+    stray = sorted(
+        {
+            _norm(e[0])
+            for toc in tocs
+            for e in toc
+            if is_cublas_dll(e[0]) and not _norm(e[0]).startswith(CUDA_BIN_DIR + "/")
+        }
+    )
+    if stray:
+        raise RuntimeError(
+            f"cuBLAS DLL(s) bundled outside {CUDA_BIN_DIR}: {', '.join(stray)}. Only "
+            f"llama-server uses cuBLAS and it loads its own copies; these would add "
+            f"~750 MB to the CUDA installer."
+        )
