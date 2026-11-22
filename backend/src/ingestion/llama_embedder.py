@@ -63,7 +63,7 @@ from typing import Any, List, Optional
 from src.core import config
 from src.core.exceptions import EmbeddingModelMissingException, EngineException
 from src.core.logging import logger
-from src.core.subprocess_flags import hidden_console_creationflags
+from src.core.subprocess_flags import hidden_console_creationflags, signed_exit_code
 from src.engines import mlx_child_log as child_log
 from src.launcher import ensure_runtime_paths_initialized
 
@@ -315,7 +315,7 @@ def is_alive(proc: Any) -> bool:
 
 def exit_code(proc: Any) -> Optional[int]:
     """The dead child's exit code (``Popen`` spells it ``returncode``)."""
-    return getattr(proc, "returncode", None)
+    return signed_exit_code(getattr(proc, "returncode", None))
 
 
 def read_tail(log_path: Optional[str], since: Optional[float]) -> str:

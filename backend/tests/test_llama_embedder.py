@@ -239,6 +239,12 @@ class TestLifecycle:
         assert llama_embedder.exit_code(proc) == -15
         assert llama_embedder.exit_code(None) is None
 
+    def test_windows_exit_code_is_signed(self, monkeypatch):
+        monkeypatch.setattr("src.core.subprocess_flags.platform.system", lambda: "Windows")
+        proc = FakePopen([])
+        proc.returncode = 4294967295
+        assert llama_embedder.exit_code(proc) == -1
+
     def test_mlx_exit_code_is_the_mp_exitcode(self):
         if sys.platform != "darwin":
             pytest.skip("mlx_embedder imports mlx-only modules")

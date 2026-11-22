@@ -43,6 +43,7 @@ import requests
 from src.core.exceptions import EngineException
 from src.engines.cuda_compatibility import classify_cuda_failure
 from src.core.logging import logger
+from src.core.subprocess_flags import signed_exit_code
 from src.engines import memory_brake
 from src.engines.base_engine import BaseEngine, _log_monitor_death, run_reset_shielded
 from src.engines.memory_brake import BrakeState
@@ -135,7 +136,7 @@ class BaseChatServerEngine(BaseEngine):
         for attr in ("returncode", "exitcode"):
             code = getattr(proc, attr, None)
             if isinstance(code, int) and not isinstance(code, bool):
-                return code
+                return signed_exit_code(code)
         return None
 
     @classmethod

@@ -165,6 +165,18 @@ def test_llama_cpp_names_an_ended_child(engine_cls):
     )
 
 
+def test_windows_exit_code_is_named_signed(monkeypatch):
+    monkeypatch.setattr("src.core.subprocess_flags.platform.system", lambda: "Windows")
+    proc = _PopenDyingLate(alive_polls=0, code=4294967295)
+
+    class _Loaded(CPU_Engine):
+        _model = {"proc": proc, "port": 27200}
+
+    assert _Loaded.child_death().cause == (
+        "llama-server child is dead (pid 4120, port 27200, exit code -1)"
+    )
+
+
 def test_a_running_child_or_no_model_names_nothing():
     class _Running(CPU_Engine):
         _model = {"proc": _LivePopen(), "port": 27200}
