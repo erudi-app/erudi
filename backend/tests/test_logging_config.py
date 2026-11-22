@@ -536,3 +536,55 @@ def test_data_url_filter_reduces_base64_in_message_and_traceback():
     out = utc_formatter(FILE_LOG_FORMAT).format(record)
     assert "Tm90" not in out
     assert out.count("data:image/png;base64,<28 chars>") == 2
+
+
+@pytest.mark.unit
+def test_data_url_filter_leaves_a_malformed_log_call_to_the_handler():
+    # `logger.warning("x %s %s", 1)` must not raise out of the filter.
+    record = logging.LogRecord("erudi", logging.WARNING, __file__, 1, "x %s %s", (1,), None)
+    assert DataUrlFilter().filter(record) is True
+    assert record.args == (1,)
+
+
+@pytest.mark.unit
+def test_data_url_filter_is_attached_to_both_handlers(restore_logging):
+    lg = configure_logger()
+    assert lg.handlers
+    for handler in lg.handlers:
+        assert any(isinstance(f, DataUrlFilter) for f in handler.filters), handler
+
+
+@pytest.mark.unit
+def test_attach_data_url_filter_covers_uvicorn_handlers():
+    from src.core.logging import attach_data_url_filter
+
+    uvicorn_error = logging.getLogger("uvicorn.error")
+    handler = logging.StreamHandler(io.StringIO())
+    uvicorn_error.addHandler(handler)
+    try:
+        attach_data_url_filter("uvicorn.error")
+        attach_data_url_filter("uvicorn.error")  # once only
+        assert [f for f in handler.filters if isinstance(f, DataUrlFilter)] != []
+        assert len(handler.filters) == 1
+    finally:
+        uvicorn_error.removeHandler(handler)
+
+
+@pytest.mark.unit
+def test_the_file_handler_reduces_a_bridged_library_record(restore_logging, tmp_path):
+    # A library's record reaches backend.log through RootFileBridge.
+    lg = configure_logger()
+    file_handler = next(h for h in lg.handlers if isinstance(h, RotatingFileHandler))
+    stream = io.StringIO()
+    probe = logging.StreamHandler(stream)
+    probe.setFormatter(file_handler.formatter)
+    for f in file_handler.filters:
+        probe.addFilter(f)
+    other = logging.getLogger("thirdparty")
+    other.propagate = False
+    other.addHandler(probe)
+    try:
+        other.error("bad data:image/png;base64,Tm90ZSBpcyBub3Q=")
+    finally:
+        other.removeHandler(probe)
+    assert "Tm90" not in stream.getvalue()

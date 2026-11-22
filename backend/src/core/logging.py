@@ -80,7 +80,7 @@ import sys
 import time
 from logging.handlers import RotatingFileHandler
 
-from src.core.logutils import reduce_data_urls
+from src.core.logutils import reduce_record
 from src.core.request_context import request_id_var
 from src.launcher import ensure_runtime_paths_initialized
 
@@ -173,20 +173,24 @@ class DataUrlFilter(logging.Filter):
     covered too.
     """
 
-    _traceback = logging.Formatter()
-
     def filter(self, record: logging.LogRecord) -> bool:
-        message = record.getMessage()
-        if "base64," in message:
-            record.msg, record.args = reduce_data_urls(message), None
-        if record.exc_info and not record.exc_text:
-            record.exc_text = self._traceback.formatException(record.exc_info)
-        if record.exc_text:
-            record.exc_text = reduce_data_urls(record.exc_text)
+        reduce_record(record)
         return True
 
 
 _DATA_URL_FILTER = DataUrlFilter()
+
+
+def attach_data_url_filter(*logger_names: str) -> None:
+    """Put the data-URL filter on the handlers of other libraries' loggers.
+
+    For loggers that do not propagate to ours (``uvicorn.error`` writes its
+    "Exception in ASGI application" to stderr through its own handler).
+    """
+    for name in logger_names:
+        for handler in logging.getLogger(name).handlers:
+            if _DATA_URL_FILTER not in handler.filters:
+                handler.addFilter(_DATA_URL_FILTER)
 
 
 # ----------------------------
@@ -277,6 +281,10 @@ class RootFileBridge(logging.Handler):
     A record matching ``_INFO_DEMOTED_LOGGER_FUNCS`` (logger name AND function
     name) is written at ``INFO`` instead of its own level: it stays in
     ``backend.log`` but off the Diagnostics page's error list.
+
+    The file handler's :class:`DataUrlFilter` runs on what is forwarded, so a
+    library's record has its data URLs reduced like ours (in place: the
+    message and traceback text of the shared record, nothing else).
     """
 
     def __init__(self, target: logging.Handler, app_logger_name: str = APP_LOGGER_NAME) -> None:
@@ -290,8 +298,11 @@ class RootFileBridge(logging.Handler):
         if record.name == self._app_name or record.name.startswith(self._app_prefix):
             return
         if (record.name, record.funcName) in _INFO_DEMOTED_LOGGER_FUNCS:
-            # Never mutate the incoming record: other handlers on root still
-            # see it unchanged. `Handler.handle` applies filters but not the
+            # Never change the level of the incoming record: other handlers on
+            # root still see it as it was. (The target's data-URL filter does
+            # rewrite the message and traceback text of the record it handles,
+            # in place and on purpose: a data URL is reduced for every
+            # handler.) `Handler.handle` applies filters but not the
             # target's own level (only `Logger.callHandlers` does), so that
             # check is repeated here for the demoted copy.
             demoted = logging.makeLogRecord(record.__dict__)

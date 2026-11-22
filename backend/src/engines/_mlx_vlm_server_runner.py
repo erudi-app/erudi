@@ -115,6 +115,7 @@ import os
 import time
 from typing import List, Optional
 
+from src.core.logutils import install_data_url_record_factory
 from src.engines.mlx_child_log import child_warning, redirect_stdio_to, write_child_record
 
 # Automatic Prefix Caching (APC) block size, in tokens. The parent sizes the
@@ -729,6 +730,11 @@ def run_mlx_vlm_server(
             # last words. Reported on the inherited stderr, which the Electron
             # main process writes to the app log.
             print(f"[WARNING] mlx-vlm child output capture disabled: {exc}", file=sys.stderr)
+    # mlx-vlm raises "Failed to load image from <the whole data URL>" and its
+    # server logs the exception: reduce data URLs on every record the child
+    # creates, whatever handler mlx-vlm or uvicorn later formats it with
+    # (src.core.logutils imports no src module, unlike src.core.logging).
+    install_data_url_record_factory()
     # Before the server blocks: a child must not outlive a parent
     # that could not run its orderly stops (see _parent_watch_loop).
     if watch_parent:

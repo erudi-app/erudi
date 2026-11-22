@@ -68,4 +68,42 @@ describe("QuestionInput images are checked by content (#760)", () => {
     expect(thumb.getAttribute("src")).toMatch(/^data:image\/jpeg;base64,/);
     expect(close).toHaveBeenCalledTimes(1);
   });
+
+  describe("a mixed batch", () => {
+    const fake = () => new File(["Note"], "fake.png", { type: "image/png" });
+    const png = (name) => new File([new Uint8Array(PNG_HEADER)], name, { type: "image/png" });
+    const jpeg = (name) => new File([new Uint8Array(JPEG_HEADER)], name, { type: "image/jpeg" });
+
+    it("takes the slots from the verified files, in the order picked", async () => {
+      vi.stubGlobal(
+        "createImageBitmap",
+        vi.fn(async () => ({ close: vi.fn() }))
+      );
+      render(<QuestionInput placeholder="ask" onSend={vi.fn()} canAttachImages maxImages={2} />);
+
+      fireEvent.change(fileInput(), { target: { files: [fake(), png("a.png"), jpeg("b.jpg")] } });
+
+      const first = await screen.findByAltText("attachment 1");
+      const second = await screen.findByAltText("attachment 2");
+      expect(first.getAttribute("src")).toMatch(/^data:image\/png;base64,/);
+      expect(second.getAttribute("src")).toMatch(/^data:image\/jpeg;base64,/);
+      expect((await screen.findByRole("alert")).textContent).toMatch(/could not be read/);
+    });
+
+    it("reports the budget, not the unreadable file, when verified files were dropped", async () => {
+      vi.stubGlobal(
+        "createImageBitmap",
+        vi.fn(async () => ({ close: vi.fn() }))
+      );
+      render(<QuestionInput placeholder="ask" onSend={vi.fn()} canAttachImages maxImages={2} />);
+
+      fireEvent.change(fileInput(), {
+        target: { files: [fake(), png("a.png"), png("b.png"), png("c.png")] },
+      });
+
+      await screen.findByAltText("attachment 2");
+      expect((await screen.findByRole("alert")).textContent).not.toMatch(/could not be read/);
+      expect(screen.queryByAltText("attachment 3")).toBeNull();
+    });
+  });
 });

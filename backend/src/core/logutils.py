@@ -13,13 +13,15 @@ NEVER pass base64/image bytes here — log their byte length instead.
 
 from __future__ import annotations
 
+import logging
 import re
 
 DEFAULT_LIMIT = 500
 
 _TRUNCATION_SUFFIX = "… [+{n} chars]"
 
-_DATA_URL = re.compile(r"(data:[\w.+\-/]+;base64,)([A-Za-z0-9+/=_\-]+)")
+# `data:<mime>` then optional `;name=value` parameters, then `;base64,<payload>`.
+_DATA_URL = re.compile(r"(data:[\w.+\-/]+(?:;[\w.+\-]+=[\w.+\-%]*)*;base64,)([A-Za-z0-9+/=_\-]+)")
 
 
 def reduce_data_urls(text: str) -> str:
@@ -32,6 +34,49 @@ def reduce_data_urls(text: str) -> str:
     if "base64," not in text:
         return text
     return _DATA_URL.sub(lambda m: f"{m.group(1)}<{len(m.group(2))} chars>", text)
+
+
+_TRACEBACK_FORMATTER = logging.Formatter()
+
+
+def reduce_record(record: logging.LogRecord) -> None:
+    """Reduce the data URLs of a record's message and traceback, in place.
+
+    The message is rendered once and the traceback text cached on the record
+    (``Formatter.format`` reuses ``exc_text``), so every formatter and handler
+    sees the reduced text. Never raises: a malformed log call (``"%s %s" % (1,)``)
+    must keep failing, or not, exactly as it would have without this.
+    """
+    try:
+        message = record.getMessage()
+        if "base64," in message:
+            record.msg, record.args = reduce_data_urls(message), None
+        if record.exc_info and not record.exc_text:
+            record.exc_text = _TRACEBACK_FORMATTER.formatException(record.exc_info)
+        if record.exc_text:
+            record.exc_text = reduce_data_urls(record.exc_text)
+    except Exception:
+        # Redaction is a net, not a precondition: a record it cannot read goes
+        # through untouched and the handler reports the malformed call itself.
+        pass
+
+
+def install_data_url_record_factory() -> None:
+    """Reduce data URLs on every record this process creates, whatever handler
+    later formats it. For a process that does not own its logging setup (the
+    MLX child: mlx-vlm and uvicorn build their handlers after this runs).
+    """
+    previous = logging.getLogRecordFactory()
+    if getattr(previous, "reduces_data_urls", False):
+        return
+
+    def factory(*args, **kwargs):
+        record = previous(*args, **kwargs)
+        reduce_record(record)
+        return record
+
+    factory.reduces_data_urls = True
+    logging.setLogRecordFactory(factory)
 
 
 def truncate_for_log(value, limit: int = DEFAULT_LIMIT) -> str:
