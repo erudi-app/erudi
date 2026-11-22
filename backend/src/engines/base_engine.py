@@ -546,8 +546,10 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     def is_runnable(cls, link: str) -> bool:
         """Whether a catalog model (already engine-format by construction, since it
         came from a filter=FORMAT_TAG search) can actually run. The only exclusion
-        is KNOWN_BROKEN — quants that load-crash on this engine."""
-        return link not in cls.KNOWN_BROKEN
+        is KNOWN_BROKEN — quants that load-crash on this engine. Compared without
+        case: Hugging Face resolves repo ids case-insensitively, so a by-link
+        download in another case reaches the same quant."""
+        return link.casefold() not in {broken.casefold() for broken in cls.KNOWN_BROKEN}
 
     def __init__(self):
         """Prevent direct instantiation.

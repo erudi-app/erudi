@@ -21,9 +21,25 @@ unit tests that run on Linux CI where `mlx-vlm` is not installed.
 
 In-child patches (pinned mlx-vlm 0.6.17)
 ----------------------------------------
-Two monkeypatches are applied before the server starts. The server's native
-reasoning split is deliberately NOT patched: mlx-vlm streaming chain-of-thought
-in the dedicated `delta.reasoning` field is the wanted behavior (#554) —
+Five monkeypatches are applied before the server starts (`_IN_CHILD_PATCHES`),
+each with the upstream version that makes it unnecessary:
+
+  - `_patch_gemma3_tied_lm_head_quant`: quantized tied-embedding Gemma3
+    checkpoints load (#273). Still needed.
+  - `_patch_turn_end_stop_tokens`: generation stops on the tokenizer's eos and
+    on the named end-of-turn tokens (`TURN_END_TOKENS`), `<|end|>` included
+    except on gpt-oss (#249, #721). The eos half is upstream from 0.7.0
+    (Neywa-Labs/mlx-vlm PR #2112); the named tokens are still needed on 0.8.0.
+  - `_patch_json_tool_call_tolerance`: a tool call written with the doubled
+    braces the Qwen2.5 template shows parses (#721). Still needed on 0.8.0.
+  - `_patch_granite_decode_embedding_multiplier`: Granite (dense and MoE)
+    multiplies its embeddings while decoding too (#721). Still needed on 0.8.0.
+  - `_patch_internlm2_output_head_sanitize`: InternLM2 checkpoints load their
+    `output.*` head (#721). Still needed on 0.8.0.
+
+The server's native reasoning split is deliberately NOT patched: mlx-vlm
+streaming chain-of-thought in the dedicated `delta.reasoning` field is the
+wanted behavior (#554) —
 `Erudi_Chat_OpenAI` (`src.agents.chat_model`) carries the field to the
 runner's `thinking` events, so the old `_patch_inline_thinking` (which forced
 reasoning inline into `delta.content` for the runner's ThinkSplitter) is gone.
@@ -91,6 +107,10 @@ exiting only when the child process is terminated by the parent.
 
 from __future__ import annotations
 
+import functools
+import importlib
+import inspect
+import json
 import os
 import time
 from typing import List, Optional
@@ -209,33 +229,90 @@ def _patch_gemma3_tied_lm_head_quant() -> bool:
     return True
 
 
-def _patch_gemma_end_of_turn_stop() -> bool:
-    """Register Gemma's ``<end_of_turn>`` as a stop token in the mlx_vlm server (#249).
+#: Tokens that close a message in a chat template while the tokenizer's eos may
+#: be something else: Gemma, ChatML (Yi, InternLM2/3, Olmo-3, Qwen2.5-Coder),
+#: Llama 3, Cohere2 (tiny-aya), Phi (Phi-3, Phi-3-vision, Phi-4-mini-reasoning).
+#: ``<|end|>`` is dropped on a Harmony tokenizer: see ``_HARMONY_MESSAGE_END``.
+TURN_END_TOKENS = (
+    "<end_of_turn>",
+    "<|im_end|>",
+    "<|eot_id|>",
+    "<|END_RESPONSE|>",
+    "<|end|>",
+)
 
-    mlx_vlm (still on 0.6.13, ``server/generation.py:_initialize_model``) builds
-    its stop-token set solely from ``config.eos_token_id``. Gemma checkpoints
-    declare ``eos_token`` = ``<eos>`` (id 1), but their chat template ends
-    *every turn* with ``<end_of_turn>`` (id 106) — which is therefore NOT in
-    the stop set. Sampling runs past the answer and streams the literal
-    ``<end_of_turn>`` token text plus multilingual garbage to the user. (The
-    OpenAI ``stop`` request field does not help: mlx_vlm's generation loop
-    halts on token *ids* in ``stop_tokens``, not on decoded strings.)
+#: gpt-oss (Harmony) closes its ``analysis`` message with ``<|end|>`` and only
+#: then writes the ``final`` answer, so stopping there would cut every answer
+#: after its reasoning. The Phi family ends its turn on the same token; the
+#: Harmony ``<|channel|>`` token tells the two apart.
+_HARMONY_MESSAGE_END = "<|end|>"
+_HARMONY_CHANNEL = "<|channel|>"
 
-    0.6.13 additionally merges a checkpoint's ``generation_config.json`` eos
-    ids into the config (``utils._merge_generation_config``), which covers
-    Gemma checkpoints that ship ``eos_token_id: [1, 106]`` there — but that is
-    checkpoint metadata, not a server guarantee. This patch stays as the
-    checkpoint-independent belt: derived from the tokenizer, and a no-op when
-    the merge already put id 106 in the stop set.
 
-    We wrap ``_initialize_model`` to add the tokenizer's ``<end_of_turn>`` id to
-    ``stop_tokens`` after the model loads — derived from the tokenizer, no
-    hardcoded id. A no-op for tokenizers that don't define the token (the id then
-    resolves to ``unk``), so non-Gemma checkpoints are untouched. Idempotent.
+def _is_token_id(value) -> bool:
+    return isinstance(value, int) and not isinstance(value, bool) and value >= 0
+
+
+def _turn_end_stop_ids(tok) -> set:
+    """The ids a turn ends on per the tokenizer: its eos and the named turn ends it knows."""
+    ids = set()
+    for attr in ("eos_token_id", "eos_token_ids"):
+        value = getattr(tok, attr, None)
+        values = value if isinstance(value, (list, tuple, set, frozenset)) else (value,)
+        ids.update(v for v in values if _is_token_id(v))
+
+    unk = getattr(tok, "unk_token_id", None)
+
+    def known(name):
+        # A token the tokenizer lacks converts to its unk id (or None).
+        tid = tok.convert_tokens_to_ids(name)
+        return tid if _is_token_id(tid) and tid != unk else None
+
+    ids.update(tid for tid in map(known, TURN_END_TOKENS) if tid is not None)
+    if known(_HARMONY_CHANNEL) is not None:
+        ids.discard(known(_HARMONY_MESSAGE_END))
+    return ids
+
+
+def _patch_turn_end_stop_tokens() -> bool:
+    """Stop where the turn ends: the tokenizer's eos and the named turn ends (#249, #721).
+
+    mlx-vlm 0.6.17 (``server/generation.py:_initialize_model``) builds its
+    stop-token set from ``config.eos_token_id`` alone, overridden by a
+    checkpoint's ``generation_config.json``. It ignores the tokenizer's own
+    ``eos_token`` and the token the chat template closes a message with, so
+    sampling runs past the answer and streams that token as text -- then, on
+    some models, a made-up next turn until ``max_tokens``. Measured on an M4
+    without the patch: Meta-Llama-3-8B-Instruct (config eos
+    ``<|end_of_text|>``, turn end ``<|eot_id|>``) loops on invented turns,
+    Yi-1.5-6B (``<|im_end|>``) invents a ``user`` turn, Phi-3-mini shows
+    ``<|end|>``, tiny-aya shows ``<|END_RESPONSE|>``, Gemma streams
+    ``<end_of_turn>``. A static scan of the MLX catalog snapshot flags 48
+    entries. The OpenAI ``stop`` request field does not help: the generation
+    loop halts on token ids in ``stop_tokens``, not on decoded strings.
+
+    The wrapped ``_initialize_model`` adds, after the model loads:
+
+      - the tokenizer's eos ids (``eos_token_id``, and ``eos_token_ids`` when
+        present) -- what upstream does from 0.7.0 on (Neywa-Labs/mlx-vlm PR
+        #2112);
+      - the ids of the ``TURN_END_TOKENS`` the tokenizer knows (an unknown one
+        converts to ``unk`` or ``None`` and is skipped). tiny-aya needs this
+        even on 0.8.0: its eos is ``<|END_OF_TURN_TOKEN|>`` but the message
+        closes on ``<|END_RESPONSE|>`` first; Phi-4-mini-reasoning and
+        Phi-3-vision declare ``<|endoftext|>`` but close the turn on
+        ``<|end|>``.
+
+    On a Harmony tokenizer (it knows ``<|channel|>``), ``<|end|>`` is taken out
+    of what is added, even when declared the eos: gpt-oss writes its answer
+    after it. Nothing upstream put in the set is removed. A failure
+    while reading the tokenizer leaves upstream's set and one warning in the
+    child's log; the model still loads. Idempotent.
 
     Returns:
         True if the patch was applied (or already present), False if mlx-vlm's
-        server generation module could not be imported (non-MLX hosts, CI).
+        server generation module or its ``ResponseGenerator._initialize_model``
+        is not where 0.6.17 has it (non-MLX hosts, an mlx-vlm bump).
     """
     try:
         from mlx_vlm.server import generation as _gen
@@ -245,29 +322,214 @@ def _patch_gemma_end_of_turn_stop() -> bool:
     rg = getattr(_gen, "ResponseGenerator", None)
     if rg is None or not hasattr(rg, "_initialize_model"):
         return False
-    if getattr(rg, "_erudi_end_of_turn_patch", False):
+    if getattr(rg, "_erudi_turn_end_stop_patch", False):
         return True
 
     _orig_initialize_model = rg._initialize_model
 
+    @functools.wraps(_orig_initialize_model)
     def _initialize_model(self):
         _orig_initialize_model(self)
+        tok = getattr(self, "tokenizer", None)
+        stop = getattr(self, "stop_tokens", None)
+        if tok is None or stop is None:
+            return
         try:
-            tok = getattr(self, "tokenizer", None)
-            stop = getattr(self, "stop_tokens", None)
-            if tok is None or stop is None:
-                return
-            unk = getattr(tok, "unk_token_id", None)
-            tid = tok.convert_tokens_to_ids("<end_of_turn>")
-            if tid is not None and tid >= 0 and tid != unk:
-                stop.add(tid)
-        except Exception:
-            # Stop-token augmentation must never break model load.
-            pass
+            added = _turn_end_stop_ids(tok) - stop
+        except Exception as exc:
+            child_warning(
+                f"Turn-end stop tokens not added: {type(exc).__name__}: {exc}. "
+                f"Generation stops on the config eos only."
+            )
+            return
+        stop.update(added)
+        write_child_record("INFO", f"Stop tokens: {sorted(stop)} (added {sorted(added)})")
 
     rg._initialize_model = _initialize_model
-    rg._erudi_end_of_turn_patch = True
+    rg._erudi_turn_end_stop_patch = True
     return True
+
+
+def _patch_json_tool_call_tolerance() -> bool:
+    """Parse the doubled-brace tool call the Qwen2.5 template teaches (#721).
+
+    The official Qwen2.5 tool template (also in Nemotron-Nano-9B-v2 and
+    VoiceChat-11B) shows the call format as
+    ``{{"name": <function-name>, "arguments": <args-json-object>}}``, a
+    Jinja-escaping slip that renders the braces doubled. Qwen2.5-0.5B copies
+    them: ``{{"name": "get_weather", "arguments": {"city": "Paris"}}}}``.
+    mlx-vlm 0.6.17's ``tool_parsers/json_tools.parse_tool_call`` is a strict
+    ``json.loads``, so ``process_tool_calls`` logs "Invalid tool call" and drops
+    it; the streamed text after ``<tool_call>`` is already suppressed, so the
+    turn ends with no content and no call. Unchanged in 0.8.0; no upstream
+    issue found.
+
+    The wrapper tries the strict parse first, so a valid call is parsed
+    exactly as before. Only when it fails on text that opens with ``{{``, it
+    drops the extra leading braces, decodes one JSON object and accepts it
+    when nothing but closing braces follows and the object is a call (a
+    string ``name``, ``arguments`` an object or a string). Anything else
+    raises, as today: a malformed call is never executed. Idempotent.
+
+    Returns:
+        True if the patch was applied (or already present), False if mlx-vlm's
+        ``json_tools`` parser is not where 0.6.17 has it.
+    """
+    try:
+        from mlx_vlm.tool_parsers import json_tools as _json_tools
+    except Exception:
+        return False
+
+    strict = getattr(_json_tools, "parse_tool_call", None)
+    if strict is None:
+        return False
+    if getattr(_json_tools, "_erudi_tolerant_parse_patch", False):
+        return True
+
+    @functools.wraps(strict)
+    def parse_tool_call(text, tools=None):
+        try:
+            return strict(text, tools)
+        except ValueError:  # json.JSONDecodeError
+            candidate = text.strip()
+            if not candidate.startswith("{{"):
+                raise
+        while candidate.startswith("{{"):
+            candidate = candidate[1:]
+        call, end = json.JSONDecoder().raw_decode(candidate)
+        if candidate[end:].strip("} \t\r\n"):
+            raise ValueError(f"Tool call has trailing text: {text!r}")
+        if not (
+            isinstance(call, dict)
+            and isinstance(call.get("name"), str)
+            and isinstance(call.get("arguments"), (dict, str))
+        ):
+            raise ValueError(f"Tool call has no name or arguments: {text!r}")
+        return call
+
+    _json_tools.parse_tool_call = parse_tool_call
+    _json_tools._erudi_tolerant_parse_patch = True
+    return True
+
+
+#: The Granite decoder classes whose ``__call__`` multiplies the embeddings on
+#: the ``inputs_embeds`` path only (mlx-vlm 0.6.17, unchanged in 0.8.0).
+_GRANITE_DECODE_TARGETS = (
+    ("mlx_vlm.models.granite.language", "GraniteModel"),
+    ("mlx_vlm.models.granitemoe.language", "GraniteMoEModel"),
+)
+
+
+def _embed_ids_first(orig):
+    """Wrap a Granite decoder ``__call__`` so token ids go through its embeddings path."""
+
+    @functools.wraps(orig)
+    def __call__(self, inputs, cache=None, inputs_embeds=None):
+        if inputs_embeds is None:
+            inputs_embeds = self.embed_tokens(inputs)
+        return orig(self, inputs, cache, inputs_embeds=inputs_embeds)
+
+    return __call__
+
+
+def _patch_granite_decode_embedding_multiplier() -> bool:
+    """Apply Granite's embedding multiplier while decoding, not only at prefill (#721).
+
+    mlx-vlm 0.6.17 ``models/granite/language.py`` (``GraniteModel.__call__``)
+    and ``models/granitemoe/language.py`` (``GraniteMoEModel.__call__``)
+    multiply the embeddings by ``embedding_multiplier`` only on the
+    ``inputs_embeds`` path. The prefill takes it (``Model.get_input_embeddings``),
+    but every decode step passes token ids, so the multiplier -- 12 on
+    granite-3.3 and granite-4.1 -- is skipped: the first token is right and the
+    rest is noise ("The Par thees the,: France"). mlx-lm multiplies on both
+    paths. Unchanged in 0.8.0; no upstream issue found. No ``granitemoe``
+    model is in the catalog, but a Hugging Face search or a by-link download
+    reaches one. The ``granitemoehybrid`` models (granite-4.0) multiply on both
+    paths and are not affected.
+
+    The wrapper embeds the ids itself when no embeddings are given, so the
+    upstream body multiplies exactly once on both paths. Idempotent.
+
+    Returns:
+        True if both classes are patched (or already were), False if either
+        class or its ``inputs_embeds`` parameter is not where 0.6.17 has it
+        (the other one is still patched).
+    """
+    applied = True
+    for module_name, class_name in _GRANITE_DECODE_TARGETS:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            applied = False
+            continue
+        cls = getattr(module, class_name, None)
+        orig = vars(cls).get("__call__") if isinstance(cls, type) else None
+        if orig is None or "inputs_embeds" not in inspect.signature(orig).parameters:
+            applied = False
+            continue
+        if getattr(cls, "_erudi_granite_multiplier_patch", False):
+            continue
+        cls.__call__ = _embed_ids_first(orig)
+        cls._erudi_granite_multiplier_patch = True
+    return applied
+
+
+def _patch_internlm2_output_head_sanitize() -> bool:
+    """Load InternLM2's ``output.*`` head (#721).
+
+    mlx-vlm 0.6.17 ``models/internlm2/internlm2.py`` (``Model.sanitize``)
+    prefixes ``model.*`` and ``lm_head.*`` with ``language_model.``, but
+    InternLM2 names its head ``output.*``, so the strict load rejects every
+    InternLM2 checkpoint: "Received 3 parameters not in model: output.biases,
+    output.scales, output.weight". Unchanged in 0.8.0; no upstream issue found.
+    internlm3 names its head ``lm_head`` and is not affected.
+
+    The wrapper prefixes ``output.*`` before the upstream sanitize runs, which
+    leaves an already-prefixed key alone. Idempotent.
+
+    Returns:
+        True if the patch was applied (or already present), False if the
+        InternLM2 ``Model.sanitize`` is not where 0.6.17 has it.
+    """
+    try:
+        from mlx_vlm.models.internlm2 import internlm2 as _internlm2
+    except Exception:
+        return False
+
+    cls = getattr(_internlm2, "Model", None)
+    if cls is None or not hasattr(cls, "sanitize"):
+        return False
+    if getattr(cls, "_erudi_internlm2_head_patch", False):
+        return True
+
+    _orig_sanitize = cls.sanitize
+
+    @functools.wraps(_orig_sanitize)
+    def sanitize(self, weights):
+        weights = {
+            (f"language_model.{k}" if k.startswith("output.") else k): v for k, v in weights.items()
+        }
+        return _orig_sanitize(self, weights)
+
+    cls.sanitize = sanitize
+    cls._erudi_internlm2_head_patch = True
+    return True
+
+
+#: The in-child patches, applied in this order before the server starts.
+_IN_CHILD_PATCHES = (
+    # Quantized tied-embedding Gemma3 checkpoints load (#273).
+    "_patch_gemma3_tied_lm_head_quant",
+    # Generation stops at the end of the turn instead of streaming the
+    # end-of-turn token and invented turns (#249, #721).
+    "_patch_turn_end_stop_tokens",
+    # A tool call written with the Qwen2.5 template's doubled braces parses (#721).
+    "_patch_json_tool_call_tolerance",
+    # Granite keeps its embedding multiplier while decoding (#721).
+    "_patch_granite_decode_embedding_multiplier",
+    # InternLM2 checkpoints load their `output.*` head (#721).
+    "_patch_internlm2_output_head_sanitize",
+)
 
 
 def _bound_buffer_cache() -> None:
@@ -478,16 +740,13 @@ def run_mlx_vlm_server(
     # (the APC pool in `apc.from_env`, the timeout in `server.runtime_config`,
     # the batch cap when its generation loop starts).
     _apply_child_runtime_env(apc_num_blocks, token_queue_timeout_s)
-    # Applied in-child before the server loads any model so quantized
-    # tied-embeddings Gemma3 checkpoints (270m/1b text-only via the native
-    # gemma3_text route, and multimodal gemma3) load cleanly on 0.6.13 (#273).
-    # Each patch fixes a defect the user would otherwise meet head-on, so a
-    # patch that did not apply is recorded rather than silently tolerated --
-    # the record lands in the captured file, which the parent quotes.
-    _record_unapplied_patch("_patch_gemma3_tied_lm_head_quant", _patch_gemma3_tied_lm_head_quant())
-    # Register Gemma's <end_of_turn> as a stop token so generation halts at the
-    # end of the answer instead of streaming the literal token + garbage (#249).
-    _record_unapplied_patch("_patch_gemma_end_of_turn_stop", _patch_gemma_end_of_turn_stop())
+    # Applied in-child before the server loads any model: each one fixes a
+    # defect the user would otherwise meet head-on, so a patch that did not
+    # apply is recorded rather than silently tolerated -- the record lands in
+    # the captured file, which the parent quotes. Looked up by name at call
+    # time, so a test can stub any of them.
+    for name in _IN_CHILD_PATCHES:
+        _record_unapplied_patch(name, globals()[name]())
     main = _import_mlx_vlm_server_main()
     main()
 
@@ -495,9 +754,10 @@ def run_mlx_vlm_server(
 def _record_unapplied_patch(name: str, applied: bool) -> None:
     """Warn (in the child's own log) when a monkeypatch could not be applied.
 
-    Every patch above compensates for a pinned-mlx-vlm defect with a visible
-    consequence: a quantized Gemma3 checkpoint that refuses to load, a Gemma
-    answer that runs past ``<end_of_turn>``. Each returns ``False`` when its
+    Every patch in ``_IN_CHILD_PATCHES`` compensates for a pinned-mlx-vlm
+    defect with a visible consequence: a checkpoint that refuses to load, an
+    answer that runs past its end-of-turn token, an empty tool turn, Granite
+    noise. Each returns ``False`` when its
     target module or class is not where it expects it -- an mlx-vlm bump,
     typically. Unrecorded, that ships a degraded product with nothing to
     explain it.

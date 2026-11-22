@@ -30,6 +30,7 @@ non-functional behavior.
 - [ ] When I have no installed models, then the Installed section shows "No models installed yet…" with my recommended size.
 - [ ] When no base model fits my machine, then the "Recommended" section is hidden (not empty).
 - [ ] When a model is **not runnable on my hardware**, then its card shows "Not supported on your hardware" and Download is disabled.
+- [ ] *(Apple Silicon)* When I browse the catalog, then **OLMo 2 0425 1B Instruct**, **Internlm2 Chat 1_8b**, **Functiongemma 270M Instruct**, **Deepseek VL 1.3B Chat** and **Deepseek VL 7B Chat** are shown as not supported, with Download disabled; and a by-link download of one of them (`curl -X POST http://127.0.0.1:27182/erudi/llms/download/huggingface -H 'Content-Type: application/json' -d '{"link":"ekryski/OLMo-2-0425-1B-Instruct-4bit"}'`) is refused with a clear message, nothing transferred.
 - [ ] When a model is **gated** (from a Hugging Face search hit), then the card shows a "gated" tag.
 - [ ] When I browse the **bundled catalog**, then no card links to a gated repository at all — Erudi downloads anonymously, so a gated link would 401 whoever clicked it *(gated repos are dropped at snapshot time, not flagged)*.
 - [ ] When a model is **under ~4B parameters**, then its card — catalog, explore and installed alike — carries the note that tool use, knowledge-base search and multi-step reasoning are unreliable below ~4B; a 7B or unknown-size card carries no such note.
@@ -72,6 +73,17 @@ non-functional behavior.
 - [ ] When the Creativity slider is dragged to the top, then it reaches **2**, not 1.
 - [ ] When the selected model's publisher recommends **nothing**, then a muted one-liner under the sliders says so ("No sampling recommendation from this model's publisher; neutral defaults applied") — in `/config` (in a conversation and on the new-conversation page) and the model info modal, and **never** on a card face or in the Arena.
 - [ ] When the publisher **does** recommend values, then that one-liner is absent.
+
+**Catalog models end their turn and load**
+- [ ] *(Apple Silicon)* When I ask **Yi 1.5 6B Chat**, **Meta Llama 3 8B Instruct** and **Phi 3 Mini 4k Instruct** a short question, then hold a three-turn conversation with each, then no `<|…|>` token shows in any answer, the model never writes a turn for me, and each answer stops on its own; `logs/mlx-child-<port>.log` has a `Stop tokens: [...] (added [...])` line and no `did not apply` line.
+- [ ] *(Apple Silicon)* When I ask **Tiny Aya Global** one question in French and one in Arabic, then neither answer ends with `<|END_RESPONSE|>`.
+- [ ] *(Apple Silicon)* When I ask **Phi 4 Mini Reasoning** a short math question, then its reasoning and its answer are both complete, no `<|end|>` shows, and the answer stops on its own instead of running on.
+- [ ] *(Apple Silicon)* When a reasoning model answers (**Qwen3 0.6B**, and **Gpt Oss 20B** if the machine can load it), then the reasoning strip and the final answer are both complete: the answer is never cut right after the reasoning. **Gemma 3 270M** and **Gemma 4 E2B** answer in full with no `<end_of_turn>`.
+- [ ] *(Apple Silicon)* When I attach a knowledge base to **Qwen2.5 0.5B Instruct** and ask a question its documents answer, then the model searches the knowledge base and answers from it, instead of "The model finished its turn without writing an answer". Same on **Qwen2.5 1.5B Instruct**.
+- [ ] *(Apple Silicon)* When I hold a two-turn conversation with **Granite 3.3 2B Instruct** and **Granite 4.1 3B**, then both answers are coherent sentences, not a scramble of words.
+- [ ] *(Apple Silicon)* When I download **Internlm2_5 7B Chat**, then it loads, answers, and no `<|im_end|>` shows.
+- [ ] *(Windows, observation only)* When I ask a GGUF **Tiny Aya Global** a question, and a GGUF **Qwen2.5 0.5B Instruct** with a knowledge base attached a question its documents answer, then record whether `<|END_RESPONSE|>` shows and whether the knowledge base is searched; open an issue for either defect *(this version changes nothing on llama.cpp; the Apple Silicon fixes are not measured there)*.
+- [ ] *(Linux, observation only)* The same two observations as on Windows, recorded for Linux.
 
 **Edge cases & errors**
 - [ ] When I send **without any image** (plain text), then the model answers normally.

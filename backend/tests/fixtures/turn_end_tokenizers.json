@@ -1,0 +1,85 @@
+{
+  "_about": "Stop-token facts of one catalog repo per family, read from its config.json, generation_config.json and tokenizer_config.json (tiny-aya's ids from its tokenizer.json). config_stop is the set mlx-vlm 0.6.17 builds on its own (config eos, overridden by generation_config); expected_stop is what the child must stop on.",
+  "families": {
+    "llama3": {
+      "repo": "mlx-community/Meta-Llama-3-8B-Instruct-4bit",
+      "config_stop": [128001],
+      "eos_token_id": 128009,
+      "unk_token_id": null,
+      "tokens": {"<|eot_id|>": 128009},
+      "expected_stop": [128001, 128009]
+    },
+    "yi": {
+      "repo": "mlx-community/Yi-1.5-6B-Chat-4bit",
+      "config_stop": [2],
+      "eos_token_id": 7,
+      "unk_token_id": 0,
+      "tokens": {"<|im_end|>": 7},
+      "expected_stop": [2, 7]
+    },
+    "cohere2": {
+      "repo": "mlx-community/tiny-aya-global-8bit-mlx",
+      "config_stop": [3],
+      "eos_token_id": 6,
+      "unk_token_id": null,
+      "tokens": {"<|END_OF_TURN_TOKEN|>": 6, "<|END_RESPONSE|>": 261001},
+      "expected_stop": [3, 6, 261001]
+    },
+    "phi3": {
+      "repo": "mlx-community/Phi-3-mini-4k-instruct-4bit",
+      "config_stop": [32000],
+      "eos_token_id": 32007,
+      "unk_token_id": 0,
+      "tokens": {"<|end|>": 32007},
+      "expected_stop": [32000, 32007]
+    },
+    "phi3_vision": {
+      "repo": "mlx-community/Phi-3-vision-128k-instruct-4bit",
+      "config_stop": [2],
+      "eos_token_id": 32000,
+      "unk_token_id": 0,
+      "tokens": {"<|end|>": 32007},
+      "expected_stop": [2, 32000, 32007]
+    },
+    "phi4_mini_reasoning": {
+      "repo": "lmstudio-community/Phi-4-mini-reasoning-MLX-4bit",
+      "config_stop": [199999],
+      "eos_token_id": 199999,
+      "unk_token_id": 199999,
+      "tokens": {"<|end|>": 200020},
+      "expected_stop": [199999, 200020]
+    },
+    "gpt_oss": {
+      "repo": "lmstudio-community/gpt-oss-20b-MLX-8bit",
+      "config_stop": [199999, 200002],
+      "eos_token_id": 200002,
+      "unk_token_id": null,
+      "tokens": {"<|end|>": 200007, "<|channel|>": 200005, "<|return|>": 200002},
+      "expected_stop": [199999, 200002]
+    },
+    "gemma3": {
+      "repo": "mlx-community/gemma-3-1b-it-4bit",
+      "config_stop": [1],
+      "eos_token_id": 1,
+      "unk_token_id": 3,
+      "tokens": {"<end_of_turn>": 106},
+      "expected_stop": [1, 106]
+    },
+    "internlm2": {
+      "repo": "mlx-community/internlm2_5-7b-chat-4bit",
+      "config_stop": [2],
+      "eos_token_id": 2,
+      "unk_token_id": 0,
+      "tokens": {"<|im_end|>": 92542},
+      "expected_stop": [2, 92542]
+    },
+    "qwen2": {
+      "repo": "mlx-community/Qwen2.5-0.5B-Instruct-4bit",
+      "config_stop": [151645],
+      "eos_token_id": 151645,
+      "unk_token_id": null,
+      "tokens": {"<|im_end|>": 151645},
+      "expected_stop": [151645]
+    }
+  }
+}
