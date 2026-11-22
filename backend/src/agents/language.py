@@ -113,6 +113,21 @@ LANGUAGE_NAMES = {
     "hu": "Hungarian",
 }
 
+# The title instruction written IN the target language, keyed like
+# LANGUAGE_NAMES: the strongest prompt-level counter to a title drifting into
+# English (same mechanism as the answer-language lines in ``agents.prompts``).
+# It closes the title prompt, right before the question. A language with a
+# name but no line here keeps only the English "Write the title in X." line.
+TITLE_LANGUAGE_LINES = {
+    "fr": "Écris le titre en français.",
+    "es": "Escribe el título en español.",
+    "zh": "用中文写标题。",
+    "de": "Schreibe den Titel auf Deutsch.",
+    "it": "Scrivi il titolo in italiano.",
+    "pt": "Escreva o título em português.",
+    "nl": "Schrijf de titel in het Nederlands.",
+}
+
 # What goes into the detector for a conversation's messages: the classifier
 # needs no more than this, and the tail is the freshest signal.
 _DETECTION_MAX_CHARS = 2000
@@ -152,6 +167,24 @@ def own_words(text: str) -> str:
     return re.sub(r"\s+", " ", text).strip()
 
 
+def language_code(texts: "str | list[Optional[str]]") -> Optional[str]:
+    """Code (a ``LANGUAGE_NAMES`` key) of the language of the user's own words.
+
+    See ``language_name``, which names it; None when unconfident.
+    """
+    if isinstance(texts, str):
+        texts = [texts]
+    weights: dict[str, int] = {}
+    for text in texts:
+        words = own_words(text or "")[-_DETECTION_MAX_CHARS:]
+        code = detect_language(words)
+        if code in LANGUAGE_NAMES:
+            weights[code] = weights.get(code, 0) + len(words)
+    if not weights:
+        return None
+    return max(weights, key=weights.__getitem__)
+
+
 def language_name(texts: "str | list[Optional[str]]") -> Optional[str]:
     """English name of the language of the user's own words, or None.
 
@@ -164,17 +197,8 @@ def language_name(texts: "str | list[Optional[str]]") -> Optional[str]:
     language as the user's messages" line -- never a default language, never
     the language of an attachment.
     """
-    if isinstance(texts, str):
-        texts = [texts]
-    weights: dict[str, int] = {}
-    for text in texts:
-        words = own_words(text or "")[-_DETECTION_MAX_CHARS:]
-        code = detect_language(words)
-        if code in LANGUAGE_NAMES:
-            weights[code] = weights.get(code, 0) + len(words)
-    if not weights:
-        return None
-    return LANGUAGE_NAMES[max(weights, key=weights.__getitem__)]
+    code = language_code(texts)
+    return LANGUAGE_NAMES[code] if code else None
 
 
 # ---------------------------------------------------------------------------

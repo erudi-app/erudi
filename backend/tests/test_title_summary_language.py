@@ -57,6 +57,60 @@ class TestTitlePromptLanguage:
         assert "same language as the user's message" in prompt
         assert "Write the title in English." not in prompt
 
+    @pytest.mark.parametrize("model_type", ["mistral", "qwen"])
+    @pytest.mark.parametrize(
+        "question,line",
+        [
+            (FRENCH, "Écris le titre en français."),
+            (SPANISH, "Escribe el título en español."),
+            (CHINESE, "用中文写标题。"),
+        ],
+    )
+    def test_title_prompt_carries_the_instruction_in_the_target_language(
+        self, test_db_session, question, line, model_type
+    ):
+        prompt = ConversationService(test_db_session)._build_title_prompt_text(question, model_type)
+        assert line in prompt
+        # The last instruction: only the question itself follows it.
+        tail = prompt.split(line, 1)[1]
+        assert question in tail
+        assert tail.replace(question, "").strip(" \n:") in (
+            "",
+            "User message",
+            "Create a 2-to-4-word title for",
+        )
+        assert "Examples" not in tail
+
+    @pytest.mark.parametrize("model_type", ["mistral", "qwen"])
+    def test_title_prompt_has_no_english_examples_for_a_french_question(
+        self, test_db_session, model_type
+    ):
+        prompt = ConversationService(test_db_session)._build_title_prompt_text(FRENCH, model_type)
+        for english in ("Pizza Recipe", "Google Founding Team", "Japan Capital", "Pig Female"):
+            assert english not in prompt
+        assert "Compte De Pommes" in prompt
+
+    @pytest.mark.parametrize("model_type", ["mistral", "qwen"])
+    def test_no_examples_next_to_another_named_language(self, test_db_session, model_type):
+        prompt = ConversationService(test_db_session)._build_title_prompt_text(SPANISH, model_type)
+        assert "Pizza Recipe" not in prompt
+        assert "Compte De Pommes" not in prompt
+
+    @pytest.mark.parametrize("model_type", ["mistral", "qwen"])
+    def test_an_english_question_keeps_its_examples(self, test_db_session, model_type):
+        prompt = ConversationService(test_db_session)._build_title_prompt_text(ENGLISH, model_type)
+        assert "Pizza Recipe" in prompt
+        assert "Compte De Pommes" in prompt
+        assert "Écris le titre" not in prompt
+
+    @pytest.mark.parametrize("model_type", ["mistral", "qwen"])
+    def test_unconfident_detection_keeps_examples_and_no_localized_line(
+        self, test_db_session, model_type
+    ):
+        prompt = ConversationService(test_db_session)._build_title_prompt_text("ok", model_type)
+        assert "Pizza Recipe" in prompt
+        assert "Écris le titre" not in prompt
+
     def test_mistral_variant_is_kept(self, test_db_session):
         service = ConversationService(test_db_session)
         mistral = service._build_title_prompt_text(FRENCH, "mistral")

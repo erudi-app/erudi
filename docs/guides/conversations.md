@@ -819,7 +819,10 @@ Streams `text/plain` (not NDJSON) — the title, sent once generation ends. The 
 code fences, backticks, wrapping quotes and list markers are stripped, only the first line is kept,
 consecutive duplicate words are collapsed, and the length is capped. The title follows the language
 of the first message: the prompt names the detected language outright ("Write the title in
-French."), and falls back to a generic "same language as the user's message" line when detection is
+French.") and closes the prompt, right before the question, with the same instruction written in that
+language ("Écris le titre en français."; French, Spanish, Chinese, German, Italian, Portuguese and
+Dutch have one). The English examples are dropped for any other language than English (French keeps
+its own), since they pull the title toward English. The prompt falls back to a generic "same language as the user's message" line when detection is
 not confident (a very short message), never to English. Only the user's own words are read:
 attachment text, code, URLs, quoted lines and a pasted text following an instruction line do not
 set the language. Letters of a script the message does not use are then dropped (a stray Han word

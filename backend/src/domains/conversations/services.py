@@ -25,7 +25,13 @@ from src.core.logging import logger
 from src.core.logutils import truncate_for_log
 from src.agents.curated_turns import CURATED_ERROR_EVENT, curated_trace_event
 from src.agents.kb_mode import plan_turn
-from src.agents.language import is_greeting, language_name, strip_foreign_scripts
+from src.agents.language import (
+    TITLE_LANGUAGE_LINES,
+    is_greeting,
+    language_code,
+    language_name,
+    strip_foreign_scripts,
+)
 from src.agents.reasoning_effort import plan_reasoning_effort
 from src.agents.runner import (
     AgentRunner,
@@ -73,6 +79,13 @@ TRACE_MAX_BYTES = 32 * 1024
 # A title needs the head of the message, not its whole body; the prefill cost
 # otherwise doubles on a long first message.
 TITLE_QUESTION_MAX_CHARS = 2000
+_TITLE_EXAMPLES_EN = (
+    "give me pizza recipe -> Pizza Recipe\n"
+    "google founding team members -> Google Founding Team\n"
+    "what's the capital of japan -> Japan Capital\n"
+    "female of the pig -> Pig Female Name\n"
+)
+_TITLE_EXAMPLE_FR = "combien de pommes me reste-t-il -> Compte De Pommes\n"
 
 # The stored name of a conversation with no title (a new one, a greeting, a
 # title that did not come out). One language-neutral value: the frontend
@@ -1035,20 +1048,34 @@ class ConversationService:
         question = question[:TITLE_QUESTION_MAX_CHARS]
         # The detected language is named outright; when detection is not
         # confident only the generic same-language line stands, never a default.
+        code = language_code(question)
         language = language_name(question)
-        # The "French message" example only rides the generic line: next to a
-        # named language it would nudge every title toward French.
         if language:
             language_line = (
                 "Write the title in the same language as the user's message.\n"
                 f"Write the title in {language}.\n"
             )
         else:
+            # The "French message" example only rides the generic line: next
+            # to a named language it would nudge every title toward French.
             language_line = (
                 "Write the title in the same language as the user's message "
                 "(a French message gets a French title).\n"
             )
+        # An instruction written in the target language closes the prompt,
+        # right before the question (#750). English examples next to another
+        # language pull the title toward English, so they go: French keeps its
+        # own, the others get none.
+        localized = TITLE_LANGUAGE_LINES.get(code) if code != "en" else None
+        if code is None or code == "en":
+            examples = _TITLE_EXAMPLES_EN + _TITLE_EXAMPLE_FR
+        elif code == "fr":
+            examples = _TITLE_EXAMPLE_FR
+        else:
+            examples = ""
+        examples_block = f"Examples (user question -> title):\n{examples}" if examples else ""
         if model_type == "mistral":
+            closing = f"{localized}\n" if localized else ""
             return (
                 "You are a TITLE generator. Produce ONLY a very short title "
                 "(2–4 words maximum).\n"
@@ -1057,15 +1084,11 @@ class ConversationService:
                 "punctuation; never answer the question; if empty/URL/noise => "
                 "output nothing.\n"
                 f"{language_line}"
-                f"User message: {question}\n"
                 "Do not answer the question, only create a relevant title. "
                 "Do NOT add quotes around the title.\n"
-                "Examples (user question -> title):\n"
-                "give me pizza recipe -> Pizza Recipe\n"
-                "google founding team members -> Google Founding Team\n"
-                "what's the capital of japan -> Japan Capital\n"
-                "female of the pig -> Pig Female Name\n"
-                "combien de pommes me reste-t-il -> Compte De Pommes\n"
+                f"{examples_block}"
+                f"{closing}"
+                f"User message: {question}\n"
             )
         system_prompt = (
             "You are a very-short-title generator. Return ONLY a concise "
@@ -1075,15 +1098,13 @@ class ConversationService:
             "Do not answer the question, only create a relevant title.\n"
             f"{language_line}"
             "If the message is empty or meaningless, return nothing.\n"
-            "Examples (user question -> title):\n"
-            "give me pizza recipe -> Pizza Recipe\n"
-            "google founding team members -> Google Founding Team\n"
-            "what's the capital of japan -> Japan Capital\n"
-            "female of the pig -> Pig Female Name\n"
-            "combien de pommes me reste-t-il -> Compte De Pommes\n"
+            f"{examples_block}"
             "Format: just the title, nothing else."
         )
-        user_prompt = f"Create a 2-to-4-word title for:\n{question}"
+        if localized:
+            user_prompt = f"Create a 2-to-4-word title.\n{localized}\n{question}"
+        else:
+            user_prompt = f"Create a 2-to-4-word title for:\n{question}"
         return f"{system_prompt}\n\n{user_prompt}"
 
     # ===================== Manual compaction and context usage =====================
