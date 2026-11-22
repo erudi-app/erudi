@@ -10,8 +10,10 @@ Contract:
   * a directory is expanded into the supported files it holds;
   * the extracted text becomes one delimited block per file, injected BEFORE
     the user's own words in the turn;
-  * the total is capped per question, and an overflowing block is truncated
-    with an explicit marker rather than silently blowing the context;
+  * the total is capped per question (``ATTACHMENT_TOKEN_BUDGET``, in the
+    compaction counter's tokens), and an overflowing file keeps its longest
+    head within what is left, with an explicit marker, rather than silently
+    blowing the context;
   * a file that cannot be read never fails the turn: it is reported back to the
     caller and its block says, in the model's own view, that it was unreadable.
 
@@ -26,23 +28,33 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
+from src.agents.token_accounting import counter_head, counter_text_tokens
 from src.core.exceptions import InvalidInputException
 from src.core.logging import logger
 from src.ingestion.reader import IMAGE_EXTENSIONS, DocumentReader
 
 # One question's attachment text is capped so a single large document cannot
-# crowd the model's context out of the answer. The cap is expressed in
-# CHARACTERS on purpose: the only tokenizer the backend loads is the e5
-# retrieval tokenizer, which is not the chat model's, so counting with it would
-# buy a precision the number does not have while adding work to the request
-# path. At the ~4 characters/token rule of thumb that holds for the Latin-script
-# Markdown these extractors produce, 24 000 characters is roughly 6 000 tokens -
-# about 60 % of the 8 192-token window the smallest bundled models expose, and a
-# small fraction of the larger ones.
-ATTACHMENT_CHAR_BUDGET = 24_000
+# crowd the model's context out of the answer. The cap is in TOKENS as the
+# compaction counter counts them (``token_accounting.counter_text_tokens``:
+# chars/4 times the text's own script weight, an ASCII digit one token, a CJK
+# character one token, never under 1.2 times chars/4), because characters are
+# not a size: 24 000 characters of short lines dense in numbers are about
+# 12 900 tokens on a tokenizer that splits digits one by one, twice the same
+# length of prose. The counter is the conservative weight on purpose -- it
+# counts high, so what it lets through fits the window the estimate expects --
+# and it needs no tokenizer: the only one the backend loads is the e5
+# retrieval tokenizer, not the chat model's.
+#
+# The cap is FIXED, not derived from the loaded model's window: the shortened
+# text stays in the conversation's state, which every later turn reads back,
+# so the same file must give the same text whatever model reads it. 6 000 tokens is about 60 % of the 8 192-token
+# window the smallest bundled models expose, about 20 000 characters of Latin
+# prose and about 13 000 of digit-dense lines. A message that still does not
+# fit a smaller window is refused as "this message alone" (``runner``).
+ATTACHMENT_TOKEN_BUDGET = 6_000
 
 # Upper bound on the files one question may carry once folders are expanded.
-# It bounds the wall-clock cost of a dropped folder; the character budget above
+# It bounds the wall-clock cost of a dropped folder; the token budget above
 # already bounds what reaches the model.
 MAX_ATTACHMENT_FILES = 50
 
@@ -236,7 +248,9 @@ def resolve_attachments(paths: Optional[Iterable[str]]) -> ResolvedAttachments:
     reader = DocumentReader()
     blocks: list[str] = []
     truncated: list[str] = []
-    remaining = ATTACHMENT_CHAR_BUDGET
+    remaining = ATTACHMENT_TOKEN_BUDGET
+    kept_chars = 0
+    kept_tokens = 0
 
     for path in files:
         text, reason = _read_one(reader, path)
@@ -251,18 +265,24 @@ def resolve_attachments(paths: Optional[Iterable[str]]) -> ResolvedAttachments:
             )
             body = _UNREADABLE_BODY.format(reason=_REASON_TEXT[reason])
         else:
-            if len(text) > remaining:
-                text = text[: max(remaining, 0)]
+            cost = counter_text_tokens(text)
+            if cost > remaining:
+                # The longest head of the file the budget left holds.
+                text = counter_head(text, remaining)
+                cost = counter_text_tokens(text)
                 truncated.append(path.name)
                 body = f"{text}\n{TRUNCATION_MARKER}" if text else TRUNCATION_MARKER
                 remaining = 0
             else:
-                remaining -= len(text)
+                remaining -= cost
                 body = text
+            kept_chars += len(text)
+            kept_tokens += cost
         blocks.append(f"{_BLOCK_HEADER.format(name=path.name)}\n{body}\n{_BLOCK_FOOTER}")
 
     logger.info(
-        f"Attachments resolved: files={len(files)}, chars={ATTACHMENT_CHAR_BUDGET - remaining}, "
+        f"Attachments resolved: files={len(files)}, chars={kept_chars}, "
+        f"tokens={kept_tokens}, "
         f"issues={len(issues)}, truncated={len(truncated)}"
     )
     return ResolvedAttachments(

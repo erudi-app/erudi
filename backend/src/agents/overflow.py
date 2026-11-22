@@ -22,7 +22,9 @@ Two wire shapes (established evidence):
 
 Two consumers, both reading the same parse:
 
-- the runner, which turns an overflow into the curated, numbers-carrying turn;
+- the runner, which turns an overflow into the curated, numbers-carrying turn,
+  "this message alone" when the request would still not fit without its
+  history (``alone_share``, which the chat client attaches to the error);
 - ``chat_model.preflight_retry_budget``, which reads the MLX shape's
   ``prompt_only_tokens`` to retry a call the engine rejected only because the
   output budget was sized from an estimate that under-counted the prompt.
@@ -35,11 +37,16 @@ or ``langchain`` -- it reads ``exc.body`` (when present) and falls back to
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Optional
 
 _LLAMA_OVERFLOW_TYPE = "exceed_context_size_error"
 _MLX_MARKER = "MAX_KV_SIZE"
+# The attribute the chat client sets on an overflow error before it re-raises
+# it: the share of the rejected request that is not its history
+# (``token_accounting.alone_share``), read back into
+# ``ContextOverflow.alone_share``.
+ALONE_SHARE_ATTR = "erudi_alone_share"
 _MLX_NEEDS_PATTERN = re.compile(r"Request needs (\d+) context tokens")
 _MLX_LIMIT_PATTERN = re.compile(r"MAX_KV_SIZE is (\d+)")
 _MLX_PROMPT_PATTERN = re.compile(r"\((\d+) prompt")
@@ -65,6 +72,13 @@ class ContextOverflow:
     # ``None`` for the llama shape and for an MLX variant without the
     # breakdown; the user-facing message uses ``prompt_tokens`` either way.
     prompt_only_tokens: Optional[int] = None
+    # The share of the rejected request that is NOT its history -- the system
+    # prompt, the tool schemas and the last user message, over the whole
+    # request, at the output budget's weights -- as the chat client estimated
+    # it at call time (``ALONE_SHARE_ATTR`` on the error). ``None`` when the
+    # error did not come through that client or the request had no user
+    # message.
+    alone_share: Optional[float] = None
 
 
 def parse_context_overflow(exc: object) -> Optional[ContextOverflow]:
@@ -78,12 +92,15 @@ def parse_context_overflow(exc: object) -> Optional[ContextOverflow]:
     stable contract there.
     """
     body = getattr(exc, "body", None)
-    if isinstance(body, dict):
-        overflow = _parse_llama_body(body)
-        if overflow is not None:
-            return overflow
-
-    return _parse_mlx_detail(str(exc))
+    overflow = _parse_llama_body(body) if isinstance(body, dict) else None
+    if overflow is None:
+        overflow = _parse_mlx_detail(str(exc))
+    if overflow is None:
+        return None
+    share = getattr(exc, ALONE_SHARE_ATTR, None)
+    if isinstance(share, float) and 0.0 < share <= 1.0:
+        return replace(overflow, alone_share=share)
+    return overflow
 
 
 def _parse_llama_body(body: dict) -> Optional[ContextOverflow]:

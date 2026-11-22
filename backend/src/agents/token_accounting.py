@@ -443,6 +443,34 @@ def counter_weight(message: Any) -> float:
     return fresh_weight(message, dense=COUNTER_DENSE_TOKENS, weight_floor=COUNTER_WEIGHT_FLOOR)
 
 
+def counter_text_tokens(text: str) -> int:
+    """The counter's tokens of ``text`` alone: its own weight
+    (``counter_weight``) times chars/4, no per-message overhead."""
+    from langchain_core.messages import HumanMessage
+
+    if not text:
+        return 0
+    return math.ceil(counter_weight(HumanMessage(text)) * len(text) / APPROX_CHARS_PER_TOKEN)
+
+
+def counter_head(text: str, budget: int) -> str:
+    """The longest head of ``text`` whose OWN count (``counter_text_tokens``)
+    fits ``budget``: cut at ``budget * 4 / w`` characters with the whole
+    text's weight ``w`` first, then shortened while the head's own weight
+    says it is over (a Chinese head of a mostly Latin text weighs far more
+    than the average). What bounds the starred messages and the attachments."""
+    from langchain_core.messages import HumanMessage
+
+    if not text or budget <= 0:
+        return ""
+    weight = counter_weight(HumanMessage(text))
+    head = text[: int(budget * APPROX_CHARS_PER_TOKEN / weight)]
+    while head and counter_text_tokens(head) > budget:
+        over = counter_text_tokens(head) - budget
+        head = head[: max(0, len(head) - max(1, over))]
+    return head.rstrip()
+
+
 def _is_summary(message: Any) -> bool:
     kwargs = getattr(message, "additional_kwargs", None) or {}
     return kwargs.get("lc_source") == SUMMARY_SOURCE_MARKER
@@ -592,20 +620,69 @@ def real_tokens_est(
         total += cost
         if not _measured_before_anchor(i, message, k) and exact_tokens(message) is not None:
             exact += cost
-    converted = openai_tools(tools)
-    if converted:
-        tools_est = count_tokens_approximately([], tools=converted)
-        tools_text = "".join(json.dumps(t, ensure_ascii=False) for t in converted)
-        tools_weight = (
-            ratio
-            if ratio is not None
-            else max(
-                weight_floor,
-                script_weight(tools_text, dense=dense, digit_tokens=digit_tokens),
-            )
-        )
-        total += math.ceil(tools_weight * tools_est)
+    total += _tools_tokens(
+        tools, ratio, dense=dense, weight_floor=weight_floor, digit_tokens=digit_tokens
+    )
     total += overhead_tokens(
         overhead, ratio, dense=dense, weight_floor=weight_floor, digit_tokens=digit_tokens
     )
     return RealTokens(total=total, exact=exact)
+
+
+def _tools_tokens(
+    tools: Optional[Iterable[Any]],
+    ratio: Optional[float],
+    *,
+    dense: float,
+    weight_floor: float,
+    digit_tokens: float,
+) -> int:
+    """The tool schemas a call carries, in real tokens: at the anchor's r
+    when the request was measured, else at their own script weight."""
+    converted = openai_tools(tools)
+    if not converted:
+        return 0
+    tools_est = count_tokens_approximately([], tools=converted)
+    tools_text = "".join(json.dumps(t, ensure_ascii=False) for t in converted)
+    tools_weight = (
+        ratio
+        if ratio is not None
+        else max(
+            weight_floor,
+            script_weight(tools_text, dense=dense, digit_tokens=digit_tokens),
+        )
+    )
+    return math.ceil(tools_weight * tools_est)
+
+
+def alone_share(
+    messages: Sequence[Any],
+    *,
+    tools: Optional[Iterable[Any]] = None,
+    digit_tokens: float = DIGIT_TOKENS,
+) -> Optional[float]:
+    """The share of a request it keeps WITHOUT its history: the system
+    messages, the last user message and the tool schemas, over the whole
+    request, both costed with the output budget's settings (the rules above,
+    one pass over the whole list so both sides weigh each message alike).
+    ``None`` without a user message or a size. Read on an engine's overflow
+    to tell a message too long on its own from a conversation that outgrew
+    the window (``ContextOverflow.alone_share``)."""
+    messages = list(messages)
+    last = last_human_index(messages)
+    if last is None:
+        return None
+    weights, ratio = message_weights(messages, dense=BUDGET_DENSE_TOKENS, digit_tokens=digit_tokens)
+    costs = [weighted_cost(m, w) for m, w in zip(messages, weights)]
+    tools_cost = _tools_tokens(
+        tools, ratio, dense=BUDGET_DENSE_TOKENS, weight_floor=0.0, digit_tokens=digit_tokens
+    )
+    total = sum(costs) + tools_cost
+    if total <= 0:
+        return None
+    kept = tools_cost + sum(
+        cost
+        for i, (message, cost) in enumerate(zip(messages, costs))
+        if i == last or getattr(message, "type", None) == "system"
+    )
+    return kept / total
