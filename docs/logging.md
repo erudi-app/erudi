@@ -417,8 +417,8 @@ Chromium's network log:
 ```
 
 ```powershell
-# Windows: the installed Erudi.exe
-& "<install folder>\Erudi.exe" --log-net-log="$env:TEMP\erudi-netlog.json"
+# Windows (the installer puts Erudi in the user's profile)
+& "$env:LOCALAPPDATA\Programs\Erudi\Erudi.exe" --log-net-log="$env:TEMP\erudi-netlog.json"
 ```
 
 Open the file in the [NetLog viewer](https://netlog-viewer.appspot.com/) and look
