@@ -26,10 +26,10 @@ from src.core.logutils import truncate_for_log
 from src.agents.curated_turns import CURATED_ERROR_EVENT, curated_trace_event
 from src.agents.kb_mode import plan_turn
 from src.agents.language import (
+    LANGUAGE_NAMES,
     TITLE_LANGUAGE_LINES,
     is_greeting,
     language_code,
-    language_name,
     strip_foreign_scripts,
 )
 from src.agents.reasoning_effort import plan_reasoning_effort
@@ -1049,7 +1049,7 @@ class ConversationService:
         # The detected language is named outright; when detection is not
         # confident only the generic same-language line stands, never a default.
         code = language_code(question)
-        language = language_name(question)
+        language = LANGUAGE_NAMES[code] if code else None
         if language:
             language_line = (
                 "Write the title in the same language as the user's message.\n"
