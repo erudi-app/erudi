@@ -33,6 +33,22 @@
       "tokens": {"<|end|>": 32007},
       "expected_stop": [32000, 32007]
     },
+    "phi3_vision": {
+      "repo": "mlx-community/Phi-3-vision-128k-instruct-4bit",
+      "config_stop": [2],
+      "eos_token_id": 32000,
+      "unk_token_id": 0,
+      "tokens": {"<|end|>": 32007},
+      "expected_stop": [2, 32000, 32007]
+    },
+    "phi4_mini_reasoning": {
+      "repo": "lmstudio-community/Phi-4-mini-reasoning-MLX-4bit",
+      "config_stop": [199999],
+      "eos_token_id": 199999,
+      "unk_token_id": 199999,
+      "tokens": {"<|end|>": 200020},
+      "expected_stop": [199999, 200020]
+    },
     "gpt_oss": {
       "repo": "lmstudio-community/gpt-oss-20b-MLX-8bit",
       "config_stop": [199999, 200002],

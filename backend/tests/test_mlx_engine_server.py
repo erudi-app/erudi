@@ -902,7 +902,7 @@ class TestTurnEndStopTokensPatch:
     shows `<|END_RESPONSE|>` and Gemma streams `<end_of_turn>`. The patch adds
     the tokenizer's eos and the named end-of-turn tokens it knows -- never
     `<|end|>` on a Harmony (gpt-oss) tokenizer, where it separates the
-    reasoning from the answer. The per-family facts are frozen from the real
+    reasoning from the answer, though it does on the Phi family. The per-family facts are frozen from the real
     repos (`fixtures/turn_end_tokenizers.json`).
     """
 
@@ -1000,20 +1000,29 @@ class TestTurnEndStopTokensPatch:
         )
         assert stop == {199999, 200002}
 
-    def test_phi3_stops_on_end_because_it_is_its_eos(self, monkeypatch):
-        # No Harmony channel token: <|end|> is Phi-3's own eos and ends the turn.
+    def test_phi3_stops_on_end(self, monkeypatch):
+        # No Harmony channel token: <|end|> closes Phi-3's turn (and is its eos).
         stop = self._stop_set_for(monkeypatch, _turn_end_families()["phi3"])
         assert 32007 in stop
 
-    def test_end_is_never_a_named_turn_end(self):
+    @pytest.mark.parametrize(
+        "name,end_id", [("phi4_mini_reasoning", 200020), ("phi3_vision", 32007)]
+    )
+    def test_phi_stops_on_end_even_when_another_token_is_its_eos(self, monkeypatch, name, end_id):
+        """Phi-4-mini-reasoning and Phi-3-vision declare `<|endoftext|>` as eos,
+        but their template closes the turn on `<|end|>`."""
+        stop = self._stop_set_for(monkeypatch, _turn_end_families()[name])
+        assert end_id in stop
+
+    def test_the_named_turn_ends(self):
         from src.engines import _mlx_vlm_server_runner as runner
 
-        assert "<|end|>" not in runner.TURN_END_TOKENS
-        assert set(runner.TURN_END_TOKENS) >= {
+        assert set(runner.TURN_END_TOKENS) == {
             "<end_of_turn>",
             "<|im_end|>",
             "<|eot_id|>",
             "<|END_RESPONSE|>",
+            "<|end|>",
         }
 
     def test_an_unknown_token_is_never_added(self, monkeypatch):
@@ -1182,74 +1191,92 @@ class TestJsonToolCallTolerancePatch:
         assert mod.parse_tool_call is first
 
 
+_GRANITE_DECODE_TARGETS = (
+    ("mlx_vlm.models.granite.language", "GraniteModel"),
+    ("mlx_vlm.models.granitemoe.language", "GraniteMoEModel"),
+)
+
+
 @pytest.mark.unit
 class TestGraniteDecodeEmbeddingMultiplierPatch:
     """`_patch_granite_decode_embedding_multiplier` keeps Granite's multiplier
     while decoding (#721).
 
-    `models/granite/language.py` (`GraniteModel.__call__`) multiplies the
-    embeddings by `embedding_multiplier` only when it receives `inputs_embeds`
+    `models/granite/language.py` (`GraniteModel.__call__`) and
+    `models/granitemoe/language.py` (`GraniteMoEModel.__call__`) multiply the
+    embeddings by `embedding_multiplier` only when they receive `inputs_embeds`
     (the prefill); every decode step passes token ids, so the multiplier (12
     on granite-3.3 and 4.1) is skipped and the answer turns to noise after its
     first token. The patch embeds the ids itself, so the multiplier applies
-    once on both paths.
+    once on both paths. Both classes are faked here, so the real mlx-vlm is
+    never patched in this process.
     """
 
-    def _install(self, monkeypatch):
+    def _install(self, monkeypatch, *, skip=None):
         calls: list = []
+        classes = {}
+        for module_name, class_name in _GRANITE_DECODE_TARGETS:
+            if module_name == skip:
+                continue
 
-        class GraniteModel:
-            def embed_tokens(self, inputs):
-                return ("embedded", inputs)
-
-            def __call__(self, inputs, cache=None, inputs_embeds=None):
-                calls.append((inputs, cache, inputs_embeds))
+            def __call__(self, inputs, cache=None, inputs_embeds=None, _name=class_name):
+                calls.append((_name, inputs, cache, inputs_embeds))
                 return "out"
 
-        _install_fake_module(
-            monkeypatch, "mlx_vlm.models.granite.language", GraniteModel=GraniteModel
-        )
-        return GraniteModel, calls
+            cls = type(
+                class_name,
+                (),
+                {"embed_tokens": lambda self, inputs: ("embedded", inputs), "__call__": __call__},
+            )
+            _install_fake_module(monkeypatch, module_name, **{class_name: cls})
+            classes[class_name] = cls
+        return classes, calls
 
-    def test_returns_false_when_mlx_vlm_absent(self, monkeypatch):
+    @pytest.mark.parametrize("missing", [m for m, _ in _GRANITE_DECODE_TARGETS])
+    def test_returns_false_when_a_module_is_absent(self, monkeypatch, missing):
         import sys
         import types
         from src.engines import _mlx_vlm_server_runner as runner
 
-        monkeypatch.setitem(sys.modules, "mlx_vlm.models.granite", types.ModuleType("x"))
-        monkeypatch.setitem(sys.modules, "mlx_vlm.models.granite.language", None)
+        self._install(monkeypatch, skip=missing)
+        monkeypatch.setitem(sys.modules, missing.rsplit(".", 1)[0], types.ModuleType("x"))
+        monkeypatch.setitem(sys.modules, missing, None)
         assert runner._patch_granite_decode_embedding_multiplier() is False
 
-    def test_returns_false_when_the_model_class_moved(self, monkeypatch):
+    @pytest.mark.parametrize("missing", [m for m, _ in _GRANITE_DECODE_TARGETS])
+    def test_returns_false_when_a_model_class_moved(self, monkeypatch, missing):
         from src.engines import _mlx_vlm_server_runner as runner
 
-        _install_fake_module(monkeypatch, "mlx_vlm.models.granite.language")
+        self._install(monkeypatch, skip=missing)
+        _install_fake_module(monkeypatch, missing)
         assert runner._patch_granite_decode_embedding_multiplier() is False
 
-    def test_a_decode_step_goes_through_the_embeddings_path(self, monkeypatch):
+    @pytest.mark.parametrize("class_name", [c for _, c in _GRANITE_DECODE_TARGETS])
+    def test_a_decode_step_goes_through_the_embeddings_path(self, monkeypatch, class_name):
         from src.engines import _mlx_vlm_server_runner as runner
 
-        GM, calls = self._install(monkeypatch)
+        classes, calls = self._install(monkeypatch)
         assert runner._patch_granite_decode_embedding_multiplier() is True
-        GM()("ids", "cache")
-        assert calls == [("ids", "cache", ("embedded", "ids"))]
+        classes[class_name]()("ids", "cache")
+        assert calls == [(class_name, "ids", "cache", ("embedded", "ids"))]
 
-    def test_a_prefill_keeps_its_embeddings(self, monkeypatch):
+    @pytest.mark.parametrize("class_name", [c for _, c in _GRANITE_DECODE_TARGETS])
+    def test_a_prefill_keeps_its_embeddings(self, monkeypatch, class_name):
         from src.engines import _mlx_vlm_server_runner as runner
 
-        GM, calls = self._install(monkeypatch)
+        classes, calls = self._install(monkeypatch)
         assert runner._patch_granite_decode_embedding_multiplier() is True
-        GM()("ids", None, inputs_embeds="given")
-        assert calls == [("ids", None, "given")]
+        classes[class_name]()("ids", None, inputs_embeds="given")
+        assert calls == [(class_name, "ids", None, "given")]
 
     def test_patch_is_idempotent(self, monkeypatch):
         from src.engines import _mlx_vlm_server_runner as runner
 
-        GM, _ = self._install(monkeypatch)
+        classes, _ = self._install(monkeypatch)
         assert runner._patch_granite_decode_embedding_multiplier() is True
-        first = GM.__call__
+        first = {name: cls.__call__ for name, cls in classes.items()}
         assert runner._patch_granite_decode_embedding_multiplier() is True
-        assert GM.__call__ is first
+        assert {name: cls.__call__ for name, cls in classes.items()} == first
 
 
 @pytest.mark.unit
@@ -1356,10 +1383,14 @@ class TestMlxVlmPatchesOnTheRealModules:
 
         from src.engines import _mlx_vlm_server_runner as runner
 
+        from mlx_vlm.models.granitemoe import language as granitemoe_language
+
+        for patched in (granite_language.GraniteModel, granitemoe_language.GraniteMoEModel):
+            # Upstream behaviour even if an earlier test applied the patch here.
+            upstream = getattr(patched.__call__, "__wrapped__", patched.__call__)
+            monkeypatch.setattr(patched, "__call__", upstream)
+            monkeypatch.setattr(patched, "_erudi_granite_multiplier_patch", False, raising=False)
         cls = granite_language.GraniteModel
-        # Upstream behaviour even if an earlier test applied the patch here.
-        monkeypatch.setattr(cls, "__call__", getattr(cls.__call__, "__wrapped__", cls.__call__))
-        monkeypatch.setattr(cls, "_erudi_granite_multiplier_patch", False, raising=False)
         model = cls(
             ModelConfig(
                 model_type="granite",
@@ -1378,6 +1409,45 @@ class TestMlxVlmPatchesOnTheRealModules:
                 attention_bias=False,
                 mlp_bias=False,
                 rope_theta=10000.0,
+            )
+        )
+        ids = mx.array([[1, 2, 3]])
+        assert not mx.allclose(model(ids), model(ids, inputs_embeds=model.embed_tokens(ids)))
+
+        assert runner._patch_granite_decode_embedding_multiplier() is True
+        assert mx.allclose(model(ids), model(ids, inputs_embeds=model.embed_tokens(ids)))
+
+    def test_granitemoe_decode_matches_the_prefill_path(self, monkeypatch):
+        import mlx.core as mx
+        from mlx_vlm.models.granite import language as granite_language
+        from mlx_vlm.models.granitemoe import language as granitemoe_language
+        from mlx_vlm.models.granitemoe.config import ModelConfig
+
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        for cls in (granite_language.GraniteModel, granitemoe_language.GraniteMoEModel):
+            # Upstream behaviour even if an earlier test applied the patch here.
+            monkeypatch.setattr(cls, "__call__", getattr(cls.__call__, "__wrapped__", cls.__call__))
+            monkeypatch.setattr(cls, "_erudi_granite_multiplier_patch", False, raising=False)
+        model = granitemoe_language.GraniteMoEModel(
+            ModelConfig(
+                model_type="granitemoe",
+                hidden_size=16,
+                num_hidden_layers=2,
+                intermediate_size=32,
+                num_attention_heads=2,
+                rms_norm_eps=1e-5,
+                vocab_size=32,
+                logits_scaling=1.0,
+                attention_multiplier=0.25,
+                embedding_multiplier=12.0,
+                residual_multiplier=0.2,
+                max_position_embeddings=64,
+                num_key_value_heads=2,
+                attention_bias=False,
+                rope_theta=10000.0,
+                num_local_experts=2,
+                num_experts_per_tok=1,
             )
         )
         ids = mx.array([[1, 2, 3]])

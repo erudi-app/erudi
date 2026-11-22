@@ -27,13 +27,13 @@ each with the upstream version that makes it unnecessary:
   - `_patch_gemma3_tied_lm_head_quant`: quantized tied-embedding Gemma3
     checkpoints load (#273). Still needed.
   - `_patch_turn_end_stop_tokens`: generation stops on the tokenizer's eos and
-    on the named end-of-turn tokens (`TURN_END_TOKENS`), never on gpt-oss's
-    `<|end|>` (#249, #721). The eos half is upstream from 0.7.0
+    on the named end-of-turn tokens (`TURN_END_TOKENS`), `<|end|>` included
+    except on gpt-oss (#249, #721). The eos half is upstream from 0.7.0
     (Neywa-Labs/mlx-vlm PR #2112); the named tokens are still needed on 0.8.0.
   - `_patch_json_tool_call_tolerance`: a tool call written with the doubled
     braces the Qwen2.5 template shows parses (#721). Still needed on 0.8.0.
-  - `_patch_granite_decode_embedding_multiplier`: Granite multiplies its
-    embeddings while decoding too (#721). Still needed on 0.8.0.
+  - `_patch_granite_decode_embedding_multiplier`: Granite (dense and MoE)
+    multiplies its embeddings while decoding too (#721). Still needed on 0.8.0.
   - `_patch_internlm2_output_head_sanitize`: InternLM2 checkpoints load their
     `output.*` head (#721). Still needed on 0.8.0.
 
@@ -107,6 +107,7 @@ exiting only when the child process is terminated by the parent.
 from __future__ import annotations
 
 import functools
+import importlib
 import inspect
 import json
 import os
@@ -229,13 +230,20 @@ def _patch_gemma3_tied_lm_head_quant() -> bool:
 
 #: Tokens that close a message in a chat template while the tokenizer's eos may
 #: be something else: Gemma, ChatML (Yi, InternLM2/3, Olmo-3, Qwen2.5-Coder),
-#: Llama 3, Cohere2 (tiny-aya). Never ``<|end|>``: see ``_HARMONY_MESSAGE_END``.
-TURN_END_TOKENS = ("<end_of_turn>", "<|im_end|>", "<|eot_id|>", "<|END_RESPONSE|>")
+#: Llama 3, Cohere2 (tiny-aya), Phi (Phi-3, Phi-3-vision, Phi-4-mini-reasoning).
+#: ``<|end|>`` is dropped on a Harmony tokenizer: see ``_HARMONY_MESSAGE_END``.
+TURN_END_TOKENS = (
+    "<end_of_turn>",
+    "<|im_end|>",
+    "<|eot_id|>",
+    "<|END_RESPONSE|>",
+    "<|end|>",
+)
 
 #: gpt-oss (Harmony) closes its ``analysis`` message with ``<|end|>`` and only
 #: then writes the ``final`` answer, so stopping there would cut every answer
-#: after its reasoning. Phi-3 declares the same token as its eos and does end
-#: its turn on it; the Harmony ``<|channel|>`` token tells the two apart.
+#: after its reasoning. The Phi family ends its turn on the same token; the
+#: Harmony ``<|channel|>`` token tells the two apart.
 _HARMONY_MESSAGE_END = "<|end|>"
 _HARMONY_CHANNEL = "<|channel|>"
 
@@ -290,11 +298,13 @@ def _patch_turn_end_stop_tokens() -> bool:
       - the ids of the ``TURN_END_TOKENS`` the tokenizer knows (an unknown one
         converts to ``unk`` or ``None`` and is skipped). tiny-aya needs this
         even on 0.8.0: its eos is ``<|END_OF_TURN_TOKEN|>`` but the message
-        closes on ``<|END_RESPONSE|>`` first.
+        closes on ``<|END_RESPONSE|>`` first; Phi-4-mini-reasoning and
+        Phi-3-vision declare ``<|endoftext|>`` but close the turn on
+        ``<|end|>``.
 
-    ``<|end|>`` is never a named turn end, and on a Harmony tokenizer it is
-    taken out of what is added even when declared the eos: gpt-oss writes its
-    answer after it. Nothing upstream put in the set is removed. A failure
+    On a Harmony tokenizer (it knows ``<|channel|>``), ``<|end|>`` is taken out
+    of what is added, even when declared the eos: gpt-oss writes its answer
+    after it. Nothing upstream put in the set is removed. A failure
     while reading the tokenizer leaves upstream's set and one warning in the
     child's log; the model still loads. Idempotent.
 
@@ -401,37 +411,16 @@ def _patch_json_tool_call_tolerance() -> bool:
     return True
 
 
-def _patch_granite_decode_embedding_multiplier() -> bool:
-    """Apply Granite's embedding multiplier while decoding, not only at prefill (#721).
+#: The Granite decoder classes whose ``__call__`` multiplies the embeddings on
+#: the ``inputs_embeds`` path only (mlx-vlm 0.6.17, unchanged in 0.8.0).
+_GRANITE_DECODE_TARGETS = (
+    ("mlx_vlm.models.granite.language", "GraniteModel"),
+    ("mlx_vlm.models.granitemoe.language", "GraniteMoEModel"),
+)
 
-    mlx-vlm 0.6.17 ``models/granite/language.py`` (``GraniteModel.__call__``)
-    multiplies the embeddings by ``embedding_multiplier`` only on the
-    ``inputs_embeds`` path. The prefill takes it (``Model.get_input_embeddings``),
-    but every decode step passes token ids, so the multiplier -- 12 on
-    granite-3.3 and granite-4.1 -- is skipped: the first token is right and the
-    rest is noise ("The Par thees the,: France"). mlx-lm multiplies on both
-    paths. Unchanged in 0.8.0; no upstream issue found. The ``granitemoehybrid``
-    models (granite-4.0) multiply on both paths and are not affected.
 
-    The wrapper embeds the ids itself when no embeddings are given, so the
-    upstream body multiplies exactly once on both paths. Idempotent.
-
-    Returns:
-        True if the patch was applied (or already present), False if
-        ``GraniteModel`` or its ``inputs_embeds`` parameter is not where 0.6.17
-        has it.
-    """
-    try:
-        from mlx_vlm.models.granite import language as _granite_language
-    except Exception:
-        return False
-
-    cls = getattr(_granite_language, "GraniteModel", None)
-    orig = vars(cls).get("__call__") if cls is not None else None
-    if orig is None or "inputs_embeds" not in inspect.signature(orig).parameters:
-        return False
-    if getattr(cls, "_erudi_granite_multiplier_patch", False):
-        return True
+def _embed_ids_first(orig):
+    """Wrap a Granite decoder ``__call__`` so token ids go through its embeddings path."""
 
     @functools.wraps(orig)
     def __call__(self, inputs, cache=None, inputs_embeds=None):
@@ -439,9 +428,49 @@ def _patch_granite_decode_embedding_multiplier() -> bool:
             inputs_embeds = self.embed_tokens(inputs)
         return orig(self, inputs, cache, inputs_embeds=inputs_embeds)
 
-    cls.__call__ = __call__
-    cls._erudi_granite_multiplier_patch = True
-    return True
+    return __call__
+
+
+def _patch_granite_decode_embedding_multiplier() -> bool:
+    """Apply Granite's embedding multiplier while decoding, not only at prefill (#721).
+
+    mlx-vlm 0.6.17 ``models/granite/language.py`` (``GraniteModel.__call__``)
+    and ``models/granitemoe/language.py`` (``GraniteMoEModel.__call__``)
+    multiply the embeddings by ``embedding_multiplier`` only on the
+    ``inputs_embeds`` path. The prefill takes it (``Model.get_input_embeddings``),
+    but every decode step passes token ids, so the multiplier -- 12 on
+    granite-3.3 and granite-4.1 -- is skipped: the first token is right and the
+    rest is noise ("The Par thees the,: France"). mlx-lm multiplies on both
+    paths. Unchanged in 0.8.0; no upstream issue found. No ``granitemoe``
+    model is in the catalog, but a Hugging Face search or a by-link download
+    reaches one. The ``granitemoehybrid`` models (granite-4.0) multiply on both
+    paths and are not affected.
+
+    The wrapper embeds the ids itself when no embeddings are given, so the
+    upstream body multiplies exactly once on both paths. Idempotent.
+
+    Returns:
+        True if both classes are patched (or already were), False if either
+        class or its ``inputs_embeds`` parameter is not where 0.6.17 has it
+        (the other one is still patched).
+    """
+    applied = True
+    for module_name, class_name in _GRANITE_DECODE_TARGETS:
+        try:
+            module = importlib.import_module(module_name)
+        except Exception:
+            applied = False
+            continue
+        cls = getattr(module, class_name, None)
+        orig = vars(cls).get("__call__") if isinstance(cls, type) else None
+        if orig is None or "inputs_embeds" not in inspect.signature(orig).parameters:
+            applied = False
+            continue
+        if getattr(cls, "_erudi_granite_multiplier_patch", False):
+            continue
+        cls.__call__ = _embed_ids_first(orig)
+        cls._erudi_granite_multiplier_patch = True
+    return applied
 
 
 def _patch_internlm2_output_head_sanitize() -> bool:
