@@ -17,10 +17,25 @@ from __future__ import annotations
 
 import platform
 import subprocess
+from typing import Optional
 
 # CREATE_NO_WINDOW's documented value; the constant only exists in the
 # subprocess module on Windows, so tests on POSIX fall back to the literal.
 _CREATE_NO_WINDOW = 0x08000000
+
+
+def signed_exit_code(code: Optional[int]) -> Optional[int]:
+    """A child's exit status as the signed value people recognise.
+
+    Windows hands back the process exit status as an unsigned 32-bit value, so
+    ``-1`` reads ``4294967295`` and a crash status ``0xC0000005`` reads
+    ``3221225477``. On Windows a status past 2**31 is folded back to its signed
+    form (``-1``, ``-1073741819``); POSIX statuses are already signed and pass
+    through, as does ``None`` (still running, or unknown).
+    """
+    if code is not None and platform.system() == "Windows" and code >= 0x80000000:
+        return code - 0x100000000
+    return code
 
 
 def hidden_console_creationflags() -> int:

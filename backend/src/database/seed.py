@@ -958,11 +958,18 @@ class Job_Cleanup_Service:
                 return True
             except Exception as e:
                 # Engine says the artifact is incomplete/corrupt: it is genuine
-                # download debris, fall through and let it be removed. Said
-                # out loud, because what follows deletes gigabytes.
-                logger.warning(
-                    f"Artifact at {link} failed the integrity check and will be removed: {e}"
-                )
+                # download debris, fall through and let it be removed.
+                if (getattr(job, "progress", None) or 0.0) >= 100.0:
+                    # The transfer finished, yet the files fail the gate: a
+                    # genuinely invalid download. Said out loud, because what
+                    # follows deletes gigabytes.
+                    logger.warning(
+                        f"Artifact at {link} failed the integrity check and will be removed: {e}"
+                    )
+                # Otherwise the job was interrupted (by the shutdown, or the
+                # transfer never finished): the validator's message is written
+                # for the load path and blames the model, so it is not quoted.
+                # The caller says what happened, once, at INFO (#751).
                 return False
 
         total_bytes = getattr(job, "total_bytes", None) or 0
@@ -1026,9 +1033,15 @@ class Job_Cleanup_Service:
                         reclaimed_gb = measure_dir_size_gb(llm.link)
                     except Exception:
                         pass
+                    cause = (
+                        "failed its integrity check"
+                        if (job.progress or 0.0) >= 100.0
+                        else "was interrupted before it finished"
+                    )
                     logger.info(
-                        f"Download job {job.id}: removing incomplete model "
-                        f"{llm.id} at {llm.link} (reclaiming ~{reclaimed_gb:.2f} GB)"
+                        f"Download job {job.id} {cause}: removing incomplete model "
+                        f"{llm.id} at {llm.link} and its partial files "
+                        f"(reclaiming ~{reclaimed_gb:.2f} GB)"
                     )
                     shutil.rmtree(llm.link, ignore_errors=True)
                     self.db.delete(llm)

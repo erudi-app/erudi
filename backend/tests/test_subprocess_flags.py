@@ -4,7 +4,11 @@ from pathlib import Path
 
 import pytest
 
-from src.core.subprocess_flags import _CREATE_NO_WINDOW, hidden_console_creationflags
+from src.core.subprocess_flags import (
+    _CREATE_NO_WINDOW,
+    hidden_console_creationflags,
+    signed_exit_code,
+)
 
 
 @pytest.mark.unit
@@ -18,6 +22,28 @@ class TestHiddenConsoleCreationflags:
         # 0 is required: Popen rejects a non-zero creationflags on POSIX.
         monkeypatch.setattr("src.core.subprocess_flags.platform.system", lambda: system)
         assert hidden_console_creationflags() == 0
+
+
+@pytest.mark.unit
+class TestSignedExitCode:
+    """Windows reports a process exit status as an unsigned 32-bit value."""
+
+    @pytest.mark.parametrize(
+        "raw,expected",
+        [(4294967295, -1), (3221225477, -1073741819), (1, 1), (0, 0), (2147483647, 2147483647)],
+    )
+    def test_windows_status_is_read_as_signed(self, monkeypatch, raw, expected):
+        monkeypatch.setattr("src.core.subprocess_flags.platform.system", lambda: "Windows")
+        assert signed_exit_code(raw) == expected
+
+    @pytest.mark.parametrize("system", ["Linux", "Darwin"])
+    def test_posix_status_is_left_alone(self, monkeypatch, system):
+        monkeypatch.setattr("src.core.subprocess_flags.platform.system", lambda: system)
+        assert signed_exit_code(-9) == -9
+        assert signed_exit_code(4294967295) == 4294967295
+
+    def test_none_stays_none(self):
+        assert signed_exit_code(None) is None
 
 
 @pytest.mark.unit

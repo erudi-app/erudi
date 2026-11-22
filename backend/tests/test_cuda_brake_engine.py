@@ -542,6 +542,86 @@ def test_an_unknown_window_loads_the_model_brake_off(request, monkeypatch, caplo
     assert world.ram_sensor_reads() == 0
 
 
+@pytest.mark.parametrize("world_name", ["windows", "linux"])
+@pytest.mark.parametrize(
+    "tail,expected",
+    [
+        ("load_tensors: offloaded 20/29 layers to GPU\n", "partly on the GPU"),
+        ("load_tensors: offloaded 29/29 layers to GPU\n", "full offload"),
+    ],
+)
+def test_an_unsized_child_logs_where_it_was_placed(request, caplog, world_name, tail, expected):
+    """#696: a child whose window Erudi did not size (here an unreadable GGUF
+    header) has no classification, yet backend.log names the placement
+    llama.cpp chose."""
+    world = request.getfixturevalue(world_name)
+    world.inputs = None
+    world.tail = tail
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        handle = _load(world)
+    assert handle["window_sized"] is False
+    (info,) = _records(caplog, expected, logging.INFO)
+    assert "offloaded " + tail.split("offloaded ")[1].split(" layers")[0] in info.getMessage()
+    assert "memory brake is off" in info.getMessage()
+
+
+@pytest.mark.parametrize("world_name", ["windows", "linux"])
+def test_an_unsized_child_without_an_offload_line_logs_what_it_holds_on_the_card(
+    request, caplog, world_name
+):
+    """The ``offloaded N/M`` line is INFO in llama.cpp and the default
+    verbosity hides it: the placement is then read from the child's device
+    bytes, with no full/partial verdict (no window, no KV to model)."""
+    world = request.getfixturevalue(world_name)
+    world.inputs = None
+    world.device_override = 3 * GIB
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        handle = _load(world)
+    assert handle["window_sized"] is False
+    (info,) = _records(caplog, "GPU placement", logging.INFO)
+    assert "signal=bytes, measured_mib=3072" in info.getMessage()
+    assert "memory brake is off" in info.getMessage()
+
+
+@pytest.mark.parametrize("world_name", ["windows", "linux"])
+def test_a_window_unknown_after_props_still_logs_the_bytes(
+    request, monkeypatch, caplog, world_name
+):
+    """The window is unknown (``/props`` failed): on Windows the healthy
+    Shared level is a function of the window, so the read counts the
+    dedicated VRAM alone instead of raising into a DEBUG."""
+    world = request.getfixturevalue(world_name)
+    monkeypatch.setenv("ERUDI_CTX", "0")
+    world.props_fail = True
+    world.device_override = 3 * GIB
+    with caplog.at_level(logging.DEBUG, logger="erudi"):
+        handle = _load(world)
+    assert handle["context_tokens"] is None
+    assert handle["window_sized"] is False
+    (info,) = _records(caplog, "GPU placement", logging.INFO)
+    assert "measured_mib=3072" in info.getMessage()
+    assert not _records(caplog, "placement unreadable")
+
+
+def test_zero_offloaded_layers_read_as_the_processor_only(windows, caplog):
+    windows.inputs = None
+    windows.tail = "load_tensors: offloaded 0/29 layers to GPU\n"
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        _load(windows)
+    (info,) = _records(caplog, "GPU placement", logging.INFO)
+    assert "processor only" in info.getMessage()
+    assert "partly" not in info.getMessage()
+
+
+def test_an_unsized_child_with_no_reading_at_all_logs_one_debug(windows, caplog):
+    windows.inputs = None
+    windows.vram_unavailable = "PDH denied"
+    with caplog.at_level(logging.DEBUG, logger="erudi"):
+        _load(windows)
+    assert len(_records(caplog, "placement unknown", logging.DEBUG)) == 1
+    assert not _records(caplog, "GPU placement", logging.INFO)
+
+
 def test_the_linux_load_stamps_no_spill_state(linux):
     handle = _load(linux)
     assert handle["window_sized"] is True

@@ -435,6 +435,47 @@ class TestJobCleanup:
         assert not model_dir.exists()
         assert not temp_dir.exists()
 
+    def _cleanup_with_rejected_artifact(self, db, tmp_path, monkeypatch, progress):
+        monkeypatch.setattr(config, "LLM_Engine", _RejectingEngine)
+        model_dir = tmp_path / "model-751"
+        model_dir.mkdir()
+        llm = Llm(name="Partial", local=2, link=str(model_dir), type="x")
+        db.add(llm)
+        db.flush()
+        job = self._download_job(db, llm_id=llm.id)
+        job.progress = progress
+        db.flush()
+        Job_Cleanup_Service(db)._cleanup_download_jobs()
+        return job
+
+    def test_interrupted_download_is_reported_as_interrupted_not_as_a_model_problem(
+        self, test_db_session, tmp_path, monkeypatch, caplog
+    ):
+        # #751: a job left running with an incomplete artifact is a download the
+        # app interrupted. One INFO line says so; no WARNING blames the model.
+        with caplog.at_level("INFO"):
+            job = self._cleanup_with_rejected_artifact(test_db_session, tmp_path, monkeypatch, 26.0)
+
+        assert job.status == "failed"
+        assert not [r for r in caplog.records if r.levelno >= 30]
+        assert "problem with the model" not in caplog.text
+        notices = [r.getMessage() for r in caplog.records if "interrupted" in r.getMessage()]
+        assert len(notices) == 1
+        assert "removing incomplete model" in notices[0]
+        assert "partial files" in notices[0]
+
+    def test_finished_but_invalid_download_keeps_the_integrity_warning(
+        self, test_db_session, tmp_path, monkeypatch, caplog
+    ):
+        # The transfer reached 100 % yet the artifact fails the engine's gate:
+        # that is a genuinely invalid download, and it stays a WARNING.
+        with caplog.at_level("INFO"):
+            self._cleanup_with_rejected_artifact(test_db_session, tmp_path, monkeypatch, 100.0)
+
+        warnings = [r for r in caplog.records if r.levelno == 30]
+        assert len(warnings) == 1
+        assert "failed the integrity check" in warnings[0].getMessage()
+
     def test_download_cleanup_ignores_finished_jobs(self, test_db_session):
         self._download_job(test_db_session, status="completed")
         assert Job_Cleanup_Service(test_db_session)._cleanup_download_jobs() == 0

@@ -477,7 +477,9 @@ class MLX_Engine(BaseChatServerEngine):
         ]
         proc = mp.Process(
             target=run_mlx_vlm_server,
-            args=(argv, log_path, apc_num_blocks, token_queue_timeout_s),
+            # watch_parent=True: the child exits when the backend dies without
+            # its orderly stops (the os._exit deadline paths run no atexit).
+            args=(argv, log_path, apc_num_blocks, token_queue_timeout_s, True, os.getpid()),
             daemon=False,
         )
         try:
