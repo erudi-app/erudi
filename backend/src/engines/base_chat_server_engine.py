@@ -175,6 +175,22 @@ class BaseChatServerEngine(BaseEngine):
         return ChildDeath(cause=cause, report=f"{cause}. {cls._read_child_output(proc)}")
 
     @classmethod
+    def serves_artifact_under(cls, link: Path) -> bool:
+        """True when the loaded child runs on weights at or under ``link``.
+
+        The handle's ``model_path`` is the resolved artifact: a file inside the
+        model folder for GGUF, the folder itself for MLX. Two model rows (a base
+        and a KB assistant) can share one folder while the engine knows only the
+        id it was loaded under, so "is this folder in use" is answered from the
+        path. Both sides are resolved; the comparison is by path component, so
+        ``/m/38`` does not claim ``/m/384``.
+        """
+        model_path = cls._model.get("model_path") if isinstance(cls._model, dict) else None
+        if not model_path:
+            return False
+        return Path(model_path).resolve().is_relative_to(Path(link).resolve())
+
+    @classmethod
     def child_output_mark(cls) -> Optional[int]:
         """A position in the loaded child's output, for `child_output_tail`'s
         ``since_mark``; None when the engine cannot tell (no captured file)."""

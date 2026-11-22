@@ -155,3 +155,36 @@ class TestMlxMetalProbe:
         with caplog.at_level("WARNING", logger="erudi"):
             assert MLX_Engine._metal_available() is False
         assert any("Metal availability probe failed" in r.message for r in caplog.records)
+
+
+class TestServesArtifactUnder:
+    """``serves_artifact_under`` names the weights folder a live child runs on (#762)."""
+
+    @staticmethod
+    def _engine(model_path):
+        from src.engines.base_chat_server_engine import BaseChatServerEngine
+
+        class _Engine(BaseChatServerEngine):
+            _model = None if model_path is None else {"model_path": str(model_path)}
+
+        return _Engine
+
+    def test_gguf_file_inside_the_folder(self, tmp_path):
+        link = tmp_path / "m" / "384"
+        assert self._engine(link / "model.gguf").serves_artifact_under(link)
+
+    def test_mlx_folder_itself(self, tmp_path):
+        link = tmp_path / "m" / "384"
+        assert self._engine(link).serves_artifact_under(link)
+
+    def test_sibling_folder_with_a_common_prefix(self, tmp_path):
+        loaded = self._engine(tmp_path / "m" / "384" / "x.gguf")
+        assert not loaded.serves_artifact_under(tmp_path / "m" / "38")
+        loaded = self._engine(tmp_path / "m" / "38" / "x.gguf")
+        assert not loaded.serves_artifact_under(tmp_path / "m" / "384")
+
+    def test_nothing_loaded(self, tmp_path):
+        assert not self._engine(None).serves_artifact_under(tmp_path)
+
+    def test_base_engine_serves_nothing(self, tmp_path):
+        assert BaseEngine.serves_artifact_under(tmp_path) is False
