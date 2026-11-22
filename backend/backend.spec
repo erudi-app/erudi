@@ -132,7 +132,11 @@ else:
 # sys.path, so the helper beside it is reached explicitly.
 if str(spec_root) not in sys.path:
     sys.path.insert(0, str(spec_root))
-from pyi_llama_artifacts import collect_llama_artifacts
+from pyi_llama_artifacts import (
+    assert_cublas_only_in_cuda_bin,
+    collect_llama_artifacts,
+    drop_toplevel_cublas,
+)
 
 _llama = collect_llama_artifacts(
     variant=os.environ.get("ERUDI_BUILD_VARIANT", "cuda"),
@@ -409,6 +413,16 @@ a = Analysis(
     optimize=0,
 )
 
+# ── No cuBLAS outside cuda/bin ────────────────────────────────────────────────
+# The llama-server entries in `datas` are PE files, so PyInstaller scans their
+# imports and collects cublas64_12.dll (and its dependency cublasLt64_12.dll,
+# 643 MB) from the CUDA toolkit on PATH into the top of the bundle. Nothing in
+# the frozen backend loads them; drop them explicitly. Windows-only in effect:
+# the pattern matches .dll names. The guard below re-checks the final TOCs.
+a.binaries, _dropped_cublas = drop_toplevel_cublas(a.binaries)
+for _d in _dropped_cublas:
+    print(f"[backend.spec] dropped {_d} from the frozen backend: llama-server loads its own cuBLAS from cuda/bin")
+
 # ── llama-server runtime DLLs, verbatim ───────────────────────────────────────
 # Collected next to the compiled server by the build scripts and listed above
 # (see the llama.cpp block for why they must not ride in `datas`): appended
@@ -417,6 +431,9 @@ a = Analysis(
 # which is the only place Windows looks when the subprocess loads them.
 for _name, _src in _llama_runtime_dlls:
     a.datas.append((_name, _src, "DATA"))
+
+# Fails the build if any path (a hook, a future package) puts cuBLAS elsewhere.
+assert_cublas_only_in_cuda_bin(a.binaries, a.datas)
 
 pyz = PYZ(a.pure)
 

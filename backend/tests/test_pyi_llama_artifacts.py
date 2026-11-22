@@ -14,7 +14,11 @@ from pathlib import Path
 
 import pytest
 
-from pyi_llama_artifacts import collect_llama_artifacts
+from pyi_llama_artifacts import (
+    assert_cublas_only_in_cuda_bin,
+    collect_llama_artifacts,
+    drop_toplevel_cublas,
+)
 
 
 def _flavour(root: Path, flavour: str, *, exe: str, dlls: tuple[str, ...] = ()) -> Path:
@@ -209,3 +213,34 @@ class TestEmbedderGguf:
         # The macOS embedding child serves the downloadable snapshot (F2).
         out = collect_llama_artifacts(variant="cuda", root=tmp_path, os_tag="mac")
         assert out.datas == []
+
+
+@pytest.mark.unit
+class TestCublasOnlyInCudaBin:
+    def test_drops_the_toplevel_pair_and_keeps_everything_else(self):
+        toc = [
+            ("cublas64_12.dll", "C:/cuda/bin/cublas64_12.dll", "BINARY"),
+            ("cublasLt64_12.dll", "C:/cuda/bin/cublasLt64_12.dll", "BINARY"),
+            ("python312.dll", "C:/py/python312.dll", "BINARY"),
+            ("numpy\\core\\_x.pyd", "C:/np/_x.pyd", "EXTENSION"),
+        ]
+        kept, dropped = drop_toplevel_cublas(toc)
+        assert [e[0] for e in kept] == ["python312.dll", "numpy\\core\\_x.pyd"]
+        assert dropped == ["cublas64_12.dll", "cublasLt64_12.dll"]
+
+    def test_the_guard_accepts_the_cuda_bin_copies(self):
+        datas = [(f"artifacts/llama-cpp/cuda/bin/{n}", f"/s/{n}", "DATA") for n in CUDA_RUNTIME]
+        assert_cublas_only_in_cuda_bin([("python312.dll", "x", "BINARY")], datas)
+
+    @pytest.mark.parametrize(
+        "dest",
+        ["cublasLt64_12.dll", "CUBLAS64_12.DLL", "artifacts/llama-cpp/cpu/bin/cublas64_12.dll"],
+    )
+    def test_the_guard_rejects_a_cublas_dll_anywhere_else(self, dest):
+        with pytest.raises(RuntimeError, match="cuBLAS"):
+            assert_cublas_only_in_cuda_bin([], [(dest, "x", "DATA")])
+
+    def test_the_guard_ignores_unrelated_names(self):
+        assert_cublas_only_in_cuda_bin(
+            [("cublas_helper.pyd", "x", "EXTENSION"), ("mycublas64.dll", "x", "BINARY")]
+        )

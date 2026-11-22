@@ -195,7 +195,8 @@ def test_backend_spec_bundles_the_llama_artifacts_through_the_helper():
     # output -- datas before Analysis, the runtime libraries verbatim after
     # it. No flavour path is hardcoded in the spec.
     spec = _read("backend.spec")
-    assert "from pyi_llama_artifacts import collect_llama_artifacts" in spec
+    assert "from pyi_llama_artifacts import (" in spec
+    assert "    collect_llama_artifacts,\n" in spec
     assert "ERUDI_BUILD_VARIANT" in spec
     assert ".runtime_files" in spec
     assert '"llama-cpp" / "cuda" / "bin"' not in spec
@@ -204,6 +205,29 @@ def test_backend_spec_bundles_the_llama_artifacts_through_the_helper():
     analysis = spec.index("a = Analysis(")
     append = spec.index('a.datas.append((_name, _src, "DATA"))')
     assert append > analysis
+
+
+@pytest.mark.unit
+def test_backend_spec_strips_then_guards_cublas():
+    # The cuBLAS DLLs PyInstaller finds by scanning llama-server's imports are
+    # dropped right after Analysis (before the verbatim cuda/bin copies are
+    # appended to a.datas), and the guard runs last, over the final TOCs.
+    spec = _read("backend.spec")
+    analysis = spec.index("a = Analysis(")
+    strip = spec.index("drop_toplevel_cublas(a.binaries)")
+    append = spec.index('a.datas.append((_name, _src, "DATA"))')
+    guard = spec.index("assert_cublas_only_in_cuda_bin(a.binaries, a.datas)")
+    assert analysis < strip < append < guard
+
+
+@pytest.mark.unit
+def test_release_workflow_rejects_cublas_outside_cuda_bin():
+    step = next(
+        s for s in _release_steps() if s.get("name") == "Verify the bundled inference binary"
+    )
+    run = step["run"]
+    assert "cublas*.dll" in run
+    assert "artifacts/llama-cpp/cuda/bin" in run
 
 
 def _release_steps():
