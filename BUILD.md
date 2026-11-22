@@ -436,7 +436,7 @@ library, which is the only thing that would catch a freeze dropping
 `libcublas.so.12` — and Windows CUDA is checked for the bundled CUDA runtime
 DLLs. On Windows no `cublas*.dll` may sit anywhere but `cuda/bin`: PyInstaller scans
 `llama-server.exe`'s imports and, with the CUDA toolkit on `PATH`, would otherwise
-collect `cublas64_12.dll` and `cublasLt64_12.dll` (643 MB) at the top of `_internal`
+collect `cublas64_12.dll` and `cublasLt64_12.dll` (about 750 MB together) at the top of `_internal`
 too, where nothing loads them. `backend.spec` drops them after Analysis and fails the
 build if one remains; this step checks the frozen tree again. Real hardware in the QA
 pass is the first thing that runs either.

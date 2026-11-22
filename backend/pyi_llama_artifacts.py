@@ -99,7 +99,8 @@ def collect_llama_artifacts(
         # The runtime DLLs the build scripts copy beside the server: the MSVC
         # C++ runtime for both flavours (#144, so it loads without the VC++
         # redistributable), plus cudart/cublas/cublasLt for CUDA (so the user
-        # needs only a driver). None on Linux, where the builds are static.
+        # needs only a driver). None on Linux: there ggml is static, and the
+        # server links libcublas from the frozen tree's `_internal`.
         out.runtime_files += [(f"{dest}/{f.name}", str(f)) for f in sorted(bindir.glob("*.dll"))]
 
     if missing and not allow_missing:
@@ -124,8 +125,9 @@ def collect_llama_artifacts(
 #: Where the CUDA llama-server loads its cuBLAS from: beside itself.
 CUDA_BIN_DIR = "artifacts/llama-cpp/cuda/bin"
 
-#: cublas64_12.dll / cublasLt64_12.dll (Windows). Linux builds are static and
-#: out of scope.
+#: cublas64_12.dll / cublasLt64_12.dll (Windows only). On Linux the
+#: `libcublas*.so` in `_internal` is the ONLY copy the server loads: never
+#: filter it.
 _CUBLAS_DLL = re.compile(r"^cublas(lt)?(64)?(_\d+)?\.dll$", re.IGNORECASE)
 
 
