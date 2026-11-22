@@ -583,6 +583,36 @@ def test_an_unsized_child_without_an_offload_line_logs_what_it_holds_on_the_card
     assert "memory brake is off" in info.getMessage()
 
 
+@pytest.mark.parametrize("world_name", ["windows", "linux"])
+def test_a_window_unknown_after_props_still_logs_the_bytes(
+    request, monkeypatch, caplog, world_name
+):
+    """The window is unknown (``/props`` failed): on Windows the healthy
+    Shared level is a function of the window, so the read counts the
+    dedicated VRAM alone instead of raising into a DEBUG."""
+    world = request.getfixturevalue(world_name)
+    monkeypatch.setenv("ERUDI_CTX", "0")
+    world.props_fail = True
+    world.device_override = 3 * GIB
+    with caplog.at_level(logging.DEBUG, logger="erudi"):
+        handle = _load(world)
+    assert handle["context_tokens"] is None
+    assert handle["window_sized"] is False
+    (info,) = _records(caplog, "GPU placement", logging.INFO)
+    assert "measured_mib=3072" in info.getMessage()
+    assert not _records(caplog, "placement unreadable")
+
+
+def test_zero_offloaded_layers_read_as_the_processor_only(windows, caplog):
+    windows.inputs = None
+    windows.tail = "load_tensors: offloaded 0/29 layers to GPU\n"
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        _load(windows)
+    (info,) = _records(caplog, "GPU placement", logging.INFO)
+    assert "processor only" in info.getMessage()
+    assert "partly" not in info.getMessage()
+
+
 def test_an_unsized_child_with_no_reading_at_all_logs_one_debug(windows, caplog):
     windows.inputs = None
     windows.vram_unavailable = "PDH denied"

@@ -682,11 +682,12 @@ its cap, so the brake re-arms at the next load. No signal at all (Windows withou
 is assumed full.
 
 A child whose window Erudi did not size (floor unfit, MLA or unreadable header,
-`ERUDI_CTX=0`, or a window unknown after `/props`) is never classified, yet its load
-still leaves a placement line: the `offloaded N/M` line when it reached the output
-(`partly on the GPU` when N < M, else `full offload`), otherwise the child's device bytes
-(`signal=bytes, measured_mib=…`, with no full or partial verdict, since there is no
-window to model a floor from), otherwise one DEBUG. The brake is off for such a child
+several visible GPUs, or a window unknown after `/props`) is never classified, yet its
+load still leaves a placement line: the `offloaded N/M` line when it reached the output
+(`on the processor only` when N is 0, `partly on the GPU` when N < M, else `full
+offload`), otherwise the child's device bytes (`signal=bytes, measured_mib=…`, with no
+full or partial verdict, since there is no window to model a floor from; on Windows with
+the window unknown, the dedicated VRAM alone), otherwise one DEBUG. The brake is off for such a child
 whatever the line says.
 
 **The post-load device check.** On a full child, its device bytes above

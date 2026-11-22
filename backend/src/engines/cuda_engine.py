@@ -755,7 +755,10 @@ class CUDA_Engine(BaseLlamaCppEngine):
         A sized child whose window is still unknown after the read
         (``ERUDI_CTX=0`` lets llama-server pick it, and ``/props`` failed:
         its one WARNING is already written) runs brake-off, ONE INFO: every
-        rule of the brake is a function of the window. On Windows, whether
+        rule of the brake is a function of the window. Like any child whose
+        window was not sized, it then gets its placement line
+        (:meth:`_log_unsized_placement`), the device read counting its
+        dedicated VRAM alone on Windows. On Windows, whether
         Flash Attention runs is stamped before the device is read -- what
         llama.cpp logged at context creation, else the static proof -- since
         the healthy Shared GPU memory the device bytes and the spill baseline
@@ -813,6 +816,11 @@ class CUDA_Engine(BaseLlamaCppEngine):
         pid = handle.get("pid")
         if not cls._host_is_windows():
             return memory_pressure.child_vram_bytes(pid, cls._read_vram_info().processes), None
+        if handle.get("context_tokens") is None:
+            # Window unknown (``/props`` failed): the healthy Shared level is a
+            # function of the window, so only the dedicated VRAM is counted.
+            vram = memory_pressure.read_vram(pid, healthy_bytes=0)
+            return vram.dedicated_bytes, vram.shared_bytes
         healthy = cls._healthy_shared_bytes(handle)
         vram = memory_pressure.read_vram(pid, healthy_bytes=healthy)
         if vram.dedicated_bytes is None or vram.shared_bytes is None:
@@ -836,9 +844,9 @@ class CUDA_Engine(BaseLlamaCppEngine):
     @classmethod
     def _log_unsized_placement(cls, handle: Dict[str, Any], tail: Optional[str]) -> None:
         """Say where llama-server placed a child whose window Erudi did not
-        size (floor unfit, MLA or unreadable header, ``ERUDI_CTX``): fit
-        placed the layers, and without this line ``backend.log`` would never
-        name the placement. Read from the same ``offloaded N/M`` line as
+        size (floor unfit, MLA or unreadable header, several visible GPUs, or
+        a window unknown after ``/props``): fit placed the layers, and without
+        this line ``backend.log`` would never name the placement. Read from the same ``offloaded N/M`` line as
         :meth:`_classify_placement`; the brake is already off for such a child,
         so nothing here decides anything. The line is INFO in llama.cpp and the
         default verbosity hides it, so without it the child's device bytes are
@@ -871,7 +879,12 @@ class CUDA_Engine(BaseLlamaCppEngine):
             )
             return
         signal = f"signal=line, offloaded {line[0]}/{line[1]} layers"
-        if line[0] < line[1]:
+        if line[0] == 0:
+            logger.info(
+                f"[{cls.__name__}] GPU placement{after}: the model is on the processor only "
+                f"({signal}); the memory brake is off for this child (port {port})"
+            )
+        elif line[0] < line[1]:
             logger.info(
                 f"[{cls.__name__}] llama-server placed the model partly on the GPU{after} "
                 f"({signal}); the memory brake is off for this child (port {port})"
