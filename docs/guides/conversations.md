@@ -821,9 +821,11 @@ consecutive duplicate words are collapsed, and the length is capped. The title f
 of the first message: the prompt names the detected language outright ("Write the title in
 French.") and closes the prompt, right before the question, with the same instruction written in that
 language ("Écris le titre en français."; French, Spanish, Chinese, German, Italian, Portuguese and
-Dutch have one). The English examples are dropped for any other language than English (French keeps
-its own), since they pull the title toward English. The prompt falls back to a generic "same language as the user's message" line when detection is
-not confident (a very short message), never to English. Only the user's own words are read:
+Dutch have one). For those languages other than English the English examples are dropped (French
+keeps its own), since they pull the title toward English; they are kept for English, for an
+unconfident detection and for a language without a localized line. The prompt falls back to a
+generic "same language as the user's message" line when detection is not confident (a very short
+message), never to English. Only the user's own words are read:
 attachment text, code, URLs, quoted lines and a pasted text following an instruction line do not
 set the language. Letters of a script the message does not use are then dropped (a stray Han word
 in a French title; Latin words and lone Greek letters are always kept, so "iPhone" or "π" survive). The stream carries the checked title, once,

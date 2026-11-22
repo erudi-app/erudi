@@ -1063,20 +1063,21 @@ class ConversationService:
                 "(a French message gets a French title).\n"
             )
         # An instruction written in the target language closes the prompt,
-        # right before the question (#750). English examples next to another
-        # language pull the title toward English, so they go: French keeps its
-        # own, the others get none.
-        localized = TITLE_LANGUAGE_LINES.get(code) if code != "en" else None
-        if code is None or code == "en":
-            examples = _TITLE_EXAMPLES_EN + _TITLE_EXAMPLE_FR
-        elif code == "fr":
+        # right before the question (#750), and the English examples go: next
+        # to another language they pull the title toward English (French keeps
+        # its own). A language without such a line keeps the prompt as it was.
+        localized = TITLE_LANGUAGE_LINES.get(code)
+        if localized and code == "fr":
             examples = _TITLE_EXAMPLE_FR
-        else:
+        elif localized and code != "en":
             examples = ""
+        else:
+            examples = _TITLE_EXAMPLES_EN + _TITLE_EXAMPLE_FR
+        if not localized or code == "en":
+            localized = None
         examples_block = f"Examples (user question -> title):\n{examples}" if examples else ""
         if model_type == "mistral":
-            closing = f"{localized}\n" if localized else ""
-            return (
+            head = (
                 "You are a TITLE generator. Produce ONLY a very short title "
                 "(2–4 words maximum).\n"
                 "Rules: only the title text; Title Case; no question mark; "
@@ -1084,12 +1085,15 @@ class ConversationService:
                 "punctuation; never answer the question; if empty/URL/noise => "
                 "output nothing.\n"
                 f"{language_line}"
+            )
+            tail = (
                 "Do not answer the question, only create a relevant title. "
                 "Do NOT add quotes around the title.\n"
                 f"{examples_block}"
-                f"{closing}"
-                f"User message: {question}\n"
             )
+            if localized:
+                return f"{head}{tail}\n{localized}\nUser message: {question}\n"
+            return f"{head}User message: {question}\n{tail}"
         system_prompt = (
             "You are a very-short-title generator. Return ONLY a concise "
             "title. No punctuation (except apostrophes in possessives), "
@@ -1102,7 +1106,7 @@ class ConversationService:
             "Format: just the title, nothing else."
         )
         if localized:
-            user_prompt = f"Create a 2-to-4-word title.\n{localized}\n{question}"
+            user_prompt = f"Create a 2-to-4-word title.\n{localized}\nMessage:\n{question}"
         else:
             user_prompt = f"Create a 2-to-4-word title for:\n{question}"
         return f"{system_prompt}\n\n{user_prompt}"
