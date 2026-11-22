@@ -73,9 +73,10 @@ class ContextOverflow:
     # breakdown; the user-facing message uses ``prompt_tokens`` either way.
     prompt_only_tokens: Optional[int] = None
     # The share of the rejected request that is NOT its history -- the system
-    # prompt, the tool schemas and the last user message, over the whole
-    # request, at the output budget's weights -- as the chat client estimated
-    # it at call time (``ALONE_SHARE_ATTR`` on the error). ``None`` when the
+    # prompt, the tool schemas, the last user message and the current turn's
+    # tool round after it, over the whole request, both weighed by one
+    # estimator -- as the chat client estimated it at call time
+    # (``token_accounting.alone_share``, ``ALONE_SHARE_ATTR`` on the error). ``None`` when the
     # error did not come through that client or the request had no user
     # message.
     alone_share: Optional[float] = None

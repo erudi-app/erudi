@@ -1798,8 +1798,8 @@ def _message_alone_tokens(overflow: ContextOverflow) -> Optional[int]:
     engine's own tokens: ``ceil(P * s) + OUTPUT_BUDGET_FLOOR_TOKENS``, with
     ``P`` the engine's prompt count (the prompt alone when the error breaks
     it out) and ``s`` the share of that request the chat client estimated for
-    the system prompt, the tool schemas and the last user message
-    (``ContextOverflow.alone_share``). The estimate can be off in absolute
+    the system prompt, the tool schemas, the last user message and the
+    current turn's tool round (``ContextOverflow.alone_share``). The estimate can be off in absolute
     terms (digits, short words); its error is about the same on every part of
     one request, so the share scales the exact count. ``None`` without a
     share."""

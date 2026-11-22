@@ -397,3 +397,50 @@ def test_the_script_densities_are_pinned():
     assert script_weight("ひらがなカタカナ" * 20, dense=BUDGET_DENSE_TOKENS) == pytest.approx(2.6)
     assert script_weight("नमस्ते" * 30, dense=BUDGET_DENSE_TOKENS) == pytest.approx(1.6)
     assert script_weight("1234567890", dense=BUDGET_DENSE_TOKENS) == pytest.approx(4.0)
+
+
+# ===================== the share a request keeps without its history =====================
+
+
+def test_the_alone_share_weighs_a_measured_history_like_the_new_message():
+    """A measured ratio (here 6.0) and exact output counts apply to the
+    history only; weighing it that way against a freshly estimated new
+    message would bias the share. Both sides use one estimator, so the share
+    is the one the same request has unmeasured."""
+    from src.agents.token_accounting import alone_share
+
+    question = HumanMessage("4821 " * 2_000)
+    measured = [
+        SystemMessage("s" * 400),
+        HumanMessage("h" * 4_000),
+        _hop(6_000, 1_000, content="a" * 4_000, output_tokens=2_000),
+        question,
+    ]
+    unmeasured = [
+        SystemMessage("s" * 400),
+        HumanMessage("h" * 4_000),
+        AIMessage("a" * 4_000),
+        question,
+    ]
+
+    share = alone_share(measured, digit_tokens=1.0)
+
+    assert share == pytest.approx(alone_share(unmeasured, digit_tokens=1.0))
+    assert 0.0 < share < 1.0
+
+
+def test_the_alone_share_counts_the_current_turns_tool_round():
+    """The tool calls and results after the last user message come back in a
+    new conversation too: they are part of what does not fit on its own."""
+    from src.agents.token_accounting import alone_share
+
+    messages = [
+        SystemMessage("s" * 400),
+        HumanMessage("h" * 2_000),
+        AIMessage("a" * 2_000),
+        HumanMessage("look it up"),
+        AIMessage(content="", tool_calls=[{"name": "lookup", "args": {"q": "x"}, "id": "c1"}]),
+        ToolMessage("r" * 40_000, tool_call_id="c1"),
+    ]
+
+    assert alone_share(messages) > 0.9

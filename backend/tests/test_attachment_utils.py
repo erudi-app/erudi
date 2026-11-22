@@ -376,15 +376,44 @@ class TestBudget:
         # chars/4 budget less the floor's margin.
         assert 19_000 <= len(kept) <= 24_000
 
-    def test_the_budget_does_not_depend_on_the_model(self, tmp_path):
-        """A fixed cap: the shortened text is persisted with the message, so
-        the same file gives the same text whatever model reads it."""
+    def test_a_latin_head_ahead_of_a_dense_tail_keeps_nearly_the_whole_budget(self, tmp_path):
+        """The cut is the longest head within the budget, whatever follows it:
+        an English beginning keeps its tokens ahead of a Chinese tail."""
+        body = _PROSE * 150 + "这是一个很长的中文句子" * 50_000
+        path = _write_txt(tmp_path, "mixed.txt", body)
+
+        resolved = resolve_attachments([str(path)])
+
+        kept = _kept_text(resolved.block)
+        assert body.startswith(kept)
+        assert 0.9 * ATTACHMENT_TOKEN_BUDGET <= _counter_tokens(kept) <= ATTACHMENT_TOKEN_BUDGET
+
+    def test_the_budget_does_not_depend_on_the_loaded_model(self, tmp_path, monkeypatch):
+        """A fixed cap: the shortened text stays in the conversation, so the
+        same file gives the same text whatever model is loaded -- a small
+        window on a tokenizer that splits digits, or a large one that groups
+        them."""
+        from src.core import config
+        from src.engines import memory_budget
+        from src.engines.base_engine import BaseEngine
+
         path = _write_txt(tmp_path, "big.txt", _DIGIT_LINES)
+        blocks = []
+        for window, digits in ((4_096, 1.0), (131_072, 0.34)):
+            engine = type(
+                "_Engine",
+                (BaseEngine,),
+                {
+                    "effective_context_tokens": classmethod(lambda cls, w=window: w),
+                    "memory_bound_tokens": classmethod(lambda cls, w=window: w),
+                },
+            )
+            monkeypatch.setattr(config, "LLM_Engine", engine)
+            monkeypatch.setattr(memory_budget, "budget_digit_tokens", lambda e, d=digits: d)
+            blocks.append(resolve_attachments([str(path)]).block)
 
-        first = resolve_attachments([str(path)])
-        second = resolve_attachments([str(path)])
-
-        assert first.block == second.block
+        assert blocks[0] == blocks[1]
+        assert _counter_tokens(_kept_text(blocks[0])) <= ATTACHMENT_TOKEN_BUDGET
 
 
 # ---------------------------------------------------------------------------

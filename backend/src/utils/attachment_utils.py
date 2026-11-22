@@ -36,21 +36,24 @@ from src.ingestion.reader import IMAGE_EXTENSIONS, DocumentReader
 # One question's attachment text is capped so a single large document cannot
 # crowd the model's context out of the answer. The cap is in TOKENS as the
 # compaction counter counts them (``token_accounting.counter_text_tokens``:
-# chars/4 times the text's own script weight, an ASCII digit one token, a CJK
-# character one token, never under 1.2 times chars/4), because characters are
-# not a size: 24 000 characters of short lines dense in numbers are about
-# 12 900 tokens on a tokenizer that splits digits one by one, twice the same
-# length of prose. The counter is the conservative weight on purpose -- it
-# counts high, so what it lets through fits the window the estimate expects --
-# and it needs no tokenizer: the only one the backend loads is the e5
-# retrieval tokenizer, not the chat model's.
+# chars/4 times the text's own script weight -- an ASCII digit one token, a
+# CJK character one token -- and never under 1.2 times chars/4), because
+# characters are not a size: 24 000 characters of short French lines dense in
+# numbers are about 13 000 tokens on a tokenizer that splits digits one by
+# one, where 24 000 characters of prose are about 6 000. The counter needs no
+# tokenizer (the only one the backend loads is the e5 retrieval tokenizer, not
+# the chat model's), and it is an estimate, not a bound: on those digit-dense
+# lines it still reads about 30 % under Qwen's count (6 000 counted, about
+# 7 900 real), on English prose about 50 % over.
 #
 # The cap is FIXED, not derived from the loaded model's window: the shortened
 # text stays in the conversation's state, which every later turn reads back,
-# so the same file must give the same text whatever model reads it. 6 000 tokens is about 60 % of the 8 192-token
-# window the smallest bundled models expose, about 20 000 characters of Latin
-# prose and about 13 000 of digit-dense lines. A message that still does not
-# fit a smaller window is refused as "this message alone" (``runner``).
+# so the same file must give the same text whatever model reads it. 6 000
+# tokens is about 60 % of the 8 192-token window the smallest bundled models
+# expose: about 20 000 characters of Latin prose, about 14 000 of digit-dense
+# lines. On a small window the shortened message can still not fit; the turn
+# is then refused as "this message alone" (``runner``), never sent truncated
+# further.
 ATTACHMENT_TOKEN_BUDGET = 6_000
 
 # Upper bound on the files one question may carry once folders are expanded.

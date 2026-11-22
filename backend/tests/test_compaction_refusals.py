@@ -295,6 +295,84 @@ async def test_an_engine_overflow_caused_by_the_history_stays_the_conversation_k
     }
 
 
+async def test_a_hop_two_overflow_caused_by_a_big_tool_result_is_the_message_alone_kind(
+    monkeypatch,
+):
+    """The current turn's tool round comes back in a new conversation too:
+    a short question whose tool result fills the window is "this message
+    alone", not "this conversation"."""
+    from langchain_core.messages import AIMessageChunk
+    from langchain_core.tools import tool
+    from langchain_openai import ChatOpenAI
+
+    from src.agents.chat_model import erudi_chat_openai_class
+    from src.agents.reasoning_effort import NO_REASONING_PLAN
+    from tests.test_compaction_keep import _PARAMS, _Llm
+
+    @tool
+    def lookup(query: str) -> str:
+        """Look something up."""
+        return _text(3_800, "r")
+
+    calls = []
+
+    async def _server(self, messages, *args, **kw):
+        calls.append(len(messages))
+        if len(calls) > 1:
+            raise _OverflowError(14_453, 11_886)
+        delta = {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": '{"query": "x"}'},
+                }
+            ]
+        }
+        yield self._convert_chunk_to_generation_chunk(
+            {"choices": [{"index": 0, "delta": delta, "finish_reason": "tool_calls"}]},
+            AIMessageChunk,
+            {},
+        )
+
+    _WindowEngine.window = 11_886
+    monkeypatch.setattr(_WindowEngine, "memory_bound_tokens", classmethod(lambda cls: 11_886))
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    main = erudi_chat_openai_class()(
+        base_url="http://127.0.0.1:1/v1", api_key="k", model="m", streaming=True
+    )
+    summary = _ScriptedSummaryModel(messages=iter([]))
+    monkeypatch.setattr(
+        runner_module,
+        "build_chat_model",
+        lambda llm, **kw: summary if kw.get("effort_plan") is NO_REASONING_PLAN else main,
+    )
+    cp = InMemorySaver()
+    await _seed(
+        cp, "hop2", [HumanMessage(_text(100, "h"), id="h0"), AIMessage(_text(100, "a"), id="a0")]
+    )
+
+    events = [
+        e
+        async for e in AgentRunner(checkpointer=cp).astream_text(
+            llm=_Llm(),
+            user_message="look it up",
+            system_prompt="s",
+            params=_PARAMS,
+            thread_id="hop2",
+            tools=[lookup],
+            summarize=True,
+            compaction_threshold=80,
+        )
+    ]
+
+    assert len(calls) == 2
+    (curated,) = _curated(events)
+    assert curated["kind"] == "message_too_long_memory"
+    assert curated["params"]["context_tokens"] == 11_886
+
+
 async def test_a_message_that_fits_on_its_own_still_compacts_the_history(monkeypatch):
     """A long message that fits with the summary: the compaction runs, the
     turn is answered."""

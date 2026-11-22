@@ -455,20 +455,22 @@ def counter_text_tokens(text: str) -> int:
 
 def counter_head(text: str, budget: int) -> str:
     """The longest head of ``text`` whose OWN count (``counter_text_tokens``)
-    fits ``budget``: cut at ``budget * 4 / w`` characters with the whole
-    text's weight ``w`` first, then shortened while the head's own weight
-    says it is over (a Chinese head of a mostly Latin text weighs far more
-    than the average). What bounds the starred messages and the attachments."""
-    from langchain_core.messages import HumanMessage
-
+    fits ``budget``, found by bisection on its length: the count only grows
+    with the head (each character adds its own cost, and the 1.2 floor grows
+    with the length), and no head longer than ``budget * 4 / 1.2`` characters
+    fits, so the search is bounded whatever follows the head (a Latin head
+    keeps its full budget ahead of a Chinese or digit-dense tail). What bounds
+    the starred messages and the attachments."""
     if not text or budget <= 0:
         return ""
-    weight = counter_weight(HumanMessage(text))
-    head = text[: int(budget * APPROX_CHARS_PER_TOKEN / weight)]
-    while head and counter_text_tokens(head) > budget:
-        over = counter_text_tokens(head) - budget
-        head = head[: max(0, len(head) - max(1, over))]
-    return head.rstrip()
+    low, high = 0, min(len(text), int(budget * APPROX_CHARS_PER_TOKEN / COUNTER_WEIGHT_FLOOR))
+    while low < high:
+        middle = (low + high + 1) // 2
+        if counter_text_tokens(text[:middle]) <= budget:
+            low = middle
+        else:
+            high = middle - 1
+    return text[:low].rstrip()
 
 
 def _is_summary(message: Any) -> bool:
@@ -661,28 +663,39 @@ def alone_share(
     tools: Optional[Iterable[Any]] = None,
     digit_tokens: float = DIGIT_TOKENS,
 ) -> Optional[float]:
-    """The share of a request it keeps WITHOUT its history: the system
-    messages, the last user message and the tool schemas, over the whole
-    request, both costed with the output budget's settings (the rules above,
-    one pass over the whole list so both sides weigh each message alike).
-    ``None`` without a user message or a size. Read on an engine's overflow
-    to tell a message too long on its own from a conversation that outgrew
-    the window (``ContextOverflow.alone_share``)."""
+    """The share of a request that is not its history: the system messages,
+    the tool schemas, the last user message and everything after it (the
+    current turn's tool calls and results, which a new conversation would
+    bring back too), over the whole request. Every part is weighed by ONE
+    estimator -- chars/4 times its own script weight, with the output
+    budget's settings and no measured ratio nor exact ``output_tokens`` --
+    so the estimator's error on this kind of text is about the same on both
+    sides and cancels in the ratio. ``None`` without a user message or a
+    size. Read on an engine's overflow to tell a message too long on its own
+    from a conversation that outgrew the window
+    (``ContextOverflow.alone_share``)."""
     messages = list(messages)
     last = last_human_index(messages)
     if last is None:
         return None
-    weights, ratio = message_weights(messages, dense=BUDGET_DENSE_TOKENS, digit_tokens=digit_tokens)
-    costs = [weighted_cost(m, w) for m, w in zip(messages, weights)]
+
+    def cost(message: Any) -> float:
+        viewed = history_view(message)
+        weight = script_weight(
+            message_text(viewed), dense=BUDGET_DENSE_TOKENS, digit_tokens=digit_tokens
+        )
+        return weight * estimate(viewed)
+
+    costs = [cost(m) for m in messages]
     tools_cost = _tools_tokens(
-        tools, ratio, dense=BUDGET_DENSE_TOKENS, weight_floor=0.0, digit_tokens=digit_tokens
+        tools, None, dense=BUDGET_DENSE_TOKENS, weight_floor=0.0, digit_tokens=digit_tokens
     )
     total = sum(costs) + tools_cost
     if total <= 0:
         return None
     kept = tools_cost + sum(
-        cost
-        for i, (message, cost) in enumerate(zip(messages, costs))
-        if i == last or getattr(message, "type", None) == "system"
+        c
+        for i, (message, c) in enumerate(zip(messages, costs))
+        if i >= last or getattr(message, "type", None) == "system"
     )
     return kept / total
