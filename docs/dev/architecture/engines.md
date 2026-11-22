@@ -899,7 +899,8 @@ apply` instead of shipping the defect silently.
 
 Quants the child cannot make chat at all are hidden by `MLX_Engine.KNOWN_BROKEN`, read by
 `BaseEngine.is_runnable` (the catalog row is disabled, a download is refused). An entry
-must be the exact link the catalog ships. Each entry carries its cause in a comment:
+must be the exact link the catalog ships; the lookup ignores case, as Hugging Face
+does for repo ids, so a by-link download in another case is refused too. Each entry carries its cause in a comment:
 DeepSeek-VL v1 (cv2 excluded from the build, plus two mlx-vlm bugs), the Nemotron-Super
 v1 quants, OLMo-2-1B (integer booleans in its `config.json`), internlm2-chat-1.8B (no
 `tokenizer.json`, and protobuf is not in the macOS build) and functiongemma (not a
