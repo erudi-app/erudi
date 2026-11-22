@@ -875,6 +875,28 @@ behaves like `generation_guard`, except that on exit the idle clock restarts onl
 model is still loaded. The lock is not reentrant: nothing inside either guard may enter
 the other.
 
+### Patches in the MLX child
+
+The `mlx_vlm.server` child (`src/engines/_mlx_vlm_server_runner.py`) monkeypatches the
+pinned mlx-vlm 0.6.17 before the server starts, for defects the user would otherwise meet
+head-on. The roster is `_IN_CHILD_PATCHES`:
+
+| Patch | What it fixes | Needed until |
+|---|---|---|
+| `_patch_gemma3_tied_lm_head_quant` | quantized tied-embedding Gemma3 checkpoints load (#273) | no upstream fix |
+| `_patch_turn_end_stop_tokens` | generation stops on the tokenizer's eos and on the named end-of-turn tokens it knows (`<end_of_turn>`, `<\|im_end\|>`, `<\|eot_id\|>`, `<\|END_RESPONSE\|>`); upstream stops on the config eos alone, so Llama 3, Yi, Phi-3, tiny-aya and Gemma stream that token and, for some, invented turns (#249, #721) | eos half: 0.7.0 (Neywa-Labs/mlx-vlm PR #2112); named tokens: not fixed in 0.8.0 |
+| `_patch_json_tool_call_tolerance` | a tool call written with the doubled braces the Qwen2.5 template shows (`{{"name": ...}}`) parses; any other malformed call is still dropped (#721) | not fixed in 0.8.0 |
+| `_patch_granite_decode_embedding_multiplier` | Granite (granite-3.3, 4.1) applies its embedding multiplier while decoding too, not only at prefill (#721) | not fixed in 0.8.0 |
+| `_patch_internlm2_output_head_sanitize` | InternLM2 checkpoints load their `output.*` head (#721) | not fixed in 0.8.0 |
+
+`<|end|>` is never a named end-of-turn token: gpt-oss (Harmony) closes its reasoning
+message with it and writes the answer after. Phi-3 still stops there, because it is that
+tokenizer's eos; on a tokenizer that has the Harmony `<|channel|>` token, `<|end|>` is
+never added. The child logs the stop set it uses (`Stop tokens: [...] (added [...])` in
+`logs/mlx-child-<port>.log`). Every patch is version-guarded: when the mlx-vlm internals
+it targets have moved, it does not apply, and the child's log records `<patch> did not
+apply` instead of shipping the defect silently.
+
 ## Prefix cache (MLX)
 
 The `mlx_vlm.server` child keeps an Automatic Prefix Cache pool, sized from the window at

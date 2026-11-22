@@ -52,11 +52,19 @@ from unittest.mock import MagicMock, Mock, patch
 import pytest
 
 from src.engines.mlx_engine import MLX_Engine
+from tests._helpers import is_mlx_platform
 
 
 # =====================================================================
 # Helpers shared by unit tests
 # =====================================================================
+
+
+def _stub_in_child_patches(monkeypatch, runner):
+    """Stub every in-child patch as applied, so a runner test never imports the
+    real mlx-vlm (absent on Linux CI, mutated-in-pytest-process on Mac)."""
+    for name in runner._IN_CHILD_PATCHES:
+        monkeypatch.setattr(runner, name, lambda: True)
 
 
 def _sse_bytes(payloads: List[dict | str]) -> Iterator[bytes]:
@@ -573,12 +581,12 @@ class TestMlxVlmServerRunnerHelper:
         from src.engines import _mlx_vlm_server_runner as runner
 
         order: list[str] = []
+        _stub_in_child_patches(monkeypatch, runner)
         monkeypatch.setattr(
             runner,
             "_patch_gemma3_tied_lm_head_quant",
             lambda: order.append("tied-lm-head") or True,
         )
-        monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
         fake_main = MagicMock(side_effect=lambda: order.append("main"))
         monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
         monkeypatch.setattr(sys, "argv", ["pytest"])
@@ -703,8 +711,7 @@ class TestChildRuntimeEnv:
 
         order: list[str] = []
         monkeypatch.setattr(runner, "_apply_child_runtime_env", lambda *a, **k: order.append("env"))
-        monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
-        monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
+        _stub_in_child_patches(monkeypatch, runner)
         fake_main = MagicMock(side_effect=lambda: order.append("main"))
         monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
         monkeypatch.setattr(sys, "argv", ["pytest"])
@@ -724,8 +731,7 @@ class TestChildRuntimeEnv:
             "_apply_child_runtime_env",
             lambda nb, to: captured.update(num_blocks=nb, timeout=to),
         )
-        monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
-        monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
+        _stub_in_child_patches(monkeypatch, runner)
         monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: MagicMock())
         monkeypatch.setattr(sys, "argv", ["pytest"])
 
@@ -746,8 +752,7 @@ class TestChildRuntimeEnv:
             "_apply_child_runtime_env",
             lambda nb, to: captured.update(num_blocks=nb, timeout=to),
         )
-        monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
-        monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
+        _stub_in_child_patches(monkeypatch, runner)
         monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: MagicMock())
         monkeypatch.setattr(sys, "argv", ["pytest"])
 
@@ -778,8 +783,7 @@ class TestBufferCacheBound:
     def _stub_runner(monkeypatch, runner, fake_main):
         import sys
 
-        monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
-        monkeypatch.setattr(runner, "_patch_gemma_end_of_turn_stop", lambda: True)
+        _stub_in_child_patches(monkeypatch, runner)
         monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
         monkeypatch.setattr(sys, "argv", ["pytest"])
 
@@ -858,49 +862,85 @@ class TestBufferCacheBound:
         assert "buffer cache not bounded" in lines[0]
 
 
-@pytest.mark.unit
-class TestGemmaEndOfTurnStopPatch:
-    """`_patch_gemma_end_of_turn_stop` adds Gemma's `<end_of_turn>` to the server's
-    stop-token set (#249).
+def _install_fake_module(monkeypatch, dotted, **attrs):
+    """Install ``dotted`` (and every missing parent) as fake modules in ``sys.modules``."""
+    import sys
+    import types
 
-    mlx_vlm (still on 0.6.13, `server/generation.py:_initialize_model`) builds
-    `stop_tokens` from `config.eos_token_id` only. Gemma declares `eos_token` =
-    `<eos>` (id 1) but its chat template ends turns with `<end_of_turn>` (id 106),
-    so without this patch generation runs past the answer and streams the literal
-    token + garbage. Verified live on `mlx-community/gemma-3-1b-it-4bit` (2048
-    chunks of garbage → 7 chunks, clean). 0.6.13 additionally merges a
-    checkpoint's `generation_config.json` eos ids into the config — the patch is
-    kept as the checkpoint-independent guarantee and is a no-op when that merge
-    already covers id 106.
+    parts = dotted.split(".")
+    for i in range(1, len(parts) + 1):
+        name = ".".join(parts[:i])
+        if not isinstance(sys.modules.get(name), types.ModuleType) or name == dotted:
+            monkeypatch.setitem(sys.modules, name, types.ModuleType(name))
+        if i > 1:
+            # Through monkeypatch: on a Mac the parent is the real mlx-vlm package.
+            parent = sys.modules[".".join(parts[: i - 1])]
+            monkeypatch.setattr(parent, parts[i - 1], sys.modules[name], raising=False)
+    for key, value in attrs.items():
+        setattr(sys.modules[dotted], key, value)
+    return sys.modules[dotted]
+
+
+_TURN_END_FIXTURE = Path(__file__).resolve().parent / "fixtures" / "turn_end_tokenizers.json"
+
+
+def _turn_end_families():
+    import json
+
+    return json.loads(_TURN_END_FIXTURE.read_text(encoding="utf-8"))["families"]
+
+
+@pytest.mark.unit
+class TestTurnEndStopTokensPatch:
+    """`_patch_turn_end_stop_tokens` completes the server's stop-token set (#249, #721).
+
+    mlx-vlm 0.6.17 (`server/generation.py:_initialize_model`) builds `stop_tokens`
+    from `config.eos_token_id` only (overridden by `generation_config.json`). It
+    ignores the tokenizer's own eos and the token the chat template closes a
+    message with, so Meta-Llama-3-8B-Instruct leaks `<|eot_id|>` and invents
+    the next turns, Yi-1.5 leaks `<|im_end|>`, Phi-3 shows `<|end|>`, tiny-aya
+    shows `<|END_RESPONSE|>` and Gemma streams `<end_of_turn>`. The patch adds
+    the tokenizer's eos and the named end-of-turn tokens it knows -- never
+    `<|end|>` on a Harmony (gpt-oss) tokenizer, where it separates the
+    reasoning from the answer. The per-family facts are frozen from the real
+    repos (`fixtures/turn_end_tokenizers.json`).
     """
 
-    def _install_fake_generation(self, monkeypatch, *, tokens, unk=3, base_stop=(1,)):
-        """Inject a minimal fake `mlx_vlm.server.generation` with a ResponseGenerator."""
-        import sys
-        import types
-
+    def _install_fake_generation(self, monkeypatch, *, config_stop, eos, unk, tokens):
         class _Tok:
             unk_token_id = unk
+            eos_token_id = eos
 
             def convert_tokens_to_ids(self, t):
+                # A fast HF tokenizer maps an unknown token to its unk id (None
+                # when it has none, Llama 3 and Qwen).
                 return tokens.get(t, unk)
 
         class ResponseGenerator:
             def _initialize_model(self):
-                # Mirror the real method: eos-derived stop set + tokenizer attr.
+                # Mirror the real method: config-derived stop set + tokenizer attr.
                 self.tokenizer = _Tok()
-                self.stop_tokens = set(base_stop)
+                self.stop_tokens = set(config_stop)
 
-        mlx_vlm = types.ModuleType("mlx_vlm")
-        server = types.ModuleType("mlx_vlm.server")
-        generation = types.ModuleType("mlx_vlm.server.generation")
-        generation.ResponseGenerator = ResponseGenerator
-        server.generation = generation
-        mlx_vlm.server = server
-        monkeypatch.setitem(sys.modules, "mlx_vlm", mlx_vlm)
-        monkeypatch.setitem(sys.modules, "mlx_vlm.server", server)
-        monkeypatch.setitem(sys.modules, "mlx_vlm.server.generation", generation)
+        _install_fake_module(
+            monkeypatch, "mlx_vlm.server.generation", ResponseGenerator=ResponseGenerator
+        )
         return ResponseGenerator
+
+    def _stop_set_for(self, monkeypatch, family):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        RG = self._install_fake_generation(
+            monkeypatch,
+            config_stop=family["config_stop"],
+            eos=family["eos_token_id"],
+            unk=family["unk_token_id"],
+            tokens=family["tokens"],
+        )
+        assert runner._patch_turn_end_stop_tokens() is True
+        rg = RG()
+        rg._initialize_model()
+        return rg.stop_tokens
 
     def test_returns_false_when_mlx_vlm_absent(self, monkeypatch):
         import sys
@@ -910,54 +950,135 @@ class TestGemmaEndOfTurnStopPatch:
         bare_server = types.ModuleType("mlx_vlm.server")  # no `generation` attribute
         monkeypatch.setitem(sys.modules, "mlx_vlm.server", bare_server)
         monkeypatch.setitem(sys.modules, "mlx_vlm.server.generation", None)
-        assert runner._patch_gemma_end_of_turn_stop() is False
+        assert runner._patch_turn_end_stop_tokens() is False
 
-    def test_adds_end_of_turn_id_for_gemma(self, monkeypatch):
+    def test_returns_false_when_the_initializer_moved(self, monkeypatch):
         from src.engines import _mlx_vlm_server_runner as runner
 
-        RG = self._install_fake_generation(monkeypatch, tokens={"<end_of_turn>": 106})
-        assert runner._patch_gemma_end_of_turn_stop() is True
+        class ResponseGenerator:  # no _initialize_model: an mlx-vlm bump moved it
+            pass
 
-        rg = RG()
-        rg._initialize_model()
-        assert 106 in rg.stop_tokens  # the turn-ender is now a stop token
-        assert 1 in rg.stop_tokens  # the original eos survives
+        _install_fake_module(
+            monkeypatch, "mlx_vlm.server.generation", ResponseGenerator=ResponseGenerator
+        )
+        assert runner._patch_turn_end_stop_tokens() is False
 
-    def test_no_op_for_non_gemma(self, monkeypatch):
+    @pytest.mark.parametrize("name", sorted(_turn_end_families()))
+    def test_stop_set_per_family(self, monkeypatch, name):
+        family = _turn_end_families()[name]
+        stop = self._stop_set_for(monkeypatch, family)
+        assert stop == set(family["expected_stop"]), family["repo"]
+
+    def test_the_tokenizers_eos_is_added_when_the_config_disagrees(self, monkeypatch):
+        # Yi-1.5: config eos 2 (<|endoftext|>), tokenizer eos 7 (<|im_end|>).
+        stop = self._stop_set_for(monkeypatch, _turn_end_families()["yi"])
+        assert 7 in stop and 2 in stop
+
+    def test_a_named_turn_end_that_is_not_the_eos_is_added(self, monkeypatch):
+        # tiny-aya: the message closes on <|END_RESPONSE|>, not on the eos.
+        stop = self._stop_set_for(monkeypatch, _turn_end_families()["cohere2"])
+        assert 261001 in stop
+
+    def test_gpt_oss_never_stops_on_its_channel_separator(self, monkeypatch):
+        # <|end|> closes gpt-oss's analysis message before the final answer.
+        stop = self._stop_set_for(monkeypatch, _turn_end_families()["gpt_oss"])
+        assert 200007 not in stop
+
+    def test_the_harmony_guard_holds_even_when_end_is_declared_eos(self, monkeypatch):
+        """A gpt-oss repack whose tokenizer declares `<|end|>` as its eos must
+        still not stop there: the guard keys on the Harmony `<|channel|>`
+        token, not on the eos declaration."""
+        stop = self._stop_set_for(
+            monkeypatch,
+            {
+                "repo": "a gpt-oss repack",
+                "config_stop": [199999, 200002],
+                "eos_token_id": 200007,
+                "unk_token_id": None,
+                "tokens": {"<|end|>": 200007, "<|channel|>": 200005, "<|return|>": 200002},
+            },
+        )
+        assert stop == {199999, 200002}
+
+    def test_phi3_stops_on_end_because_it_is_its_eos(self, monkeypatch):
+        # No Harmony channel token: <|end|> is Phi-3's own eos and ends the turn.
+        stop = self._stop_set_for(monkeypatch, _turn_end_families()["phi3"])
+        assert 32007 in stop
+
+    def test_end_is_never_a_named_turn_end(self):
         from src.engines import _mlx_vlm_server_runner as runner
 
-        # Tokenizer doesn't know <end_of_turn> → convert returns unk (3), skipped.
-        RG = self._install_fake_generation(monkeypatch, tokens={}, unk=3)
-        assert runner._patch_gemma_end_of_turn_stop() is True
+        assert "<|end|>" not in runner.TURN_END_TOKENS
+        assert set(runner.TURN_END_TOKENS) >= {
+            "<end_of_turn>",
+            "<|im_end|>",
+            "<|eot_id|>",
+            "<|END_RESPONSE|>",
+        }
 
-        rg = RG()
-        rg._initialize_model()
-        assert rg.stop_tokens == {1}  # unchanged; unk id never added
+    def test_an_unknown_token_is_never_added(self, monkeypatch):
+        # A tokenizer without any named token maps them to unk (3): untouched.
+        stop = self._stop_set_for(
+            monkeypatch,
+            {"config_stop": [1], "eos_token_id": 1, "unk_token_id": 3, "tokens": {}},
+        )
+        assert stop == {1}
+
+    def test_a_list_eos_is_added_whole(self, monkeypatch):
+        stop = self._stop_set_for(
+            monkeypatch,
+            {"config_stop": [1], "eos_token_id": [5, 6], "unk_token_id": None, "tokens": {}},
+        )
+        assert stop == {1, 5, 6}
+
+    def test_a_tokenizer_that_raises_never_breaks_the_load(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        class _Tok:
+            eos_token_id = 7
+
+            def convert_tokens_to_ids(self, t):
+                raise RuntimeError("tokenizer broke")
+
+        class ResponseGenerator:
+            def _initialize_model(self):
+                self.tokenizer = _Tok()
+                self.stop_tokens = {2}
+
+        _install_fake_module(
+            monkeypatch, "mlx_vlm.server.generation", ResponseGenerator=ResponseGenerator
+        )
+        assert runner._patch_turn_end_stop_tokens() is True
+        rg = ResponseGenerator()
+        rg._initialize_model()  # does not raise
+        assert 2 in rg.stop_tokens
 
     def test_patch_is_idempotent(self, monkeypatch):
         from src.engines import _mlx_vlm_server_runner as runner
 
-        RG = self._install_fake_generation(monkeypatch, tokens={"<end_of_turn>": 106})
-        assert runner._patch_gemma_end_of_turn_stop() is True
+        RG = self._install_fake_generation(
+            monkeypatch, config_stop=[1], eos=1, unk=3, tokens={"<end_of_turn>": 106}
+        )
+        assert runner._patch_turn_end_stop_tokens() is True
         first = RG._initialize_model
-        assert runner._patch_gemma_end_of_turn_stop() is True
+        assert runner._patch_turn_end_stop_tokens() is True
         assert RG._initialize_model is first  # not double-wrapped
 
-    def test_runner_applies_gemma_patch_before_main(self, monkeypatch):
+    def test_runner_applies_stop_patch_before_main(self, monkeypatch):
         """The stop-token patch must run before the server's main() loads a model.
 
-        The sibling in-child patch is stubbed out so this test never imports
+        The sibling in-child patches are stubbed out so this test never imports
         the real mlx-vlm (absent on Linux CI, mutated-in-pytest-process on Mac).
         """
         import sys
         from src.engines import _mlx_vlm_server_runner as runner
 
         order: list[str] = []
-        monkeypatch.setattr(runner, "_patch_gemma3_tied_lm_head_quant", lambda: True)
+        _stub_in_child_patches(monkeypatch, runner)
         monkeypatch.setattr(
             runner,
-            "_patch_gemma_end_of_turn_stop",
-            lambda: order.append("gemma-stop") or True,
+            "_patch_turn_end_stop_tokens",
+            lambda: order.append("turn-end-stop") or True,
         )
         fake_main = MagicMock(side_effect=lambda: order.append("main"))
         monkeypatch.setattr(runner, "_import_mlx_vlm_server_main", lambda: fake_main)
@@ -965,7 +1086,360 @@ class TestGemmaEndOfTurnStopPatch:
 
         runner.run_mlx_vlm_server(["mlx_vlm.server", "--port", "9080"])
 
-        assert order.index("gemma-stop") < order.index("main")
+        assert order.index("turn-end-stop") < order.index("main")
+
+
+def _strict_parse_tool_call(text, tools=None):
+    """mlx-vlm 0.6.17's `json_tools.parse_tool_call`, verbatim."""
+    import json
+
+    return json.loads(text.strip())
+
+
+@pytest.mark.unit
+class TestJsonToolCallTolerancePatch:
+    """`_patch_json_tool_call_tolerance` parses the doubled-brace tool call (#721).
+
+    The Qwen2.5 tool template shows the call format as
+    `{{"name": <function-name>, "arguments": <args-json-object>}}`; a small
+    model copies the doubled braces, mlx-vlm's strict `json.loads` rejects the
+    call, and since the streamed text after `<tool_call>` is already
+    suppressed the turn ends empty. The patch accepts that one shape (extra
+    leading `{`, extra trailing `}`) and nothing else.
+    """
+
+    def _install(self, monkeypatch):
+        return _install_fake_module(
+            monkeypatch,
+            "mlx_vlm.tool_parsers.json_tools",
+            parse_tool_call=_strict_parse_tool_call,
+            tool_call_start="<tool_call>",
+            tool_call_end="</tool_call>",
+        )
+
+    def test_returns_false_when_mlx_vlm_absent(self, monkeypatch):
+        import sys
+        import types
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        monkeypatch.setitem(sys.modules, "mlx_vlm.tool_parsers", types.ModuleType("x"))
+        monkeypatch.setitem(sys.modules, "mlx_vlm.tool_parsers.json_tools", None)
+        assert runner._patch_json_tool_call_tolerance() is False
+
+    def test_returns_false_when_the_parser_moved(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        _install_fake_module(monkeypatch, "mlx_vlm.tool_parsers.json_tools")
+        assert runner._patch_json_tool_call_tolerance() is False
+
+    def test_parses_the_qwen_doubled_brace_call(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        mod = self._install(monkeypatch)
+        assert runner._patch_json_tool_call_tolerance() is True
+        # The exact text Qwen2.5-0.5B wrote (the child's "Invalid tool call" line).
+        call = mod.parse_tool_call('{{"name": "get_weather", "arguments": {"city": "Paris"}}}}')
+        assert call == {"name": "get_weather", "arguments": {"city": "Paris"}}
+
+    def test_a_valid_call_parses_as_before(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        mod = self._install(monkeypatch)
+        assert runner._patch_json_tool_call_tolerance() is True
+        text = '\n{"name": "f", "arguments": {"a": 1}}\n'
+        assert mod.parse_tool_call(text) == _strict_parse_tool_call(text)
+
+    @pytest.mark.parametrize(
+        "text",
+        [
+            '{"name": "f", "arguments": {"a": 1}',  # truncated
+            '{{"name": "f", "arguments": {"a": 1}',  # doubled but truncated
+            '{{"name": "f", "arguments": {"a": 1}}} and then some prose',  # trailing text
+            '{{"arguments": {"a": 1}}}',  # no name
+            '{{"name": "f"}}',  # no arguments
+            '{{"name": 3, "arguments": {}}}',  # name not a string
+            '{{"name": "f", "arguments": [1]}}',  # arguments neither object nor string
+            "not json at all",
+        ],
+    )
+    def test_a_malformed_call_still_raises(self, monkeypatch, text):
+        """Never executed: process_tool_calls logs `Invalid tool call` and
+        drops it, as it does today."""
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        mod = self._install(monkeypatch)
+        assert runner._patch_json_tool_call_tolerance() is True
+        with pytest.raises(ValueError):
+            mod.parse_tool_call(text)
+
+    def test_patch_is_idempotent(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        mod = self._install(monkeypatch)
+        assert runner._patch_json_tool_call_tolerance() is True
+        first = mod.parse_tool_call
+        assert runner._patch_json_tool_call_tolerance() is True
+        assert mod.parse_tool_call is first
+
+
+@pytest.mark.unit
+class TestGraniteDecodeEmbeddingMultiplierPatch:
+    """`_patch_granite_decode_embedding_multiplier` keeps Granite's multiplier
+    while decoding (#721).
+
+    `models/granite/language.py` (`GraniteModel.__call__`) multiplies the
+    embeddings by `embedding_multiplier` only when it receives `inputs_embeds`
+    (the prefill); every decode step passes token ids, so the multiplier (12
+    on granite-3.3 and 4.1) is skipped and the answer turns to noise after its
+    first token. The patch embeds the ids itself, so the multiplier applies
+    once on both paths.
+    """
+
+    def _install(self, monkeypatch):
+        calls: list = []
+
+        class GraniteModel:
+            def embed_tokens(self, inputs):
+                return ("embedded", inputs)
+
+            def __call__(self, inputs, cache=None, inputs_embeds=None):
+                calls.append((inputs, cache, inputs_embeds))
+                return "out"
+
+        _install_fake_module(
+            monkeypatch, "mlx_vlm.models.granite.language", GraniteModel=GraniteModel
+        )
+        return GraniteModel, calls
+
+    def test_returns_false_when_mlx_vlm_absent(self, monkeypatch):
+        import sys
+        import types
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        monkeypatch.setitem(sys.modules, "mlx_vlm.models.granite", types.ModuleType("x"))
+        monkeypatch.setitem(sys.modules, "mlx_vlm.models.granite.language", None)
+        assert runner._patch_granite_decode_embedding_multiplier() is False
+
+    def test_returns_false_when_the_model_class_moved(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        _install_fake_module(monkeypatch, "mlx_vlm.models.granite.language")
+        assert runner._patch_granite_decode_embedding_multiplier() is False
+
+    def test_a_decode_step_goes_through_the_embeddings_path(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        GM, calls = self._install(monkeypatch)
+        assert runner._patch_granite_decode_embedding_multiplier() is True
+        GM()("ids", "cache")
+        assert calls == [("ids", "cache", ("embedded", "ids"))]
+
+    def test_a_prefill_keeps_its_embeddings(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        GM, calls = self._install(monkeypatch)
+        assert runner._patch_granite_decode_embedding_multiplier() is True
+        GM()("ids", None, inputs_embeds="given")
+        assert calls == [("ids", None, "given")]
+
+    def test_patch_is_idempotent(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        GM, _ = self._install(monkeypatch)
+        assert runner._patch_granite_decode_embedding_multiplier() is True
+        first = GM.__call__
+        assert runner._patch_granite_decode_embedding_multiplier() is True
+        assert GM.__call__ is first
+
+
+@pytest.mark.unit
+class TestInternlm2OutputHeadSanitizePatch:
+    """`_patch_internlm2_output_head_sanitize` loads InternLM2's head (#721).
+
+    `models/internlm2/internlm2.py` (`Model.sanitize`) prefixes `model.*` and
+    `lm_head.*` with `language_model.`, but InternLM2 names its head
+    `output.*`, so the strict load rejects the checkpoint: "Received 3
+    parameters not in model: output.biases, output.scales, output.weight".
+    """
+
+    @staticmethod
+    def _upstream_sanitize(self, weights):
+        # mlx-vlm 0.6.17's Model.sanitize, minus the language-model pass.
+        def transform_key(key):
+            if key.startswith("language_model."):
+                return key
+            if key.startswith("model.") or key.startswith("lm_head."):
+                return f"language_model.{key}"
+            return key
+
+        return {transform_key(k): v for k, v in weights.items()}
+
+    def _install(self, monkeypatch):
+        Model = type("Model", (), {"sanitize": self._upstream_sanitize})
+        _install_fake_module(monkeypatch, "mlx_vlm.models.internlm2.internlm2", Model=Model)
+        return Model
+
+    def test_returns_false_when_mlx_vlm_absent(self, monkeypatch):
+        import sys
+        import types
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        monkeypatch.setitem(sys.modules, "mlx_vlm.models.internlm2", types.ModuleType("x"))
+        monkeypatch.setitem(sys.modules, "mlx_vlm.models.internlm2.internlm2", None)
+        assert runner._patch_internlm2_output_head_sanitize() is False
+
+    def test_returns_false_when_the_model_class_moved(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        _install_fake_module(monkeypatch, "mlx_vlm.models.internlm2.internlm2")
+        assert runner._patch_internlm2_output_head_sanitize() is False
+
+    def test_the_output_head_is_prefixed(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        Model = self._install(monkeypatch)
+        assert runner._patch_internlm2_output_head_sanitize() is True
+        out = Model().sanitize(
+            {"output.weight": 1, "output.scales": 2, "output.biases": 3, "model.norm.weight": 4}
+        )
+        assert out == {
+            "language_model.output.weight": 1,
+            "language_model.output.scales": 2,
+            "language_model.output.biases": 3,
+            "language_model.model.norm.weight": 4,
+        }
+
+    def test_an_already_prefixed_head_is_left_alone(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        Model = self._install(monkeypatch)
+        assert runner._patch_internlm2_output_head_sanitize() is True
+        weights = {"language_model.output.weight": 1}
+        assert Model().sanitize(dict(weights)) == weights
+
+    def test_a_key_that_only_starts_like_output_is_left_alone(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        Model = self._install(monkeypatch)
+        assert runner._patch_internlm2_output_head_sanitize() is True
+        assert Model().sanitize({"outputs.weight": 1}) == {"outputs.weight": 1}
+
+    def test_patch_is_idempotent(self, monkeypatch):
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        Model = self._install(monkeypatch)
+        assert runner._patch_internlm2_output_head_sanitize() is True
+        first = Model.sanitize
+        assert runner._patch_internlm2_output_head_sanitize() is True
+        assert Model.sanitize is first
+
+
+@pytest.mark.mlx_only
+class TestMlxVlmPatchesOnTheRealModules:
+    """The three model patches against the pinned mlx-vlm's real classes.
+
+    Each test starts from upstream (the patched function's `__wrapped__`, in
+    case a runner test applied the real patch in this process) and restores
+    the attribute and the idempotence flag afterwards.
+    """
+
+    @pytest.fixture(autouse=True)
+    def _needs_mlx_vlm(self):
+        if not is_mlx_platform():
+            pytest.skip("mlx-vlm is only installed on Apple Silicon")
+        pytest.importorskip("mlx_vlm")
+
+    def test_granite_decode_matches_the_prefill_path(self, monkeypatch):
+        import mlx.core as mx
+        from mlx_vlm.models.granite import language as granite_language
+        from mlx_vlm.models.granite.config import ModelConfig
+
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        cls = granite_language.GraniteModel
+        # Upstream behaviour even if an earlier test applied the patch here.
+        monkeypatch.setattr(cls, "__call__", getattr(cls.__call__, "__wrapped__", cls.__call__))
+        monkeypatch.setattr(cls, "_erudi_granite_multiplier_patch", False, raising=False)
+        model = cls(
+            ModelConfig(
+                model_type="granite",
+                hidden_size=16,
+                num_hidden_layers=2,
+                intermediate_size=32,
+                num_attention_heads=2,
+                rms_norm_eps=1e-5,
+                vocab_size=32,
+                logits_scaling=1.0,
+                attention_multiplier=0.25,
+                embedding_multiplier=12.0,
+                residual_multiplier=0.2,
+                max_position_embeddings=64,
+                num_key_value_heads=2,
+                attention_bias=False,
+                mlp_bias=False,
+                rope_theta=10000.0,
+            )
+        )
+        ids = mx.array([[1, 2, 3]])
+        assert not mx.allclose(model(ids), model(ids, inputs_embeds=model.embed_tokens(ids)))
+
+        assert runner._patch_granite_decode_embedding_multiplier() is True
+        assert mx.allclose(model(ids), model(ids, inputs_embeds=model.embed_tokens(ids)))
+
+    def test_an_internlm2_checkpoint_loads_strictly(self, monkeypatch):
+        from mlx.utils import tree_flatten
+        from mlx_vlm.models.internlm2 import internlm2
+        from mlx_vlm.models.internlm2.config import ModelConfig
+
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        cls = internlm2.Model
+        monkeypatch.setattr(cls, "sanitize", getattr(cls.sanitize, "__wrapped__", cls.sanitize))
+        monkeypatch.setattr(cls, "_erudi_internlm2_head_patch", False, raising=False)
+        model = cls(
+            ModelConfig(
+                model_type="internlm2",
+                hidden_size=16,
+                num_hidden_layers=1,
+                intermediate_size=32,
+                num_attention_heads=2,
+                rms_norm_eps=1e-5,
+                vocab_size=32,
+                bias=False,
+            )
+        )
+        # The checkpoint's own names: `model.*` and the `output.*` head.
+        checkpoint = {
+            k.removeprefix("language_model."): v for k, v in tree_flatten(model.parameters())
+        }
+        assert "output.weight" in checkpoint
+        with pytest.raises(ValueError, match="output.weight"):
+            model.load_weights(list(model.sanitize(dict(checkpoint)).items()), strict=True)
+
+        assert runner._patch_internlm2_output_head_sanitize() is True
+        model.load_weights(list(model.sanitize(dict(checkpoint)).items()), strict=True)
+
+    def test_the_real_tool_call_pass_extracts_the_doubled_brace_call(self, monkeypatch):
+        from mlx_vlm.server.responses_state import process_tool_calls
+        from mlx_vlm.tool_parsers import json_tools, load_tool_module
+
+        from src.engines import _mlx_vlm_server_runner as runner
+
+        strict = json_tools.parse_tool_call
+        monkeypatch.setattr(json_tools, "parse_tool_call", getattr(strict, "__wrapped__", strict))
+        monkeypatch.setattr(json_tools, "_erudi_tolerant_parse_patch", False, raising=False)
+        output = (
+            '<tool_call>\n{{"name": "get_weather", "arguments": {"city": "Paris"}}}}\n'
+            "</tool_call>"
+        )
+        module = load_tool_module("json_tools")
+        assert process_tool_calls(output, module, None)["calls"] == []
+
+        assert runner._patch_json_tool_call_tolerance() is True
+        calls = process_tool_calls(output, module, None)["calls"]
+        assert [(c["function"]["name"], c["function"]["arguments"]) for c in calls] == [
+            ("get_weather", '{"city": "Paris"}')
+        ]
 
 
 @pytest.mark.unit
@@ -2130,6 +2604,65 @@ class TestSubprocessReal:
                     break
                 time.sleep(0.1)
             assert not proc.is_alive(), "real subprocess was not terminated by the idle tick"
+        finally:
+            MLX_Engine.cleanup()
+
+
+@pytest.mark.mlx_only
+class TestToolCallReal:
+    """Qwen2.5-0.5B (the session model) calls a tool through the real child (#721).
+
+    Its template shows the call as `{{"name": ..., "arguments": ...}}` and the
+    model copies the doubled braces; without the tolerant parser the turn
+    ends with no content and no tool call.
+    """
+
+    def test_the_tool_call_comes_back_structured(self, mlx_test_model_path):
+        import json as _json
+
+        import requests
+
+        try:
+            model, _ = MLX_Engine.get_model_and_tokenizer(
+                llm_id="qwen-test",
+                llm_local_path=str(mlx_test_model_path),
+            )
+            body = {
+                "model": model["model_path"],
+                "messages": [
+                    {"role": "system", "content": "You are a helpful assistant."},
+                    {"role": "user", "content": "What is the weather in Paris right now?"},
+                ],
+                "tools": [
+                    {
+                        "type": "function",
+                        "function": {
+                            "name": "get_weather",
+                            "description": "Get the current weather for a city",
+                            "parameters": {
+                                "type": "object",
+                                "properties": {"city": {"type": "string"}},
+                                "required": ["city"],
+                            },
+                        },
+                    }
+                ],
+                "max_tokens": 200,
+                "temperature": 0.0,
+                "stream": False,
+            }
+            r = requests.post(
+                f"{model['base_url']}/v1/chat/completions",
+                json=body,
+                timeout=120,
+                headers={"Authorization": f"Bearer {model['api_key']}"},
+            )
+            assert r.status_code == 200, r.text
+            choice = r.json()["choices"][0]
+            calls = choice["message"].get("tool_calls") or []
+            assert [c["function"]["name"] for c in calls] == ["get_weather"], choice
+            assert _json.loads(calls[0]["function"]["arguments"]) == {"city": "Paris"}
+            assert choice["finish_reason"] == "tool_calls"
         finally:
             MLX_Engine.cleanup()
 
