@@ -98,7 +98,7 @@ describe("APIClient timeout normalization", () => {
 });
 
 describe("APIClient error normalization (handleErrorResponse)", () => {
-  it("shapes an HTTP error into message/status/code/data using `detail`", async () => {
+  it("shapes an HTTP error into message/status/code/data, the backend's text kept apart", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 422,
@@ -107,20 +107,21 @@ describe("APIClient error normalization (handleErrorResponse)", () => {
     });
 
     const err = await apiClient.get("/x").catch((e) => e);
-    expect(err.message).toBe("bad field");
+    expect(err.message).toBe("API Error: 422");
+    expect(err.detail).toBe("bad field");
     expect(err.status).toBe(422);
     expect(err.code).toBe("HTTP_422");
     expect(err.data).toEqual({ detail: "bad field" });
   });
 
-  it("falls back detail -> message -> generic for the error text", async () => {
+  it("never shows the backend's own detail or message: the status says it", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 400,
       statusText: "Bad Request",
       json: async () => ({ message: "only a message" }),
     });
-    await expect(apiClient.get("/a")).rejects.toThrow("only a message");
+    await expect(apiClient.get("/a")).rejects.toThrow("API Error: 400");
 
     fetchMock.mockResolvedValueOnce({
       ok: false,
@@ -131,7 +132,7 @@ describe("APIClient error normalization (handleErrorResponse)", () => {
     await expect(apiClient.get("/b")).rejects.toThrow("API Error: 500");
   });
 
-  it("uses statusText when the error body is not JSON", async () => {
+  it("keeps statusText, for the log, when the error body is not JSON", async () => {
     fetchMock.mockResolvedValueOnce({
       ok: false,
       status: 503,
@@ -142,7 +143,8 @@ describe("APIClient error normalization (handleErrorResponse)", () => {
     });
 
     const err = await apiClient.get("/x").catch((e) => e);
-    expect(err.message).toBe("Service Unavailable");
+    expect(err.message).toBe("API Error: 503");
+    expect(err.detail).toBe("Service Unavailable");
     expect(err.code).toBe("HTTP_503");
     expect(err.data).toEqual({ detail: "Service Unavailable" });
   });
@@ -155,7 +157,7 @@ describe("APIClient error normalization (handleErrorResponse)", () => {
       json: async () => ({ detail: "boom" }),
     });
 
-    await expect(apiClient.get("/x")).rejects.toThrow("boom");
+    await expect(apiClient.get("/x")).rejects.toThrow("API Error: 500");
     expect(fetchMock).toHaveBeenCalledTimes(1);
   });
 });

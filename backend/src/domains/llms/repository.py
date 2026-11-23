@@ -38,6 +38,7 @@ from src.entities.DownloadJob import DownloadJobModel
 from src.entities.ModelDefaults import ModelDefaults
 from src.core.logging import logger
 from src.core import config
+from src.domains.llms.download_errors import download_error_code
 
 
 def dir_size_bytes(path) -> int:
@@ -688,6 +689,7 @@ def update_db_with_progress(job_tracker, job_id: int, model_id: int) -> None:
         try:
             dbj.status = "failed"
             dbj.error_message = str(e)
+            dbj.error_code = download_error_code(e)
 
             # Clean up temp files
             if dbj.temp_local_model_link:

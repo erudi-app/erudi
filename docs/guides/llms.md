@@ -209,10 +209,42 @@ installed, its control says so ("Waiting for the download to finish installingâ€
 
 Quitting the app is not a cancel: the backend interrupts the download, leaves the job
 `running` and its partial files on disk, and the next start resolves them (the job ends
-`failed` with "Download interrupted due to application shutdown" and the files are
-removed, unless the transfer had already completed). The cleanup logs one INFO line
-saying the download was interrupted; the integrity-check WARNING is kept for a download
-whose transfer had reached 100 % yet whose files fail the engine's check.
+`failed` with "Download interrupted due to application shutdown" and the code
+`interrupted`, and the files are removed, unless the transfer had already completed). The
+cleanup logs one INFO line saying the download was interrupted; the integrity-check WARNING
+is kept for a download whose transfer had reached 100 % yet whose files fail the engine's
+check.
+
+### Download failures
+
+A `failed` job carries two fields: `error_message`, the English text of the failure, for
+`backend.log` and Diagnostics; and `error_code`, a stable code the download widget turns into
+a sentence in the interface language (`downloads:errors.codes.*`,
+`frontend/src/utils/downloadErrors.js`). The widget never shows `error_message`. The code is
+read off the exception where the failure is recorded (`download_error_code` in
+`src/domains/llms/download_errors.py`): a refusal Erudi raises itself is marked with its code at
+the raise site, a failure from below is recognised from its type anywhere in the exception
+chain.
+
+| `error_code` | When |
+|--------------|------|
+| `offline` | No network reaches the Hub (`OFFLINE_DOWNLOAD_MESSAGE`) |
+| `disk_full` | An `OSError` with `ENOSPC` while writing the files |
+| `gated` | The repository needs an account (`GatedRepoError`, HTTP 401/403) |
+| `not_found` | The repository or a file of it does not exist (`RepositoryNotFoundError`, `EntryNotFoundError`, HTTP 404); the Hub also answers 401 for a missing repository, which keeps this code |
+| `rate_limited` | HTTP 429 once huggingface_hub's own retries are spent |
+| `interrupted` | The app quit during the transfer (written by the next start's cleanup) |
+| `no_engine_artifact` | The repository ships nothing this engine runs |
+| `raw_gguf_chunks` | The GGUF weights are raw byte pieces only |
+| `incomplete_split` | The listing misses a part of the chosen split quant |
+| `unsafe_file_name` | A listed file name would land outside the model folder |
+| `not_runnable` | The quant is known not to run on this engine |
+| `integrity_failed` | The files arrived but the engine's integrity gate refused them |
+| `unexpected` | Anything else; the job's ERROR record carries the traceback |
+
+A cancelled job is not a failure and carries no code. A job that failed before codes were
+stored has `error_code: null`, and the widget shows its generic sentence for it, as it does
+for a code it does not know.
 
 ## Searching
 

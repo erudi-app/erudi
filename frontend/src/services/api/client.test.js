@@ -1,6 +1,8 @@
 // @vitest-environment jsdom
 import { describe, it, expect, vi, beforeEach, afterEach } from "vitest";
 import { apiClient, tracedFetch } from "./client";
+import i18n from "../../i18n";
+import frErrors from "../../locales/fr/errors.json";
 
 const okResponse = (body = { ok: true }) => ({
   ok: true,
@@ -81,11 +83,13 @@ describe("APIClient request tracing", () => {
       json: async () => ({ detail: "kaput" }),
     });
 
-    await expect(apiClient.get("/llms/")).rejects.toThrow("kaput");
+    await expect(apiClient.get("/llms/")).rejects.toThrow("API Error: 500");
 
     const fail = entryData("api.failure");
     expect(fail).toBeTruthy();
-    expect(fail.error).toBe("kaput");
+    expect(fail.error).toBe("API Error: 500");
+    // The backend's own sentence stays in the log, never on screen (#780).
+    expect(fail.detail).toBe("kaput");
     expect(fail.status).toBe(500);
     expect(typeof fail.duration_ms).toBe("number");
     expect(fail.rid).toBe(entryData("api.request").rid);
@@ -98,7 +102,7 @@ describe("APIClient request tracing", () => {
       statusText: "boom",
       json: async () => ({ detail: "kaput" }),
     });
-    await expect(apiClient.post("/llms/7/download", {})).rejects.toThrow("kaput");
+    await expect(apiClient.post("/llms/7/download", {})).rejects.toThrow("API Error: 500");
     const entry = clientEntries().find((e) => e.msg === "api.failure");
     expect(entry.level).toBe("error");
     const fail = JSON.parse(entry.data);
@@ -113,11 +117,96 @@ describe("APIClient request tracing", () => {
       statusText: "Not Found",
       json: async () => ({ detail: "Model 'ghost' not found" }),
     });
-    await expect(apiClient.get("/llms/ghost")).rejects.toThrow("not found");
+    await expect(apiClient.get("/llms/ghost")).rejects.toThrow("API Error: 404");
     const entry = clientEntries().find((e) => e.msg === "api.failure");
     expect(entry.level).toBe("info");
     expect(JSON.parse(entry.data).status).toBe(404);
     expect(clientEntries().some((e) => e.level === "error")).toBe(false);
+  });
+});
+
+describe("APIClient error text in the interface language (#780)", () => {
+  const appError = (status, type, message) => ({
+    ok: false,
+    status,
+    statusText: "x",
+    json: async () => ({ success: false, error: { type, message } }),
+  });
+
+  beforeEach(async () => {
+    await i18n.changeLanguage("fr");
+  });
+  afterEach(async () => {
+    await i18n.changeLanguage("en");
+  });
+
+  it("says a code it knows in the interface language, never the backend's sentence", async () => {
+    const english =
+      "Every database connection was in use for 30 s, so this request was not served.";
+    fetchMock.mockResolvedValueOnce(appError(503, "DATABASE_BUSY", english));
+
+    const error = await apiClient.get("/conversations/").catch((e) => e);
+
+    expect(error.message).toBe(frErrors.api.codes.databaseBusy);
+    expect(error.status).toBe(503);
+    expect(error.data.error.type).toBe("DATABASE_BUSY");
+    // The English sentence is in the renderer log, for Diagnostics.
+    expect(entryData("api.failure").detail).toBe(english);
+  });
+
+  it.each([
+    ["INTERNAL_SERVER_ERROR", 500, frErrors.api.codes.internal],
+    ["DATABASE_ERROR", 500, frErrors.api.codes.database],
+    ["FILESYSTEM_ERROR", 500, frErrors.api.codes.filesystem],
+    ["MODEL_NOT_FOUND", 404, frErrors.api.codes.modelNotFound],
+  ])("translates %s", async (type, status, sentence) => {
+    fetchMock.mockResolvedValueOnce(appError(status, type, "an English sentence"));
+
+    await expect(apiClient.get("/llms/local")).rejects.toThrow(sentence);
+  });
+
+  it("falls back to the HTTP status for a code it has no sentence for", async () => {
+    fetchMock.mockResolvedValueOnce(appError(409, "SOME_OTHER_CODE", "an English sentence"));
+
+    const error = await apiClient.get("/llms/local").catch((e) => e);
+
+    expect(error.message).toBe(i18n.t("errors:api.httpStatus", { status: 409 }));
+    expect(error.message).not.toContain("English");
+  });
+
+  it("falls back to the HTTP status for FastAPI's own detail, a string or a list", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 500,
+      json: async () => ({ detail: "CUDA driver version is insufficient" }),
+    });
+    await expect(apiClient.get("/hardware/")).rejects.toThrow(
+      i18n.t("errors:api.httpStatus", { status: 500 })
+    );
+
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 422,
+      json: async () => ({ detail: [{ loc: ["body"], msg: "Field required" }] }),
+    });
+    await expect(apiClient.post("/conversations/", {})).rejects.toThrow(
+      i18n.t("errors:api.httpStatus", { status: 422 })
+    );
+  });
+
+  it("falls back to the HTTP status for a body that is not JSON", async () => {
+    fetchMock.mockResolvedValueOnce({
+      ok: false,
+      status: 502,
+      statusText: "Bad Gateway",
+      json: async () => {
+        throw new SyntaxError("not JSON");
+      },
+    });
+
+    await expect(apiClient.get("/llms/")).rejects.toThrow(
+      i18n.t("errors:api.httpStatus", { status: 502 })
+    );
   });
 });
 
@@ -237,7 +326,7 @@ describe("APIClient silentFailure (#485 self-feeding-badge fix)", () => {
       json: async () => ({ detail: "backend unreachable" }),
     });
     await expect(apiClient.get("/diagnostics/", { silentFailure: true })).rejects.toThrow(
-      "backend unreachable"
+      "API Error: 500"
     );
     const entry = clientEntries().find((e) => e.msg === "api.failure");
     expect(entry.level).toBe("info");

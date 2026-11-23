@@ -64,6 +64,7 @@ from huggingface_hub import HfApi, HfFileSystem
 from huggingface_hub.utils import GatedRepoError, HfHubHTTPError
 from fsspec.callbacks import Callback
 
+from src.domains.llms.download_errors import download_error_code, with_download_code
 from src.domains.llms.repository import remove_tree_reporting, update_db_with_progress
 
 from src.core.config import HF_TOKEN
@@ -367,14 +368,17 @@ def _assert_split_is_complete(chosen: str, parts: List[str]) -> None:
     if len(found) == expected:
         return
     missing = sorted(set(range(1, expected + 1)) - found)
-    raise HuggingFaceAPIException(
-        message=(
-            f"{chosen} is part of a {expected}-part split quant, but the "
-            f"repository listing only exposes {len(found)} of them (missing "
-            f"part(s): {', '.join(str(p) for p in missing)}). llama.cpp needs "
-            f"every part to load the model, so this download would produce an "
-            f"unusable model."
+    raise with_download_code(
+        HuggingFaceAPIException(
+            message=(
+                f"{chosen} is part of a {expected}-part split quant, but the "
+                f"repository listing only exposes {len(found)} of them (missing "
+                f"part(s): {', '.join(str(p) for p in missing)}). llama.cpp needs "
+                f"every part to load the model, so this download would produce an "
+                f"unusable model."
+            ),
         ),
+        "incomplete_split",
     )
 
 
@@ -762,8 +766,11 @@ def resolve_member_path(root: Union[str, Path], member: str) -> Path:
     shown = _display_member(member) if isinstance(member, str) else repr(member)
 
     def refuse(reason: str) -> InvalidInputException:
-        return InvalidInputException(
-            f"Hub file name '{shown}' ({reason}; refusing to write outside the model directory)"
+        return with_download_code(
+            InvalidInputException(
+                f"Hub file name '{shown}' ({reason}; refusing to write outside the model directory)"
+            ),
+            "unsafe_file_name",
         )
 
     if not isinstance(member, str) or not member:
@@ -868,9 +875,12 @@ def _assert_runnable(model_link: str) -> None:
     crash-on-load for this engine — fail fast with a clear message.
     """
     if not config.LLM_Engine.is_runnable(model_link):
-        raise UnsupportedPlatformException(
-            feature=model_link,
-            reason=f"this model is known not to run on {config.LLM_Engine.__name__}",
+        raise with_download_code(
+            UnsupportedPlatformException(
+                feature=model_link,
+                reason=f"this model is known not to run on {config.LLM_Engine.__name__}",
+            ),
+            "not_runnable",
         )
 
 
@@ -901,11 +911,14 @@ def _assert_repo_has_engine_artifact(model_link: str, repo_info, all_repo_files:
         present = pick_best_gguf(all_repo_files) is not None
         byte_pieces = [f for f in all_repo_files if is_byte_split_gguf(f)]
         if not present and byte_pieces:
-            raise InvalidInputException(
-                f"{model_link} publishes its GGUF weights as raw chunks "
-                f"(for example {_display_member(byte_pieces[0])}) that must be joined "
-                f"into one file before the model can run, and Erudi does not join them. "
-                f"Pick another repository of this model that ships complete .gguf files."
+            raise with_download_code(
+                InvalidInputException(
+                    f"{model_link} publishes its GGUF weights as raw chunks "
+                    f"(for example {_display_member(byte_pieces[0])}) that must be joined "
+                    f"into one file before the model can run, and Erudi does not join them. "
+                    f"Pick another repository of this model that ships complete .gguf files."
+                ),
+                "raw_gguf_chunks",
             )
     else:
         tags = set(getattr(repo_info, "tags", None) or ())
@@ -913,11 +926,14 @@ def _assert_repo_has_engine_artifact(model_link: str, repo_info, all_repo_files:
     if present:
         return
     engine_name = getattr(engine, "__name__", type(engine).__name__)
-    raise InvalidInputException(
-        f"{model_link} has no {tag} artefact for this machine's engine ({engine_name}): "
-        f"Erudi only downloads pre-built {tag} models and does not convert weights locally. "
-        f"Pick a repository that ships {tag} files (for example one found through the "
-        f"Hugging Face search in the app)."
+    raise with_download_code(
+        InvalidInputException(
+            f"{model_link} has no {tag} artefact for this machine's engine ({engine_name}): "
+            f"Erudi only downloads pre-built {tag} models and does not convert weights locally. "
+            f"Pick a repository that ships {tag} files (for example one found through the "
+            f"Hugging Face search in the app)."
+        ),
+        "no_engine_artifact",
     )
 
 
@@ -1095,9 +1111,14 @@ async def download_llm(
     except (GatedRepoError, HfHubHTTPError) as e:
         status = getattr(getattr(e, "response", None), "status_code", None)
         if isinstance(e, GatedRepoError) or status in (401, 403):
-            raise UnsupportedPlatformException(
-                feature=model_link,
-                reason="requires HuggingFace authentication and cannot be downloaded anonymously",
+            # The Hub answers 401 for a private repository and for one that
+            # does not exist alike: the code keeps which of the two it said.
+            raise with_download_code(
+                UnsupportedPlatformException(
+                    feature=model_link,
+                    reason="requires HuggingFace authentication and cannot be downloaded anonymously",
+                ),
+                download_error_code(e),
             )
         raise
     except DownloadCancelled:

@@ -194,8 +194,9 @@ All error handling on the renderer side goes through
   30-second timeout via `AbortController`, and up to 3 attempts with exponential backoff
   on transient failures (network `TypeError`, `ECONNREFUSED`, `ENOTFOUND`, `ETIMEDOUT`,
   `EHOSTUNREACH`). Non-OK responses are normalized by `handleErrorResponse` into an
-  `Error` carrying `status`, `code` (`HTTP_<status>`) and `data` (the parsed body). An
-  abort throws an error with `code = "TIMEOUT"`.
+  `Error` carrying `status`, `code` (`HTTP_<status>`), `data` (the parsed body) and
+  `detail` (the backend's English sentence, for the log). An abort throws an error with
+  `code = "TIMEOUT"`.
 - **`tracedFetch`**, a drop-in `fetch` that adds the same `X-Request-ID` header and the
   same request/response/failure log entries but touches nothing else — no retry, no
   timeout, no JSON parsing — so streaming readers keep working. Use it for the NDJSON
@@ -203,11 +204,13 @@ All error handling on the renderer side goes through
 
 Two consequences worth knowing:
 
-- `handleErrorResponse` looks for a top-level `detail` or `message`. The backend nests
-  both under `error`, so a caller that needs the `erudi_code` or the structured `detail`
-  reads them from `err.data.error.type` and `err.data.error.detail`.
-- The backend's own message text is passed through untranslated; only the generic
-  fallbacks (`errors:api.timeout`, `errors:api.httpStatus`) go through i18n.
+- A caller that needs the `erudi_code` or the structured `detail` reads them from
+  `err.data.error.type` and `err.data.error.detail`.
+- `err.message` is what pages show, so it is in the interface language
+  (`frontend/src/utils/apiErrors.js`): the sentence of the response's `erudi_code` when
+  `API_ERROR_KEYS` has one (`errors:api.codes.*`), else `errors:api.httpStatus`. The
+  backend's own sentence never reaches the screen; it is in the request's `api.failure`
+  log entry (`detail`). See [Internationalization](../i18n.md), "Text the backend writes".
 
 Both the request id on the frontend and the one injected into every backend log line for
 that request are the same string, so one click can be followed end to end. See

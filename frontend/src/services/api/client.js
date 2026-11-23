@@ -3,6 +3,7 @@ import { getApiBaseUrl } from "../../config/api";
 import { truncateValue } from "../../utils/interactionLogger";
 import { reportNetworkFailure, reportNetworkSuccess } from "../../utils/networkStatus";
 import i18n from "../../i18n";
+import { apiErrorDetail, apiErrorMessage } from "../../utils/apiErrors";
 
 const log = createLogger("APIClient");
 
@@ -342,6 +343,7 @@ class APIClient {
         method,
         path: endpoint,
         error: error.message,
+        ...(error.detail ? { detail: error.detail } : {}),
         status: error.status,
         duration_ms: durationMs,
       });
@@ -364,16 +366,14 @@ class APIClient {
       errorData = { detail: response.statusText };
     }
 
-    // The backend's own `detail`/`message` is passed through as-is; only the
-    // generic fallback is translated (it is what pages show the user).
-    const error = new Error(
-      errorData.detail ||
-        errorData.message ||
-        i18n.t("errors:api.httpStatus", { status: response.status })
-    );
+    // Pages show `error.message` to the user, so it is in the interface
+    // language: the sentence of the response's code, else of its status
+    // (#780). The backend's English sentence goes to the log only.
+    const error = new Error(apiErrorMessage(response.status, errorData));
     error.status = response.status;
     error.code = `HTTP_${response.status}`;
     error.data = errorData;
+    error.detail = apiErrorDetail(errorData);
 
     return error;
   }

@@ -189,16 +189,23 @@ describe("DownloadModalContext completion (#205)", () => {
 });
 
 describe("DownloadModalContext failure and cancel routing", () => {
-  it("routes a failed job to onError with the backend message and does not count it", async () => {
+  it("routes a failed job to onError with the sentence of its code and does not count it", async () => {
     statusResponder = () => ({
       ok: true,
-      json: async () => ({ status: "failed", error_message: "disk full", progress: 0 }),
+      json: async () => ({
+        status: "failed",
+        error_message: "[Errno 28] No space left on device",
+        error_code: "disk_full",
+        progress: 0,
+      }),
     });
     renderProvider();
 
     await startAndPollOnce();
 
-    expect(onError).toHaveBeenCalledWith("disk full");
+    expect(onError).toHaveBeenCalledWith(
+      "The disk is full. Free some space, then start the download again."
+    );
     expect(onComplete).not.toHaveBeenCalled();
     expect(val("completions")).toBe("0");
     expect(val("downloading")).toBe("false");
@@ -247,7 +254,7 @@ describe("DownloadModalContext failure and cancel routing", () => {
     await startAndPollOnce();
 
     expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError.mock.calls[0][0]).toContain("Failed to start download (500)");
+    expect(onError.mock.calls[0][0]).toBe("Failed to start download: API Error: 500");
     expect(val("downloading")).toBe("false");
     expect(statusCalls()).toHaveLength(0); // no interval was ever armed
   });

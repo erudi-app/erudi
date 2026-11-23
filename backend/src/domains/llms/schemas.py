@@ -430,6 +430,10 @@ class DownloadJobResponse(BaseModel):
         total_time_elapsed: Seconds elapsed since job start.
         time_left: Estimated seconds remaining (updated each poll).
         error_message: Exception message if status="failed", None otherwise.
+            English, for the log and Diagnostics.
+        error_code: Stable code of the failure if status="failed" (see
+            ``DOWNLOAD_ERROR_CODES``), which the interface translates; None
+            otherwise, and on a job that failed before codes were stored.
         created_at: Job creation timestamp.
         updated_at: Last status update timestamp (used for stale job detection).
 
@@ -452,6 +456,7 @@ class DownloadJobResponse(BaseModel):
     total_time_elapsed: float = Field(default=0.0, ge=0)
     time_left: float = Field(default=0.0, ge=0)
     error_message: Optional[str] = None
+    error_code: Optional[str] = None
     created_at: datetime
     updated_at: Optional[datetime] = None
 

@@ -128,7 +128,17 @@
   },
   "api": {
     "timeout": "Tiempo de espera de la solicitud agotado",
-    "httpStatus": "Error de API: {{status}}"
+    "httpStatus": "Error de API: {{status}}",
+    "codes": {
+      "databaseBusy": "Erudi está terminando otras respuestas. Inténtalo de nuevo en un momento.",
+      "database": "La base de datos de Erudi no pudo completar la solicitud. Inténtalo de nuevo.",
+      "filesystem": "Erudi no pudo usar la carpeta del modelo en el disco. Inténtalo de nuevo; si sigue ocurriendo, infórmalo desde la página Diagnóstico.",
+      "modelNotFound": "Este modelo ya no existe. Actualiza la lista e inténtalo de nuevo.",
+      "internal": "Algo salió mal en Erudi. Inténtalo de nuevo; si sigue ocurriendo, infórmalo desde la página Diagnóstico.",
+      "modelLoading": "No se pudo cargar el modelo.",
+      "insufficientMemory": "No hay memoria suficiente para el modelo. Cierra otras aplicaciones o elige un modelo más pequeño.",
+      "engineFailure": "El modelo dejó de funcionar. Inténtalo de nuevo; si sigue ocurriendo, infórmalo desde la página Diagnóstico."
+    }
   },
   "engine": {
     "codes": {

@@ -431,6 +431,8 @@ class TestJobCleanup:
         assert count == 1
         assert job.status == "failed"
         assert "interrupted" in job.error_message
+        # The interface's sentence is keyed on it (#780).
+        assert job.error_code == "interrupted"
         assert job.temp_local_model_link == ""
         assert not model_dir.exists()
         assert not temp_dir.exists()
@@ -510,6 +512,7 @@ class TestJobCleanup:
         assert job.status == "completed"
         assert job.progress == 100.0
         assert job.error_message is None
+        assert job.error_code is None
         # Staging space is still reclaimed: its contents were already moved.
         assert not temp_dir.exists()
         assert job.temp_local_model_link == ""

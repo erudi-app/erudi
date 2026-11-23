@@ -12,9 +12,14 @@ import {
   DOWNLOAD_CANCELLED,
   DOWNLOAD_STALLED,
   deriveDownloadPhase,
-  downloadFailureDetail,
   downloadStalledMessage,
 } from "../utils/downloadStatus";
+import { downloadFailureMessage } from "../utils/downloadErrors";
+import {
+  apiErrorDetailFromText,
+  apiErrorMessage,
+  apiErrorMessageFromText,
+} from "../utils/apiErrors";
 const log = createLogger("DownloadModalContext");
 
 // Poll cadence, and the stall guard on top of it (#315).
@@ -223,10 +228,13 @@ export function DownloadModalProvider({ children }) {
           } else {
             // The backend logged the traceback under this job; this side
             // records that the download the user started did not happen.
+            // The English message stays in the log; the user reads the
+            // sentence of its code, in the interface language (#780).
             log.error(`Download job ${id} failed with status "${data.status}"`, {
               error: data.error_message || null,
+              code: data.error_code || null,
             });
-            const errorMsg = data.error_message || t("downloads:errors.failedUnexpectedly");
+            const errorMsg = downloadFailureMessage(data.error_code);
             setErrorMessage(errorMsg);
             revealPanel();
             callbacksRef.current.onError?.(errorMsg);
@@ -273,10 +281,20 @@ export function DownloadModalProvider({ children }) {
           log.log(`Download job ${id} had already ended when the cancel arrived`);
           return "ended";
         }
-        throw new Error(`Server responded with ${response.status}: ${response.statusText}`);
+        const refused = new Error(
+          `Server responded with ${response.status}: ${response.statusText}`
+        );
+        refused.status = response.status;
+        throw refused;
       } catch (error) {
         log.error("Failed to cancel download:", error);
-        setErrorMessage(t("downloads:errors.cancelFailed", { detail: error.message }));
+        // The status's sentence when the backend answered, else that it did
+        // not; never English text (#780).
+        const detail =
+          error.status !== undefined
+            ? apiErrorMessage(error.status, null)
+            : t("errors:connection.unreachable.title");
+        setErrorMessage(t("downloads:errors.cancelFailed", { detail }));
         return "failed";
       }
     },
@@ -327,8 +345,15 @@ export function DownloadModalProvider({ children }) {
               }),
             });
       if (!res.ok) {
-        const detail = downloadFailureDetail(await res.text());
-        throw new Error(t("downloads:errors.startFailed", { status: res.status, detail }));
+        // The sentence of the response's code, else of its status, in the
+        // interface language; the backend's English one goes to the log (#780).
+        const body = await res.text();
+        const refused = new Error(
+          t("downloads:errors.startFailed", { detail: apiErrorMessageFromText(res.status, body) })
+        );
+        refused.refused = true;
+        refused.detail = apiErrorDetailFromText(body);
+        throw refused;
       }
       const job = await res.json();
 
@@ -354,8 +379,18 @@ export function DownloadModalProvider({ children }) {
         // cancel; reporting it would contradict the "cancelled" on screen.
         return;
       }
-      log.error("Download start error:", err);
-      const errorMsg = err.message || err.toString() || t("downloads:errors.unexpected");
+      log.error("Download start error:", { error: String(err), detail: err.detail ?? null });
+      // A refused start says its own translated sentence; a request that got
+      // no answer, or any other failure, says one of ours, never the
+      // runtime's English text.
+      let errorMsg = t("downloads:errors.unexpected");
+      if (err.refused) {
+        errorMsg = err.message;
+      } else if (err instanceof TypeError) {
+        errorMsg = t("downloads:errors.startFailed", {
+          detail: t("errors:connection.unreachable.title"),
+        });
+      }
       setErrorMessage(errorMsg);
       revealPanel();
       setIsDownloading(false);

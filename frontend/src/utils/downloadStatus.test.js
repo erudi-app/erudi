@@ -1,7 +1,6 @@
 import { describe, it, expect } from "vitest";
 import {
   deriveDownloadPhase,
-  downloadFailureDetail,
   downloadStalledMessage,
   DOWNLOAD_CANCELLED,
   DOWNLOAD_STALLED,
@@ -41,28 +40,6 @@ describe("deriveDownloadPhase (#292)", () => {
     expect(
       deriveDownloadPhase({ status: DOWNLOAD_CANCELLED, progress: 0, errorMessage: "500" })
     ).toBe("cancelled");
-  });
-});
-
-describe("downloadFailureDetail", () => {
-  it("unwraps FastAPI's {detail} envelope so the user never sees raw JSON", () => {
-    expect(downloadFailureDetail('{"detail":"Model 14 not found"}')).toBe("Model 14 not found");
-  });
-
-  it("unwraps the app's {success, error: {type, message}} envelope too", () => {
-    const body = JSON.stringify({
-      success: false,
-      error: { type: "MODEL_NOT_FOUND", message: "Model with id 14 was not found" },
-    });
-    expect(downloadFailureDetail(body)).toBe("Model with id 14 was not found");
-  });
-
-  it("passes anything that is not a detail envelope through, trimmed", () => {
-    expect(downloadFailureDetail("  Bad Gateway \n")).toBe("Bad Gateway");
-    expect(downloadFailureDetail('{"error":"x"}')).toBe('{"error":"x"}');
-    expect(downloadFailureDetail('{"detail":{"loc":[]}}')).toBe('{"detail":{"loc":[]}}');
-    expect(downloadFailureDetail("")).toBe("");
-    expect(downloadFailureDetail(undefined)).toBe("");
   });
 });
 
