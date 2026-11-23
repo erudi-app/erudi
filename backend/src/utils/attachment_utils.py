@@ -303,30 +303,6 @@ def resolve_attachments(paths: Optional[Iterable[str]]) -> ResolvedAttachments:
     )
 
 
-def build_attachment_notice(resolved: ResolvedAttachments) -> str:
-    """Markdown notice prepended to the answer when an attachment was not used
-    in full. Empty string when every attached file was read whole.
-
-    Mirrors ``IMAGES_IGNORED_NOTICE``: the user is told what the model did not
-    get instead of the attachment being dropped in silence.
-    """
-    lines: list[str] = []
-    if resolved.issues:
-        named = [
-            f"{issue.name} ({issue.message})" if issue.name else issue.message
-            for issue in resolved.issues
-        ]
-        lines.append(f"*Some attachments could not be read: {', '.join(named)}.*")
-    if resolved.truncated_names:
-        lines.append(
-            "*Attached content was shortened to fit this model's context: "
-            f"{', '.join(resolved.truncated_names)}.*"
-        )
-    if not lines:
-        return ""
-    return "\n".join(lines) + "\n\n"
-
-
 def prepend_attachment_block(block: str, question: str) -> str:
     """The text the model sees: attachment blocks first, the question last, so
     the question is the most recent thing in the turn."""

@@ -96,6 +96,11 @@
   "fileReasons": {
     "unreadable": "dañado, protegido con contraseña o con un formato distinto del que indica su extensión",
     "empty": "sin texto",
-    "pending_vision": "sin texto extraíble (un escaneo o una imagen), y el reconocimiento de texto aún no está incluido"
+    "pending_vision": "sin texto extraíble (un escaneo o una imagen), y el reconocimiento de texto aún no está incluido",
+    "missing": "ya no está en esa ubicación",
+    "unsupported": "tipo de archivo no compatible",
+    "failed": "la aplicación no pudo extraer su texto",
+    "empty_folder": "ningún documento compatible en esta carpeta",
+    "too_many": "solo se adjuntaron los primeros {{limit}} archivos"
   }
 }

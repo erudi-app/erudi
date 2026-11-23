@@ -96,6 +96,11 @@
   "fileReasons": {
     "unreadable": "文件已损坏、受密码保护，或与其扩展名所示的格式不符",
     "empty": "没有文本",
-    "pending_vision": "没有可提取的文本（扫描件或图片），且尚未内置文字识别"
+    "pending_vision": "没有可提取的文本（扫描件或图片），且尚未内置文字识别",
+    "missing": "该位置已不存在此文件",
+    "unsupported": "不支持的文件类型",
+    "failed": "应用无法提取其文本",
+    "empty_folder": "此文件夹中没有受支持的文档",
+    "too_many": "仅附加了前 {{limit}} 个文件"
   }
 }

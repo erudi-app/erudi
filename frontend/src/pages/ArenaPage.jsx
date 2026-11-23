@@ -14,25 +14,31 @@ import apiClient from "../services/api/client";
 import { createLogger } from "../utils/logger";
 import { baseName, getDisplayContent, isGenericFailure } from "../utils/messageContent";
 import { withCuratedTurn } from "../utils/curatedTurns";
+import { withNotices } from "../utils/answerNotices";
 import KbEmbeddingBanner from "../components/KbEmbeddingBanner";
 
 const log = createLogger("ArenaPage");
 
 const MAX_PANELS = 4;
 
-// How a panel's answer ends, from the stream event that ends it: an `error`
-// (the red line below what streamed, exactly one blank line between them) or
-// an empty-answer line (#554). Its kind and numbers, when the turn is curated,
-// are kept as the trace a conversation persists (#690): the sentence is
+// A panel's answer after a stream event that is more than text: a note
+// opening the answer (#764), an `error` that ends it (the red line below what
+// streamed, exactly one blank line between them) or an empty-answer line
+// (#554). The kind of a note, and the kind and numbers of a curated turn, join
+// the panel's trace as a conversation persists them (#690): the sentences are
 // translated at display from them, like a conversation's.
-const endTurn = (message, event) => {
+const withEvent = (message, event) => {
   const text = event.text || "";
   const head = message.content.replace(/\n+$/, "");
+  const kinds = [
+    ...(event.notice ? [{ t: "notice", ...event.notice }] : []),
+    ...(event.curated_error ? [{ t: "curated_error", ...event.curated_error }] : []),
+  ];
   return {
     ...message,
     content: event.t === "error" ? (head ? `${head}\n\n${text}` : text) : message.content + text,
     error: event.t === "error" || message.error === true,
-    trace: event.curated_error ? [{ t: "curated_error", ...event.curated_error }] : message.trace,
+    trace: kinds.length > 0 ? [...(message.trace || []), ...kinds] : message.trace,
   };
 };
 
@@ -248,8 +254,8 @@ export default function ArenaPage() {
             let nextTok = buf.shift();
             // Answer text: everything queued since the last tick shows at
             // once (a network read can carry dozens of events, and a tool
-            // turn's final answer arrives in one burst); an event ends the
-            // turn.
+            // turn's final answer arrives in one burst); an event (a note,
+            // the end of the turn) is applied on its own.
             while (typeof nextTok === "string" && typeof buf[0] === "string") {
               nextTok += buf.shift();
             }
@@ -258,7 +264,7 @@ export default function ArenaPage() {
             msgs[msgs.length - 1] =
               typeof nextTok === "string"
                 ? { ...last, content: last.content + nextTok }
-                : endTurn(last, nextTok);
+                : withEvent(last, nextTok);
             return { ...p, messages: msgs };
           }
           return p;
@@ -295,7 +301,7 @@ export default function ArenaPage() {
         customPrompt: panel.customPrompt,
         signal: abortRef.current.signal,
         onStreamEvent: (event) => {
-          if (event?.t === "answer" && !event.curated_error) {
+          if (event?.t === "answer" && !event.curated_error && !event.notice) {
             buffersRef.current[panel.id].push(event.text || "");
           } else if (event?.t === "answer" || event?.t === "error") {
             buffersRef.current[panel.id].push(event);
@@ -453,10 +459,12 @@ export default function ArenaPage() {
         {panel.messages.map((msg, idx) => {
           const isUser = msg.role === "user";
           const isError = msg.error === true;
-          // Shown as a conversation shows it: a curated turn's sentence in the
-          // interface language, a generic failure's headline translated, the
-          // sentinel as a cross.
-          const content = isUser ? msg.content : withCuratedTurn(msg.content, msg.trace);
+          // Shown as a conversation shows it: the notes and a curated turn's
+          // sentence in the interface language, a generic failure's headline
+          // translated, the sentinel as a cross.
+          const content = isUser
+            ? msg.content
+            : withCuratedTurn(withNotices(msg.content, msg.trace), msg.trace);
           const errorText = isError
             ? getDisplayContent(
                 content,

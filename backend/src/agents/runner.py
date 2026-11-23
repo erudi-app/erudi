@@ -1863,14 +1863,6 @@ def _stream_timeout_answer(exc: GenerationTimeoutException) -> dict:
     return _prefill_timeout_answer(exc.budget_s)
 
 
-# Prepended (and persisted with the assistant message) by the conversation and
-# arena services when the CURRENT turn carries images but the model is not
-# positively vision-capable (#212): ``_StripImagesForTextModel`` drops the image
-# parts, and the user is told explicitly instead of silently. Markdown italics —
-# the frontend renders streamed answers as markdown.
-IMAGES_IGNORED_NOTICE = "*This model doesn't support images — your image was ignored.*\n\n"
-
-
 def _construction_error_message(exc: Exception) -> str:
     """Curated, traceback-free error turn for a failed agent construction.
 

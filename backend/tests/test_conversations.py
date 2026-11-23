@@ -785,6 +785,84 @@ class TestConversationService:
         assert "archive.zip" in answer
         assert answer.endswith("Answer.")
 
+    async def test_query_stream_persists_the_unreadable_attachment_notice(
+        self, test_db_session, mock_llm, monkeypatch, tmp_path
+    ):
+        """#764 - the note naming a scan is persisted with its kind and files,
+        what the interface translates it from; the English line stays in the
+        content."""
+        from pypdf import PdfWriter
+
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(agent_runner, "build_chat_model", _fake_chat_model("Answer."))
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+        scan = tmp_path / "scan.pdf"
+        writer = PdfWriter()
+        writer.add_blank_page(width=612, height=792)
+        with scan.open("wb") as handle:
+            writer.write(handle)
+
+        payload = ConversationQuery(question="Read this", attachments=[str(scan)])
+        result = [t async for t in service.query_and_respond_stream(conversation.id, payload)]
+
+        notice_events = [e for e in _parse_ndjson(result) if e.get("notice")]
+        assert [e["notice"]["kind"] for e in notice_events] == ["attachments_unreadable"]
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        [notice] = [e for e in messages[1].trace if e["t"] == "notice"]
+        assert notice["kind"] == "attachments_unreadable"
+        assert notice["params"] == {"files": [{"name": "scan.pdf", "reason": "pending_vision"}]}
+        assert notice["text"] in messages[1].content
+        assert messages[1].content.endswith("Answer.")
+
+    async def test_query_stream_persists_the_truncated_attachment_notice(
+        self, test_db_session, mock_llm, monkeypatch, tmp_path
+    ):
+        """#764 - a file shortened to fit is named in a note of its own kind."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(agent_runner, "build_chat_model", _fake_chat_model("Answer."))
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+        huge = tmp_path / "big.txt"
+        huge.write_text("A" * 30_000, encoding="utf-8")
+
+        payload = ConversationQuery(question="Read this", attachments=[str(huge)])
+        [_ async for _ in service.query_and_respond_stream(conversation.id, payload)]
+
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        [notice] = [e for e in messages[1].trace if e["t"] == "notice"]
+        assert notice["kind"] == "attachments_truncated"
+        assert notice["params"] == {"files": ["big.txt"]}
+        assert notice["text"] in messages[1].content
+
+    async def test_query_stream_persists_the_images_ignored_notice(
+        self, test_db_session, mock_llm, monkeypatch
+    ):
+        """#764 - the images note is persisted with its kind too."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(agent_runner, "build_chat_model", _fake_chat_model("A red square."))
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=1024
+        )
+
+        payload = ConversationQuery(question="What is this?", images=["data:image/png;base64,AAA"])
+        [_ async for _ in service.query_and_respond_stream(conversation.id, payload)]
+
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert messages[1].trace == [
+            {
+                "t": "notice",
+                "kind": "images_ignored",
+                "params": {},
+                "text": _VISION_NOTICE.strip().strip("*"),
+            }
+        ]
+
     def test_build_user_message_shape(self):
         assert ConversationService._build_user_message("hi", None) == "hi"
         msg = ConversationService._build_user_message("hi", ["data:image/png;base64,AAA"])
@@ -1678,6 +1756,23 @@ class TestTraceHelpers:
 
         assert len(json.dumps(capped)) <= TRACE_MAX_BYTES
         assert capped[0] == curated
+        assert capped[1] == {"t": "truncated"}
+
+    def test_cap_trace_pins_the_answer_notices(self):
+        """#764: the notes that open an answer keep the kind the interface
+        translates them from, however long the reasoning that follows."""
+        notice = {
+            "t": "notice",
+            "kind": "attachments_unreadable",
+            "params": {"files": [{"name": "scan.pdf", "reason": "pending_vision"}]},
+            "text": "Some attachments could not be read: scan.pdf (why).",
+        }
+        events = [notice] + [{"t": "thinking", "text": "x" * 1000} for _ in range(50)]
+
+        capped = _cap_trace(events)
+
+        assert len(json.dumps(capped)) <= TRACE_MAX_BYTES
+        assert capped[0] == notice
         assert capped[1] == {"t": "truncated"}
 
     def test_cap_trace_marks_nothing_when_only_compactions_overflow(self):

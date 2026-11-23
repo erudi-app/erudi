@@ -6,8 +6,10 @@ import { manualCompactions, automaticCompactions } from "./traceEvents";
 //
 // What it writes: the title, the messages in order under a role heading, a
 // separator where a compaction took over, the names of the attachments and
-// images. What it leaves out: the model's reasoning (the trace, never read
-// except for its compactions), the failed turns, the summaries a compaction
+// images, an answer as the conversation shows it (`labels.answer`: its notes
+// and curated line in the interface language). What it leaves out: the
+// model's reasoning (the trace, read only for its compactions and, through
+// `labels.answer`, the kinds of its notes and curated line), the failed turns, the summaries a compaction
 // wrote (the model's working memory, not conversation), and any file path.
 
 const DEFAULT_CONVERSATION_NAME = "New Conversation";
@@ -76,7 +78,9 @@ const attachmentLines = (content, labels) => {
  * @param {object} labels - Translated by the caller: `untitled`, `user`,
  *   `assistant`, `attachment`, `image`, `created` (the line under the title,
  *   "" for none) and `compaction(count)` (the separator's sentence; `count` is
- *   0 when the number of summarized messages is unknown).
+ *   0 when the number of summarized messages is unknown), `answer(content,
+ *   trace)` (an answer's text as the conversation shows it: its notes and
+ *   curated line in the interface language).
  * @returns {string} The Markdown text, "" for no conversation.
  */
 export function buildConversationMarkdown(conversation, labels) {
@@ -100,7 +104,7 @@ export function buildConversationMarkdown(conversation, labels) {
       blocks.push(compactionBlock(event, labels));
     }
     if (!content.includes(ERROR_SENTINEL)) {
-      const text = visibleText(content);
+      const text = visibleText(isUser ? content : labels.answer(content, trace));
       const notes = isUser ? attachmentLines(content, labels) : [];
       if (text || notes.length > 0) {
         const body = [text && safeBody(text), notes.join("\n")].filter(Boolean).join("\n\n");
