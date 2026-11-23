@@ -225,7 +225,9 @@ def world(monkeypatch):
 
 def _load(world, *, llm_id=7):
     alias = f"erudi-{llm_id}"
-    handle = CPU_Engine._start_server(model_path=Path("/models/q.gguf"), alias=alias, port=27200)
+    handle = CPU_Engine._start_server(
+        model_path=Path(str(Path("/models/q.gguf"))), alias=alias, port=27200
+    )
     CPU_Engine._model = handle
     CPU_Engine._model_id = llm_id
     CPU_Engine._tokenizer = {"type": "remote"}
@@ -436,7 +438,7 @@ def test_two_idle_criticals_unload_and_carry_the_episode(world, caplog):
     unloads = [r for r in _brake_records(caplog) if "action=unload" in r.getMessage()]
     assert len(unloads) == 1 and unloads[0].levelno == logging.WARNING
     # The window memory also keeps the cap for the reload.
-    assert CPU_Engine._window_memory["/models/q.gguf"]["cap"] == record["cap"]
+    assert CPU_Engine._window_memory[str(Path("/models/q.gguf"))]["cap"] == record["cap"]
 
 
 def test_a_brake_unload_under_one_id_answers_and_seeds_the_sibling(world):
@@ -451,7 +453,7 @@ def test_a_brake_unload_under_one_id_answers_and_seeds_the_sibling(world):
     CPU_Engine.brake_point("idle")
     assert CPU_Engine._model is None
     record = CPU_Engine._brake_reload
-    assert record["model_path"] == "/models/q.gguf"
+    assert record["model_path"] == str(Path("/models/q.gguf"))
     cap = record["cap"]
     assert CPU_Engine.brake_reload_pending(9, link="/models")
     assert not CPU_Engine.brake_reload_pending(9)
@@ -486,7 +488,7 @@ def test_a_shrink_is_written_through_to_the_window_memory(world):
     CPU_Engine._model["brake"].turn_happened = True
     outcome = CPU_Engine.brake_point("turn_end")
     assert outcome == BrakeOutcome(acted=True, action="shrink")
-    entry = CPU_Engine._window_memory["/models/q.gguf"]
+    entry = CPU_Engine._window_memory[str(Path("/models/q.gguf"))]
     assert entry["cap"] == int(W * mb.SHRINK_FACTOR)
     assert entry["faulty"] == W
     assert time.time() - entry["at"] < 5
@@ -495,7 +497,7 @@ def test_a_shrink_is_written_through_to_the_window_memory(world):
 def test_the_window_memory_follows_the_artifact_across_sibling_ids(world):
     """The window memory is keyed by the resolved artifact path (#755): a
     reduction learned under the base's id sizes the KB assistant's spawn."""
-    CPU_Engine._window_memory["/models/q.gguf"] = {
+    CPU_Engine._window_memory[str(Path("/models/q.gguf"))] = {
         "cap": 20_480,
         "faulty": 30_720,
         "at": time.time(),
@@ -507,7 +509,7 @@ def test_the_window_memory_follows_the_artifact_across_sibling_ids(world):
 
 def test_the_window_memory_survives_a_reap_and_sizes_the_reload(world):
     _load(world)
-    CPU_Engine._window_memory["/models/q.gguf"] = {
+    CPU_Engine._window_memory[str(Path("/models/q.gguf"))] = {
         "cap": 20_480,
         "faulty": 30_720,
         "at": time.time(),
@@ -515,7 +517,7 @@ def test_the_window_memory_survives_a_reap_and_sizes_the_reload(world):
     CPU_Engine._brake_reload = {"alias": "erudi-9", "unloaded_at": time.time()}
     CPU_Engine.cleanup()
     assert CPU_Engine._brake_reload is None
-    assert "/models/q.gguf" in CPU_Engine._window_memory
+    assert str(Path("/models/q.gguf")) in CPU_Engine._window_memory
     handle = _load(world)
     assert handle["context_tokens"] == 20_480
     assert handle["brake"].cap == 20_480
@@ -524,10 +526,14 @@ def test_the_window_memory_survives_a_reap_and_sizes_the_reload(world):
 
 
 def test_the_unload_record_seeds_before_the_window_memory(world):
-    CPU_Engine._window_memory["/models/q.gguf"] = {"cap": 30_720, "faulty": None, "at": time.time()}
+    CPU_Engine._window_memory[str(Path("/models/q.gguf"))] = {
+        "cap": 30_720,
+        "faulty": None,
+        "at": time.time(),
+    }
     CPU_Engine._brake_reload = {
         "alias": "erudi-7",
-        "model_path": "/models/q.gguf",
+        "model_path": str(Path("/models/q.gguf")),
         "cap": 20_480,
         "faulty": 30_720,
         "in_episode": True,
@@ -545,7 +551,7 @@ def test_the_unload_record_seeds_before_the_window_memory(world):
 
 
 def test_an_expired_window_memory_seeds_nothing_and_hands_no_cap(world):
-    CPU_Engine._window_memory["/models/q.gguf"] = {
+    CPU_Engine._window_memory[str(Path("/models/q.gguf"))] = {
         "cap": 20_480,
         "faulty": 30_720,
         "at": time.time() - mb.BRAKE_RELOAD_TTL_S - 1,
@@ -553,14 +559,18 @@ def test_an_expired_window_memory_seeds_nothing_and_hands_no_cap(world):
     handle = _load(world)
     assert world.caps_seen == [None]
     assert handle["brake"] == BrakeState()
-    assert "/models/q.gguf" not in CPU_Engine._window_memory
+    assert str(Path("/models/q.gguf")) not in CPU_Engine._window_memory
 
 
 def test_an_entry_back_to_nothing_is_deleted(world):
     _load(world)
-    CPU_Engine._window_memory["/models/q.gguf"] = {"cap": 20_480, "faulty": None, "at": time.time()}
-    CPU_Engine._remember_window("/models/q.gguf", BrakeState())
-    assert "/models/q.gguf" not in CPU_Engine._window_memory
+    CPU_Engine._window_memory[str(Path("/models/q.gguf"))] = {
+        "cap": 20_480,
+        "faulty": None,
+        "at": time.time(),
+    }
+    CPU_Engine._remember_window(str(Path("/models/q.gguf")), BrakeState())
+    assert str(Path("/models/q.gguf")) not in CPU_Engine._window_memory
 
 
 # ===================== samples =====================
@@ -773,7 +783,11 @@ def test_respawns_settle_on_a_window_that_is_not_a_multiple_of_1024(world, caplo
     """10,496 x 0.75 = 7,872, which llama.cpp would allocate as 7,936: the
     cap is 7,680, the respawn allocates exactly it, and the brake settles --
     no respawn at every turn, no -c mismatch."""
-    CPU_Engine._window_memory["/models/q.gguf"] = {"cap": 10_496, "faulty": None, "at": time.time()}
+    CPU_Engine._window_memory[str(Path("/models/q.gguf"))] = {
+        "cap": 10_496,
+        "faulty": None,
+        "at": time.time(),
+    }
     _load(world)
     assert CPU_Engine._model["context_tokens"] == 10_496
     world.level = 4
@@ -858,7 +872,7 @@ async def test_a_manual_unload_keeps_the_window_memory_like_an_idle_reap(world):
     """The header's Unload button goes through the same cleanup as the idle
     reap: a window the brake reduced recently stays reduced at the next load."""
     _load(world)
-    CPU_Engine._window_memory["/models/q.gguf"] = {
+    CPU_Engine._window_memory[str(Path("/models/q.gguf"))] = {
         "cap": 20_480,
         "faulty": 30_720,
         "at": time.time(),
@@ -868,10 +882,10 @@ async def test_a_manual_unload_keeps_the_window_memory_like_an_idle_reap(world):
         assert CPU_Engine._model is None
         assert CPU_Engine._idle_unload == {
             "model_id": 7,
-            "model_path": "/models/q.gguf",
+            "model_path": str(Path("/models/q.gguf")),
             "reason": "manual",
         }
-        assert "/models/q.gguf" in CPU_Engine._window_memory
+        assert str(Path("/models/q.gguf")) in CPU_Engine._window_memory
         handle = _load(world)
         assert handle["context_tokens"] == 20_480
         assert handle["brake"].cap == 20_480
