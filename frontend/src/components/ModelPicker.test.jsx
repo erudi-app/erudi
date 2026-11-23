@@ -213,3 +213,24 @@ describe("ModelPicker", () => {
     ).toBeTruthy();
   });
 });
+
+describe("ModelPicker name layout (#754)", () => {
+  // jsdom does no layout, so this is a class/structure guard, not a rendering
+  // proof: the name must wrap (break-words) instead of being cut by `truncate`,
+  // and keep the full name as its tooltip.
+  it("lets the name wrap instead of truncating it", () => {
+    setup();
+    const nameSpan = screen.getByText("Qwen3-4B", { selector: "button span" });
+    expect(nameSpan.className).not.toContain("truncate");
+    expect(nameSpan.className).toContain("break-words");
+    expect(nameSpan.getAttribute("title")).toBe("Qwen3-4B");
+  });
+
+  it("does the same in the attention state", () => {
+    setup({ attention: true });
+    const nameSpan = screen.getByText("Please select a model", { selector: "button span" });
+    expect(nameSpan.className).not.toContain("truncate");
+    expect(nameSpan.className).toContain("break-words");
+    expect(nameSpan.className).toContain("text-red-400");
+  });
+});

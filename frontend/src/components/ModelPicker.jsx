@@ -204,7 +204,7 @@ export default function ModelPicker({
   );
 
   return (
-    <span ref={rootRef} className="relative inline-block max-w-full align-bottom">
+    <span ref={rootRef} className="relative inline-block align-bottom">
       <button
         ref={triggerRef}
         type="button"
@@ -215,20 +215,20 @@ export default function ModelPicker({
         onClick={() => (isOpen ? closeMenu(false) : openMenu())}
         onKeyDown={onTriggerKeyDown}
         className={[
-          "inline-flex max-w-full items-center gap-1 rounded-lg px-1.5 -mx-1.5 align-bottom",
+          "inline-flex items-baseline gap-1 rounded-lg px-1.5 -mx-1.5 text-left align-bottom",
           "transition hover:bg-white/10 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60",
           "disabled:cursor-not-allowed disabled:hover:bg-transparent",
         ].join(" ")}
       >
         <span
-          className={`truncate ${attention ? "text-red-400" : "text-emerald-300"}`}
+          className={`min-w-0 break-words text-left ${attention ? "text-red-400" : "text-emerald-300"}`}
           title={attention ? undefined : modelName}
         >
           {attention ? t("chat:conversationHeader.pickerAttention") : modelName}
         </span>
         <ChevronDown
           aria-hidden
-          className={`w-4 h-4 shrink-0 transition-transform ${isOpen ? "rotate-180" : ""}`}
+          className={`w-4 h-4 shrink-0 self-center transition-transform ${isOpen ? "rotate-180" : ""}`}
         />
       </button>
 

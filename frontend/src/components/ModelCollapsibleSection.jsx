@@ -264,10 +264,11 @@ const CollapsibleSection = forwardRef(
                           </span>
                           <button
                             onClick={(e) => handleDeleteClick(e, m)}
-                            className="text-red-400 opacity-0 group-hover:opacity-100 transition-opacity duration-150 hover:text-red-300 p-1 rounded hover:bg-red-900/20"
+                            className="text-red-400 opacity-0 group-hover:opacity-100 focus-visible:opacity-100 focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60 transition-opacity duration-150 hover:text-red-300 p-1 rounded hover:bg-red-900/20"
                             title={t("landing:sidebar.deleteModel")}
+                            aria-label={t("landing:sidebar.deleteModel")}
                           >
-                            <Trash2 className="w-4 h-4" />
+                            <Trash2 aria-hidden="true" className="w-4 h-4" />
                           </button>
                         </div>
                       ) : m.runnable === false ? (
