@@ -1347,8 +1347,11 @@ the prompt names it
    facts — stay whole however large the document pasted after them, and only the messages above the
    cap are cut, each keeping its head and its tail (about two thirds and one third: attachments come
    before the question in a pasted message, so a head-only cut would erase the question) around an
-   ASCII `[... N characters omitted ...]` marker. Only when even a 64-token cap does not fit — too
-   many messages for the budget — are the oldest dropped. Past
+   ASCII `[... N characters omitted ...]` marker (a tool-calling message's args are replaced by the
+   marker in that copy: they can be its whole cost). A history that fits the budget is passed
+   **whole** — nothing is dropped from its head, whatever message it starts on. Only when even a
+   64-token cap does not fit — too many messages for the budget — are the oldest dropped, with one
+   warning saying how many. Past
    knowledge-base and web results reach the summarizer as their markers, exactly as the model last
    saw them. The **previous summary is always part of what the summarizer reads**, prepended on top
    of that budget, so the facts it carries survive every compaction.
@@ -1375,15 +1378,18 @@ the prompt names it
      were provided."), 0.001 to 0.038 of what they read. The floor lets the short summary of a one-
      or two-message history through; the ceiling (about 80 Latin characters, twice the longest
      degenerate one) keeps a long history from asking more than a short summary can carry;
-   - **stale**: the new summary is the previous summary it read — case, spacing and the
-     punctuation at its ends ignored, or 90 % similar — while the new turns it read weigh at
-     least 4 tokens and half the previous summary's size: the model copied its old summary over
-     real new content. With little new content the copy is accepted — it *is* the right summary
-     of a history that added nothing;
+   - **stale**: the new summary adds almost nothing to the previous summary it read — fewer than
+     `max(40, 5 % of the previous summary)` characters outside their matching blocks, case and
+     spacing ignored — while the new turns it read weigh at least 4 tokens and half the previous
+     summary's size: the model copied its old summary over real new content. An incremental
+     summary (the previous one carried forward plus a sentence about the new turns) is highly
+     similar to the previous one but *adds* something, so it is accepted; and with little new
+     content the plain copy is accepted — it *is* the right summary of a history that added
+     nothing;
    - **a copy**: with more than one message read and the summary under 0.2 of what it read, the
-     summary is the last question or the last answer it read — case, spacing and the punctuation
-     at its ends ignored, or 90 % similar. A long recap that is also the last answer (the user
-     asked to recap everything) is kept.
+     summary is a question or an answer it read — **any** of them, not only the last ones — case,
+     spacing and the punctuation at its ends ignored, or 90 % similar. A long recap that is also
+     the last answer (the user asked to recap everything) is kept.
 
    `backend.log` carries one warning per failed attempt, a rejection as `Compaction summary
    rejected (<attempt> attempt): too_short|stale|copy, summary_chars=..., read_chars=...,

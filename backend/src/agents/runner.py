@@ -316,11 +316,20 @@ SUMMARY_COPY_SIMILARITY = 0.9
 # this share of what it read, a copy of the last message is rejected.
 SUMMARY_COPY_MAX_RATIO = 0.2
 # A summary that merely repeats the PREVIOUS summary is stale -- the model
-# learned nothing from the new turns it read -- but only when those new turns
-# weigh enough to deserve a new summary: at least ``SUMMARY_MIN_TOKENS`` and
-# at least this share of the previous summary's size. Below that, the copy IS
-# the right summary (the pool after ``[S1, "OK", "thanks"]`` adds nothing).
+# learned nothing from the new turns it read. Stale when BOTH hold: the new
+# turns read weigh enough to deserve a new summary (at least
+# ``SUMMARY_MIN_TOKENS`` and ``SUMMARY_STALE_MIN_NEW_RATIO`` of the previous
+# summary -- below that the copy IS the right summary: the pool after
+# ``[S1, "OK", "thanks"]`` adds nothing), and the new summary ADDS almost
+# nothing to the previous one: fewer normalized characters outside difflib's
+# matching blocks against it (``_novel_chars``) than
+# ``max(SUMMARY_STALE_NOVEL_FLOOR_CHARS, SUMMARY_STALE_NOVEL_SHARE * previous)``.
+# A legitimate incremental summary -- the previous one carried forward plus a
+# sentence about the new turns -- is over 0.9 similar to S1 whenever S1 is
+# long, so similarity cannot be the criterion; what the summary ADDS can.
 SUMMARY_STALE_MIN_NEW_RATIO = 0.5
+SUMMARY_STALE_NOVEL_FLOOR_CHARS = 40
+SUMMARY_STALE_NOVEL_SHARE = 0.05
 # After an automatic compaction whose summary failed or was rejected, the next
 # ``COMPACTION_PAUSE_MESSAGES`` user messages run without one: a failing
 # summary is not retried on every turn (one model call each, reading the whole
@@ -984,6 +993,19 @@ def _reads_as_copy(wanted: str, other: str) -> bool:
     )
 
 
+def _novel_chars(wanted: str, previous: str) -> int:
+    """Characters of ``wanted`` outside its difflib matching blocks against
+    ``previous`` (both already normalized): what the new summary says that
+    the previous one did not."""
+    import difflib
+
+    matched = sum(
+        block.size
+        for block in difflib.SequenceMatcher(None, previous, wanted).get_matching_blocks()
+    )
+    return max(0, len(wanted) - matched)
+
+
 def summary_rejection(summary: str, read: list) -> Optional[str]:
     """Why ``summary`` cannot stand for the messages the summarizer ``read``
     (the previous summary and the bounded pool), or ``None``.
@@ -992,17 +1014,20 @@ def summary_rejection(summary: str, read: list) -> Optional[str]:
       min(SUMMARY_MIN_RATIO * read, SUMMARY_SHORT_CEILING_TOKENS))``, both
       counted with the compaction counter (``content_tokens``), so a Chinese
       summary is not held to a Latin length;
-    * ``"stale"``: a previous summary was read, the new summary is it
-      (normalized, or within ``SUMMARY_COPY_SIMILARITY`` of it), and the rest
-      of what was read weighs at least ``SUMMARY_MIN_TOKENS`` AND
+    * ``"stale"``: a previous summary was read, the new summary ADDS almost
+      nothing to it (``_novel_chars`` below the stale novel floor), and the
+      rest of what was read weighs at least ``SUMMARY_MIN_TOKENS`` AND
       ``SUMMARY_STALE_MIN_NEW_RATIO`` of the previous summary: the model
       copied its old summary over real new content. With little new content
-      the copy is accepted -- it IS the right summary;
+      the copy is accepted -- it IS the right summary -- and an incremental
+      summary (S1 plus a sentence about the new turns) always is;
     * ``"copy"``: with more than one message read, and the summary under
-      ``SUMMARY_COPY_MAX_RATIO`` of what it read, the summary is the last
-      question or the last answer it read, normalized (``_normalized``), or
-      within ``SUMMARY_COPY_SIMILARITY`` of it. A single message has nothing a
-      copy of it drops; a long recap that is also the last answer is kept.
+      ``SUMMARY_COPY_MAX_RATIO`` of what it read, the summary is a question
+      or an answer it read, normalized (``_normalized``), or within
+      ``SUMMARY_COPY_SIMILARITY`` of it -- ANY of them, not only the last
+      ones: #748's summary copied an earlier pasted document. A single
+      message has nothing a copy of it drops; a long recap that is also the
+      last answer is kept.
     """
     bodies = [_message_body(m) for m in read]
     read_tokens = sum(content_tokens(body) for body in bodies)
@@ -1021,20 +1046,26 @@ def summary_rejection(summary: str, read: list) -> Optional[str]:
         new_tokens = sum(
             content_tokens(body) for m, body in zip(read, bodies) if not _is_previous_summary(m)
         )
+        previous_normalized = _normalized(previous)
+        novel_floor = max(
+            SUMMARY_STALE_NOVEL_FLOOR_CHARS,
+            SUMMARY_STALE_NOVEL_SHARE * len(previous_normalized),
+        )
         if (
             new_tokens >= SUMMARY_MIN_TOKENS
             and new_tokens >= SUMMARY_STALE_MIN_NEW_RATIO * content_tokens(previous)
-            and _reads_as_copy(wanted, _normalized(previous))
+            and _novel_chars(wanted, previous_normalized) < novel_floor
         ):
             return "stale"
     if len(read) > 1 and content_tokens(summary.strip()) < SUMMARY_COPY_MAX_RATIO * read_tokens:
-        last_of = {}
         for message, body in zip(read, bodies):
             kind = getattr(message, "type", None)
-            if kind in ("human", "ai") and not _is_previous_summary(message) and body.strip():
-                last_of[kind] = _normalized(body)
-        for last in last_of.values():
-            if _reads_as_copy(wanted, last):
+            if (
+                kind in ("human", "ai")
+                and not _is_previous_summary(message)
+                and body.strip()
+                and _reads_as_copy(wanted, _normalized(body))
+            ):
                 return "copy"
     return None
 
@@ -1149,9 +1180,25 @@ def _cut_to_cap(message: Any, cap: int, weight_of: Any) -> Any:
     ``(cap / w - 16) * 4`` characters, ``w`` the message's own weight
     (``weight_of``; the role and per-message overhead are weighed too), kept
     as the head and the tail (``_BOUND_HEAD_SHARE``) around the ASCII
-    omission marker. The message itself when the cap covers its whole
-    text."""
+    omission marker. The copy of a tool-calling message replaces each call's
+    args by the marker: the args can be the whole cost of a message with no
+    text, which no text cut could shrink. The message itself when the cap
+    covers its whole text and it carries no calls."""
     text = message.text if isinstance(getattr(message, "text", None), str) else ""
+    update: dict = {}
+    calls = getattr(message, "tool_calls", None)
+    if calls:
+        update["tool_calls"] = [
+            {
+                **call,
+                "args": {
+                    "omitted": _OMITTED_MARKER.format(
+                        len(json.dumps(call.get("args") or {}, ensure_ascii=False, default=str))
+                    )
+                },
+            }
+            for call in calls
+        ]
     marker_room = len(_OMITTED_MARKER.format(len(text)))
     unscaled = cap / max(weight_of(message), 1e-6)
     keep = max(
@@ -1159,25 +1206,27 @@ def _cut_to_cap(message: Any, cap: int, weight_of: Any) -> Any:
         int((unscaled - _TRUNCATION_OVERHEAD_TOKENS) * _APPROX_CHARS_PER_TOKEN) - marker_room,
     )
     if keep >= len(text):
-        return message
+        return message.model_copy(update=update) if update else message
     head = int(keep * _BOUND_HEAD_SHARE)
     tail = keep - head
     marker = _OMITTED_MARKER.format(len(text) - keep)
-    kept = text[:head] + "\n" + marker + ("\n" + text[len(text) - tail :] if tail else "")
-    return message.model_copy(update={"content": kept})
+    update["content"] = (
+        text[:head] + "\n" + marker + ("\n" + text[len(text) - tail :] if tail else "")
+    )
+    return message.model_copy(update=update)
 
 
 def _bound_for_summary(pool: list, budget: int, counter: Any, weight_of: Any) -> list:
     """``pool`` bounded to ``budget`` real tokens by fair share
-    (water-filling), order preserved. A pool that fits is returned as is.
+    (water-filling), order preserved. A pool that fits is returned WHOLE.
     Otherwise, bisection finds the largest per-message cap whose bounded pool
     -- each message over the cap cut to it (``_cut_to_cap``), the others
-    WHOLE, so a short fact sent before an oversized document still reaches
+    whole, so a short fact sent before an oversized document still reaches
     the summarizer (#748) -- fits the budget, verified with ``counter``
     itself. When even the floor cap (``_BOUND_FLOOR_TOKENS``) does not fit,
     the pool holds too many messages and the oldest bounded messages are
-    dropped; a single message that still cannot fit is cut to the largest
-    cap that does (down to its marker alone)."""
+    dropped (one WARNING says how many); a single message that still cannot
+    fit is cut to the largest cap that does (down to its marker alone)."""
     pool = list(pool)
     if not pool or counter(pool) <= budget:
         return pool
@@ -1205,14 +1254,32 @@ def _bound_for_summary(pool: list, budget: int, counter: Any, weight_of: Any) ->
     cap = largest_fitting_cap(pool, costs, _BOUND_FLOOR_TOKENS, max(costs))
     if cap is not None:
         return bounded_at(pool, costs, cap)
+    # Too many messages for the budget even at the floor cap: drop the
+    # oldest. The counter is additive (pinned by the compaction tests), so
+    # one count per message decides the longest suffix that fits.
     bounded = bounded_at(pool, costs, _BOUND_FLOOR_TOKENS)
-    while len(bounded) > 1 and counter(bounded) > budget:
-        bounded = bounded[1:]
-    if counter(bounded) <= budget:
-        return bounded
-    last = pool[-1:]
-    cap = largest_fitting_cap(last, costs[-1:], 0, _BOUND_FLOOR_TOKENS)
-    return bounded_at(last, costs[-1:], cap) if cap is not None else []
+    total, start = 0, len(bounded)
+    for i in range(len(bounded) - 1, -1, -1):
+        cost = counter([bounded[i]])
+        if total + cost > budget:
+            break
+        total, start = total + cost, i
+    if start < len(bounded):
+        kept = bounded[start:]
+        dropped = start
+    else:
+        # Even the last bounded message alone exceeds the budget: cut it to
+        # the largest cap that fits (down to its marker alone).
+        last_cap = largest_fitting_cap(pool[-1:], costs[-1:], 0, _BOUND_FLOOR_TOKENS)
+        kept = bounded_at(pool[-1:], costs[-1:], last_cap) if last_cap is not None else []
+        dropped = len(pool) - len(kept)
+    if dropped:
+        logger.warning(
+            f"Compaction summarizer input dropped its {dropped} oldest message(s): "
+            f"{len(pool)} messages exceed the {budget}-token budget even at the "
+            f"{_BOUND_FLOOR_TOKENS}-token floor cap"
+        )
+    return kept
 
 
 # HTTP statuses of the summary call that are worth retrying on the NEXT turn.

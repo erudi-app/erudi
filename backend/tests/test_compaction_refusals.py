@@ -480,10 +480,26 @@ def test_a_summary_equal_to_the_previous_summary_is_rejected_as_stale():
     assert summary_rejection(_GOOD_SUMMARY, read) == "stale"
 
 
-def test_a_summary_similar_to_the_previous_summary_is_rejected_as_stale():
+def test_a_trivially_reworded_previous_summary_is_still_stale():
     almost = _GOOD_SUMMARY.replace("the 8:04 train", "that same train")
     read = [_previous_summary_message(_GOOD_SUMMARY)] + _pool(10)
     assert summary_rejection(almost, read) == "stale"
+
+
+def test_a_summary_adding_one_new_sentence_to_the_previous_one_is_accepted():
+    """The legitimate incremental summary: a LONG S1 carried forward plus one
+    sentence about what the new turns brought. Similarity to S1 is above 0.9
+    by construction -- what matters is that the summary ADDS something."""
+    long_previous = " ".join(
+        f"On day {i} she asked about the {i}:04 train to Paris and noted the fare."
+        for i in range(18)
+    )
+    grown = (
+        f"{long_previous} She then pasted a long tide-table document about "
+        "Brest harbour and asked to keep its schedule in mind."
+    )
+    read = [_previous_summary_message(long_previous)] + _pool(40)
+    assert summary_rejection(grown, read) is None
 
 
 def test_a_summary_equal_to_the_previous_one_is_accepted_when_little_new_was_read():
@@ -494,6 +510,18 @@ def test_a_summary_equal_to_the_previous_one_is_accepted_when_little_new_was_rea
         HumanMessage("thanks"),
     ]
     assert summary_rejection(_GOOD_SUMMARY, read) is None
+
+
+def test_a_copy_of_an_earlier_document_is_rejected():
+    """#748's third symptom: the summary was a near-verbatim copy of document
+    A, which was not the last message read."""
+    doc_a = "The archivist filed the municipal tide tables for Brest. " * 35
+    read = [
+        HumanMessage(doc_a),
+        AIMessage("Noted, I will keep the archive schedule in mind."),
+        HumanMessage("Second document: " + "the harbour log repeats itself. " * 600),
+    ]
+    assert summary_rejection(doc_a, read) == "copy"
 
 
 # ===================== 2. automatic: history kept, proceed or refuse, pause =====================

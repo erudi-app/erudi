@@ -981,6 +981,57 @@ def test_bounded_pools_fit_the_budget_and_keep_their_order():
         assert [m.id for m in bounded] == [m.id for m in pool if m.id in kept]
 
 
+def test_a_tool_call_heavy_message_is_bounded_not_dropped():
+    """An AIMessage whose cost is its tool-call args (empty content) must be
+    reducible too, or the fair share degenerates to dropping everything --
+    the short fact before it included."""
+    from src.agents.token_accounting import counter_weight
+
+    pool = [
+        HumanMessage("My secret code is ZEBRA-42.", id="fact"),
+        AIMessage(
+            "",
+            tool_calls=[{"name": "lookup", "args": {"q": "x" * 20_000}, "id": "c1"}],
+            id="call",
+        ),
+    ]
+
+    def counter(part):
+        return real_token_count(part, {})
+
+    bounded = runner_module._bound_for_summary(pool, 1000, counter, counter_weight)
+
+    assert [m.id for m in bounded] == ["fact", "call"]
+    assert counter(bounded) <= 1000
+    assert "ZEBRA-42" in bounded[0].content
+    assert "characters omitted" in str(bounded[1].tool_calls)
+
+
+def test_dropping_the_oldest_messages_logs_one_warning(caplog):
+    """Only the floor path drops messages, and it says so: one ASCII WARNING
+    with how many fell."""
+    from src.agents.token_accounting import counter_weight
+
+    pool = [
+        (HumanMessage if i % 2 == 0 else AIMessage)(_text(300, chr(ord("a") + i % 26)), id=f"m{i}")
+        for i in range(60)
+    ]
+
+    def counter(part):
+        return real_token_count(part, {})
+
+    with caplog.at_level(logging.WARNING):
+        bounded = runner_module._bound_for_summary(pool, 1000, counter, counter_weight)
+
+    assert counter(bounded) <= 1000
+    assert 0 < len(bounded) < len(pool)
+    assert [m.id for m in bounded] == [m.id for m in pool[-len(bounded) :]]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert str(len(pool) - len(bounded)) in warnings[0].getMessage()
+    assert warnings[0].getMessage().isascii()
+
+
 async def test_a_manual_compaction_bounds_a_giant_document_the_same_way():
     """``/compact`` goes through the same ``_acreate_summary``: the facts
     before a giant document reach the summarizer and nothing raises."""
