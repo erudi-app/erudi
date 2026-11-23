@@ -106,6 +106,7 @@ class CPU_Engine(BaseLlamaCppEngine):
     # --- BaseChatServerEngine config overrides ---
     _server_name = "llama-server"
     _tokenizer_provider = "llama-server"
+    _hardware_logged = False
     # _port_range_start = 27200 (inherited from BaseLlamaCppEngine)
     # _use_cuda_build = False (inherited from BaseLlamaCppEngine)
     # USES_GGUF + MODEL_MAPPING (public-GGUF catalog) inherited from BaseLlamaCppEngine.
@@ -372,9 +373,10 @@ class CPU_Engine(BaseLlamaCppEngine):
                 "timestamp": time.time(),
             }
 
-            logger.info(
-                f"CPU hardware detected: {cpu_model}, {total_cores} cores, {total_mem}GB RAM"
-            )
+            # The diagnostics poll reads this every minute: INFO once per process.
+            log = logger.debug if CPU_Engine._hardware_logged else logger.info
+            CPU_Engine._hardware_logged = True
+            log(f"CPU hardware detected: {cpu_model}, {total_cores} cores, {total_mem}GB RAM")
             return info
 
         except Exception as e:

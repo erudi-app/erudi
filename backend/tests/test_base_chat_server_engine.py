@@ -746,3 +746,49 @@ class TestEffectiveContextTokens:
         }
         _TestEngine.cleanup()
         assert _TestEngine.effective_context_tokens() is None
+
+
+# =====================================================================
+# UNIT — the load line says what happens
+# =====================================================================
+
+
+@pytest.mark.unit
+class TestLoadLogLine:
+    """`Loading model ...` is logged when a child is spawned, never for a model
+    that is already up: every turn calls get_model_and_tokenizer twice (the
+    chat client and the summary client) and neither may claim a load."""
+
+    @staticmethod
+    def _cache_a_live_child():
+        _TestEngine._model = {
+            "pid": 1,
+            "proc": MagicMock(),
+            "port": 19032,
+            "base_url": "http://127.0.0.1:19032",
+            "alias": "test-7",
+            "model_path": Path("/m"),
+        }
+        _TestEngine._tokenizer = {"type": "remote", "provider": "test-provider"}
+        _TestEngine._model_id = "7"
+
+    def test_cached_model_logs_no_loading_line_and_nothing_above_debug(self, caplog):
+        self._cache_a_live_child()
+        with (
+            patch.object(_TestEngine, "_proc_is_alive", return_value=True),
+            caplog.at_level("DEBUG", logger="erudi"),
+        ):
+            _TestEngine.get_model_and_tokenizer(llm_id="7", llm_local_path="/m")
+            _TestEngine.get_model_and_tokenizer(llm_id="7", llm_local_path="/m")
+        messages = [(r.levelname, r.getMessage()) for r in caplog.records]
+        assert not any("Loading model" in m for _, m in messages)
+        assert not any(level in ("INFO", "WARNING", "ERROR") for level, _ in messages)
+
+    def test_a_spawn_logs_the_loading_line_once(self, caplog):
+        with (
+            patch.object(_TestEngine, "_probe_ready", return_value=None),
+            caplog.at_level("INFO", logger="erudi"),
+        ):
+            _TestEngine.get_model_and_tokenizer(llm_id="8", llm_local_path="/m")
+        loading = [r for r in caplog.records if "Loading model '8'" in r.getMessage()]
+        assert len(loading) == 1
