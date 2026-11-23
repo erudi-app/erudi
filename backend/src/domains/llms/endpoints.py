@@ -685,10 +685,13 @@ async def search_huggingface_route(q: str, limit: int = 30):
         q: Free-text query (model name, family, trait like "uncensored").
         limit: Max results to return (default 30).
 
+    The search blocks on Hugging Face (the listing, then one size request per hit,
+    #761), so it runs in a worker thread, off the event loop.
+
     Returns:
         List[HFSearchResult]: Downloadable matches with metadata + category.
     """
-    return search_huggingface(q, limit=limit)
+    return await asyncio.to_thread(search_huggingface, q, limit=limit)
 
 
 # The loaded model (#619). Declared before every ``/{llm_id}`` route, which
