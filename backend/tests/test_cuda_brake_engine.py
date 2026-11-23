@@ -728,7 +728,11 @@ def test_a_full_line_wins_over_the_bytes(windows):
 def test_the_byte_measurement_classifies_a_partial_child(linux, caplog):
     # fit dropped a third of the layers: their weights and KV sit in RAM.
     linux.device_override = 3 * GIB
-    CUDA_Engine._window_memory["/models/q.gguf"] = {"cap": 30_720, "faulty": W, "at": time.time()}
+    CUDA_Engine._window_memory[str(Path("/models/q.gguf"))] = {
+        "cap": 30_720,
+        "faulty": W,
+        "at": time.time(),
+    }
     with caplog.at_level(logging.INFO, logger="erudi"):
         handle = _load(linux)
     assert handle["window_sized"] is False
@@ -736,8 +740,8 @@ def test_the_byte_measurement_classifies_a_partial_child(linux, caplog):
     assert "measured" in info.getMessage()
     # The window memory keeps its cap and faulty window: the brake re-arms
     # at the next load of the artifact.
-    assert CUDA_Engine._window_memory["/models/q.gguf"]["cap"] == 30_720
-    assert CUDA_Engine._window_memory["/models/q.gguf"]["faulty"] == W
+    assert CUDA_Engine._window_memory[str(Path("/models/q.gguf"))]["cap"] == 30_720
+    assert CUDA_Engine._window_memory[str(Path("/models/q.gguf"))]["faulty"] == W
     # memory_bound is stamped from the budget alone.
     assert CUDA_Engine.memory_bound_tokens() is None
 
@@ -771,7 +775,9 @@ def test_a_spill_warning_shrinks_and_respawns_once_away_pinning_every_layer(wind
     with caplog.at_level(logging.INFO, logger="erudi"):
         outcome = CUDA_Engine.brake_point("turn_end")
         assert outcome == BrakeOutcome(acted=True, action="shrink")
-        assert CUDA_Engine._window_memory["/models/q.gguf"]["cap"] == int(W * mb.SHRINK_FACTOR)
+        assert CUDA_Engine._window_memory[str(Path("/models/q.gguf"))]["cap"] == int(
+            W * mb.SHRINK_FACTOR
+        )
         # A reader between messages pays no respawn.
         assert len(windows.spawns) == 1
         sized, nvml = windows.sized, windows.nvml_reads
@@ -1105,7 +1111,9 @@ def test_the_vram_warning_seam_shrinks_a_262144_window(vram_seam, monkeypatch):
     monkeypatch.setenv("ERUDI_FORCE_MEMORY_PRESSURE", "vram-warning")
     _load(vram_seam)
     assert CUDA_Engine.brake_point("turn_end") == BrakeOutcome(acted=True, action="shrink")
-    assert CUDA_Engine._window_memory["/models/q.gguf"]["cap"] == int(LONG_W * mb.SHRINK_FACTOR)
+    assert CUDA_Engine._window_memory[str(Path("/models/q.gguf"))]["cap"] == int(
+        LONG_W * mb.SHRINK_FACTOR
+    )
 
 
 # ===================== Linux: sized at spawn, no brake signal =====================
