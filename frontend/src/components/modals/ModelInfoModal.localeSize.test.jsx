@@ -60,4 +60,18 @@ describe("ModelInfoModal numbers in French (#765)", () => {
     expect(exact(`${formatNumber(8192)} tokens`)).toBeTruthy();
     expect(screen.queryByText("40960 tokens")).toBeNull();
   });
+
+  it("groups downloads and likes and localizes the parameter count", () => {
+    open({
+      name: "Gemma 1B",
+      size: "~0.7 GB",
+      parameters: "4.0B",
+      downloads: "1234567",
+      likes: 8901,
+    });
+    const exact = (text) => screen.getByText((_, node) => node.textContent === text);
+    expect(exact(formatNumber(1234567))).toBeTruthy();
+    expect(exact(formatNumber(8901))).toBeTruthy();
+    expect(exact("4,0B")).toBeTruthy();
+  });
 });

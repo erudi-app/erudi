@@ -52,8 +52,14 @@ describe("DeleteModelModal size in French", () => {
     expect(freesLine()).toContain("2,3 Go");
   });
 
-  it("says nothing about the size when it is unknown", () => {
-    open({ name: "Gemma 1B", size: "Unknown" });
+  it("says nothing about the size when the app marks it unknown (translated)", () => {
+    open({ name: "Gemma 1B", size: i18n.t("common:status.unknown") });
     expect(document.body.textContent).not.toContain("libère");
+  });
+
+  it("uses a measured size even when the metadata size is unknown", async () => {
+    await i18n.changeLanguage("en");
+    open({ name: "Gemma 1B", size: "Unknown", artifact_size_bytes: 2_279_000_000 });
+    expect(document.body.textContent).toContain("frees 2.3 GB.");
   });
 });

@@ -37,7 +37,7 @@ export default function DeleteModelModal({ isOpen, model, onConfirm, onCancel, d
   const assistants = dependents?.assistants || [];
   const hasDependents = assistants.length > 0;
   const conversationCount = dependents?.total_conversation_count ?? 0;
-  const sizeKnown = Boolean(model?.size) && model.size !== "Unknown";
+  const sizeLabel = displayModelSize(model);
   return (
     <AnimatePresence>
       {isOpen && (
@@ -117,9 +117,7 @@ export default function DeleteModelModal({ isOpen, model, onConfirm, onCancel, d
                               strong: <span className="font-semibold" />,
                             }}
                           />
-                          {sizeKnown
-                            ? ` ${t("downloads:delete.frees", { size: displayModelSize(model) ?? model.size })}`
-                            : ""}
+                          {sizeLabel ? ` ${t("downloads:delete.frees", { size: sizeLabel })}` : ""}
                         </p>
                         <p className="text-gray-300/80 text-xs mt-2">
                           {t("downloads:delete.dependentsNote")}

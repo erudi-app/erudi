@@ -41,6 +41,19 @@ ModelInfoModal.defaultProps = {
 // Hugging Face search mapping): such a field is hidden, never shown as copy.
 const isKnown = (value) => value && value !== "Unknown";
 
+// Counts (downloads, likes) arrive as numbers or digit strings: group them with
+// the language's separator; anything else is shown as received.
+const displayCount = (value) => (/^\d+$/.test(String(value)) ? formatNumber(Number(value)) : value);
+
+// "4.0B" / "1.5B" (the backend's English label) -> the language's decimal
+// separator; any other label is shown as received.
+const displayParameters = (value) => {
+  const match = /^(\d+\.\d+)B$/.exec(String(value ?? ""));
+  return match
+    ? `${formatNumber(Number(match[1]), { minimumFractionDigits: 1, maximumFractionDigits: 1 })}B`
+    : value;
+};
+
 export default function ModelInfoModal({
   modelInfo,
   isOpen,
@@ -140,7 +153,9 @@ export default function ModelInfoModal({
                           <span className="text-emerald-400 font-medium">
                             {t("models:info.parameters")}
                           </span>
-                          <span className="text-gray-200 ml-2">{modelInfo.parameters}</span>
+                          <span className="text-gray-200 ml-2">
+                            {displayParameters(modelInfo.parameters)}
+                          </span>
                         </div>
                         {/* Trained window = a fact of the model; allocated =
                             what the engine's loaded child runs with right
@@ -209,7 +224,9 @@ export default function ModelInfoModal({
                             <span className="text-emerald-400 font-medium">
                               {t("models:info.downloads")}
                             </span>
-                            <span className="text-gray-200">{modelInfo.downloads}</span>
+                            <span className="text-gray-200">
+                              {displayCount(modelInfo.downloads)}
+                            </span>
                           </div>
                         )}
                         {isKnown(modelInfo.likes) && (
@@ -218,7 +235,7 @@ export default function ModelInfoModal({
                             <span className="text-emerald-400 font-medium">
                               {t("models:info.likes")}
                             </span>
-                            <span className="text-gray-200">{modelInfo.likes}</span>
+                            <span className="text-gray-200">{displayCount(modelInfo.likes)}</span>
                           </div>
                         )}
                         {isKnown(modelInfo.lastUpdate) && (

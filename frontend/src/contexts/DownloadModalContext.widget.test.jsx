@@ -122,11 +122,16 @@ describe("Download widget progress readout", () => {
   });
 
   it("derives bytes and speed from the status reply's total_bytes and time_left", async () => {
-    const GIB = 1_000_000_000; // decimal, like the model card (#753)
+    const GB_BYTES = 1_000_000_000; // decimal, like the model card (#753)
     statusResponder = () => ({
       ok: true,
       // 25% of 8 GB done, 6 GB left in 600s -> 10 MB/s
-      json: async () => ({ status: "running", progress: 25, time_left: 600, total_bytes: 8 * GIB }),
+      json: async () => ({
+        status: "running",
+        progress: 25,
+        time_left: 600,
+        total_bytes: 8 * GB_BYTES,
+      }),
     });
     renderProvider();
     await startPollAndExpand();
