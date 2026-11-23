@@ -36,6 +36,7 @@ from langchain_postgres.v2.indexes import DistanceStrategy, HNSWIndex
 
 from src.core.logging import logger
 from src.core.logutils import truncate_for_log
+from src.ingestion import phase_timings
 from src.launcher.postgres_settings import (
     KB_STORE_POOL_MAX_OVERFLOW,
     KB_STORE_POOL_SIZE,
@@ -223,7 +224,8 @@ def add_kb_chunks(
     embedding_texts = [
         build_embedding_text(file_name=source_file, chunk_text=chunk.text) for chunk in chunks
     ]
-    vectors = get_embeddings().embed_documents(embedding_texts)
+    with phase_timings.timed("embed"):
+        vectors = get_embeddings().embed_documents(embedding_texts)
     texts = [chunk.text for chunk in chunks]
     metadatas = [
         {
@@ -239,7 +241,8 @@ def add_kb_chunks(
         }
         for chunk in chunks
     ]
-    ids = get_kb_store().add_embeddings(texts=texts, embeddings=vectors, metadatas=metadatas)
+    with phase_timings.timed("db"):
+        ids = get_kb_store().add_embeddings(texts=texts, embeddings=vectors, metadatas=metadatas)
     duration_ms = (time.perf_counter() - start_s) * 1000
     logger.info(
         f"KB chunks added: kb_id={kb_id}, document_id={document_id}, "

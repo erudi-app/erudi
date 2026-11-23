@@ -465,6 +465,7 @@ non-functional behavior.
 - [ ] *(Windows/Linux)* When I start the new version over one that had downloaded the embedding model (a `models_cache/models--intfloat--multilingual-e5-small` folder in the data folder), then the folder is deleted at start, `backend.log` says so at INFO with the size freed, and existing Knowledge Bases keep answering; the next start finds nothing to delete.
 - [ ] *(not built yet: v1.3.0, #594 — record as not applicable)* When existing Knowledge Bases are re-embedded at first start (only if the shipped vectors differ), then they stay usable meanwhile and the log says when it is done.
 - [ ] *(Apple Silicon)* When a conversation with a Knowledge Base opens, then the embedder starts ahead (`Embedding child ready` in `backend.log` within seconds of opening); the first Knowledge Base use after a start is at most 1-2 s slower.
+- [ ] When I add one small text file to a Knowledge Base as the first Knowledge Base use after a start, then `backend.log` ends the job with one `KB job N timings: total_ms=... spawn_ms=... read_ms=... chunk_ms=... tokenizer_ms=... embed_ms=... db_ms=...` line, `spawn_ms` is a number, and `total_ms` is below `spawn_ms + chunk_ms` (the child started while the file was chunked, not after). Record the line in the QA report; a second job a moment later shows `spawn_ms` and `tokenizer_ms` near 0.
 - [ ] *(Windows)* When I install 1.3.0 over 1.2.0, then the install succeeds and leaves no torch tree.
 
 ## Settings — `/erudi/settings`

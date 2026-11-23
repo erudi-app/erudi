@@ -10,6 +10,8 @@ Two harnesses on the same embedded cluster:
 """
 
 import logging
+import threading
+import time
 
 import pytest
 import psycopg
@@ -949,3 +951,312 @@ class TestIngestionPipeline:
         job_row = service.repo.get_kb_job_by_id(session, job.id)
         assert job_row.status == "failed"
         assert service._job_files(session, job_row)[0] == ["maintenance.md"]
+
+
+class TestFirstIngestionTimings:
+    """The embedding child starts beside the job's first file (its reading,
+    its chunking and the e5 tokenizer's load) instead of after them, and the
+    job ends with one ``KB job N timings:`` line saying where the time went."""
+
+    @staticmethod
+    def _timing_lines(caplog, job_id):
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith(f"KB job {job_id} timings:")
+        ]
+
+    def test_the_job_logs_one_ascii_timing_line_with_every_phase(
+        self, kb_store, real_db_session, tmp_path, caplog
+    ):
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        doc = tmp_path / "délais.md"
+        doc.write_text("# Délais\n\nLa livraison prend trois jours.", encoding="utf-8")
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            service.process_and_index_documents(db=session, kb_job_id=job.id, file_paths=[str(doc)])
+
+        (line,) = self._timing_lines(caplog, job.id)
+        assert line.isascii()
+        fields = dict(part.split("=") for part in line.split(": ", 1)[1].split())
+        assert set(fields) == {
+            "total_ms",
+            "spawn_ms",
+            "read_ms",
+            "chunk_ms",
+            "tokenizer_ms",
+            "embed_ms",
+            "db_ms",
+        }
+        # The suite's manager is disarmed: no child was started.
+        assert fields["spawn_ms"] == "none"
+        for name in ("total_ms", "read_ms", "chunk_ms", "tokenizer_ms", "embed_ms", "db_ms"):
+            assert int(fields[name]) >= 0
+        assert int(fields["chunk_ms"]) >= int(fields["tokenizer_ms"])
+
+    def test_the_start_and_the_chunking_run_at_the_same_time(
+        self, kb_store, real_db_session, tmp_path, monkeypatch
+    ):
+        """Neither waits for the other: the fake start only finishes once the
+        job has chunked, and the chunking only goes on once the start runs.
+        Run one after the other, each would wait out its 5 s and fail."""
+        from src.domains.knowledge_base import services
+
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        first = tmp_path / "a.md"
+        first.write_text("# A\n\nPremier document.", encoding="utf-8")
+        second = tmp_path / "b.md"
+        second.write_text("# B\n\nSecond document.", encoding="utf-8")
+        order = []
+        start_running = threading.Event()
+        chunked = threading.Event()
+        overlapped = []
+
+        class FakeStart:
+            def __init__(self):
+                self.seconds = None
+                self.error = None
+                self._done = threading.Event()
+
+            def wait(self, timeout=None):
+                return self._done.wait(timeout)
+
+            def run(self):
+                start_running.set()
+                overlapped.append(chunked.wait(5.0))
+                self.seconds = 0.0
+                self._done.set()
+
+        def start_in_background():
+            order.append("start")
+            start = FakeStart()
+            threading.Thread(target=start.run, daemon=True).start()
+            return start
+
+        real_read = service.reader.read
+        real_chunk = services.chunk_document
+
+        def read(path):
+            order.append("read")
+            return real_read(path)
+
+        def chunk(document):
+            overlapped.append(start_running.wait(5.0))
+            chunks = real_chunk(document)
+            chunked.set()
+            return chunks
+
+        monkeypatch.setattr(services.embedder_child, "start_in_background", start_in_background)
+        monkeypatch.setattr(service.reader, "read", read)
+        monkeypatch.setattr(services, "chunk_document", chunk)
+        service.process_and_index_documents(
+            db=session, kb_job_id=job.id, file_paths=[str(first), str(second)]
+        )
+
+        assert order == ["read", "start", "read"]  # once per job, after the first read
+        assert overlapped[:2] == [True, True]
+        session.expire_all()
+        assert service.repo.get_kb_job_by_id(session, job.id).status == "completed"
+
+    def test_a_job_without_text_to_index_starts_no_child(
+        self, kb_store, real_db_session, tmp_path, monkeypatch, caplog
+    ):
+        """Duplicates are already indexed, images and scans wait for a later
+        tier, empty and invalid files hold nothing: none needs the child, so
+        it is not started for them (it would be held 5 minutes for nothing)."""
+        from src.domains.knowledge_base import services
+        from tests.test_ingestion_reader import _write_renamed_text
+
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        doc = tmp_path / "notes.md"
+        doc.write_text("# Notes\n\nDéjà indexé.", encoding="utf-8")
+        service.process_and_index_documents(db=session, kb_job_id=job.id, file_paths=[str(doc)])
+
+        starts = []
+        monkeypatch.setattr(
+            services.embedder_child, "start_in_background", lambda: starts.append(1)
+        )
+        photo = tmp_path / "photo.png"
+        photo.write_bytes(b"\x89PNG fake")
+        blank = tmp_path / "vide.txt"
+        blank.write_text("  \n\n ", encoding="utf-8")
+        broken = tmp_path / "broken.docx"
+        _write_renamed_text(broken)
+        second = service.repo.create_kb_job(
+            db=session, base_model_id=None, new_model_id=None, kb_id=kb.id
+        )
+        session.commit()
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            service.process_and_index_documents(
+                db=session,
+                kb_job_id=second.id,
+                file_paths=[str(doc), str(photo), str(blank), str(broken)],
+            )
+
+        assert starts == []
+        (line,) = self._timing_lines(caplog, second.id)
+        assert " spawn_ms=none " in line
+
+
+class TestFirstIngestionStartFailures:
+    """A child that cannot start beside the job: reported once, by whoever
+    handles it, with the number of spawns the policy says."""
+
+    @pytest.fixture
+    def child(self, tmp_path, monkeypatch):
+        from src.ingestion import embedder_child, vector_store
+        from src.ingestion.embeddings import ChildE5Embeddings
+        from tests.test_embedder_child import FakeHttp, make_adapter
+
+        adapter = make_adapter(tmp_path)
+        adapter.attempts = 0
+        adapter.fail_spawns = 0
+        fake_spawn = adapter.spawn
+
+        def spawn(**kwargs):
+            adapter.attempts += 1
+            if adapter.fail_spawns:
+                adapter.fail_spawns -= 1
+                raise OSError("fork refused")
+            return fake_spawn(**kwargs)
+
+        adapter.spawn = spawn
+        http = FakeHttp()
+        http.dimensions = 384
+        monkeypatch.setattr(embedder_child, "_adapter_override", adapter)
+        monkeypatch.setattr(embedder_child, "requests", http)
+        monkeypatch.setattr(vector_store, "get_embeddings", ChildE5Embeddings)
+        embedder_child._reset_for_tests()
+        yield adapter, http
+        embedder_child._reset_for_tests()
+
+    @staticmethod
+    def _run(service, session, job, doc, caplog):
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            try:
+                service.process_and_index_documents(
+                    db=session, kb_job_id=job.id, file_paths=[str(doc)]
+                )
+            except NothingIndexedException:
+                pass
+        line = next(
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith(f"KB job {job.id} timings:")
+        )
+        problems = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        return line, problems
+
+    @staticmethod
+    def _embed_after(monkeypatch, condition):
+        """Let the job's first embedding call through once ``condition()``."""
+        from src.ingestion import embedder_child
+
+        real = embedder_child.embed_texts
+
+        def embed_texts(texts):
+            deadline = time.monotonic() + 5.0
+            while not condition() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            return real(texts)
+
+        monkeypatch.setattr(embedder_child, "embed_texts", embed_texts)
+
+    def test_a_start_the_job_waited_for_fails_once_with_one_spawn(
+        self, kb_store, real_db_session, tmp_path, monkeypatch, caplog, child
+    ):
+        """The job's embedding arrived while the start was still probing: it
+        gets the start's failure, the file logs the ONE error, no WARNING,
+        and the child was spawned once."""
+        from src.ingestion import embedder_child
+        from tests.test_embedder_child import FakeResponse
+
+        adapter, http = child
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        doc = tmp_path / "panne.md"
+        doc.write_text("# Panne\n\nLe service est indisponible.", encoding="utf-8")
+        http.post_handler = lambda url, json: FakeResponse(status_code=500, text="no model")
+        release = threading.Event()
+        fake_get = http.get
+
+        def held_get(url, timeout=None, headers=None):
+            release.wait(5.0)
+            return fake_get(url, timeout=timeout, headers=headers)
+
+        http.get = held_get
+        real_ensure = embedder_child.ensure_embedder_running
+        job_waiting = threading.Event()
+
+        def ensure():
+            if threading.current_thread().name != "kb-embedder-start":
+                job_waiting.set()
+            return real_ensure()
+
+        monkeypatch.setattr(embedder_child, "ensure_embedder_running", ensure)
+
+        def releaser():
+            job_waiting.wait(5.0)
+            time.sleep(0.3)  # the job is queued behind the spawn in flight
+            release.set()
+
+        threading.Thread(target=releaser, daemon=True).start()
+        line, problems = self._run(service, session, job, doc, caplog)
+
+        session.expire_all()
+        assert session.query(KnowledgeDocument).filter_by(kb_id=kb.id).one().status == "failed"
+        assert adapter.attempts == 1
+        assert [r.levelno for r in problems] == [logging.ERROR]
+        assert "panne.md" in problems[0].getMessage()
+        assert "HTTP 500" in problems[0].getMessage()
+        assert "spawn_error=EngineException" in line
+
+    def test_a_start_that_failed_at_once_is_one_warning_when_the_retry_works(
+        self, kb_store, real_db_session, tmp_path, monkeypatch, caplog, child
+    ):
+        """The start died before the job needed the child: the job spawns
+        again, that works, the file is indexed, and the first failure is ONE
+        WARNING (the app recovered on its own), never silent."""
+        from src.ingestion import embedder_child
+
+        adapter, http = child
+        adapter.fail_spawns = 1
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        doc = tmp_path / "relance.md"
+        doc.write_text("# Relance\n\nLe second essai fonctionne.", encoding="utf-8")
+        self._embed_after(monkeypatch, lambda: embedder_child._spawn_failures >= 1)
+
+        line, problems = self._run(service, session, job, doc, caplog)
+
+        session.expire_all()
+        assert session.query(KnowledgeDocument).filter_by(kb_id=kb.id).one().status == "active"
+        assert adapter.attempts == 2
+        assert [r.levelno for r in problems] == [logging.WARNING]
+        assert "fork refused" in problems[0].getMessage()
+        assert "spawn_error=OSError" in line
+
+    def test_a_start_that_failed_at_once_then_fails_again_is_one_error(
+        self, kb_store, real_db_session, tmp_path, monkeypatch, caplog, child
+    ):
+        from src.ingestion import embedder_child
+
+        adapter, http = child
+        adapter.fail_spawns = 2
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        doc = tmp_path / "panne2.md"
+        doc.write_text("# Panne\n\nToujours indisponible.", encoding="utf-8")
+        self._embed_after(monkeypatch, lambda: embedder_child._spawn_failures >= 1)
+
+        line, problems = self._run(service, session, job, doc, caplog)
+
+        session.expire_all()
+        assert session.query(KnowledgeDocument).filter_by(kb_id=kb.id).one().status == "failed"
+        assert adapter.attempts == 2
+        assert [r.levelno for r in problems] == [logging.ERROR]
+        assert "fork refused" in problems[0].getMessage()
+        assert "spawn_error=OSError" in line

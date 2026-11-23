@@ -457,6 +457,41 @@ system proxy configuration), `HTTP_CACHE`, or a socket-pool wait such as
 host). The API client records `duration_ms` for each of its requests in
 `erudi-backend.log`, which tells which requests to look for.
 
+## A slow Knowledge Base job
+
+Every Knowledge Base job ends with one `INFO` line, after its outcome line,
+that says where its time went:
+
+```
+KB job 7 timings: total_ms=4720 spawn_ms=4712 read_ms=1 chunk_ms=745 tokenizer_ms=744 embed_ms=3980 db_ms=14
+```
+
+- `spawn_ms` — starting the embedding child (process start, model load, the
+  two-stage probe), about 0 when it was already running. It runs on its own
+  thread beside the job, from the moment the job's first file has been read
+  and holds text to index: `none` when no file held any (duplicates, images,
+  scans, empty or invalid files), `running` when the job ended first, and
+  `spawn_error=<type>` beside it when the start failed. That failure has one
+  record: the `ERROR` of the file that needed the child when the job's
+  embedding was waiting for the start (no second spawn); when the start
+  failed before the job needed the child, the job spawns again and logs the
+  first failure as one `WARNING` (`KB job N: the embedding child failed to
+  start beside the job and started on a second try: ...`) if that works, or
+  the file's `ERROR` for the second failure if it does not.
+- `read_ms` — extracting the files; `chunk_ms` — chunking them, which includes
+  `tokenizer_ms`, the e5 tokenizer's load (0 when it was already loaded). When
+  the tokenizer was released mid-job and the input bound reloads it during the
+  embedding, that load lands in `tokenizer_ms` and in `embed_ms` instead.
+- `embed_ms` — the embedding requests, including the wait for the child when
+  it was not ready yet; `db_ms` — the vector store's writes.
+
+On the first job after a start, `spawn_ms` and the first file's chunking
+(`tokenizer_ms` included) are paid at the same time, so `total_ms` is below
+`spawn_ms + chunk_ms`. Only the first file's reading comes before the start
+(tens of milliseconds for a text, Word or small PDF file). The lines that
+describe each step (`Embedding child ready: ... ready in`, `Document chunked`,
+`Embedded batch via child`, `KB chunks added`) are still written.
+
 ## Tracing a bug (QA recipe)
 
 1. Reproduce the problem and note the time (remember: logs are in UTC).

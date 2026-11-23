@@ -109,7 +109,10 @@ continues either way.
      — see BUILD.md — and never downloaded at runtime; worst measured cosine vs the fp32 model
      0.99981, so existing Knowledge Bases keep their vectors). Nothing stays
      resident in the backend: the child spawns on first use (or ahead, when a conversation with a
-     Knowledge Base opens), an ingestion holds a lease so it is never stopped mid-job, and it is
+     Knowledge Base opens; an ingestion job starts it on a background thread once its first file
+     has been read and holds text to index, so the spawn runs while that file is chunked and the
+     e5 tokenizer loads; a job of duplicates, images, scans, empty or invalid files never starts
+     it), an ingestion holds a lease so it is never stopped mid-job, and it is
      released after a fixed 5 minutes unused (no setting). Inputs are bounded at e5's 512-token
      window Erudi-side (`chunking.truncate_to_tokens`, prefix included) before the call —
      llama-server refuses longer inputs rather than truncating them. On a CUDA install the child
@@ -135,6 +138,15 @@ continues either way.
 
 A document that extracts fine but yields zero chunks (blank file, parser that returned no text) is
 marked `empty`, never `active`.
+
+A failed start is reported once. When the job's embedding was already waiting for it, the job
+gets its failure without a second spawn, and the file that needed the child logs the `ERROR`. When
+it failed before the job needed the child, the job spawns again: if that works, the first failure
+is one `WARNING`; if not, the file's `ERROR` reports the second failure.
+
+Each job ends with a `KB job N timings:` line in `backend.log` giving the time spent starting the
+child, reading, chunking (the tokenizer's load apart), embedding and writing to the database (see
+[A slow Knowledge Base job](../logging.md#a-slow-knowledge-base-job)).
 
 ### Document statuses
 
