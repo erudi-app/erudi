@@ -129,3 +129,15 @@ def test_a_star_whose_cut_would_be_empty_is_skipped():
 
     assert all(_body(c).strip() for c in carried)
     assert sum(_tokens(_body(c)) for c in carried) <= STARRED_TOTAL_TOKENS
+
+
+def test_a_latin_star_ahead_of_a_dense_tail_keeps_nearly_its_whole_budget():
+    """The cut is the longest head within the budget, whatever follows it:
+    a Latin beginning keeps its 500 tokens ahead of a Chinese tail."""
+    star = "The plan for the week is simple. " * 40 + "这是一个很长的中文句子" * 2_000
+
+    (carried,) = bound_starred_messages([star])
+
+    body = _body(carried)
+    assert star.startswith(body)
+    assert 0.9 * STARRED_MESSAGE_TOKENS <= _tokens(body) <= STARRED_MESSAGE_TOKENS

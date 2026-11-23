@@ -15,7 +15,7 @@ import pytest
 from tests.test_ingestion_reader import _minimal_pdf
 
 from src.utils.attachment_utils import (
-    ATTACHMENT_CHAR_BUDGET,
+    ATTACHMENT_TOKEN_BUDGET,
     MAX_ATTACHMENT_FILES,
     TRUNCATION_MARKER,
     build_attachment_notice,
@@ -292,9 +292,39 @@ class TestPerFileFailures:
 # ---------------------------------------------------------------------------
 
 
+def _counter_tokens(text: str) -> int:
+    """``text`` in the compaction counter's tokens (digits one each, the 1.2
+    floor), computed here from the public weight so the test does not lean on
+    the helper it checks."""
+    import math
+
+    from langchain_core.messages import HumanMessage
+
+    from src.agents.token_accounting import counter_weight
+
+    return math.ceil(counter_weight(HumanMessage(text)) * len(text) / 4)
+
+
+def _kept_text(block: str) -> str:
+    """The file text a single-file block carries, without its frame."""
+    body = block.split("\n", 1)[1].rsplit("\n", 1)[0]
+    return body.replace(f"\n{TRUNCATION_MARKER}", "").replace(TRUNCATION_MARKER, "")
+
+
+# 30 000+ characters of the #759 QA file: short French lines dense in digits.
+_DIGIT_LINES = "\n".join(
+    f"Ligne {n} : le camion {n} a parcouru {(n * 7919) % 99991} km." for n in range(1, 900)
+)[:30_000]
+
+_PROSE = (
+    "The committee met on a grey morning and went through the proposals one by one, "
+    "weighing what each would cost the town and what it would bring to its people. "
+)
+
+
 class TestBudget:
     def test_content_over_the_budget_is_truncated_with_an_explicit_marker(self, tmp_path):
-        body = "A" * (ATTACHMENT_CHAR_BUDGET + 5_000)
+        body = "A" * 30_000
         path = _write_txt(tmp_path, "huge.txt", body)
 
         resolved = resolve_attachments([str(path)])
@@ -304,8 +334,8 @@ class TestBudget:
         assert len(resolved.block) < len(body)
 
     def test_the_budget_spans_the_whole_question_not_one_file(self, tmp_path):
-        body = "B" * (ATTACHMENT_CHAR_BUDGET - 100)
-        first = _write_txt(tmp_path, "first.txt", body)
+        # About 5 700 of the 6 000 tokens, then a file that cannot fit whole.
+        first = _write_txt(tmp_path, "first.txt", "B" * 19_000)
         second = _write_txt(tmp_path, "second.txt", "C" * 10_000)
 
         resolved = resolve_attachments([str(first), str(second)])
@@ -321,6 +351,70 @@ class TestBudget:
         assert TRUNCATION_MARKER not in resolved.block
         assert resolved.truncated_names == []
 
+    def test_the_attachment_budget_is_in_tokens_so_digit_dense_text_is_cut_shorter(self, tmp_path):
+        path = _write_txt(tmp_path, "big.txt", _DIGIT_LINES)
+
+        resolved = resolve_attachments([str(path)])
+
+        kept = _kept_text(resolved.block)
+        assert resolved.truncated_names == ["big.txt"]
+        assert _DIGIT_LINES.startswith(kept)
+        assert _counter_tokens(kept) <= ATTACHMENT_TOKEN_BUDGET
+        assert len(kept) < 24_000
+
+    def test_latin_prose_keeps_about_the_same_budget(self, tmp_path):
+        body = _PROSE * 300  # about 48 000 characters
+        path = _write_txt(tmp_path, "essay.txt", body)
+
+        resolved = resolve_attachments([str(path)])
+
+        kept = _kept_text(resolved.block)
+        assert resolved.truncated_names == ["essay.txt"]
+        assert body.startswith(kept)
+        assert _counter_tokens(kept) <= ATTACHMENT_TOKEN_BUDGET
+        # 6 000 tokens at the 1.2 floor: 20 000 characters, the 24 000 of a
+        # chars/4 budget less the floor's margin.
+        assert 19_000 <= len(kept) <= 24_000
+
+    def test_a_latin_head_ahead_of_a_dense_tail_keeps_nearly_the_whole_budget(self, tmp_path):
+        """The cut is the longest head within the budget, whatever follows it:
+        an English beginning keeps its tokens ahead of a Chinese tail."""
+        body = _PROSE * 150 + "这是一个很长的中文句子" * 50_000
+        path = _write_txt(tmp_path, "mixed.txt", body)
+
+        resolved = resolve_attachments([str(path)])
+
+        kept = _kept_text(resolved.block)
+        assert body.startswith(kept)
+        assert 0.9 * ATTACHMENT_TOKEN_BUDGET <= _counter_tokens(kept) <= ATTACHMENT_TOKEN_BUDGET
+
+    def test_the_budget_does_not_depend_on_the_loaded_model(self, tmp_path, monkeypatch):
+        """A fixed cap: the shortened text stays in the conversation, so the
+        same file gives the same text whatever model is loaded -- a small
+        window on a tokenizer that splits digits, or a large one that groups
+        them."""
+        from src.core import config
+        from src.engines import memory_budget
+        from src.engines.base_engine import BaseEngine
+
+        path = _write_txt(tmp_path, "big.txt", _DIGIT_LINES)
+        blocks = []
+        for window, digits in ((4_096, 1.0), (131_072, 0.34)):
+            engine = type(
+                "_Engine",
+                (BaseEngine,),
+                {
+                    "effective_context_tokens": classmethod(lambda cls, w=window: w),
+                    "memory_bound_tokens": classmethod(lambda cls, w=window: w),
+                },
+            )
+            monkeypatch.setattr(config, "LLM_Engine", engine)
+            monkeypatch.setattr(memory_budget, "budget_digit_tokens", lambda e, d=digits: d)
+            blocks.append(resolve_attachments([str(path)]).block)
+
+        assert blocks[0] == blocks[1]
+        assert _counter_tokens(_kept_text(blocks[0])) <= ATTACHMENT_TOKEN_BUDGET
+
 
 # ---------------------------------------------------------------------------
 # The notice the UI shows.
@@ -335,7 +429,7 @@ class TestNotice:
     def test_failures_and_truncation_are_named_in_the_notice(self, tmp_path):
         bad = tmp_path / "archive.zip"
         bad.write_bytes(b"PK\x03\x04")
-        huge = _write_txt(tmp_path, "huge.txt", "A" * (ATTACHMENT_CHAR_BUDGET + 1_000))
+        huge = _write_txt(tmp_path, "huge.txt", "A" * 30_000)
 
         resolved = resolve_attachments([str(bad), str(huge)])
         notice = build_attachment_notice(resolved)

@@ -250,9 +250,19 @@ Revenue grew steadily during the first quarter.
 What does it say?
 ```
 
-The total is capped at 24 000 characters per question (`ATTACHMENT_CHAR_BUDGET` in
-`src/utils/attachment_utils.py`, roughly 6 000 tokens). A block that overflows the remaining budget
-is cut and ends with `[truncated: file too large to include fully]`.
+The total is capped at 6 000 tokens per question (`ATTACHMENT_TOKEN_BUDGET` in
+`src/utils/attachment_utils.py`), counted as the compaction counter counts: `chars / 4` × the
+text's own script weight (an ASCII digit one token, a Chinese, Japanese or Korean character one
+token), never under 1.2. That is about 20 000 characters of Latin prose and about 14 000 of short
+lines dense in numbers. The counter is an estimate, not the model's tokenizer: on digit-dense
+French lines it reads about 30 % under what a digit-splitting tokenizer such as Qwen's spends, on
+English prose about 50 % over. A file that overflows the remaining budget keeps its longest head
+within it and ends with `[truncated: file too large to include fully]`. The cap is fixed, whatever
+the loaded model's window: the shortened text stays in the conversation the model reads back on
+later turns, so the same file gives the same text with any model. On a small window the shortened
+message can still not fit; the turn is then refused with the "this message alone" wording (see
+[When the prompt no longer fits](#when-the-prompt-no-longer-fits-the-context-window)), never
+"this conversation".
 
 A file that cannot be read never fails the turn: its block says so in the model's view, and the
 answer opens with an italic notice naming the file and why - unsupported type, missing file, no
@@ -407,6 +417,23 @@ turn names memory instead:
 needs about N tokens; memory allows W). Start a new conversation, send less at once, or switch to a
 smaller model.`
 
+Either way, when the request would still not fit WITHOUT its history, the new message is what is
+too long, and a new conversation would not help: the turn is the "this message alone" one
+(`message_too_long`, or `message_too_long_memory` when the limit is the memory bound, wording
+below). The engine only counts the whole request, so the chat client attaches to its overflow
+error the share `s` of that request that is not the history -- the system prompt, the tool schemas,
+the last user message and the current turn's tool calls and results after it, over the whole
+request (`token_accounting.alone_share`). Both sides are weighed by one estimator, the script
+weight of each text with the output budget's settings and no measured ratio, so its error on a
+given kind of text cancels in the share. The runner scales the engine's exact count by it:
+`needed = ceil(P × s) + 512`, `P` the engine's prompt count (the prompt alone when mlx_vlm.server
+breaks it out), 512 the output budget's floor. The estimate can be off in absolute terms (digits,
+short words), but by about the same factor on every part of one request, so the share stays
+right. When `needed` exceeds the limit, the turn quotes `needed`; otherwise it is the conversation
+kind with the engine's figures. The `Agent stream hit a context-window overflow` warning in
+`backend.log` carries `alone_share`, and the `Model call: ... failed` line before it the request's
+two estimates (`est_prompt_tokens`, chars/4, and `est_budget_tokens`, the output budget's).
+
 When the wire error matched but its numbers didn't parse, the turn drops the figures but keeps the
 same honest wording. There is no silent truncation or shifting of the conversation to make it fit --
 the user always gets a turn that says why and what to do next.
@@ -414,8 +441,9 @@ the user always gets a turn that says why and what to do next.
 Two refusals come before the engine is asked anything, from the compaction middleware, against
 the allocated window -- the limit the engine refuses on. They count the request as the
 [output budget](#output-budget) does (no weight below 1.0, Chinese, Japanese and Korean characters
-0.65 token each), not with the compaction's counter, which counts higher on purpose to compact a
-little early: a refusal counted that way would turn away requests the engine serves.
+0.65 token each, a digit as the loaded model's tokenizer spends it), not with the compaction's
+counter, which counts higher on purpose to compact a little early: a refusal counted that way
+would turn away requests the engine serves.
 
 - **A message too long on its own.** When the new message, with the request's overhead (system
   prompt, tool schemas, knowledge-base block) and the output budget's 512-token floor, exceeds the

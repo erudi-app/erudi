@@ -116,13 +116,14 @@ from src.agents.output_budget import (
     estimate_prompt,
     output_budget_override,
 )
-from src.agents.overflow import parse_context_overflow
+from src.agents.overflow import ALONE_SHARE_ATTR, parse_context_overflow
 from src.agents.reasoning_stream import REASONING_KWARG, extract_reasoning_delta
 from src.agents.token_accounting import (
     REQUEST_EST_KEY,
     REQUEST_FIRST_HOP_KEY,
     REQUEST_HAS_IMAGES_KEY,
     GROUPED_DIGIT_TOKENS,
+    alone_share,
     kb_stamp,
     message_text,
     messages_have_images,
@@ -659,6 +660,34 @@ def erudi_chat_openai_class():
                     stamp.update(kb_stamp(self.kb_additions, self.digit_tokens))
             return stamp
 
+        def _budget_estimate(self, messages, tools) -> Optional[int]:
+            """The request at the output budget's weights (the loaded
+            tokenizer's digit weight included), or ``None`` when it cannot be
+            estimated: what the ``failed`` line carries next to chars/4."""
+            try:
+                return estimate_prompt(messages, tools=tools, digit_tokens=self.digit_tokens).total
+            except Exception:
+                # A log field: an unreadable shape costs the field, never the call.
+                logger.debug("Budget estimate unavailable for the failed line", exc_info=True)
+                return None
+
+        def _mark_overflow(self, exc: Exception, messages, tools) -> None:
+            """On the engine's context overflow, attach to ``exc`` the share
+            of the request that is not its history (``alone_share``), so the
+            runner can tell a message too long on its own from a conversation
+            that outgrew the window. Any other error is left alone."""
+            if parse_context_overflow(exc) is None:
+                return
+            try:
+                share = alone_share(messages, tools=tools, digit_tokens=self.digit_tokens)
+                if share is not None:
+                    setattr(exc, ALONE_SHARE_ATTR, share)
+            except Exception:
+                # The share only picks the wording of the overflow turn: without
+                # it the runner names the conversation, as before. The overflow
+                # itself is re-raised untouched.
+                logger.debug("Overflow share unavailable", exc_info=True)
+
         def _stamp_usage_chunk(self, chunk, stamp: Optional[dict]) -> bool:
             """Stamp ``chunk`` if it is the one carrying the server's usage;
             True when it did. ONE chunk only: LangChain's ``merge_dicts`` sums
@@ -781,17 +810,25 @@ def erudi_chat_openai_class():
                         yield chunk
                 ended_normally = True
                 self._notify_completed(started_at)
+            except Exception as exc:
+                # Both attempts end here: the first one's overflow that was not
+                # retried, and the retry's own.
+                self._mark_overflow(exc, messages, tools)
+                raise
             finally:
                 if self.call_log_label and not usage_seen:
                     # The call ended without the server's usage (it failed, was
                     # cut or abandoned): the one line it still writes carries
-                    # the request's estimate, the only size known. Once per
-                    # call, after the preflight retry, which writes the usage
-                    # line when it succeeds.
+                    # the request's estimates, the only sizes known -- chars/4
+                    # and the output budget's (the loaded tokenizer's digit
+                    # weight). Once per call, after the preflight retry, which
+                    # writes the usage line when it succeeds.
                     est = (stamp or {}).get(REQUEST_EST_KEY)
+                    budget_est = self._budget_estimate(messages, tools)
                     logger.info(
                         f"Model call: {self.call_log_label} hop={self._calls} failed"
                         + (f" est_prompt_tokens={est}" if est is not None else "")
+                        + (f" est_budget_tokens={budget_est}" if budget_est is not None else "")
                     )
                 if not ended_normally:
                     self._notify_abandoned()
