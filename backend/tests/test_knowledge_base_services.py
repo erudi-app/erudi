@@ -11,6 +11,7 @@ Two harnesses on the same embedded cluster:
 
 import logging
 import threading
+import time
 
 import pytest
 import psycopg
@@ -1054,17 +1055,19 @@ class TestFirstIngestionTimings:
             db=session, kb_job_id=job.id, file_paths=[str(first), str(second)]
         )
 
-        assert order == ["start", "read", "read"]  # once per job, before the first read
+        assert order == ["read", "start", "read"]  # once per job, after the first read
         assert overlapped[:2] == [True, True]
         session.expire_all()
         assert service.repo.get_kb_job_by_id(session, job.id).status == "completed"
 
-    def test_a_job_with_nothing_to_embed_starts_no_child(
+    def test_a_job_without_text_to_index_starts_no_child(
         self, kb_store, real_db_session, tmp_path, monkeypatch, caplog
     ):
-        """Images wait for a later tier and duplicates are already indexed:
-        neither needs the child, so it is not started for them."""
+        """Duplicates are already indexed, images and scans wait for a later
+        tier, empty and invalid files hold nothing: none needs the child, so
+        it is not started for them (it would be held 5 minutes for nothing)."""
         from src.domains.knowledge_base import services
+        from tests.test_ingestion_reader import _write_renamed_text
 
         session, created = real_db_session
         service, kb, job = _make_kb_and_job(session, created)
@@ -1078,54 +1081,182 @@ class TestFirstIngestionTimings:
         )
         photo = tmp_path / "photo.png"
         photo.write_bytes(b"\x89PNG fake")
+        blank = tmp_path / "vide.txt"
+        blank.write_text("  \n\n ", encoding="utf-8")
+        broken = tmp_path / "broken.docx"
+        _write_renamed_text(broken)
         second = service.repo.create_kb_job(
             db=session, base_model_id=None, new_model_id=None, kb_id=kb.id
         )
         session.commit()
         with caplog.at_level(logging.INFO, logger="erudi"):
             service.process_and_index_documents(
-                db=session, kb_job_id=second.id, file_paths=[str(doc), str(photo)]
+                db=session,
+                kb_job_id=second.id,
+                file_paths=[str(doc), str(photo), str(blank), str(broken)],
             )
 
         assert starts == []
         (line,) = self._timing_lines(caplog, second.id)
         assert " spawn_ms=none " in line
 
-    def test_a_failed_start_is_reported_once_by_the_file_that_needed_it(
-        self, kb_store, real_db_session, tmp_path, monkeypatch, caplog
-    ):
-        """The child cannot come up: the file is `failed` with ONE error
-        record carrying the child's answer, the background start adds none,
-        and the timing line names the start's failure."""
+
+class TestFirstIngestionStartFailures:
+    """A child that cannot start beside the job: reported once, by whoever
+    handles it, with the number of spawns the policy says."""
+
+    @pytest.fixture
+    def child(self, tmp_path, monkeypatch):
         from src.ingestion import embedder_child, vector_store
         from src.ingestion.embeddings import ChildE5Embeddings
-        from tests.test_embedder_child import FakeHttp, FakeResponse, make_adapter
+        from tests.test_embedder_child import FakeHttp, make_adapter
 
-        session, created = real_db_session
-        service, kb, job = _make_kb_and_job(session, created)
-        doc = tmp_path / "panne.md"
-        doc.write_text("# Panne\n\nLe service est indisponible.", encoding="utf-8")
         adapter = make_adapter(tmp_path)
+        adapter.attempts = 0
+        adapter.fail_spawns = 0
+        fake_spawn = adapter.spawn
+
+        def spawn(**kwargs):
+            adapter.attempts += 1
+            if adapter.fail_spawns:
+                adapter.fail_spawns -= 1
+                raise OSError("fork refused")
+            return fake_spawn(**kwargs)
+
+        adapter.spawn = spawn
         http = FakeHttp()
-        http.post_handler = lambda url, json: FakeResponse(status_code=500, text="no model")
+        http.dimensions = 384
         monkeypatch.setattr(embedder_child, "_adapter_override", adapter)
         monkeypatch.setattr(embedder_child, "requests", http)
         monkeypatch.setattr(vector_store, "get_embeddings", ChildE5Embeddings)
         embedder_child._reset_for_tests()
-        try:
-            with caplog.at_level(logging.INFO, logger="erudi"):
-                with pytest.raises(NothingIndexedException):
-                    service.process_and_index_documents(
-                        db=session, kb_job_id=job.id, file_paths=[str(doc)]
-                    )
-        finally:
-            embedder_child._reset_for_tests()
+        yield adapter, http
+        embedder_child._reset_for_tests()
+
+    @staticmethod
+    def _run(service, session, job, doc, caplog):
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            try:
+                service.process_and_index_documents(
+                    db=session, kb_job_id=job.id, file_paths=[str(doc)]
+                )
+            except NothingIndexedException:
+                pass
+        line = next(
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith(f"KB job {job.id} timings:")
+        )
+        problems = [r for r in caplog.records if r.levelno >= logging.WARNING]
+        return line, problems
+
+    @staticmethod
+    def _embed_after(monkeypatch, condition):
+        """Let the job's first embedding call through once ``condition()``."""
+        from src.ingestion import embedder_child
+
+        real = embedder_child.embed_texts
+
+        def embed_texts(texts):
+            deadline = time.monotonic() + 5.0
+            while not condition() and time.monotonic() < deadline:
+                time.sleep(0.01)
+            return real(texts)
+
+        monkeypatch.setattr(embedder_child, "embed_texts", embed_texts)
+
+    def test_a_start_the_job_waited_for_fails_once_with_one_spawn(
+        self, kb_store, real_db_session, tmp_path, monkeypatch, caplog, child
+    ):
+        """The job's embedding arrived while the start was still probing: it
+        gets the start's failure, the file logs the ONE error, no WARNING,
+        and the child was spawned once."""
+        from src.ingestion import embedder_child
+        from tests.test_embedder_child import FakeResponse
+
+        adapter, http = child
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        doc = tmp_path / "panne.md"
+        doc.write_text("# Panne\n\nLe service est indisponible.", encoding="utf-8")
+        http.post_handler = lambda url, json: FakeResponse(status_code=500, text="no model")
+        release = threading.Event()
+        fake_get = http.get
+
+        def held_get(url, timeout=None, headers=None):
+            release.wait(5.0)
+            return fake_get(url, timeout=timeout, headers=headers)
+
+        http.get = held_get
+        real_ensure = embedder_child.ensure_embedder_running
+        job_waiting = threading.Event()
+
+        def ensure():
+            if threading.current_thread().name != "kb-embedder-start":
+                job_waiting.set()
+            return real_ensure()
+
+        monkeypatch.setattr(embedder_child, "ensure_embedder_running", ensure)
+
+        def releaser():
+            job_waiting.wait(5.0)
+            time.sleep(0.3)  # the job is queued behind the spawn in flight
+            release.set()
+
+        threading.Thread(target=releaser, daemon=True).start()
+        line, problems = self._run(service, session, job, doc, caplog)
 
         session.expire_all()
         assert session.query(KnowledgeDocument).filter_by(kb_id=kb.id).one().status == "failed"
-        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
-        assert len(errors) == 1
-        assert "panne.md" in errors[0].getMessage()
-        assert "HTTP 500" in errors[0].getMessage()
-        (line,) = self._timing_lines(caplog, job.id)
+        assert adapter.attempts == 1
+        assert [r.levelno for r in problems] == [logging.ERROR]
+        assert "panne.md" in problems[0].getMessage()
+        assert "HTTP 500" in problems[0].getMessage()
         assert "spawn_error=EngineException" in line
+
+    def test_a_start_that_failed_at_once_is_one_warning_when_the_retry_works(
+        self, kb_store, real_db_session, tmp_path, monkeypatch, caplog, child
+    ):
+        """The start died before the job needed the child: the job spawns
+        again, that works, the file is indexed, and the first failure is ONE
+        WARNING (the app recovered on its own), never silent."""
+        from src.ingestion import embedder_child
+
+        adapter, http = child
+        adapter.fail_spawns = 1
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        doc = tmp_path / "relance.md"
+        doc.write_text("# Relance\n\nLe second essai fonctionne.", encoding="utf-8")
+        self._embed_after(monkeypatch, lambda: embedder_child._spawn_failures >= 1)
+
+        line, problems = self._run(service, session, job, doc, caplog)
+
+        session.expire_all()
+        assert session.query(KnowledgeDocument).filter_by(kb_id=kb.id).one().status == "active"
+        assert adapter.attempts == 2
+        assert [r.levelno for r in problems] == [logging.WARNING]
+        assert "fork refused" in problems[0].getMessage()
+        assert "spawn_error=OSError" in line
+
+    def test_a_start_that_failed_at_once_then_fails_again_is_one_error(
+        self, kb_store, real_db_session, tmp_path, monkeypatch, caplog, child
+    ):
+        from src.ingestion import embedder_child
+
+        adapter, http = child
+        adapter.fail_spawns = 2
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        doc = tmp_path / "panne2.md"
+        doc.write_text("# Panne\n\nToujours indisponible.", encoding="utf-8")
+        self._embed_after(monkeypatch, lambda: embedder_child._spawn_failures >= 1)
+
+        line, problems = self._run(service, session, job, doc, caplog)
+
+        session.expire_all()
+        assert session.query(KnowledgeDocument).filter_by(kb_id=kb.id).one().status == "failed"
+        assert adapter.attempts == 2
+        assert [r.levelno for r in problems] == [logging.ERROR]
+        assert "fork refused" in problems[0].getMessage()
+        assert "spawn_error=OSError" in line

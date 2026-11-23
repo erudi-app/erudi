@@ -51,11 +51,15 @@ Lifecycle policy (product decisions on #594):
   `PREWARM_BACKOFF_S` after a failure, and an absent artifact is one INFO
   per state (the gate/banner owns the state), anything else one WARNING.
 - **Start beside the job.** An ingestion job calls `start_in_background`
-  at its first file to embed: the spawn runs while the job reads and chunks
-  that file (and loads the e5 tokenizer), instead of after them. A caller
-  that waited on ``_spawn_lock`` while a spawn failed raises that spawn's
-  error rather than spawning again, so a failed background start costs the
-  job no second spawn and is reported once, by the job's own call.
+  once its first file has been read and holds text to index: the spawn runs
+  while the job chunks that file (and loads the e5 tokenizer), instead of
+  after. A caller that waited on ``_spawn_lock`` while a spawn failed gets
+  that spawn's failure (a fresh exception of the same kind, chained to it
+  and flagged ``joined_spawn``) instead of spawning again; the background
+  starts (pre-start, the job's start) never log a failure they only
+  joined. A spawn that failed BEFORE a caller arrived is not shared: that
+  caller spawns again (the job then logs the first failure as a WARNING
+  when its own start succeeds).
 - **Shutdown is terminal.** `shutdown_embedder` sets ``_closed``; any later
   ``ensure_embedder_running`` refuses — a background thread that outlives
   the lifespan must never respawn a child into a stopping backend.
@@ -82,7 +86,11 @@ from typing import Any, Dict, Iterator, List, Optional, Tuple
 
 import requests
 
-from src.core.exceptions import EmbeddingModelMissingException, EngineException
+from src.core.exceptions import (
+    AppBaseException,
+    EmbeddingModelMissingException,
+    EngineException,
+)
 from src.core.logging import logger
 from src.ingestion import embedding_model
 
@@ -497,16 +505,47 @@ def ensure_embedder_running() -> Dict[str, Any]:
                 return handle
             if _spawn_failures != failures_seen and _last_spawn_error is not None:
                 # A spawn ran and failed while this caller waited (the job's
-                # background start, another request): its error is this
+                # background start, another request): its failure is this
                 # caller's answer too. The next caller tries again.
-                raise _last_spawn_error
+                failure = _last_spawn_error
+                raise _joined_failure(failure) from failure
         try:
-            return _spawn_and_publish(adapter)
+            handle = _spawn_and_publish(adapter)
         except BaseException as exc:
             with _state_lock:
                 _spawn_failures += 1
                 _last_spawn_error = exc
             raise
+        with _state_lock:
+            # Nobody can join a failure once a spawn succeeded: drop it (and
+            # the frames its traceback holds).
+            _last_spawn_error = None
+        return handle
+
+
+def _joined_failure(failure: BaseException) -> BaseException:
+    """What a caller that waited on a failed spawn raises: a FRESH exception
+    of the same kind (each waiter's traceback is its own), chained to the
+    spawn's failure by the ``raise ... from`` at the call site, and flagged
+    ``joined_spawn`` so the caller knows the spawn's owner reports it."""
+    if isinstance(failure, EmbeddingModelMissingException):
+        fresh: AppBaseException = EmbeddingModelMissingException(trace=failure.trace)
+    elif isinstance(failure, EngineException):
+        fresh = EngineException(
+            message=failure.message,
+            trace=failure.trace,
+            engine_code=getattr(failure, "engine_code", None),
+        )
+    else:
+        fresh = EngineException(message=f"{type(failure).__name__}: {failure}")
+    fresh.joined_spawn = True
+    return fresh
+
+
+def joined_spawn(exc: BaseException) -> bool:
+    """Whether ``exc`` is a failure this caller only joined (another caller
+    owned the spawn and reports it)."""
+    return bool(getattr(exc, "joined_spawn", False))
 
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
@@ -658,9 +697,11 @@ class BackgroundStart:
         seconds: The time ``ensure_embedder_running`` took (a spawn and its
             probe, or about nothing when the child was already running);
             ``None`` until it returns.
-        error: What it raised, ``None`` on success. Not logged here: the
-            caller's own first embedding call waits for this same attempt
-            and raises this same error where the failure is handled.
+        error: What it raised, ``None`` on success. Not logged here: an
+            embedding call that waited for this attempt gets its failure
+            and reports it where it is handled; a later call spawns again,
+            and the caller (the job) logs this error as a WARNING when that
+            second start succeeds.
     """
 
     def __init__(self) -> None:
@@ -677,10 +718,8 @@ class BackgroundStart:
         try:
             ensure_embedder_running()
         except BaseException as exc:
-            # Kept for the caller's timing line, never logged here: the
-            # caller's first embedding call shares this spawn's outcome
-            # (``ensure_embedder_running``) and reports it as its own
-            # failure, once. A caller that ends up embedding nothing did
+            # Kept for the caller, never logged here: the caller reports it
+            # (see the class docstring) or, when it embedded nothing, did
             # not need the child.
             self.error = exc
         finally:
@@ -691,9 +730,9 @@ class BackgroundStart:
 def start_in_background() -> Optional[BackgroundStart]:
     """Start the child on a background thread, beside the caller's own work.
 
-    An ingestion job calls it when it reaches its first file to embed, so
-    the spawn runs while the job reads and chunks that file (and loads the
-    e5 tokenizer) instead of after. The job holds its ingestion lease, so
+    An ingestion job calls it once its first file has been read and holds
+    text to index, so the spawn runs while the job chunks that file (and
+    loads the e5 tokenizer) instead of after. The job holds its ingestion lease, so
     the idle reaper leaves the child alone. ``None`` when the manager is
     disarmed (tests); otherwise the start's record. Its failure is not
     reported here (see `BackgroundStart`).
@@ -720,6 +759,10 @@ def _prewarm() -> None:
             logger.info("Embedding child pre-start skipped: the embedding model is not downloaded")
     except Exception as exc:
         _prewarm_failed_at = time.monotonic()
+        if joined_spawn(exc):
+            # Another caller (an ingestion job) owned this spawn and reports
+            # its failure: a second record here would count it twice.
+            return
         logger.warning(f"Embedding child pre-start failed (the first KB use will retry): {exc}")
 
 

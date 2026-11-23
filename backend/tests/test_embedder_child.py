@@ -468,9 +468,84 @@ class TestBackgroundStart:
             thread.join(5.0)
             assert start.wait(5.0)
         assert isinstance(start.error, EngineException)
-        assert errors == [start.error]
+        (joined,) = errors
+        # A fresh exception per waiter (its own traceback), chained to the
+        # spawn's failure and flagged as joined.
+        assert joined is not start.error
+        assert joined.__cause__ is start.error
+        assert joined.message == start.error.message
+        assert embedder_child.joined_spawn(joined)
+        assert not embedder_child.joined_spawn(start.error)
         assert len(adapter.spawns) == 1
         assert not [r for r in caplog.records if r.levelno >= 30]
+
+    def test_two_waiters_get_two_fresh_exceptions(self, adapter, http):
+        release = _hold_the_probe(http)
+        http.post_handler = lambda url, json: FakeResponse(status_code=500, text="boom")
+        start = embedder_child.start_in_background()
+        assert _wait_until(lambda: len(adapter.spawns) == 1)
+        errors = []
+
+        def caller():
+            try:
+                embedder_child.ensure_embedder_running()
+            except EngineException as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=caller) for _ in range(2)]
+        for thread in threads:
+            thread.start()
+        time.sleep(0.1)
+        release.set()
+        for thread in threads:
+            thread.join(5.0)
+        assert start.wait(5.0)
+        assert len(errors) == 2 and errors[0] is not errors[1]
+        assert all(e.__cause__ is start.error for e in errors)
+        assert len(adapter.spawns) == 1
+
+    def test_a_successful_spawn_drops_the_last_failure(self, adapter, http):
+        http.post_handler = lambda url, json: FakeResponse(status_code=500, text="boom")
+        with pytest.raises(EngineException):
+            embedder_child.ensure_embedder_running()
+        assert embedder_child._last_spawn_error is not None
+        http.post_handler = None
+        embedder_child.ensure_embedder_running()
+        assert embedder_child._last_spawn_error is None
+
+    @pytest.mark.parametrize(
+        "failure, kind",
+        [
+            (EmbeddingModelMissingException(), EmbeddingModelMissingException),
+            (EngineException(message="probe failed", engine_code="X"), EngineException),
+            (OSError("fork refused"), EngineException),
+        ],
+    )
+    def test_a_joined_failure_keeps_its_kind_and_message(self, failure, kind):
+        joined = embedder_child._joined_failure(failure)
+        assert type(joined) is kind
+        assert embedder_child.joined_spawn(joined)
+        assert str(failure) in str(joined) or joined.message == getattr(failure, "message", None)
+        if isinstance(failure, EngineException):
+            assert joined.engine_code == "X"
+
+    def test_a_pre_start_that_joined_a_failed_spawn_stays_silent(self, adapter, http, caplog):
+        """The job's start owned the spawn (the job reports its failure): the
+        conversation's pre-start, queued behind it, adds no record."""
+        release = _hold_the_probe(http)
+        http.post_handler = lambda url, json: FakeResponse(status_code=500, text="boom")
+        start = embedder_child.start_in_background()
+        assert _wait_until(lambda: len(adapter.spawns) == 1)
+        prewarm = threading.Thread(target=embedder_child._prewarm)
+        with caplog.at_level("DEBUG"):
+            prewarm.start()
+            time.sleep(0.1)
+            release.set()
+            prewarm.join(5.0)
+            assert start.wait(5.0)
+        assert start.error is not None
+        assert not [r for r in caplog.records if r.levelno >= 30]
+        assert len(adapter.spawns) == 1
 
     def test_a_caller_after_a_failed_start_tries_again(self, adapter, http):
         http.post_handler = lambda url, json: FakeResponse(status_code=500, text="boom")
