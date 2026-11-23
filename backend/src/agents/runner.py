@@ -276,13 +276,20 @@ SUMMARY_TRIM_ALLOCATED_MARGIN_TOKENS = 512
 SUMMARY_TRIM_HETEROGENEITY_FACTOR = 2
 
 # chars per token of ``count_tokens_approximately`` (its default), used to
-# truncate an oversized message to a token budget (divided by the measured
-# ratio, so the cut is in real tokens).
+# cut an oversized message to a token budget (divided by the message's own
+# weight, so the cut is in real tokens).
 _APPROX_CHARS_PER_TOKEN = 4
-# Room left for the role and per-message overhead when truncating a message.
+# Room left for the role and per-message overhead when cutting a message.
 _TRUNCATION_OVERHEAD_TOKENS = 16
-# LangChain's fallback when ``trim_messages`` itself fails.
-_TRIM_FALLBACK_MESSAGE_COUNT = 15
+# The fair-share bound of the summarizer's input (``_bound_for_summary``).
+# Below the floor cap the pool holds too many messages for the budget and the
+# oldest are dropped instead of cutting every message to a stump. A cut
+# message keeps its head and its tail around the ASCII omission marker --
+# attachments come BEFORE the user's question (``prepend_attachment_block``),
+# so a head-only cut would erase the question.
+_BOUND_FLOOR_TOKENS = 64
+_BOUND_HEAD_SHARE = 2 / 3
+_OMITTED_MARKER = "[... {} characters omitted ...]"
 
 # The summary message LangChain inserts (``_build_new_messages``, pinned in
 # tests/test_compaction_keep.py) and the marker it carries.
@@ -308,6 +315,21 @@ SUMMARY_COPY_SIMILARITY = 0.9
 # user asked for ("recap everything") is the last answer AND a summary. Below
 # this share of what it read, a copy of the last message is rejected.
 SUMMARY_COPY_MAX_RATIO = 0.2
+# A summary that merely repeats the PREVIOUS summary is stale -- the model
+# learned nothing from the new turns it read. Stale when BOTH hold: the new
+# turns read weigh enough to deserve a new summary (at least
+# ``SUMMARY_MIN_TOKENS`` and ``SUMMARY_STALE_MIN_NEW_RATIO`` of the previous
+# summary -- below that the copy IS the right summary: the pool after
+# ``[S1, "OK", "thanks"]`` adds nothing), and the new summary ADDS almost
+# nothing to the previous one: fewer normalized characters outside difflib's
+# matching blocks against it (``_novel_chars``) than
+# ``max(SUMMARY_STALE_NOVEL_FLOOR_CHARS, SUMMARY_STALE_NOVEL_SHARE * previous)``.
+# A legitimate incremental summary -- the previous one carried forward plus a
+# sentence about the new turns -- is over 0.9 similar to S1 whenever S1 is
+# long, so similarity cannot be the criterion; what the summary ADDS can.
+SUMMARY_STALE_MIN_NEW_RATIO = 0.5
+SUMMARY_STALE_NOVEL_FLOOR_CHARS = 40
+SUMMARY_STALE_NOVEL_SHARE = 0.05
 # After an automatic compaction whose summary failed or was rejected, the next
 # ``COMPACTION_PAUSE_MESSAGES`` user messages run without one: a failing
 # summary is not retried on every turn (one model call each, reading the whole
@@ -532,8 +554,8 @@ def real_token_count(
     SENT: each message costs ``ceil(weight * chars/4 of that copy)``.
 
     ``weights_by_id`` is frozen once per call from the full state
-    (``frozen_weights``), so the count works on any list LangChain hands it --
-    suffixes, the reversed pool of ``trim_messages``, partial copies (same id,
+    (``frozen_weights``), so the count works on any list it is handed --
+    suffixes, the summarizer's bounded pool, partial copies (same id,
     shorter content: they cost their share). A ToolMessage whose id is in
     ``past_ids`` is sent as its marker, and a marker costs the weight of its
     OWN text, never the frozen weight of the result it replaces. A message
@@ -959,22 +981,54 @@ def _normalized(text: str) -> str:
     return " ".join(text.casefold().split()).strip(" .,;:!?¡¿。，！？…\"'«»")
 
 
+def _reads_as_copy(wanted: str, other: str) -> bool:
+    """Whether two normalized texts read as the same one: equal, or within
+    ``SUMMARY_COPY_SIMILARITY`` by difflib (``quick_ratio`` first: it upper
+    bounds ``ratio`` and is cheap)."""
+    import difflib
+
+    return wanted == other or (
+        difflib.SequenceMatcher(None, wanted, other).quick_ratio() >= SUMMARY_COPY_SIMILARITY
+        and difflib.SequenceMatcher(None, wanted, other).ratio() >= SUMMARY_COPY_SIMILARITY
+    )
+
+
+def _novel_chars(wanted: str, previous: str) -> int:
+    """Characters of ``wanted`` outside its difflib matching blocks against
+    ``previous`` (both already normalized): what the new summary says that
+    the previous one did not."""
+    import difflib
+
+    matched = sum(
+        block.size
+        for block in difflib.SequenceMatcher(None, previous, wanted).get_matching_blocks()
+    )
+    return max(0, len(wanted) - matched)
+
+
 def summary_rejection(summary: str, read: list) -> Optional[str]:
     """Why ``summary`` cannot stand for the messages the summarizer ``read``
-    (the previous summary and the trimmed pool), or ``None``.
+    (the previous summary and the bounded pool), or ``None``.
 
     * ``"too_short"``: fewer tokens than ``max(SUMMARY_MIN_TOKENS,
       min(SUMMARY_MIN_RATIO * read, SUMMARY_SHORT_CEILING_TOKENS))``, both
       counted with the compaction counter (``content_tokens``), so a Chinese
       summary is not held to a Latin length;
+    * ``"stale"``: a previous summary was read, the new summary ADDS almost
+      nothing to it (``_novel_chars`` below the stale novel floor), and the
+      rest of what was read weighs at least ``SUMMARY_MIN_TOKENS`` AND
+      ``SUMMARY_STALE_MIN_NEW_RATIO`` of the previous summary: the model
+      copied its old summary over real new content. With little new content
+      the copy is accepted -- it IS the right summary -- and an incremental
+      summary (S1 plus a sentence about the new turns) always is;
     * ``"copy"``: with more than one message read, and the summary under
-      ``SUMMARY_COPY_MAX_RATIO`` of what it read, the summary is the last
-      question or the last answer it read, normalized (``_normalized``), or
-      within ``SUMMARY_COPY_SIMILARITY`` of it. A single message has nothing a
-      copy of it drops; a long recap that is also the last answer is kept.
+      ``SUMMARY_COPY_MAX_RATIO`` of what it read, the summary is a question
+      or an answer it read, normalized (``_normalized``), or within
+      ``SUMMARY_COPY_SIMILARITY`` of it -- ANY of them, not only the last
+      ones: #748's summary copied an earlier pasted document. A single
+      message has nothing a copy of it drops; a long recap that is also the
+      last answer is kept.
     """
-    import difflib
-
     bodies = [_message_body(m) for m in read]
     read_tokens = sum(content_tokens(body) for body in bodies)
     floor = max(
@@ -983,17 +1037,34 @@ def summary_rejection(summary: str, read: list) -> Optional[str]:
     )
     if content_tokens(summary.strip()) < floor:
         return "too_short"
+    wanted = _normalized(summary)
+    previous = next(
+        (body for m, body in zip(read, bodies) if _is_previous_summary(m)),
+        None,
+    )
+    if previous is not None:
+        new_tokens = sum(
+            content_tokens(body) for m, body in zip(read, bodies) if not _is_previous_summary(m)
+        )
+        previous_normalized = _normalized(previous)
+        novel_floor = max(
+            SUMMARY_STALE_NOVEL_FLOOR_CHARS,
+            SUMMARY_STALE_NOVEL_SHARE * len(previous_normalized),
+        )
+        if (
+            new_tokens >= SUMMARY_MIN_TOKENS
+            and new_tokens >= SUMMARY_STALE_MIN_NEW_RATIO * content_tokens(previous)
+            and _novel_chars(wanted, previous_normalized) < novel_floor
+        ):
+            return "stale"
     if len(read) > 1 and content_tokens(summary.strip()) < SUMMARY_COPY_MAX_RATIO * read_tokens:
-        wanted = _normalized(summary)
-        last_of = {}
         for message, body in zip(read, bodies):
             kind = getattr(message, "type", None)
-            if kind in ("human", "ai") and not _is_previous_summary(message) and body.strip():
-                last_of[kind] = _normalized(body)
-        for last in last_of.values():
-            if wanted == last or (
-                difflib.SequenceMatcher(None, wanted, last).quick_ratio() >= SUMMARY_COPY_SIMILARITY
-                and difflib.SequenceMatcher(None, wanted, last).ratio() >= SUMMARY_COPY_SIMILARITY
+            if (
+                kind in ("human", "ai")
+                and not _is_previous_summary(message)
+                and body.strip()
+                and _reads_as_copy(wanted, _normalized(body))
             ):
                 return "copy"
     return None
@@ -1104,22 +1175,111 @@ def _compaction_event(payload: Any) -> Optional[dict]:
     return None
 
 
-def _truncate_for_summary(messages: list, budget: int, counter: Any, weight_of: Any) -> list:
-    """Copies of ``messages`` whose content alone exceeds ``budget`` real
-    tokens, cut to fit it (the head is kept): ``(budget / w - 16) * 4``
-    characters, ``w`` the message's own weight (``weight_of``; the role and
-    per-message overhead are weighed too). Halving the input cannot fix a
-    single oversized answer; cutting it can."""
-    out = []
-    for message in messages:
-        if counter([message]) <= budget:
-            out.append(message)
-            continue
-        unscaled = budget / max(weight_of(message), 1e-6)
-        keep_chars = max(0, int((unscaled - _TRUNCATION_OVERHEAD_TOKENS) * _APPROX_CHARS_PER_TOKEN))
-        text = message.text if isinstance(getattr(message, "text", None), str) else ""
-        out.append(message.model_copy(update={"content": text[:keep_chars]}))
-    return out
+def _cut_to_cap(message: Any, cap: int, weight_of: Any) -> Any:
+    """A copy of ``message`` cut to about ``cap`` real tokens:
+    ``(cap / w - 16) * 4`` characters, ``w`` the message's own weight
+    (``weight_of``; the role and per-message overhead are weighed too), kept
+    as the head and the tail (``_BOUND_HEAD_SHARE``) around the ASCII
+    omission marker. The copy of a tool-calling message replaces each call's
+    args by the marker: the args can be the whole cost of a message with no
+    text, which no text cut could shrink. The message itself when the cap
+    covers its whole text and it carries no calls."""
+    text = message.text if isinstance(getattr(message, "text", None), str) else ""
+    update: dict = {}
+    calls = getattr(message, "tool_calls", None)
+    if calls:
+        update["tool_calls"] = [
+            {
+                **call,
+                "args": {
+                    "omitted": _OMITTED_MARKER.format(
+                        len(json.dumps(call.get("args") or {}, ensure_ascii=False, default=str))
+                    )
+                },
+            }
+            for call in calls
+        ]
+    marker_room = len(_OMITTED_MARKER.format(len(text)))
+    unscaled = cap / max(weight_of(message), 1e-6)
+    keep = max(
+        0,
+        int((unscaled - _TRUNCATION_OVERHEAD_TOKENS) * _APPROX_CHARS_PER_TOKEN) - marker_room,
+    )
+    if keep >= len(text):
+        return message.model_copy(update=update) if update else message
+    head = int(keep * _BOUND_HEAD_SHARE)
+    tail = keep - head
+    marker = _OMITTED_MARKER.format(len(text) - keep)
+    update["content"] = (
+        text[:head] + "\n" + marker + ("\n" + text[len(text) - tail :] if tail else "")
+    )
+    return message.model_copy(update=update)
+
+
+def _bound_for_summary(pool: list, budget: int, counter: Any, weight_of: Any) -> list:
+    """``pool`` bounded to ``budget`` real tokens by fair share
+    (water-filling), order preserved. A pool that fits is returned WHOLE.
+    Otherwise, bisection finds the largest per-message cap whose bounded pool
+    -- each message over the cap cut to it (``_cut_to_cap``), the others
+    whole, so a short fact sent before an oversized document still reaches
+    the summarizer (#748) -- fits the budget, verified with ``counter``
+    itself. When even the floor cap (``_BOUND_FLOOR_TOKENS``) does not fit,
+    the pool holds too many messages and the oldest bounded messages are
+    dropped (one WARNING says how many); a single message that still cannot
+    fit is cut to the largest cap that does (down to its marker alone)."""
+    pool = list(pool)
+    if not pool or counter(pool) <= budget:
+        return pool
+    costs = [counter([m]) for m in pool]
+
+    def bounded_at(part: list, part_costs: list, cap: int) -> list:
+        return [
+            m if cost <= cap else _cut_to_cap(m, cap, weight_of)
+            for m, cost in zip(part, part_costs)
+        ]
+
+    def largest_fitting_cap(part: list, part_costs: list, low: int, high: int) -> Optional[int]:
+        """The largest cap in [low, high] whose bounded ``part`` fits the
+        budget, or ``None`` when even ``low`` does not."""
+        if counter(bounded_at(part, part_costs, low)) > budget:
+            return None
+        while low < high:
+            middle = (low + high + 1) // 2
+            if counter(bounded_at(part, part_costs, middle)) <= budget:
+                low = middle
+            else:
+                high = middle - 1
+        return low
+
+    cap = largest_fitting_cap(pool, costs, _BOUND_FLOOR_TOKENS, max(costs))
+    if cap is not None:
+        return bounded_at(pool, costs, cap)
+    # Too many messages for the budget even at the floor cap: drop the
+    # oldest. The counter is additive (pinned by the compaction tests), so
+    # one count per message decides the longest suffix that fits.
+    bounded = bounded_at(pool, costs, _BOUND_FLOOR_TOKENS)
+    total, start = 0, len(bounded)
+    for i in range(len(bounded) - 1, -1, -1):
+        cost = counter([bounded[i]])
+        if total + cost > budget:
+            break
+        total, start = total + cost, i
+    if start < len(bounded):
+        kept = bounded[start:]
+        dropped = start
+    else:
+        # Even the last bounded message alone exceeds the budget: cut it to
+        # the largest cap that fits (down to its marker alone).
+        last_cap = largest_fitting_cap(pool[-1:], costs[-1:], 0, _BOUND_FLOOR_TOKENS)
+        kept = bounded_at(pool[-1:], costs[-1:], last_cap) if last_cap is not None else []
+        dropped = len(pool) - len(kept)
+    if dropped:
+        logger.warning(
+            f"Compaction summarizer input dropped its {dropped} oldest message(s): "
+            f"{len(pool)} messages exceed the {budget}-token budget even at the "
+            f"{_BOUND_FLOOR_TOKENS}-token floor cap"
+        )
+    return kept
 
 
 # HTTP statuses of the summary call that are worth retrying on the NEXT turn.
@@ -1205,7 +1365,7 @@ def _summarization_middleware_class():
     """The per-turn compaction middleware class, built lazily (LangChain is
     not imported at boot, #160) and cached."""
     from langchain.agents.middleware import SummarizationMiddleware
-    from langchain_core.messages.utils import get_buffer_string, trim_messages
+    from langchain_core.messages.utils import get_buffer_string
 
     from src.agents.middleware import CompactionState
 
@@ -1220,8 +1380,8 @@ def _summarization_middleware_class():
         * the request overhead O (system prompt, tool schemas, KB block --
           not in the state) enters the trigger (``_should_summarize``) and the
           keep and futility guard (``compaction_cutoff``), never the counter
-          itself (an O larger than the summarizer's trim budget would empty
-          the trim);
+          itself (an O larger than the summarizer's read budget would empty
+          its input);
         * the cutoff is ``compaction_cutoff`` (a token bound with a known
           window, the message fallback without one);
         * a performed compaction resets the engine's prefix cache, shielded
@@ -1523,18 +1683,19 @@ def _summarization_middleware_class():
             """Summarize, never losing what the previous summary knew.
 
             The previous summary is set aside from the pool, the pool is
-            trimmed to the budget, and the previous summary is prepended
-            back. A transient failure of the summary call is RAISED: the
-            turn fails with the history intact and the next turn retries. A
-            deterministic one, a summary ``summary_rejection`` turns down --
-            or a pool where no user turn fits the budget because one answer
-            alone exceeds it -- takes the size path: one retry with oversized
-            messages truncated (the budget halved after a failed attempt).
-            When that fails too: ``None`` (automatic: the caller keeps the
-            history and pauses) or ``CompactionFailedException`` (manual).
-            One WARNING per failed attempt; an unexpected error is one ERROR
-            with its traceback (``_attempt_failed``; in manual mode those
-            records are DEBUG and the causes ride the raised
+            bounded to the budget by fair share (``_bound_for_summary``:
+            short messages stay whole, only oversized ones are cut to their
+            head and tail around an omission marker), and the previous
+            summary is prepended back. A transient failure of the summary
+            call is RAISED: the turn fails with the history intact and the
+            next turn retries. A deterministic one -- or a summary
+            ``summary_rejection`` turns down -- takes the size path: one
+            retry at half the budget, bounded the same way. When that fails
+            too: ``None`` (automatic: the caller keeps the history and
+            pauses) or ``CompactionFailedException`` (manual). One WARNING
+            per failed attempt; an unexpected error is one ERROR with its
+            traceback (``_attempt_failed``; in manual mode those records are
+            DEBUG and the causes ride the raised
             ``CompactionFailedException``).
             """
             from src.agents.middleware import strip_stale_tool_results
@@ -1547,63 +1708,30 @@ def _summarization_middleware_class():
             previous = next((m for m in messages_to_summarize if _is_previous_summary(m)), None)
             # The pool holds only past turns: their KB/web results are read as
             # the markers the model last saw, so what the summarizer reads is
-            # what its trim counts.
+            # what its bound counts.
             pool = strip_stale_tool_results(
                 [m for m in messages_to_summarize if m is not previous], all_past=True
             )
             budget = self.trim_tokens_to_summarize or SUMMARY_TRIM_DEFAULT_TOKENS
-            retry_budget = budget
-            trimmed = self._trim_for_summary(pool, budget, start_on="human")
-            if pool and not trimmed:
-                self._attempt_failed(
-                    logging.WARNING,
-                    f"Compaction summary skipped its first attempt: no user turn fits "
-                    f"the {budget}-token summarizer budget; retrying with oversized "
-                    f"messages truncated",
-                    cause="first attempt: no user turn fits the budget",
-                )
-            else:
-                summary = await self._summarize(previous, trimmed, attempt="first")
-                if summary is not None:
-                    return self._compacted(messages_to_summarize, summary)
-                retry_budget = max(1, budget // 2)
-            truncated = _truncate_for_summary(
+            bounded = _bound_for_summary(pool, budget, self._partial_token_counter, self._weight_of)
+            summary = await self._summarize(previous, bounded, attempt="first")
+            if summary is not None:
+                return self._compacted(messages_to_summarize, summary)
+            retry_budget = max(1, budget // 2)
+            bounded = _bound_for_summary(
                 pool, retry_budget, self._partial_token_counter, self._weight_of
             )
-            trimmed = self._trim_for_summary(truncated, retry_budget, start_on=None)
-            summary = await self._summarize(previous, trimmed, attempt="retry")
+            summary = await self._summarize(previous, bounded, attempt="retry")
             if summary is None and self.manual:
                 raise CompactionFailedException(trace="; ".join(self._attempt_failures))
             if summary is None:
                 return None
             return self._compacted(messages_to_summarize, summary)
 
-        def _trim_for_summary(self, messages, budget, *, start_on):
-            if not messages:
-                return []
-            try:
-                return trim_messages(
-                    messages,
-                    max_tokens=budget,
-                    token_counter=self.token_counter,
-                    start_on=start_on,
-                    strategy="last",
-                    allow_partial=True,
-                    include_system=True,
-                )
-            except Exception:
-                # LangChain's own fallback when trimming fails; the summary
-                # still runs, on the most recent messages.
-                logger.warning(
-                    "Trimming the summarizer input failed; using the last messages",
-                    exc_info=True,
-                )
-                return messages[-_TRIM_FALLBACK_MESSAGE_COUNT:]
-
-        async def _summarize(self, previous, trimmed, *, attempt):
+        async def _summarize(self, previous, bounded, *, attempt):
             """One summary call; the text, or None after a deterministic
             failure (logged). A transient failure propagates."""
-            messages = ([previous] if previous is not None else []) + list(trimmed)
+            messages = ([previous] if previous is not None else []) + list(bounded)
             # The language line is filled from these very messages; the
             # transcript is substituted last, so a "{...}" in it stays text.
             prompt = (
@@ -1861,14 +1989,6 @@ def _stream_timeout_answer(exc: GenerationTimeoutException) -> dict:
     # a deliberate UPPER BOUND (one token per UTF-8 byte, #573), so quoting it
     # to the user as a token count would overstate the real prompt several-fold.
     return _prefill_timeout_answer(exc.budget_s)
-
-
-# Prepended (and persisted with the assistant message) by the conversation and
-# arena services when the CURRENT turn carries images but the model is not
-# positively vision-capable (#212): ``_StripImagesForTextModel`` drops the image
-# parts, and the user is told explicitly instead of silently. Markdown italics —
-# the frontend renders streamed answers as markdown.
-IMAGES_IGNORED_NOTICE = "*This model doesn't support images — your image was ignored.*\n\n"
 
 
 def _construction_error_message(exc: Exception) -> str:
@@ -3556,8 +3676,8 @@ class AgentRunner:
         and reads up to ``summarize_trim_budget`` tokens of history; without one it
         falls back to the message pair -- it triggers at
         ``SUMMARY_TRIGGER_MESSAGES`` messages and keeps the last
-        ``SUMMARY_KEEP_MESSAGES`` -- with LangChain's 4000-token trim.
-        Every count -- trigger, cutoff, trim, truncation -- goes through ONE
+        ``SUMMARY_KEEP_MESSAGES`` -- with a 4000-token read budget.
+        Every count -- trigger, cutoff, the summarizer's bound -- goes through ONE
         counter in real tokens (``real_token_count``), and ``overhead`` (the
         request's system prompt, tool schemas and KB additions) enters the
         trigger and the keep. ``manual`` builds the ``/compact`` variant

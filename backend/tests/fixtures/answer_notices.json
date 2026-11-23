@@ -1,0 +1,61 @@
+{
+  "_comment": "Answer notices (#764): the English line of each notice, as the backend stores it (src/agents/answer_notices.py notice_text) and as the interface rebuilds it from its en locale (frontend/src/utils/answerNotices.js) to find it in the stored content. Both sides are tested against these lines: one wording.",
+  "cases": [
+    {
+      "kind": "images_ignored",
+      "params": {},
+      "english": "This model doesn't support images — your image was ignored."
+    },
+    {
+      "kind": "attachments_unreadable",
+      "params": { "files": [{ "name": "scan.pdf", "reason": "pending_vision" }] },
+      "english": "Some attachments could not be read: scan.pdf (no extractable text (a scan or an image), and text recognition is not bundled yet)."
+    },
+    {
+      "kind": "attachments_unreadable",
+      "params": {
+        "files": [
+          { "name": "archive.zip", "reason": "unsupported" },
+          { "name": "gone.txt", "reason": "missing" }
+        ]
+      },
+      "english": "Some attachments could not be read: archive.zip (a file type that is not supported) and gone.txt (no longer at that location)."
+    },
+    {
+      "kind": "attachments_unreadable",
+      "params": {
+        "files": [
+          { "name": "blank.txt", "reason": "empty" },
+          { "name": "broken.docx", "reason": "unreadable" },
+          { "name": "odd.pdf", "reason": "failed" }
+        ]
+      },
+      "english": "Some attachments could not be read: blank.txt (no text), broken.docx (damaged, protected by a password, or not the format its extension says), and odd.pdf (the app could not extract its text)."
+    },
+    {
+      "kind": "attachments_unreadable",
+      "params": {
+        "files": [
+          { "name": "photos", "reason": "empty_folder" },
+          { "name": "", "reason": "too_many", "limit": 50 }
+        ]
+      },
+      "english": "Some attachments could not be read: photos (no supported document in this folder) and only the first 50 files were attached."
+    },
+    {
+      "kind": "attachments_unreadable",
+      "params": { "files": [{ "name": "a.zip", "reason": "unsupported" }], "more": 3 },
+      "english": "Some attachments could not be read: a.zip (a file type that is not supported) and 3 more."
+    },
+    {
+      "kind": "attachments_truncated",
+      "params": { "files": ["big.txt"] },
+      "english": "Attached content was shortened to fit this model's context: big.txt."
+    },
+    {
+      "kind": "attachments_truncated",
+      "params": { "files": ["a.txt", "b.txt"], "more": 1 },
+      "english": "Attached content was shortened to fit this model's context: a.txt, b.txt, and 1 more."
+    }
+  ]
+}

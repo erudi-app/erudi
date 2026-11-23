@@ -20,7 +20,6 @@ from src.utils.attachment_utils import (
     ATTACHMENT_TOKEN_BUDGET,
     MAX_ATTACHMENT_FILES,
     TRUNCATION_MARKER,
-    build_attachment_notice,
     resolve_attachments,
 )
 
@@ -442,26 +441,3 @@ class TestBudget:
 
         assert blocks[0] == blocks[1]
         assert _counter_tokens(_kept_text(blocks[0])) <= ATTACHMENT_TOKEN_BUDGET
-
-
-# ---------------------------------------------------------------------------
-# The notice the UI shows.
-# ---------------------------------------------------------------------------
-
-
-class TestNotice:
-    def test_a_clean_resolution_produces_no_notice(self, tmp_path):
-        resolved = resolve_attachments([str(_write_txt(tmp_path))])
-        assert build_attachment_notice(resolved) == ""
-
-    def test_failures_and_truncation_are_named_in_the_notice(self, tmp_path):
-        bad = tmp_path / "archive.zip"
-        bad.write_bytes(b"PK\x03\x04")
-        huge = _write_txt(tmp_path, "huge.txt", "A" * 30_000)
-
-        resolved = resolve_attachments([str(bad), str(huge)])
-        notice = build_attachment_notice(resolved)
-
-        assert "archive.zip" in notice
-        assert "huge.txt" in notice
-        assert notice.endswith("\n\n")

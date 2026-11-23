@@ -15,6 +15,11 @@ const labels = {
     count > 0
       ? `${count} earlier messages were summarized here.`
       : "Earlier messages were summarized here.",
+  // An answer as the caller translates it (its notes and curated line, #764).
+  answer: (content, trace) =>
+    Array.isArray(trace) && trace.some((e) => e.t === "notice")
+      ? content.replace("A note.", "Une note.")
+      : content,
 };
 
 const msg = (sender, content, trace = null) => ({ id: Math.random(), sender, content, trace });
@@ -37,6 +42,15 @@ describe("buildConversationMarkdown", () => {
     expect(md).toBe(
       "# Airships\n\nCreated Nov 3, 2026\n\n## You\n\nHello\n\n## Assistant\n\nHi there!\n"
     );
+  });
+
+  it("writes an answer as the caller translates it, never a question", () => {
+    const notice = [{ t: "notice", kind: "images_ignored", params: {} }];
+    const md = buildConversationMarkdown(
+      { name: "T", messages: [msg("user", "A note."), msg("llm", "*A note.*\n\nHi.", notice)] },
+      labels
+    );
+    expect(md).toContain("## You\n\nA note.\n\n## Assistant\n\n*Une note.*\n\nHi.\n");
   });
 
   it("shows the translated untitled name for a conversation that has no title", () => {

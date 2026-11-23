@@ -229,7 +229,7 @@ def test_the_counter_is_additive_and_monotone_for_the_binary_search():
     )
 
 
-async def test_a_partial_trim_copy_keeps_its_id_and_lowers_the_count():
+async def test_a_bounded_copy_keeps_its_id_and_lowers_the_count():
     mw = _mw(100_000)
     state = [
         HumanMessage(_text(4000), id="big"),
@@ -238,9 +238,12 @@ async def test_a_partial_trim_copy_keeps_its_id_and_lowers_the_count():
     ]
     await mw.abefore_model({"messages": state}, None)
 
-    trimmed = mw._trim_for_summary(state[:2], 500, start_on=None)
+    bounded = runner_module._bound_for_summary(
+        state[:2], 500, mw._partial_token_counter, mw._weight_of
+    )
 
-    assert mw.token_counter(trimmed) <= 500 < mw.token_counter(state[:2])
+    assert [m.id for m in bounded] == ["big", "a1"]
+    assert mw.token_counter(bounded) <= 500 < mw.token_counter(state[:2])
 
 
 def test_the_sync_path_is_refused():
@@ -329,8 +332,8 @@ async def test_an_overhead_larger_than_the_trim_budget_never_empties_the_summary
 
     after = _after(await mw.abefore_model({"messages": state}, None))
 
-    # One summary call, on a non-empty trim (an empty one would have taken
-    # the truncation retry), and the summary written into the state.
+    # One summary call, on a non-empty bounded pool, and the summary written
+    # into the state.
     (prompt,) = summary.prompts
     assert "my name is Ada" in prompt
     assert SUMMARY in after[0].content
@@ -339,17 +342,18 @@ async def test_an_overhead_larger_than_the_trim_budget_never_empties_the_summary
 # ===================== character helpers by the message's own weight =====================
 
 
-def test_the_truncated_copy_fits_the_trim_at_its_own_weight():
+def test_the_bounded_copy_fits_the_budget_at_its_own_weight():
     huge = AIMessage("长城" * 20_000, id="huge")
     weights = {"huge": script_weight(huge.content, dense=COUNTER_DENSE_TOKENS)}
 
     def counter(messages):
         return real_token_count(messages, weights)
 
-    out = runner_module._truncate_for_summary(
+    out = runner_module._bound_for_summary(
         [huge], 1000, counter, lambda m: weights.get(m.id, counter_weight(m))
     )
     assert counter(out) <= 1000
+    assert "characters omitted" in out[0].content
 
 
 def test_the_trims_allocated_term_uses_the_heterogeneity_factor_2():

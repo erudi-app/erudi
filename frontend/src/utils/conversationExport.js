@@ -1,7 +1,9 @@
 import { API_BASE_URL } from "../config/api.js";
 import { tracedFetch } from "../services/api/client";
 import { formatDate } from "../i18n/format";
+import { withNotices } from "./answerNotices";
 import { buildConversationMarkdown } from "./conversationMarkdown";
+import { withCuratedTurn } from "./curatedTurns";
 
 // The renderer's half of "Export as Markdown" (#430), shared by the history row
 // and the conversation header. It fetches the conversation, writes its Markdown
@@ -21,6 +23,9 @@ export function exportLabels(conversation, t) {
     created: date ? t("chat:export.created", { date }) : "",
     compaction: (count) =>
       count > 0 ? t("chat:export.compaction", { count }) : t("chat:export.compactionNoCount"),
+    // An answer as the conversation shows it: its notes (#764) and its
+    // curated line (#690) in the interface language.
+    answer: (content, trace) => withCuratedTurn(withNotices(content, trace), trace),
   };
 }
 

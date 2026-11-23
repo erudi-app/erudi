@@ -32,6 +32,12 @@ from src.agents.language import (
     language_code,
     strip_foreign_scripts,
 )
+from src.agents.answer_notices import (
+    NOTICE_EVENT,
+    attachment_notice_answers,
+    images_ignored_answer,
+    notice_trace_event,
+)
 from src.agents.reasoning_effort import plan_reasoning_effort
 from src.agents.runner import (
     AgentRunner,
@@ -40,7 +46,6 @@ from src.agents.runner import (
     GenParams,
     ERROR_MESSAGE,
     ERROR_SENTINEL,
-    IMAGES_IGNORED_NOTICE,
 )
 from src.database.generation_hints import FALLBACK_MAX_TOKENS, resolve_sampling_defaults
 from src.domains.conversations.repository import ConversationRepository, MessageRepository
@@ -61,11 +66,7 @@ from src.core.exceptions import (
 )
 from src.core.request_context import get_request_id
 from src.launcher.runtime_paths import pasted_images_dir
-from src.utils.attachment_utils import (
-    build_attachment_notice,
-    prepend_attachment_block,
-    resolve_attachments,
-)
+from src.utils.attachment_utils import prepend_attachment_block, resolve_attachments
 from src.utils.kb_utils import KbExcerpt, retrieve_kb_excerpts
 from src.utils.pasted_images import PastedImage, pasted_images_in, remove_pasted_images
 from src.utils.prompt_utils import get_prompting_strategy
@@ -135,9 +136,13 @@ def _is_compaction(event: dict) -> bool:
 
 def _is_pinned(event: dict) -> bool:
     """What an error turn keeps of its trace and what a cap never drops: its
-    compactions, the cleaned cause of its failure and the kind of its curated
-    line (what the interface translates it from)."""
-    return _is_compaction(event) or event.get("t") in (ERROR_DETAIL_EVENT, CURATED_ERROR_EVENT)
+    compactions, the cleaned cause of its failure, the kind of its curated
+    line and of its notices (what the interface translates them from)."""
+    return _is_compaction(event) or event.get("t") in (
+        ERROR_DETAIL_EVENT,
+        CURATED_ERROR_EVENT,
+        NOTICE_EVENT,
+    )
 
 
 def _append_failure(partial: str, failure: str) -> str:
@@ -159,8 +164,9 @@ def _cap_trace(events: list) -> Optional[list]:
     ``{"t":"truncated"}`` marker counted in the budget -- until the marker plus the
     remaining events fit, always keeping at least the newest event.
 
-    Compaction events (#614), the failure's ``error_detail`` (#615) and a
-    curated turn's ``curated_error`` (#690) are pinned: a reasoning turn emits one event per token, so a compaction
+    Compaction events (#614), the failure's ``error_detail`` (#615), a
+    curated turn's ``curated_error`` (#690) and the answer's ``notice`` events
+    (#764; bounded at ``NOTICE_FILES_SHOWN`` files each) are pinned: a reasoning turn emits one event per token, so a compaction
     announced at the first model call would be the first dropped. They lead the
     capped trace, in their order, and are never dropped;
     the other events are capped against what they leave -- all of them may go,
@@ -715,20 +721,20 @@ class ConversationService:
 
             # Safety net (#133/#212): unless the model is positively vision-
             # capable, the runner strips images before inference — surface that
-            # up front instead of silently dropping the attachment. The notice
-            # is persisted with the assistant message (deliberate).
+            # up front instead of silently dropping the attachment. Same
+            # contract for documents (#492): a file the reader could not turn
+            # into text, or text cut to fit the budget, is named up front
+            # rather than dropped in silence. Each notice is persisted with the
+            # answer, its English line in the content and its kind in the
+            # trace, what the interface translates it from (#764).
             supports_vision = await run_in_threadpool(detect_supports_vision, llm.link)
+            notices = attachment_notice_answers(attachments)
             if payload.images and supports_vision is not True:
-                assistant_response += IMAGES_IGNORED_NOTICE
-                yield _ndjson({"t": "answer", "text": IMAGES_IGNORED_NOTICE})
-
-            # Same contract for documents (#492): a file the reader could not
-            # turn into text, or text cut to fit the budget, is named up front
-            # rather than dropped in silence. Persisted with the answer.
-            attachment_notice = build_attachment_notice(attachments)
-            if attachment_notice:
-                assistant_response += attachment_notice
-                yield _ndjson({"t": "answer", "text": attachment_notice})
+                notices.insert(0, images_ignored_answer())
+            for notice in notices:
+                assistant_response += notice["text"]
+                trace.append(notice_trace_event(notice[NOTICE_EVENT]))
+                yield _ndjson(notice)
 
             # ``aclosing``: whenever THIS generator is closed, the runner is
             # closed with it, inside the guard. Starlette never closes a body

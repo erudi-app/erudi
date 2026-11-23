@@ -327,6 +327,12 @@
     "empty_answer_length": "La generación se detuvo durante el razonamiento, antes de escribir una respuesta. Envía un mensaje pidiendo directamente la respuesta final, o baja el esfuerzo de razonamiento.",
     "empty_answer_stop": "El modelo terminó su turno sin escribir una respuesta. Envía un mensaje pidiéndole que continúe."
   },
+  "notices": {
+    "images_ignored": "Este modelo no admite imágenes: se ignoró tu imagen.",
+    "attachments_unreadable": "No se pudieron leer algunos adjuntos: {{files}}.",
+    "attachments_truncated": "El contenido adjunto se acortó para caber en el contexto de este modelo: {{files}}."
+  },
+  "noticeFile": "{{name}} ({{reason}})",
   "memoryWarning": {
     "bound": "La memoria de tu equipo limita esta conversación: el modelo y esta conversación ocupan juntos alrededor de {{size}}, casi todo el espacio que permite la memoria. Inicia una nueva conversación, envía menos a la vez o cambia a un modelo más pequeño.",
     "pressure": "La memoria de tu equipo está bajo presión: esta conversación se resumirá antes para mantener la fluidez.",
