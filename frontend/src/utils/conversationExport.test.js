@@ -91,7 +91,7 @@ describe("exportLabels", () => {
   it("writes an answer's notes in the interface language (#764)", async () => {
     await i18n.changeLanguage("fr");
     const english = "This model doesn't support images — your image was ignored.";
-    const trace = [{ t: "notice", kind: "images_ignored", params: {}, text: english }];
+    const trace = [{ t: "notice", kind: "images_ignored", params: {} }];
 
     const answer = exportLabels(conversation, tr).answer(`*${english}*\n\nUn carré.`, trace);
 

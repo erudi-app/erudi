@@ -271,23 +271,28 @@ failure. Truncated files are named in a second notice of their own, and images t
 in a notice before both.
 
 Each notice (`src/agents/answer_notices.py`) is one `answer` event carrying
-`notice: {"kind", "params", "text"}`, its English line in italics, followed by a blank line:
+`notice: {"kind", "params"}`, its English line in italics, followed by a blank line:
 
 | Kind | `params` | Notice |
 |------|----------|--------|
 | `images_ignored` | — | The turn carries images and the model is not positively vision-capable |
-| `attachments_unreadable` | `files`: `[{"name", "reason"}]`, `reason` one of `missing`, `unsupported`, `pending_vision`, `empty`, `unreadable`, `failed`, `empty_folder`, `too_many` (no `name`, with `limit`, the file cap) | Files the reader could not turn into text |
-| `attachments_truncated` | `files`: the names | Files shortened to fit the budget |
+| `attachments_unreadable` | `files`: `[{"name", "reason"}]`, `reason` a key of `attachment_utils.REASON_TEXT`: `missing`, `unsupported`, `pending_vision`, `empty`, `unreadable`, `failed`, `empty_folder`, `too_many` (no `name`, with `limit`, the file cap); optional `more` | Files the reader could not turn into text |
+| `attachments_truncated` | `files`: the names; optional `more` | Files shortened to fit the budget |
 
-The English line is what the message content stores, what the model reads back and what an older
-interface shows; the trace keeps `{"t": "notice", "kind", "params", "text"}` per notice, pinned
-like an `error_detail`. The renderer shows `chat:notices.<kind>` in the interface language
-(`frontend/src/utils/answerNotices.js`), the file names joined as a list of that language and each
+`files` names at most the first 20 files (`NOTICE_FILES_SHOWN`); `more` counts the others, said
+"and 3 more". The model never sees a notice: it is added to the answer the database stores, not to
+the conversation's state (the checkpointer holds the model's own answer only), and an Arena turn
+has no state. The English line is what the message content stores, what an older interface shows;
+the trace keeps `{"t": "notice", "kind", "params"}` per notice, pinned like an `error_detail`. The
+renderer rebuilds the English line from its `en` catalog, which says exactly what the backend writes
+(`backend/tests/fixtures/answer_notices.json` holds both sides to the same lines), finds it in the
+content, and shows `chat:notices.<kind>` in the interface language in its place
+(`frontend/src/utils/answerNotices.js`): the file names joined as a list of that language, each
 reason from `common:fileReasons.<reason>`, live, after a reload, after a language switch, in an
-Arena panel and in the Markdown export, in place of exactly `text` in the content. A message stored
-before notices carried their kind, a kind or a reason the interface has no key for, or content that
-no longer holds `text` shows as stored. A new kind is one entry of `NOTICE_KINDS` and
-`chat:notices.<kind>` in the four locales.
+Arena panel and in the Markdown export. A message stored before notices carried their kind, a kind
+or a reason the interface has no key for, or content that no longer holds the line shows as stored.
+A new kind is one entry of `NOTICE_KINDS`, `chat:notices.<kind>` in the four locales and a case of
+the fixture.
 
 Both marker paths are percent-encoded when stored — `%` as `%25`, then `]` as `%5D` — so a path
 holding a closing bracket cannot end its own marker; the renderer decodes them in

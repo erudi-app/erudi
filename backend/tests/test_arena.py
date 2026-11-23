@@ -22,6 +22,7 @@ import src.agents.runner as agent_runner
 from src.core import config
 from src.database.generation_hints import FALLBACK_MAX_TOKENS
 from src.engines.base_engine import BaseEngine
+from src.agents.answer_notices import notice_text
 from src.agents.runner import ERROR_SENTINEL
 from src.domains.arena.repository import ArenaRepository
 from src.domains.arena.services import ArenaService
@@ -194,7 +195,7 @@ class TestArenaService:
         assert notices[1]["params"] == {"files": [{"name": "archive.zip", "reason": "unsupported"}]}
         assert notices[2]["params"] == {"files": ["big.txt"]}
         text = _arena_text(result)
-        assert all(n["text"] in text for n in notices)
+        assert all(f"*{notice_text(n['kind'], n['params'])}*" in text for n in notices)
         assert text.endswith("Answer.")
 
     def test_payload_image_only_is_valid(self):

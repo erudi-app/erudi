@@ -62,10 +62,12 @@ export function formatGigabytes(gigabytes, { maximumFractionDigits = 1 } = {}) {
 /**
  * Join items as a list in the app language ("a, b, and c", "a, b et c",
  * "a、b和c"). The conjunction form: the unit form has no separator at all in
- * Chinese.
+ * Chinese. `language` picks another app language than the active one (the
+ * English a backend line was written in).
  */
-export function formatList(items) {
-  return new Intl.ListFormat(currentLocale(), { type: "conjunction" }).format(items);
+export function formatList(items, language = i18n.language) {
+  const locale = LOCALE_BY_LANGUAGE[language] || LOCALE_BY_LANGUAGE.en;
+  return new Intl.ListFormat(locale, { type: "conjunction" }).format(items);
 }
 
 export function formatDate(value, options = { dateStyle: "medium" }) {

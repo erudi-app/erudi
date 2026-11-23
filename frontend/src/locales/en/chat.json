@@ -328,7 +328,7 @@
     "empty_answer_stop": "The model finished its turn without writing an answer. Send a follow-up asking it to continue."
   },
   "notices": {
-    "images_ignored": "This model doesn't support images: your image was ignored.",
+    "images_ignored": "This model doesn't support images — your image was ignored.",
     "attachments_unreadable": "Some attachments could not be read: {{files}}.",
     "attachments_truncated": "Attached content was shortened to fit this model's context: {{files}}."
   },

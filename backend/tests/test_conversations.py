@@ -30,6 +30,8 @@ from src.domains.conversations.services import (
     TRACE_MAX_BYTES,
 )
 from src.utils.kb_utils import KbExcerpt
+from src.agents.answer_notices import notice_text
+from src.agents.runner import ERROR_SENTINEL
 from src.domains.conversations.schemas import ConversationQuery
 
 # ERROR sentinel (hardcoded on purpose: the tests pin the wire/DB contract, not
@@ -814,7 +816,7 @@ class TestConversationService:
         [notice] = [e for e in messages[1].trace if e["t"] == "notice"]
         assert notice["kind"] == "attachments_unreadable"
         assert notice["params"] == {"files": [{"name": "scan.pdf", "reason": "pending_vision"}]}
-        assert notice["text"] in messages[1].content
+        assert f"*{notice_text(notice['kind'], notice['params'])}*" in messages[1].content
         assert messages[1].content.endswith("Answer.")
 
     async def test_query_stream_persists_the_truncated_attachment_notice(
@@ -837,7 +839,7 @@ class TestConversationService:
         [notice] = [e for e in messages[1].trace if e["t"] == "notice"]
         assert notice["kind"] == "attachments_truncated"
         assert notice["params"] == {"files": ["big.txt"]}
-        assert notice["text"] in messages[1].content
+        assert f"*{notice_text(notice['kind'], notice['params'])}*" in messages[1].content
 
     async def test_query_stream_persists_the_images_ignored_notice(
         self, test_db_session, mock_llm, monkeypatch
@@ -854,14 +856,32 @@ class TestConversationService:
         [_ async for _ in service.query_and_respond_stream(conversation.id, payload)]
 
         messages = service.message_repo.get_messages_by_conversation(conversation.id)
-        assert messages[1].trace == [
-            {
-                "t": "notice",
-                "kind": "images_ignored",
-                "params": {},
-                "text": _VISION_NOTICE.strip().strip("*"),
-            }
-        ]
+        assert messages[1].trace == [{"t": "notice", "kind": "images_ignored", "params": {}}]
+        assert messages[1].content.startswith(_VISION_NOTICE)
+
+    async def test_a_failed_turn_keeps_its_notices(self, test_db_session, mock_llm, monkeypatch):
+        """#764 - the red line of a failed turn follows the notes that opened
+        it: the persisted trace keeps their kinds, what they are translated
+        from, beside the cause of the failure."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+
+        def _boom(llm, **kw):
+            raise RuntimeError("model load failed")
+
+        monkeypatch.setattr(agent_runner, "build_chat_model", _boom)
+        service = ConversationService(test_db_session, InMemorySaver())
+        conversation = service.create_conversation(
+            llm_id=mock_llm.id, temperature=0.7, top_p=0.9, max_tokens=512
+        )
+
+        payload = ConversationQuery(question="What is this?", images=["data:image/png;base64,AAA"])
+        [_ async for _ in service.query_and_respond_stream(conversation.id, payload)]
+
+        messages = service.message_repo.get_messages_by_conversation(conversation.id)
+        assert ERROR_SENTINEL in messages[1].content
+        assert messages[1].content.startswith(_VISION_NOTICE)
+        assert [e["t"] for e in messages[1].trace] == ["notice", "error_detail"]
+        assert messages[1].trace[0] == {"t": "notice", "kind": "images_ignored", "params": {}}
 
     def test_build_user_message_shape(self):
         assert ConversationService._build_user_message("hi", None) == "hi"
@@ -1765,7 +1785,6 @@ class TestTraceHelpers:
             "t": "notice",
             "kind": "attachments_unreadable",
             "params": {"files": [{"name": "scan.pdf", "reason": "pending_vision"}]},
-            "text": "Some attachments could not be read: scan.pdf (why).",
         }
         events = [notice] + [{"t": "thinking", "text": "x" * 1000} for _ in range(50)]
 

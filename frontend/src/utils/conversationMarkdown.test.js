@@ -45,7 +45,7 @@ describe("buildConversationMarkdown", () => {
   });
 
   it("writes an answer as the caller translates it, never a question", () => {
-    const notice = [{ t: "notice", kind: "images_ignored", params: {}, text: "A note." }];
+    const notice = [{ t: "notice", kind: "images_ignored", params: {} }];
     const md = buildConversationMarkdown(
       { name: "T", messages: [msg("user", "A note."), msg("llm", "*A note.*\n\nHi.", notice)] },
       labels

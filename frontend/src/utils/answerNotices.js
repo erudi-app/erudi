@@ -1,78 +1,85 @@
 import i18n from "../i18n";
-import { formatList, formatNumber } from "../i18n/format";
+import { formatList } from "../i18n/format";
 import { answerNoticesOf } from "./traceEvents";
 
 // Answer notices (#764): the notes that open an answer when the model did not
 // get the question in full (an image it cannot see, an attached file it could
-// not read, attached text shortened to fit).
+// not read, attached text shortened to fit). The model never sees them.
 //
 // The backend stores each note's English line, in italics, in the message
-// content (the model reads it back, and it is what a message stored before
-// this version shows) and carries {"t":"notice","kind","params","text"} in the
-// turn's trace (and as `notice` on the live `answer` event), `text` being that
-// English line. The sentence shown is `chat:notices.<kind>` in the interface
-// language, the file names joined as a list of that language and each
-// unreadable file's reason from `common:fileReasons.<reason>`, translated at
-// display: it follows a language switch and a reload. The kinds live in
-// backend/src/agents/answer_notices.py (NOTICE_KINDS); a kind or a reason this
-// interface has no key for keeps its stored line.
+// content (what a message stored before this version, and a plain read of the
+// database, show) and carries {"t":"notice","kind","params"} in the turn's
+// trace (and as `notice` on the live `answer` event). The sentence shown is
+// `chat:notices.<kind>` in the interface language, the file names joined as a
+// list of that language, each unreadable file's reason from
+// `common:fileReasons.<reason>` and the files past the first ones counted,
+// translated at display: it follows a language switch and a reload. The same
+// keys in English rebuild the stored line, which is how it is found in the
+// content: the `en` catalog says exactly what the backend writes
+// (backend/tests/fixtures/answer_notices.json holds both sides to it). The
+// kinds live in backend/src/agents/answer_notices.py (NOTICE_KINDS); a kind or
+// a reason this interface has no key for keeps its stored line.
 
 const CODE = /^[a-z][a-z0-9_]*$/;
-
-const known = (key) => i18n.exists(key);
 
 // One unreadable file: "scan.pdf (no extractable text...)", or the reason
 // alone for an entry without a name (the file cap). Null for a reason this
 // interface does not know.
-function unreadableFile(file) {
+function unreadableFile(file, lng) {
   if (!file || typeof file.reason !== "string" || !CODE.test(file.reason)) {
     return null;
   }
   const key = `common:fileReasons.${file.reason}`;
-  if (!known(key)) {
+  if (!i18n.exists(key)) {
     return null;
   }
-  const reason = i18n.t(key, {
-    limit: typeof file.limit === "number" ? formatNumber(file.limit) : "",
-  });
+  const reason = i18n.t(key, { lng, limit: Number.isInteger(file.limit) ? file.limit : "" });
   const name = typeof file.name === "string" ? file.name : "";
-  return name ? i18n.t("chat:noticeFile", { name, reason }) : reason;
+  return name ? i18n.t("chat:noticeFile", { lng, name, reason }) : reason;
 }
 
 // The `files` value of a kind, or null when one of its entries cannot be said.
-function filesValue(kind, files) {
+function filesValue(kind, params, lng) {
+  const { files, more } = params;
   if (!Array.isArray(files) || files.length === 0) {
     return null;
   }
   const items =
     kind === "attachments_unreadable"
-      ? files.map(unreadableFile)
+      ? files.map((file) => unreadableFile(file, lng))
       : files.map((name) => (typeof name === "string" && name ? name : null));
-  return items.every((item) => item !== null) ? formatList(items) : null;
+  if (items.some((item) => item === null)) {
+    return null;
+  }
+  if (Number.isInteger(more) && more > 0) {
+    items.push(i18n.t("knowledgeBase:page.form.moreFiles", { lng, count: more }));
+  }
+  return formatList(items, lng);
 }
 
 /**
- * The notice's sentence in the interface language, or null when there is
- * none to show (not a notice, or a kind or reason this interface does not
- * know).
+ * The notice's sentence, in the interface language or in `lng`, or null when
+ * there is none to say (not a notice, or a kind or reason this interface does
+ * not know).
  *
  * @param {{kind: string, params?: Object}|null} notice - The trace event.
+ * @param {string} [lng] - An app language; the active one by default.
  * @returns {string|null}
  */
-export function answerNoticeText(notice) {
+export function answerNoticeText(notice, lng = i18n.language) {
   if (!notice || typeof notice.kind !== "string" || !CODE.test(notice.kind)) {
     return null;
   }
   const key = `chat:notices.${notice.kind}`;
-  if (!known(key)) {
+  if (!i18n.exists(key)) {
     return null;
   }
   const params = notice.params || {};
   if (!Object.hasOwn(params, "files")) {
-    return i18n.t(key);
+    return i18n.t(key, { lng });
   }
-  const files = filesValue(notice.kind, params.files);
-  return files === null ? null : i18n.t(key, { files });
+  const files = filesValue(notice.kind, params, lng);
+  return files === null ? null : i18n.t(key, { lng, files });
 }
 
 /**
@@ -92,12 +99,12 @@ export function withNotices(content, trace) {
   let text = String(content || "");
   let from = 0;
   for (const notice of answerNoticesOf(trace)) {
-    const english = typeof notice.text === "string" ? notice.text : "";
+    const english = answerNoticeText(notice, "en");
     const at = english ? text.indexOf(english, from) : -1;
-    const line = at < 0 ? null : answerNoticeText(notice);
-    if (line === null) {
+    if (at < 0) {
       continue;
     }
+    const line = answerNoticeText(notice);
     text = `${text.slice(0, at)}${line}${text.slice(at + english.length)}`;
     from = at + line.length;
   }

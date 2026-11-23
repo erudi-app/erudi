@@ -164,8 +164,9 @@ def _cap_trace(events: list) -> Optional[list]:
     ``{"t":"truncated"}`` marker counted in the budget -- until the marker plus the
     remaining events fit, always keeping at least the newest event.
 
-    Compaction events (#614), the failure's ``error_detail`` (#615) and a
-    curated turn's ``curated_error`` (#690) are pinned: a reasoning turn emits one event per token, so a compaction
+    Compaction events (#614), the failure's ``error_detail`` (#615), a
+    curated turn's ``curated_error`` (#690) and the answer's ``notice`` events
+    (#764; bounded at ``NOTICE_FILES_SHOWN`` files each) are pinned: a reasoning turn emits one event per token, so a compaction
     announced at the first model call would be the first dropped. They lead the
     capped trace, in their order, and are never dropped;
     the other events are capped against what they leave -- all of them may go,

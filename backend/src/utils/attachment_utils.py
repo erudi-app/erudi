@@ -74,17 +74,28 @@ _BLOCK_FOOTER = "[End of attached file]"
 # so the model does not invent content for a document it never received.
 _UNREADABLE_BODY = "[This file could not be read: {reason}]"
 
-_REASON_TEXT = {
-    "missing": "the file no longer exists at that location",
-    "unsupported": "this file type is not supported",
+# Why a file could not be read, by reason code: what the model's block says
+# and what the answer's notice names (``src.agents.answer_notices``). The
+# interface shows ``common:fileReasons.<reason>``, whose English is these very
+# texts (``tests/fixtures/answer_notices.json`` holds both sides to it).
+REASON_TEXT = {
+    "missing": "no longer at that location",
+    "unsupported": "a file type that is not supported",
     "pending_vision": (
-        "it holds no extractable text (a scan or an image), and text recognition "
-        "is not bundled yet"
+        "no extractable text (a scan or an image), and text recognition is not bundled yet"
     ),
-    "empty": "it holds no text",
-    "unreadable": "it is damaged, protected by a password, or not the format its extension says",
+    "empty": "no text",
+    "unreadable": "damaged, protected by a password, or not the format its extension says",
     "failed": "the app could not extract its text",
+    "empty_folder": "no supported document in this folder",
+    "too_many": "only the first {limit} files were attached",
 }
+
+
+def reason_text(reason: str, limit: Optional[int] = None) -> str:
+    """The English text of a reason code, with ``limit`` (the file cap by
+    default) for ``too_many``."""
+    return REASON_TEXT[reason].format(limit=MAX_ATTACHMENT_FILES if limit is None else limit)
 
 
 @dataclass(frozen=True)
@@ -93,10 +104,8 @@ class AttachmentIssue:
 
     name: str
     path: str
-    # One of: missing, unsupported, pending_vision, empty, unreadable, failed,
-    # too_many, empty_folder.
+    # A key of ``REASON_TEXT``; ``too_many`` has no name and no path.
     reason: str
-    message: str
 
 
 @dataclass(frozen=True)
@@ -183,7 +192,6 @@ def _expand(paths: Sequence[str]) -> tuple[list[Path], list[AttachmentIssue]]:
                         name=path.name,
                         path=str(path),
                         reason="empty_folder",
-                        message="no supported document was found in this folder",
                     )
                 )
                 continue
@@ -198,7 +206,6 @@ def _expand(paths: Sequence[str]) -> tuple[list[Path], list[AttachmentIssue]]:
                 name="",
                 path="",
                 reason="too_many",
-                message=f"only the first {MAX_ATTACHMENT_FILES} files were attached",
             )
         )
     return files, issues
@@ -206,7 +213,7 @@ def _expand(paths: Sequence[str]) -> tuple[list[Path], list[AttachmentIssue]]:
 
 def _read_one(reader: DocumentReader, path: Path) -> tuple[str, Optional[str]]:
     """Extract one file. Returns ``(text, reason)``; ``reason`` is None on
-    success and a key of ``_REASON_TEXT`` otherwise. Never raises."""
+    success and a key of ``REASON_TEXT`` otherwise. Never raises."""
     if not path.exists() or not path.is_file():
         return "", "missing"
     try:
@@ -270,10 +277,9 @@ def resolve_attachments(paths: Optional[Iterable[str]]) -> ResolvedAttachments:
                     name=path.name,
                     path=str(path),
                     reason=reason,
-                    message=_REASON_TEXT[reason],
                 )
             )
-            body = _UNREADABLE_BODY.format(reason=_REASON_TEXT[reason])
+            body = _UNREADABLE_BODY.format(reason=reason_text(reason))
         else:
             cost = counter_text_tokens(text)
             if cost > remaining:
