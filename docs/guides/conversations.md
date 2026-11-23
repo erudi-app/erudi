@@ -278,6 +278,15 @@ What the conversation *stores* is only a `[file_path:/abs/path]` marker per atta
 as message content, so a reloaded conversation shows which documents a turn carried without dragging
 their contents through history forever.
 
+The composer judges an image by its content, never by its name or declared type: before a file is
+attached, its first bytes must be a PNG, JPEG, WebP, GIF or BMP signature
+(`frontend/src/utils/imageSignature.js`, the check the reader below shares) and the browser must
+decode it (`createImageBitmap`). When several files are picked, the ones that fail the check never take a slot from the others, and the
+message names the budget first when verified images were left out. A text file renamed `.png` is refused with "That image could not be
+read", with no thumbnail, and the data URL carries the type the bytes announce. Should an image the
+model cannot decode reach it anyway, the data URL its error quotes is reduced to
+`data:<mime>;base64,<N chars>` in the turn's Details, in `backend.log` and in the MLX child's log.
+
 A reloaded conversation shows its images again by reading each `[image_path:...]` file through the
 Electron main process (`fs:readImageAsDataURL`, `frontend/src/utils/imageReader.js`). The reader
 takes any folder, since an image may have been attached from anywhere on the disk, but only an image:

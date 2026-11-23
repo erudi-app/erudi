@@ -379,7 +379,16 @@ done callback for the same reason.
 
 A record says what failed, on what, and why: the model id, path, port, request
 id, exit code or HTTP status, and the exception with its traceback when it was
-unexpected. Huge payloads are truncated. Secrets never reach a line: the
+unexpected. Huge payloads are truncated, and a `data:<mime>;base64,` URL (an image the
+model could not decode quotes it back in its error) is cut to
+`data:<mime>;base64,<N chars>` (parameters such as `;charset=` kept) in the
+message and the traceback, by a filter on both handlers (`DataUrlFilter`, also
+on what `RootFileBridge` forwards and on uvicorn's own handlers, attached in
+`run.py`: `uvicorn.error` writes to stderr, not through ours). The MLX child
+log (`mlx-child-<port>.log`) gets the same reduction from a log-record factory
+the child installs before mlx-vlm configures its handlers
+(`install_data_url_record_factory`), since mlx-vlm quotes the whole URL in its
+"Failed to load image" error. Secrets never reach a line: the
 `HF_TOKEN`, the `--api-key` minted for `llama-server`, database URLs with a
 password, `Authorization` headers; argv, headers and environment blocks are
 not logged.

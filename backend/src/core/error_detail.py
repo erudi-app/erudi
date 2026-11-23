@@ -18,6 +18,7 @@ from typing import Optional
 from urllib.parse import unquote
 
 from src.core.exceptions import AppBaseException
+from src.core.logutils import reduce_data_urls
 
 MAX_DETAIL_CHARS = 300
 
@@ -131,6 +132,8 @@ def sanitize(text: str) -> str:
     before any path rule can reshape it); paths follow, on the text as it was
     written (a path never spans a line break); the whitespace collapse is last.
     """
+    # A data URL's payload first: its "/" would otherwise read as a path.
+    text = reduce_data_urls(text)
     text = _DB_URL.sub(lambda m: f"{m.group(1).lower()}://{_MASK}", text)
     text = _URL_USERINFO.sub(lambda m: f"{m.group(1)}{_MASK}@", text)
     text = _BEARER.sub(lambda m: f"{m.group(1).capitalize()} {_MASK}", text)
