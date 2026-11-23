@@ -213,12 +213,12 @@ class _ScriptedSummaryModel(ToolableFakeChatModel):
         yield ChatGenerationChunk(message=AIMessageChunk(content=text, chunk_position="last"))
 
 
-def _middleware(summary_model, window=None, budget=None, compaction_threshold=80):
+def _middleware(summary_model, window=None, budget=None, compaction_threshold=80, manual=False):
     from langchain.agents.middleware import SummarizationMiddleware
 
     _WindowEngine.window = window
     built = AgentRunner()._build_middleware(
-        summary_model, budget, compaction_threshold=compaction_threshold
+        summary_model, budget, compaction_threshold=compaction_threshold, manual=manual
     )
     return next(m for m in built if isinstance(m, SummarizationMiddleware))
 
@@ -897,6 +897,153 @@ async def test_an_oversized_last_message_survives_compaction_whole():
 # ===================== the summarizer input and failures =====================
 
 
+def _fact_pool(document: str) -> list:
+    """The #748 shape: a short fact, a short answer, then a document far
+    larger than the summarizer's budget."""
+    return [
+        HumanMessage(
+            "My secret code is ZEBRA-42 and my home town is Quimper. "
+            "Please keep both in mind for the rest of this conversation and reply only OK.",
+            id="fact",
+        ),
+        AIMessage("OK", id="ok"),
+        HumanMessage(document, id="doc"),
+    ]
+
+
+@pytest.mark.parametrize(
+    "document",
+    ["z" * 20_000, ("The sailor checked the tide tables for Brest once more.\n" * 360)],
+    ids=["one-line", "short-sentences"],
+)
+async def test_a_short_fact_before_an_oversized_message_reaches_the_summarizer(document):
+    """#748: the facts sent before a document larger than the summarizer's
+    budget still reach the summarizer -- short messages are kept whole, only
+    the oversized one is cut."""
+    summary = _ScriptedSummaryModel(messages=iter([]), script=[SUMMARY])
+    mw = _middleware(summary, window=8916)
+    assert mw._real_count([_fact_pool(document)[-1]]) > mw.trim_tokens_to_summarize
+
+    result = await mw._acreate_summary(_fact_pool(document))
+
+    assert result == SUMMARY
+    prompt = summary.prompts[0]
+    assert "ZEBRA-42" in prompt
+    assert "Quimper" in prompt
+
+
+async def test_an_oversized_message_keeps_its_head_and_tail_with_a_marker():
+    """The user's question comes after the attachments, so a head-only cut
+    would erase it: the cut keeps the head AND the tail around an ASCII
+    omission marker."""
+    document = (
+        "FAIT-DEBUT: the archivist's favourite colour is fir green.\n"
+        + "x" * 19_000
+        + "\nORCHIDEE is the password at the end of the file.\n"
+        + "What is my secret code?"
+    )
+    summary = _ScriptedSummaryModel(messages=iter([]), script=[SUMMARY])
+    mw = _middleware(summary, window=8916)
+
+    await mw._acreate_summary(_fact_pool(document))
+
+    prompt = summary.prompts[0]
+    assert "FAIT-DEBUT" in prompt
+    assert "ORCHIDEE" in prompt
+    assert "What is my secret code?" in prompt
+    assert "characters omitted" in prompt
+
+
+def test_bounded_pools_fit_the_budget_and_keep_their_order():
+    """Property of ``_bound_for_summary``: whatever the mix (Latin, CJK,
+    digits, one or several giant messages), the bounded pool fits the budget
+    counted by the SAME counter, in the pool's order."""
+    import random
+
+    from src.agents.token_accounting import counter_weight
+
+    rng = random.Random(748)
+    for _ in range(25):
+        pool = []
+        for i in range(rng.randint(1, 10)):
+            char = rng.choice(["a", "汉", "7", "m"])
+            size = rng.choice([8, 60, 500, 4000, 20_000])
+            body = (char * rng.randint(10, 60) + "\n") * max(1, size // 40)
+            cls = HumanMessage if i % 2 == 0 else AIMessage
+            pool.append(cls(body[:size], id=f"m{i}"))
+        budget = rng.choice([128, 256, 900, 3178])
+        counter = lambda part: real_token_count(part, {})  # noqa: E731
+
+        bounded = runner_module._bound_for_summary(pool, budget, counter, counter_weight)
+
+        assert counter(bounded) <= budget
+        kept = {m.id for m in bounded}
+        assert [m.id for m in bounded] == [m.id for m in pool if m.id in kept]
+
+
+def test_a_tool_call_heavy_message_is_bounded_not_dropped():
+    """An AIMessage whose cost is its tool-call args (empty content) must be
+    reducible too, or the fair share degenerates to dropping everything --
+    the short fact before it included."""
+    from src.agents.token_accounting import counter_weight
+
+    pool = [
+        HumanMessage("My secret code is ZEBRA-42.", id="fact"),
+        AIMessage(
+            "",
+            tool_calls=[{"name": "lookup", "args": {"q": "x" * 20_000}, "id": "c1"}],
+            id="call",
+        ),
+    ]
+
+    def counter(part):
+        return real_token_count(part, {})
+
+    bounded = runner_module._bound_for_summary(pool, 1000, counter, counter_weight)
+
+    assert [m.id for m in bounded] == ["fact", "call"]
+    assert counter(bounded) <= 1000
+    assert "ZEBRA-42" in bounded[0].content
+    assert "characters omitted" in str(bounded[1].tool_calls)
+
+
+def test_dropping_the_oldest_messages_logs_one_warning(caplog):
+    """Only the floor path drops messages, and it says so: one ASCII WARNING
+    with how many fell."""
+    from src.agents.token_accounting import counter_weight
+
+    pool = [
+        (HumanMessage if i % 2 == 0 else AIMessage)(_text(300, chr(ord("a") + i % 26)), id=f"m{i}")
+        for i in range(60)
+    ]
+
+    def counter(part):
+        return real_token_count(part, {})
+
+    with caplog.at_level(logging.WARNING):
+        bounded = runner_module._bound_for_summary(pool, 1000, counter, counter_weight)
+
+    assert counter(bounded) <= 1000
+    assert 0 < len(bounded) < len(pool)
+    assert [m.id for m in bounded] == [m.id for m in pool[-len(bounded) :]]
+    warnings = [r for r in caplog.records if r.levelno == logging.WARNING]
+    assert len(warnings) == 1
+    assert str(len(pool) - len(bounded)) in warnings[0].getMessage()
+    assert warnings[0].getMessage().isascii()
+
+
+async def test_a_manual_compaction_bounds_a_giant_document_the_same_way():
+    """``/compact`` goes through the same ``_acreate_summary``: the facts
+    before a giant document reach the summarizer and nothing raises."""
+    summary = _ScriptedSummaryModel(messages=iter([]), script=[SUMMARY])
+    mw = _middleware(summary, window=8916, manual=True)
+
+    result = await mw._acreate_summary(_fact_pool("z" * 20_000))
+
+    assert result == SUMMARY
+    assert "ZEBRA-42" in summary.prompts[0]
+
+
 async def test_the_previous_summary_stays_in_the_summarizer_input_past_the_trim():
     summary = _ScriptedSummaryModel(messages=iter([]))
     mw = _middleware(summary, window=10_000)
@@ -910,7 +1057,10 @@ async def test_the_previous_summary_stays_in_the_summarizer_input_past_the_trim(
     assert prompt.count(_PREVIOUS) == 1
 
 
-async def test_a_size_failure_retries_with_the_oversized_message_truncated():
+async def test_an_oversized_message_is_bounded_on_the_first_attempt():
+    """No skipped first attempt anymore: the pool reaches the summarizer at
+    once, the oversized answer cut to the fair-share cap, the short question
+    whole."""
     summary = _ScriptedSummaryModel(messages=iter([]), script=[SUMMARY])
     mw = _middleware(summary, window=10_000)
     budget = mw.trim_tokens_to_summarize
@@ -925,14 +1075,36 @@ async def test_a_size_failure_retries_with_the_oversized_message_truncated():
     assert result == SUMMARY
     (prompt,) = summary.prompts
     assert _PREVIOUS in prompt
+    assert "question" in prompt
     assert "zzzz" in prompt
-    # The oversized answer reached the summarizer TRUNCATED to the budget.
+    assert "characters omitted" in prompt
+    # The oversized answer reached the summarizer CUT to the budget.
     assert prompt.count("z") <= budget * 4
 
 
+async def test_a_size_failure_retries_with_the_pool_bounded_to_half_the_budget():
+    summary = _ScriptedSummaryModel(messages=iter([]), script=[_overflow_400(), SUMMARY])
+    mw = _middleware(summary, window=10_000)
+    budget = mw.trim_tokens_to_summarize
+    to_summarize = [
+        _previous_summary_message(),
+        HumanMessage("question", id="h"),
+        AIMessage(_text(budget * 3, "z"), id="huge"),
+    ]
+
+    result = await mw._acreate_summary(to_summarize)
+
+    assert result == SUMMARY
+    first, second = summary.prompts
+    assert _PREVIOUS in second
+    assert "question" in second
+    assert "zzzz" in second
+    assert len(second) < len(first)
+    assert second.count("z") <= (budget // 2) * 4
+
+
 async def test_a_size_failure_that_fails_again_writes_no_summary(caplog):
-    overflow = _overflow_400()
-    summary = _ScriptedSummaryModel(messages=iter([]), script=[overflow])
+    summary = _ScriptedSummaryModel(messages=iter([]), script=[_overflow_400(), _overflow_400()])
     mw = _middleware(summary, window=10_000)
     budget = mw.trim_tokens_to_summarize
     to_summarize = [
@@ -945,6 +1117,7 @@ async def test_a_size_failure_that_fails_again_writes_no_summary(caplog):
         result = await mw._acreate_summary(to_summarize)
 
     assert result is None
+    assert len(summary.prompts) == 2
     assert len([r for r in caplog.records if r.levelno == logging.WARNING]) == 2
     assert all(r.getMessage().isascii() for r in caplog.records)
 

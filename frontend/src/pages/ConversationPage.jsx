@@ -53,6 +53,7 @@ import {
 } from "../utils/messageContent";
 import { formatBytes } from "../utils/formatBytes";
 import { withCuratedTurn } from "../utils/curatedTurns";
+import { withNotices } from "../utils/answerNotices";
 import {
   automaticCompactions,
   errorDetailOf,
@@ -754,10 +755,14 @@ export default function ConversationPage() {
                 reloading = false;
                 compacting = false;
                 answerText += evt.text || "";
-                // An empty-answer line (#554): its kind, what it is
-                // translated from at display, joins the trace as persisted.
+                // An empty-answer line (#554) or a note opening the answer
+                // (#764): its kind, what it is translated from at display,
+                // joins the trace as persisted.
                 if (evt.curated_error) {
                   traceEvents.push({ t: "curated_error", ...evt.curated_error });
+                }
+                if (evt.notice) {
+                  traceEvents.push({ t: "notice", ...evt.notice });
                 }
                 break;
               case "thinking":
@@ -1573,10 +1578,13 @@ export default function ConversationPage() {
                 isError && isGenericFailure(msg.content, msg.trace)
                   ? t("chat:errors.generationFailed")
                   : undefined;
-              // A curated turn (#690): its sentence in the interface language,
-              // from the kind its trace carries, in place of the stored
-              // English line; a turn without one shows as stored.
-              const content = isUser ? msg.content : withCuratedTurn(msg.content, msg.trace);
+              // A curated turn (#690) and the notes that open an answer
+              // (#764): their sentences in the interface language, from the
+              // kinds the trace carries, in place of the stored English
+              // lines; a turn without them shows as stored.
+              const content = isUser
+                ? msg.content
+                : withCuratedTurn(withNotices(msg.content, msg.trace), msg.trace);
               const displayText = getDisplayContent(content, failureHeadline);
 
               return (
