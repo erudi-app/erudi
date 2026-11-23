@@ -50,6 +50,12 @@ Lifecycle policy (product decisions on #594):
   in flight without touching the idle clock, backs off
   `PREWARM_BACKOFF_S` after a failure, and an absent artifact is one INFO
   per state (the gate/banner owns the state), anything else one WARNING.
+- **Start beside the job.** An ingestion job calls `start_in_background`
+  at its first file to embed: the spawn runs while the job reads and chunks
+  that file (and loads the e5 tokenizer), instead of after them. A caller
+  that waited on ``_spawn_lock`` while a spawn failed raises that spawn's
+  error rather than spawning again, so a failed background start costs the
+  job no second spawn and is reported once, by the job's own call.
 - **Shutdown is terminal.** `shutdown_embedder` sets ``_closed``; any later
   ``ensure_embedder_running`` refuses — a background thread that outlives
   the lifespan must never respawn a child into a stopping backend.
@@ -167,6 +173,11 @@ _last_used = 0.0
 _reaper_started = False
 _prewarm_failed_at: Optional[float] = None
 _prewarm_missing_logged = False
+#: Failed spawns so far, and the last one's error: a caller that waited on
+#: ``_spawn_lock`` while a spawn failed raises that spawn's error instead of
+#: paying a second spawn (and a second probe timeout) on its own.
+_spawn_failures = 0
+_last_spawn_error: Optional[BaseException] = None
 
 
 def _get_adapter() -> Any:
@@ -457,10 +468,12 @@ def ensure_embedder_running() -> Dict[str, Any]:
         EngineException: The child could not be spawned or probed (the
             message quotes its log tail), or the manager is closed.
     """
+    global _spawn_failures, _last_spawn_error
     adapter = _require_adapter()
     with _state_lock:
         if _closed:
             raise _closed_error()
+        failures_seen = _spawn_failures
         handle = _handle
         if handle is not None:
             if adapter.is_alive(handle.get("proc")):
@@ -482,7 +495,18 @@ def ensure_embedder_running() -> Dict[str, Any]:
             if handle is not None and adapter.is_alive(handle.get("proc")):
                 _touch()
                 return handle
-        return _spawn_and_publish(adapter)
+            if _spawn_failures != failures_seen and _last_spawn_error is not None:
+                # A spawn ran and failed while this caller waited (the job's
+                # background start, another request): its error is this
+                # caller's answer too. The next caller tries again.
+                raise _last_spawn_error
+        try:
+            return _spawn_and_publish(adapter)
+        except BaseException as exc:
+            with _state_lock:
+                _spawn_failures += 1
+                _last_spawn_error = exc
+            raise
 
 
 def embed_texts(texts: List[str]) -> List[List[float]]:
@@ -626,6 +650,61 @@ def prewarm_embedder() -> None:
     threading.Thread(target=_prewarm, name="kb-embedder-prewarm", daemon=True).start()
 
 
+class BackgroundStart:
+    """One `start_in_background` call: when it ends, how long it took and
+    how it failed.
+
+    Attributes:
+        seconds: The time ``ensure_embedder_running`` took (a spawn and its
+            probe, or about nothing when the child was already running);
+            ``None`` until it returns.
+        error: What it raised, ``None`` on success. Not logged here: the
+            caller's own first embedding call waits for this same attempt
+            and raises this same error where the failure is handled.
+    """
+
+    def __init__(self) -> None:
+        self.seconds: Optional[float] = None
+        self.error: Optional[BaseException] = None
+        self._done = threading.Event()
+
+    def wait(self, timeout: Optional[float] = None) -> bool:
+        """Wait for the start to end; returns whether it ended."""
+        return self._done.wait(timeout)
+
+    def _run(self) -> None:
+        start = time.perf_counter()
+        try:
+            ensure_embedder_running()
+        except BaseException as exc:
+            # Kept for the caller's timing line, never logged here: the
+            # caller's first embedding call shares this spawn's outcome
+            # (``ensure_embedder_running``) and reports it as its own
+            # failure, once. A caller that ends up embedding nothing did
+            # not need the child.
+            self.error = exc
+        finally:
+            self.seconds = time.perf_counter() - start
+            self._done.set()
+
+
+def start_in_background() -> Optional[BackgroundStart]:
+    """Start the child on a background thread, beside the caller's own work.
+
+    An ingestion job calls it when it reaches its first file to embed, so
+    the spawn runs while the job reads and chunks that file (and loads the
+    e5 tokenizer) instead of after. The job holds its ingestion lease, so
+    the idle reaper leaves the child alone. ``None`` when the manager is
+    disarmed (tests); otherwise the start's record. Its failure is not
+    reported here (see `BackgroundStart`).
+    """
+    if _get_adapter() is None:
+        return None
+    start = BackgroundStart()
+    threading.Thread(target=start._run, name="kb-embedder-start", daemon=True).start()
+    return start
+
+
 def _prewarm() -> None:
     """The prewarm thread's body. An absent artifact is an interface state
     (the gate/banner owns it): one INFO per state, then silence until a
@@ -665,7 +744,7 @@ def shutdown_embedder() -> None:
 def _reset_for_tests() -> None:
     """Clear module state between tests (terminates any live child)."""
     global _handle, _pending, _closed, _leases, _last_used
-    global _prewarm_failed_at, _prewarm_missing_logged
+    global _prewarm_failed_at, _prewarm_missing_logged, _spawn_failures, _last_spawn_error
     with _state_lock:
         _stop_locked(reason="test reset")
         if _pending is not None:
@@ -681,3 +760,5 @@ def _reset_for_tests() -> None:
         _last_used = 0.0
         _prewarm_failed_at = None
         _prewarm_missing_logged = False
+        _spawn_failures = 0
+        _last_spawn_error = None

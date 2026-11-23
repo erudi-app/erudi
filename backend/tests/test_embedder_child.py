@@ -391,6 +391,125 @@ class TestPrewarm:
         assert threading.active_count() == thread_count
 
 
+# ====================== Background start (an ingestion job) ======================
+
+
+def _wait_until(predicate, timeout=5.0):
+    deadline = time.monotonic() + timeout
+    while not predicate() and time.monotonic() < deadline:
+        time.sleep(0.01)
+    return predicate()
+
+
+def _hold_the_probe(http):
+    """Make ``/health`` block until the returned event is set: the spawn
+    stays in flight (holding ``_spawn_lock``) for as long as the test wants."""
+    release = threading.Event()
+    fake_get = http.get
+
+    def get(url, timeout=None, headers=None):
+        release.wait(5.0)
+        return fake_get(url, timeout=timeout, headers=headers)
+
+    http.get = get
+    return release
+
+
+class TestBackgroundStart:
+    def test_the_start_spawns_beside_the_caller_and_records_its_time(self, adapter, http):
+        start = embedder_child.start_in_background()
+        assert start is not None
+        assert start.wait(5.0)
+        assert start.error is None
+        assert start.seconds is not None and start.seconds >= 0.0
+        assert len(adapter.spawns) == 1
+        assert embedder_child._handle is not None
+
+    def test_an_embedding_asked_during_the_start_waits_for_it_without_a_second_spawn(
+        self, adapter, http
+    ):
+        release = _hold_the_probe(http)
+        start = embedder_child.start_in_background()
+        assert _wait_until(lambda: len(adapter.spawns) == 1)
+        vectors = []
+        caller = threading.Thread(target=lambda: vectors.extend(embedder_child.embed_texts(["x"])))
+        caller.start()
+        time.sleep(0.1)
+        assert not vectors  # still waiting on the spawn in flight
+        release.set()
+        caller.join(5.0)
+        assert start.wait(5.0) and start.error is None
+        assert len(vectors) == 1
+        assert len(adapter.spawns) == 1
+
+    def test_a_failed_start_is_the_waiting_callers_error_and_is_not_logged_twice(
+        self, adapter, http, caplog
+    ):
+        """The job's first embedding waited for the background spawn: when it
+        fails, the job gets that error at once (no second spawn, no second
+        probe timeout), and the background start itself logs nothing."""
+        release = _hold_the_probe(http)
+        http.post_handler = lambda url, json: FakeResponse(status_code=500, text="boom")
+        start = embedder_child.start_in_background()
+        assert _wait_until(lambda: len(adapter.spawns) == 1)
+        errors = []
+
+        def caller():
+            try:
+                embedder_child.ensure_embedder_running()
+            except EngineException as exc:
+                errors.append(exc)
+
+        thread = threading.Thread(target=caller)
+        with caplog.at_level("DEBUG"):
+            thread.start()
+            time.sleep(0.1)
+            release.set()
+            thread.join(5.0)
+            assert start.wait(5.0)
+        assert isinstance(start.error, EngineException)
+        assert errors == [start.error]
+        assert len(adapter.spawns) == 1
+        assert not [r for r in caplog.records if r.levelno >= 30]
+
+    def test_a_caller_after_a_failed_start_tries_again(self, adapter, http):
+        http.post_handler = lambda url, json: FakeResponse(status_code=500, text="boom")
+        start = embedder_child.start_in_background()
+        assert start.wait(5.0) and start.error is not None
+        http.post_handler = None
+        assert embedder_child.ensure_embedder_running() is embedder_child._handle
+        assert len(adapter.spawns) == 2
+
+    def test_a_missing_model_reaches_the_waiting_caller_with_its_own_type(self, adapter, http):
+        def resolve_model():
+            raise EmbeddingModelMissingException()
+
+        adapter.resolve_model = resolve_model
+        start = embedder_child.start_in_background()
+        assert start.wait(5.0)
+        assert isinstance(start.error, EmbeddingModelMissingException)
+        assert adapter.spawns == []
+
+    def test_the_jobs_lease_keeps_the_started_child_and_the_idle_clock_runs_after(
+        self, adapter, http
+    ):
+        with embedder_child.ingestion_lease():
+            start = embedder_child.start_in_background()
+            assert start.wait(5.0) and start.error is None
+            assert not embedder_child.reap_if_idle(now=embedder_child._last_used + 10_000.0)
+        assert not embedder_child.reap_if_idle(now=embedder_child._last_used + 1.0)
+        assert embedder_child.reap_if_idle(
+            now=embedder_child._last_used + embedder_child.EMBEDDER_IDLE_SECONDS + 1.0
+        )
+
+    def test_a_disarmed_manager_starts_nothing(self, monkeypatch):
+        monkeypatch.setattr(embedder_child, "_adapter_override", None)
+        embedder_child._reset_for_tests()
+        thread_count = threading.active_count()
+        assert embedder_child.start_in_background() is None
+        assert threading.active_count() == thread_count
+
+
 # ====================== Platform selection ======================
 
 

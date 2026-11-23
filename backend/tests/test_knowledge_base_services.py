@@ -10,6 +10,7 @@ Two harnesses on the same embedded cluster:
 """
 
 import logging
+import threading
 
 import pytest
 import psycopg
@@ -949,3 +950,182 @@ class TestIngestionPipeline:
         job_row = service.repo.get_kb_job_by_id(session, job.id)
         assert job_row.status == "failed"
         assert service._job_files(session, job_row)[0] == ["maintenance.md"]
+
+
+class TestFirstIngestionTimings:
+    """The embedding child starts beside the job's first file (its reading,
+    its chunking and the e5 tokenizer's load) instead of after them, and the
+    job ends with one ``KB job N timings:`` line saying where the time went."""
+
+    @staticmethod
+    def _timing_lines(caplog, job_id):
+        return [
+            r.getMessage()
+            for r in caplog.records
+            if r.getMessage().startswith(f"KB job {job_id} timings:")
+        ]
+
+    def test_the_job_logs_one_ascii_timing_line_with_every_phase(
+        self, kb_store, real_db_session, tmp_path, caplog
+    ):
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        doc = tmp_path / "délais.md"
+        doc.write_text("# Délais\n\nLa livraison prend trois jours.", encoding="utf-8")
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            service.process_and_index_documents(db=session, kb_job_id=job.id, file_paths=[str(doc)])
+
+        (line,) = self._timing_lines(caplog, job.id)
+        assert line.isascii()
+        fields = dict(part.split("=") for part in line.split(": ", 1)[1].split())
+        assert set(fields) == {
+            "total_ms",
+            "spawn_ms",
+            "read_ms",
+            "chunk_ms",
+            "tokenizer_ms",
+            "embed_ms",
+            "db_ms",
+        }
+        # The suite's manager is disarmed: no child was started.
+        assert fields["spawn_ms"] == "none"
+        for name in ("total_ms", "read_ms", "chunk_ms", "tokenizer_ms", "embed_ms", "db_ms"):
+            assert int(fields[name]) >= 0
+        assert int(fields["chunk_ms"]) >= int(fields["tokenizer_ms"])
+
+    def test_the_start_and_the_chunking_run_at_the_same_time(
+        self, kb_store, real_db_session, tmp_path, monkeypatch
+    ):
+        """Neither waits for the other: the fake start only finishes once the
+        job has chunked, and the chunking only goes on once the start runs.
+        Run one after the other, each would wait out its 5 s and fail."""
+        from src.domains.knowledge_base import services
+
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        first = tmp_path / "a.md"
+        first.write_text("# A\n\nPremier document.", encoding="utf-8")
+        second = tmp_path / "b.md"
+        second.write_text("# B\n\nSecond document.", encoding="utf-8")
+        order = []
+        start_running = threading.Event()
+        chunked = threading.Event()
+        overlapped = []
+
+        class FakeStart:
+            def __init__(self):
+                self.seconds = None
+                self.error = None
+                self._done = threading.Event()
+
+            def wait(self, timeout=None):
+                return self._done.wait(timeout)
+
+            def run(self):
+                start_running.set()
+                overlapped.append(chunked.wait(5.0))
+                self.seconds = 0.0
+                self._done.set()
+
+        def start_in_background():
+            order.append("start")
+            start = FakeStart()
+            threading.Thread(target=start.run, daemon=True).start()
+            return start
+
+        real_read = service.reader.read
+        real_chunk = services.chunk_document
+
+        def read(path):
+            order.append("read")
+            return real_read(path)
+
+        def chunk(document):
+            overlapped.append(start_running.wait(5.0))
+            chunks = real_chunk(document)
+            chunked.set()
+            return chunks
+
+        monkeypatch.setattr(services.embedder_child, "start_in_background", start_in_background)
+        monkeypatch.setattr(service.reader, "read", read)
+        monkeypatch.setattr(services, "chunk_document", chunk)
+        service.process_and_index_documents(
+            db=session, kb_job_id=job.id, file_paths=[str(first), str(second)]
+        )
+
+        assert order == ["start", "read", "read"]  # once per job, before the first read
+        assert overlapped[:2] == [True, True]
+        session.expire_all()
+        assert service.repo.get_kb_job_by_id(session, job.id).status == "completed"
+
+    def test_a_job_with_nothing_to_embed_starts_no_child(
+        self, kb_store, real_db_session, tmp_path, monkeypatch, caplog
+    ):
+        """Images wait for a later tier and duplicates are already indexed:
+        neither needs the child, so it is not started for them."""
+        from src.domains.knowledge_base import services
+
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        doc = tmp_path / "notes.md"
+        doc.write_text("# Notes\n\nDéjà indexé.", encoding="utf-8")
+        service.process_and_index_documents(db=session, kb_job_id=job.id, file_paths=[str(doc)])
+
+        starts = []
+        monkeypatch.setattr(
+            services.embedder_child, "start_in_background", lambda: starts.append(1)
+        )
+        photo = tmp_path / "photo.png"
+        photo.write_bytes(b"\x89PNG fake")
+        second = service.repo.create_kb_job(
+            db=session, base_model_id=None, new_model_id=None, kb_id=kb.id
+        )
+        session.commit()
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            service.process_and_index_documents(
+                db=session, kb_job_id=second.id, file_paths=[str(doc), str(photo)]
+            )
+
+        assert starts == []
+        (line,) = self._timing_lines(caplog, second.id)
+        assert " spawn_ms=none " in line
+
+    def test_a_failed_start_is_reported_once_by_the_file_that_needed_it(
+        self, kb_store, real_db_session, tmp_path, monkeypatch, caplog
+    ):
+        """The child cannot come up: the file is `failed` with ONE error
+        record carrying the child's answer, the background start adds none,
+        and the timing line names the start's failure."""
+        from src.ingestion import embedder_child, vector_store
+        from src.ingestion.embeddings import ChildE5Embeddings
+        from tests.test_embedder_child import FakeHttp, FakeResponse, make_adapter
+
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        doc = tmp_path / "panne.md"
+        doc.write_text("# Panne\n\nLe service est indisponible.", encoding="utf-8")
+        adapter = make_adapter(tmp_path)
+        http = FakeHttp()
+        http.post_handler = lambda url, json: FakeResponse(status_code=500, text="no model")
+        monkeypatch.setattr(embedder_child, "_adapter_override", adapter)
+        monkeypatch.setattr(embedder_child, "requests", http)
+        monkeypatch.setattr(vector_store, "get_embeddings", ChildE5Embeddings)
+        embedder_child._reset_for_tests()
+        try:
+            with caplog.at_level(logging.INFO, logger="erudi"):
+                with pytest.raises(NothingIndexedException):
+                    service.process_and_index_documents(
+                        db=session, kb_job_id=job.id, file_paths=[str(doc)]
+                    )
+        finally:
+            embedder_child._reset_for_tests()
+
+        session.expire_all()
+        assert session.query(KnowledgeDocument).filter_by(kb_id=kb.id).one().status == "failed"
+        errors = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert len(errors) == 1
+        assert "panne.md" in errors[0].getMessage()
+        assert "HTTP 500" in errors[0].getMessage()
+        (line,) = self._timing_lines(caplog, job.id)
+        assert "spawn_error=EngineException" in line

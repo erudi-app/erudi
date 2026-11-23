@@ -14,6 +14,12 @@ Ingestion pipeline (per file, background task):
     run continues either way; the job only fails when nothing could be
     ingested (``NothingIndexedException``).
 
+The embedding child starts on a background thread at the job's first file
+that has text to embed, so its spawn runs beside that file's extraction and
+chunking (and the e5 tokenizer's load) instead of after them. The job ends
+with one ``KB job N timings:`` INFO line (``phase_timings``) giving the time
+each phase took.
+
 Classes:
     KB_Service: Business logic for KB creation, updates, and job tracking.
 
@@ -27,7 +33,7 @@ import hashlib
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List, Optional, Tuple
 
 from sqlalchemy.orm import Session
 
@@ -40,10 +46,11 @@ from src.core.exceptions import (
 )
 from src.domains.knowledge_base.repository import KB_Repository
 from src.entities.KBJob import KBJobModel
+from src.ingestion import embedder_child, phase_timings
 from src.ingestion.chunking import chunk_document
 from src.ingestion.embedder_child import ingestion_lease
 from src.ingestion.embeddings import embedding_artifact_missing
-from src.ingestion.reader import DocumentReader
+from src.ingestion.reader import IMAGE_EXTENSIONS, DocumentReader
 from src.ingestion.vector_store import add_kb_chunks
 from src.core.logging import logger
 
@@ -66,6 +73,57 @@ class _JobFileLedger:
 
     def add_rowless(self, outcome: str, name: str) -> None:
         self.rowless.setdefault(outcome, []).append(name)
+
+
+class _JobEmbedderStart:
+    """The embedding child's start for one job, requested once: at the job's
+    first file that has text to embed, so it runs while that file is read and
+    chunked. A job of duplicates or images never starts it."""
+
+    def __init__(self) -> None:
+        self.requested = False
+        self.start: Optional[embedder_child.BackgroundStart] = None
+
+    def request(self) -> None:
+        if not self.requested:
+            self.requested = True
+            self.start = embedder_child.start_in_background()
+
+    def describe(self) -> str:
+        """The start's part of the job's timing line: ``spawn_ms=none`` when
+        nothing was started, ``running`` when it outlives the job, and the
+        error's type beside the time when it failed (the file that needed
+        the child logged the error itself)."""
+        start = self.start
+        if start is None:
+            return "spawn_ms=none"
+        # A start the job's embedding waited for has ended, but its thread
+        # may not have recorded it yet: a moment's grace, so the line says
+        # how it ended rather than "running".
+        if not start.wait(0.1):
+            return "spawn_ms=running"
+        text = f"spawn_ms={start.seconds * 1000:.0f}"
+        if start.error is not None:
+            text += f" spawn_error={type(start.error).__name__}"
+        return text
+
+
+def _timings_line(
+    kb_job_id: int, total_s: float, tally: Dict[str, float], embedder: _JobEmbedderStart
+) -> str:
+    """``KB job N timings: ...``: where the job's time went. ``spawn_ms`` ran
+    beside the job (about 0 when the child was already running);
+    ``chunk_ms`` includes ``tokenizer_ms`` (the e5 tokenizer's load, 0 when
+    it was already loaded); ``embed_ms`` includes the wait for the child when
+    it was not ready yet; ``db_ms`` is the vector store's writes."""
+    phases = " ".join(
+        f"{name}_ms={tally.get(name, 0.0) * 1000:.0f}"
+        for name in ("read", "chunk", "tokenizer", "embed", "db")
+    )
+    return (
+        f"KB job {kb_job_id} timings: total_ms={total_s * 1000:.0f} "
+        f"{embedder.describe()} {phases}"
+    )
 
 
 # Kept in memory, by job id, for the status route. Only the latest jobs are kept.
@@ -350,14 +408,18 @@ class KB_Service:
                 del _JOB_LEDGERS[next(iter(_JOB_LEDGERS))]
 
             counts = dict.fromkeys(("indexed", "skipped", "failed", *USER_FILE_REASONS), 0)
+            embedder = _JobEmbedderStart()
             # The lease keeps the dedicated embedding child alive for the
             # whole job (#594): its idle reaper never terminates it between
             # two files, however long a file takes to parse.
-            with ingestion_lease():
+            with ingestion_lease(), phase_timings.collect() as tally:
                 for raw_path in file_paths:
-                    counts[self._ingest_one_file(db, kb.id, raw_path, ledger)] += 1
+                    counts[
+                        self._ingest_one_file(db, kb.id, raw_path, ledger, embedder=embedder)
+                    ] += 1
 
-            duration_ms = (time.perf_counter() - start_s) * 1000
+            duration_s = time.perf_counter() - start_s
+            duration_ms = duration_s * 1000
             logger.info(
                 f"KB job {kb_job_id} ({'update' if is_update else 'creation'}): "
                 f"{counts['indexed']} indexed, {counts['pending_vision']} pending_vision, "
@@ -365,6 +427,7 @@ class KB_Service:
                 f"{counts['unreadable']} unreadable, {counts['failed']} failed, "
                 f"duration_ms={duration_ms:.0f}"
             )
+            logger.info(_timings_line(kb_job_id, duration_s, tally, embedder))
 
             # Don't report success when nothing queryable was added. A batch that
             # indexed zero chunks and had no duplicates (its files were empty,
@@ -383,15 +446,23 @@ class KB_Service:
             raise
 
     def _ingest_one_file(
-        self, db: Session, kb_id: int, raw_path: str, ledger: _JobFileLedger | None = None
+        self,
+        db: Session,
+        kb_id: int,
+        raw_path: str,
+        ledger: _JobFileLedger | None = None,
+        *,
+        embedder: _JobEmbedderStart | None = None,
     ) -> str:
         """Ingest one file; returns "indexed" | "pending_vision" | "skipped"
         | "empty" | "unreadable" | "failed". Never raises — a broken file must
         not sink the batch.
 
         ``ledger`` records the job's files that have no document row of their
-        own, so the job can still name them."""
+        own, so the job can still name them. ``embedder`` is the job's child
+        start, requested at the first file with text to embed."""
         ledger = ledger if ledger is not None else _JobFileLedger()
+        embedder = embedder if embedder is not None else _JobEmbedderStart()
         path = Path(raw_path)
         try:
             content = path.read_bytes()
@@ -420,7 +491,7 @@ class KB_Service:
             )
             ledger.add_rowless(earlier, path.name)
             return earlier
-        outcome = self._ingest_new_content(db, kb_id, path, content, content_hash, ledger)
+        outcome = self._ingest_new_content(db, kb_id, path, content, content_hash, ledger, embedder)
         ledger.outcome_by_hash[content_hash] = outcome
         return outcome
 
@@ -432,6 +503,7 @@ class KB_Service:
         content: bytes,
         content_hash: str,
         ledger: _JobFileLedger,
+        embedder: _JobEmbedderStart,
     ) -> str:
         """The rest of ``_ingest_one_file`` for a content new to this job."""
         try:
@@ -473,14 +545,20 @@ class KB_Service:
             return "failed"
 
         try:
-            extracted = self.reader.read(path)
+            if path.suffix.lower() not in IMAGE_EXTENSIONS:
+                # The child's start (seconds) runs beside this file's reading
+                # and chunking (the e5 tokenizer's load) instead of after.
+                embedder.request()
+            with phase_timings.timed("read"):
+                extracted = self.reader.read(path)
 
             if extracted.status == "pending_vision":
                 self.repo.update_document_status(db, document, "pending_vision")
                 logger.info(f"KB {kb_id}: {path.name} accepted as pending_vision")
                 return "pending_vision"
 
-            chunks = chunk_document(extracted)
+            with phase_timings.timed("chunk"):
+                chunks = chunk_document(extracted)
             if not chunks:
                 # Extracted, but produced nothing indexable (blank/whitespace file
                 # or a parser that yielded no text): honestly 'empty', never

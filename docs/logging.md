@@ -457,6 +457,32 @@ system proxy configuration), `HTTP_CACHE`, or a socket-pool wait such as
 host). The API client records `duration_ms` for each of its requests in
 `erudi-backend.log`, which tells which requests to look for.
 
+## A slow Knowledge Base job
+
+Every Knowledge Base job ends with one `INFO` line, after its outcome line,
+that says where its time went:
+
+```
+KB job 7 timings: total_ms=4720 spawn_ms=4712 read_ms=1 chunk_ms=745 tokenizer_ms=744 embed_ms=3980 db_ms=14
+```
+
+- `spawn_ms` — starting the embedding child (process start, model load, the
+  two-stage probe), about 0 when it was already running. It runs on its own
+  thread beside the job, from the job's first file that has text to embed:
+  `none` when the job had nothing to embed (duplicates, images), `running`
+  when the job ended first, and `spawn_error=<type>` beside it when the start
+  failed (the file that needed the child logs the error itself, once).
+- `read_ms` — extracting the files; `chunk_ms` — chunking them, which includes
+  `tokenizer_ms`, the e5 tokenizer's load (0 when it was already loaded).
+- `embed_ms` — the embedding requests, including the wait for the child when
+  it was not ready yet; `db_ms` — the vector store's writes.
+
+On the first job after a start, `spawn_ms` and `tokenizer_ms` are paid at the
+same time, so `total_ms` comes close to the larger of `spawn_ms` and the
+reading and chunking, plus the embedding and the writes. The lines that
+describe each step (`Embedding child ready: ... ready in`, `Document chunked`,
+`Embedded batch via child`, `KB chunks added`) are still written.
+
 ## Tracing a bug (QA recipe)
 
 1. Reproduce the problem and note the time (remember: logs are in UTC).

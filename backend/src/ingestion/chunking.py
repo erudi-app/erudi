@@ -40,6 +40,7 @@ from typing import TYPE_CHECKING
 
 from src.core import config
 from src.core.logging import logger
+from src.ingestion import phase_timings
 from src.ingestion.types import ExtractedDocument
 
 if TYPE_CHECKING:  # pragma: no cover - typing only
@@ -122,7 +123,8 @@ def _loaded_tokenizer() -> Tokenizer:
         with _state:
             tokenizer = _tokenizer
         if tokenizer is None:
-            tokenizer = _load_frozen_tokenizer()
+            with phase_timings.timed("tokenizer"):
+                tokenizer = _load_frozen_tokenizer()
             with _state:
                 _tokenizer = tokenizer
                 _start_reaper_locked()
