@@ -44,7 +44,7 @@
     "babel-loader": "^10.1.1",
     "concurrently": "^10.0.7",
     "cross-env": "^10.1.0",
-    "css-loader": "^6.11.0",
+    "css-loader": "^7.1.5",
     "electron": "^44.10.0",
     "electron-builder": "^26.15.3",
     "eslint": "^8.57.1",
@@ -55,8 +55,8 @@
     "html-webpack-plugin": "^5.6.8",
     "jsdom": "^29.1.1",
     "node-loader": "^2.1.0",
-    "playwright": "^1.65.0",
-    "postcss": "^8.5.30",
+    "playwright": "^1.65.1",
+    "postcss": "^8.5.33",
     "postcss-loader": "^8.2.1",
     "prettier": "^3.10.1",
     "style-loader": "^4.0.0",
@@ -94,6 +94,18 @@
     "katex": "$katex",
     "@tailwindcss/typography": {
       "postcss-selector-parser": "^6.1.5"
+    },
+    "app-builder-lib": {
+      "minimatch": "^11.0.1"
+    },
+    "@electron/universal": {
+      "minimatch": "^11.0.1",
+      "dir-compare": {
+        "minimatch": "^3.1.5"
+      }
+    },
+    "filelist": {
+      "minimatch": "^11.0.1"
     }
   }
 }

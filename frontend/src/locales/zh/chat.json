@@ -178,7 +178,9 @@
       "documentTooLarge": "该文件过大（最大 50 MB）。",
       "tooManyFiles_one": "每次最多可添加 {{count}} 个文件。",
       "tooManyFiles_other": "每次最多可添加 {{count}} 个文件。",
-      "noFilePath": "该项目在磁盘上没有对应文件，无法添加。"
+      "noFilePath": "该项目在磁盘上没有对应文件，无法添加。",
+      "noVision": "此模型无法读取图片。请选择支持图片的模型后再添加图片。",
+      "noVisionAny": "所选模型均无法读取图片。请选择支持图片的模型后再添加图片。"
     },
     "attachFile": "添加文件",
     "attachFileHint": "添加文档或文件夹（也可拖放）",
