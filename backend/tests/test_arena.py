@@ -22,6 +22,7 @@ import src.agents.runner as agent_runner
 from src.core import config
 from src.database.generation_hints import FALLBACK_MAX_TOKENS
 from src.engines.base_engine import BaseEngine
+from src.agents.answer_notices import notice_text
 from src.agents.runner import ERROR_SENTINEL
 from src.domains.arena.repository import ArenaRepository
 from src.domains.arena.services import ArenaService
@@ -164,6 +165,38 @@ class TestArenaService:
         joined = _arena_text(result)
         assert "archive.zip" in joined
         assert joined.endswith("Answer.")
+
+    async def test_query_llm_stream_carries_the_notice_kinds(
+        self, test_db_session, mock_llm, monkeypatch, tmp_path
+    ):
+        """#764 - the panel's notes carry the kind they are translated from:
+        the images note, an unreadable file and a shortened one, in order."""
+        monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
+        monkeypatch.setattr(agent_runner, "build_chat_model", _fake_chat_model("Answer."))
+        service = ArenaService(test_db_session)
+        bad = tmp_path / "archive.zip"
+        bad.write_bytes(b"PK\x03\x04")
+        huge = tmp_path / "big.txt"
+        huge.write_text("A" * 30_000, encoding="utf-8")
+
+        payload = ArenaQueryPayload(
+            question="Read this",
+            images=["data:image/png;base64,AAA"],
+            attachments=[str(bad), str(huge)],
+        )
+        result = [t async for t in service.query_llm_stream(mock_llm.id, payload)]
+
+        notices = [e["notice"] for e in _arena_events(result) if e.get("notice")]
+        assert [n["kind"] for n in notices] == [
+            "images_ignored",
+            "attachments_unreadable",
+            "attachments_truncated",
+        ]
+        assert notices[1]["params"] == {"files": [{"name": "archive.zip", "reason": "unsupported"}]}
+        assert notices[2]["params"] == {"files": ["big.txt"]}
+        text = _arena_text(result)
+        assert all(f"*{notice_text(n['kind'], n['params'])}*" in text for n in notices)
+        assert text.endswith("Answer.")
 
     def test_payload_image_only_is_valid(self):
         # An image-only ask (no text) is a legitimate vision-model turn,

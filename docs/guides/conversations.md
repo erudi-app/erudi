@@ -267,7 +267,32 @@ message can still not fit; the turn is then refused with the "this message alone
 A file that cannot be read never fails the turn: its block says so in the model's view, and the
 answer opens with an italic notice naming the file and why - unsupported type, missing file, no
 extractable text (Erudi bundles no OCR tier, so images and scanned PDFs land here), or an extractor
-failure. Truncated files are named in the same notice.
+failure. Truncated files are named in a second notice of their own, and images the model cannot see
+in a notice before both.
+
+Each notice (`src/agents/answer_notices.py`) is one `answer` event carrying
+`notice: {"kind", "params"}`, its English line in italics, followed by a blank line:
+
+| Kind | `params` | Notice |
+|------|----------|--------|
+| `images_ignored` | — | The turn carries images and the model is not positively vision-capable |
+| `attachments_unreadable` | `files`: `[{"name", "reason"}]`, `reason` a key of `attachment_utils.REASON_TEXT`: `missing`, `unsupported`, `pending_vision`, `empty`, `unreadable`, `failed`, `empty_folder`, `too_many` (no `name`, with `limit`, the file cap); optional `more` | Files the reader could not turn into text |
+| `attachments_truncated` | `files`: the names; optional `more` | Files shortened to fit the budget |
+
+`files` names at most the first 20 files (`NOTICE_FILES_SHOWN`); `more` counts the others, said
+"and 3 more". The model never sees a notice: it is added to the answer the database stores, not to
+the conversation's state (the checkpointer holds the model's own answer only), and an Arena turn
+has no state. The English line is what the message content stores, what an older interface shows;
+the trace keeps `{"t": "notice", "kind", "params"}` per notice, pinned like an `error_detail`. The
+renderer rebuilds the English line from its `en` catalog, which says exactly what the backend writes
+(`backend/tests/fixtures/answer_notices.json` holds both sides to the same lines), finds it in the
+content, and shows `chat:notices.<kind>` in the interface language in its place
+(`frontend/src/utils/answerNotices.js`): the file names joined as a list of that language, each
+reason from `common:fileReasons.<reason>`, live, after a reload, after a language switch, in an
+Arena panel and in the Markdown export. A message stored before notices carried their kind, a kind
+or a reason the interface has no key for, or content that no longer holds the line shows as stored.
+A new kind is one entry of `NOTICE_KINDS`, `chat:notices.<kind>` in the four locales and a case of
+the fixture.
 
 Both marker paths are percent-encoded when stored — `%` as `%25`, then `]` as `%5D` — so a path
 holding a closing bracket cannot end its own marker; the renderer decodes them in
@@ -303,7 +328,7 @@ an image pasted before pasted images moved into the data folder stays where it i
 
 | `t` | Payload | Meaning |
 |-----|---------|---------|
-| `answer` | `text`; optional `curated_error` | A chunk of the answer, streamed. The curated line of a turn that ended without an answer (see below) carries `curated_error` |
+| `answer` | `text`; optional `curated_error` or `notice` | A chunk of the answer, streamed. The curated line of a turn that ended without an answer (see below) carries `curated_error`; a notice opening the answer (images ignored, an attachment unreadable or shortened, see [Attached documents](#attached-documents)) carries `notice` |
 | `thinking` | `text` | A chunk of the model's reasoning (see below) |
 | `tool_call` | `name`, `args` | The agent called a tool (`search_knowledge_base`, `web_search`, `calculator`) |
 | `tool_result` | `name`, `text` | What that tool returned |
@@ -517,7 +542,8 @@ stored. A new kind is one entry of
 An Arena panel shows them the same way: `POST /erudi/arena/{llm_id}/query` streams NDJSON
 (`application/x-ndjson`) limited to `answer` events and, for a failed turn, one `error` event
 shaped like a conversation's (`curated_error` included); the panel translates a curated turn and a
-generic failure's headline, in red, below what streamed.
+generic failure's headline, in red, below what streamed, and the notices opening the answer (their
+`answer` events carry `notice`).
 
 ### Parsing the stream
 
@@ -579,14 +605,15 @@ The user message is persisted immediately, so it shows up before generation star
 ends, the accumulated `answer` text becomes the assistant message's `content`, and the non-answer
 events (`thinking`, `tool_call`, `tool_result`, and `compaction` with `phase: "done"`) are stored in
 order as that message's `trace`, so the reasoning and tool panel and the compaction markers can be
-replayed on reload. The serialized trace is capped at 32 KB, drop-oldest, with a
+replayed on reload; so are the `notice` events of the notices opening the answer. The serialized trace is capped at 32 KB, drop-oldest, with a
 `{"t": "truncated"}` marker prepended when events were dropped; compaction events are never dropped
 (they lead the capped trace, ahead of the marker, which follows them only when a reasoning or tool
 step was dropped). Error turns persist their compaction events (a compaction is checkpointed even
 when the model call after it fails) and, for an unexpected failure, an `error_detail` event, or, for
-a curated one, its `curated_error` event — and no other trace. `error_detail` and `curated_error`
-are pinned like a compaction (a curated empty-answer line keeps its `curated_error` beside its
-reasoning). `compaction` with `phase: "start"`, `memory_warning` and `memory_reload` reach the wire but
+a curated one, its `curated_error` event, and their `notice` events — and no other trace.
+`error_detail`, `curated_error` and `notice` are pinned like a compaction (a curated empty-answer
+line keeps its `curated_error` beside its reasoning, an answer its notices whatever reasoning
+follows them). `compaction` with `phase: "start"`, `memory_warning` and `memory_reload` reach the wire but
 are **never** persisted: the first describes the turn in flight, and the memory events describe the
 machine's memory at that moment — an old conversation reopened on a bigger machine must not replay
 them.
@@ -950,7 +977,9 @@ it left open is closed, and its headings move two levels down (below the role he
 `######`). A **compaction** is a separator (`---`, a line saying how many earlier
 messages were summarized, `---`) where it took over: before the answer of the turn that ran it, after
 the answer a `/compact` run was saved on. The summary itself is not written. **Left out**: the
-model's reasoning and tool activity, and the failed turns. **Named, not embedded**: an image is
+model's reasoning and tool activity, and the failed turns. **In the interface language**: the
+notices opening an answer and a curated empty-answer line, as the conversation shows them
+(`labels.answer`, from the kinds their trace carries). **Named, not embedded**: an image is
 `> Image: <file name>` (`> Image` for a pasted one that has no file), an attached document is
 `> Attachment: <file name>`; no file path is written.
 

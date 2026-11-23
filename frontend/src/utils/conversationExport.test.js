@@ -1,5 +1,6 @@
 import { describe, it, expect, vi, afterEach } from "vitest";
-import { exportConversation } from "./conversationExport";
+import i18n from "../i18n";
+import { exportConversation, exportLabels } from "./conversationExport";
 
 // The renderer side of the Markdown export (#430): fetch the conversation,
 // build the text, hand title + text to the main process, which owns the dialog
@@ -79,5 +80,23 @@ describe("exportConversation", () => {
 
     await expect(exportConversation(7, { t: tr, fetcher })).rejects.toThrow(/ephemeral/);
     expect(save).not.toHaveBeenCalled();
+  });
+});
+
+describe("exportLabels", () => {
+  afterEach(async () => {
+    await i18n.changeLanguage("en");
+  });
+
+  it("writes an answer's notes in the interface language (#764)", async () => {
+    await i18n.changeLanguage("fr");
+    const english = "This model doesn't support images — your image was ignored.";
+    const trace = [{ t: "notice", kind: "images_ignored", params: {} }];
+
+    const answer = exportLabels(conversation, tr).answer(`*${english}*\n\nUn carré.`, trace);
+
+    expect(answer).toBe(
+      "*Ce modèle ne prend pas en charge les images : votre image a été ignorée.*\n\nUn carré."
+    );
   });
 });

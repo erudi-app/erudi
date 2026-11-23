@@ -96,6 +96,11 @@
   "fileReasons": {
     "unreadable": "damaged, protected by a password, or not the format its extension says",
     "empty": "no text",
-    "pending_vision": "no extractable text (a scan or an image), and text recognition is not bundled yet"
+    "pending_vision": "no extractable text (a scan or an image), and text recognition is not bundled yet",
+    "missing": "no longer at that location",
+    "unsupported": "a file type that is not supported",
+    "failed": "the app could not extract its text",
+    "empty_folder": "no supported document in this folder",
+    "too_many": "only the first {{limit}} files were attached"
   }
 }
