@@ -705,6 +705,10 @@ def _chosen_artifact_bytes(repo_info) -> int:
     GGUF engine: the resolver and the derived catalog only keep repos from which
     the downloader selects an artefact (``has_downloadable_gguf``).
 
+    The selection runs with ``log=False``: measuring a size (a catalog row, a
+    Hugging Face search hit, #761) downloads nothing, so the download's picks
+    are not logged.
+
     The selection helpers are imported lazily to keep this utility module free of a
     top-level dependency on the llms domain (utils sits below domains in the layering).
     """
@@ -718,7 +722,7 @@ def _chosen_artifact_bytes(repo_info) -> int:
     }
     all_repo_files = [s.rfilename for s in repo_info.siblings]
     uses_gguf = bool(getattr(config.LLM_Engine, "USES_GGUF", False))
-    selection = _select_download_files(all_repo_files, file_sizes, uses_gguf)
+    selection = _select_download_files(all_repo_files, file_sizes, uses_gguf, log=False)
     chosen = [f for f in selection.files if f in file_sizes]
     if not chosen:
         return sum(file_sizes.values())
