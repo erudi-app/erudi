@@ -221,7 +221,7 @@ export default function ModelPicker({
         ].join(" ")}
       >
         <span
-          className={`min-w-0 break-words text-left ${attention ? "text-red-400" : "text-emerald-300"}`}
+          className={`min-w-0 break-words text-left [overflow-wrap:anywhere] ${attention ? "text-red-400" : "text-emerald-300"}`}
           title={attention ? undefined : modelName}
         >
           {attention ? t("chat:conversationHeader.pickerAttention") : modelName}

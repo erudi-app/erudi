@@ -21,6 +21,9 @@ const MODELS = [
   { id: 2, name: "Beta" },
 ];
 
+const entries = () =>
+  screen.getAllByRole("button", { name: /^(Alpha|Beta)$/ }).filter((b) => b.closest("[id]"));
+
 const setup = () => {
   const onModelChange = vi.fn();
   render(
@@ -37,10 +40,9 @@ const setup = () => {
 };
 
 describe("HeaderBar model dropdown keyboard access (#766)", () => {
-  it("is a button announcing a menu popup", () => {
+  it("is a button announcing its expanded state", () => {
     const { trigger } = setup();
     expect(trigger.tagName).toBe("BUTTON");
-    expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
   });
 
@@ -49,13 +51,35 @@ describe("HeaderBar model dropdown keyboard access (#766)", () => {
     const { trigger, onModelChange } = setup();
     trigger.focus();
     await user.keyboard("{Enter}");
-    const items = screen.getAllByRole("menuitem");
+    const items = entries();
     expect(items.map((i) => i.tagName)).toEqual(["BUTTON", "BUTTON"]);
     await user.tab();
     await user.tab();
     await user.keyboard("{Enter}");
     expect(onModelChange).toHaveBeenCalledWith("Beta");
-    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.queryByText("Beta")).toBeNull();
+  });
+
+  it("closes on Escape pressed on the button itself", async () => {
+    const user = userEvent.setup();
+    const { trigger } = setup();
+    trigger.focus();
+    await user.keyboard("{Enter}");
+    expect(screen.getByText("Beta")).toBeTruthy();
+    await user.keyboard("{Escape}");
+    expect(screen.queryByText("Beta")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("closes when Tab leaves the list", async () => {
+    const user = userEvent.setup();
+    const { trigger } = setup();
+    trigger.focus();
+    await user.keyboard("{Enter}");
+    await user.tab();
+    await user.tab();
+    await user.tab();
+    expect(screen.queryByText("Beta")).toBeNull();
   });
 
   it("closes on Escape and refocuses the trigger", async () => {
@@ -65,7 +89,7 @@ describe("HeaderBar model dropdown keyboard access (#766)", () => {
     await user.keyboard("{Enter}");
     await user.tab();
     await user.keyboard("{Escape}");
-    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.queryByText("Beta")).toBeNull();
     expect(document.activeElement).toBe(trigger);
   });
 });

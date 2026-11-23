@@ -27,6 +27,8 @@ const targets = [
 
 afterEach(cleanup);
 
+const targetButtons = () => screen.getAllByRole("button", { name: /^Base / });
+
 const setup = () => {
   const onRebind = vi.fn();
   render(<ModelCard model={orphan} type="local" rebindTargets={targets} onRebind={onRebind} />);
@@ -34,15 +36,16 @@ const setup = () => {
 };
 
 describe("ModelCard re-bind menu keyboard access (#766)", () => {
-  it("announces a menu popup and its expanded state", async () => {
+  it("announces its expanded state and the list it controls", async () => {
     const user = userEvent.setup();
     const { trigger } = setup();
-    expect(trigger.getAttribute("aria-haspopup")).toBe("menu");
     expect(trigger.getAttribute("aria-expanded")).toBe("false");
     trigger.focus();
     await user.keyboard("{Enter}");
     expect(trigger.getAttribute("aria-expanded")).toBe("true");
-    expect(screen.getByRole("menu")).toBeTruthy();
+    const list = document.getElementById(trigger.getAttribute("aria-controls"));
+    expect(list).toBeTruthy();
+    expect(list.textContent).toContain("Base A");
   });
 
   it("reaches each target with Tab and picks one with Enter, closing the menu", async () => {
@@ -50,7 +53,7 @@ describe("ModelCard re-bind menu keyboard access (#766)", () => {
     const { onRebind, trigger } = setup();
     trigger.focus();
     await user.keyboard("{Enter}");
-    const items = screen.getAllByRole("menuitem");
+    const items = targetButtons();
     expect(items.map((i) => i.tagName)).toEqual(["BUTTON", "BUTTON"]);
     await user.tab();
     expect(document.activeElement).toBe(items[0]);
@@ -58,7 +61,37 @@ describe("ModelCard re-bind menu keyboard access (#766)", () => {
     expect(document.activeElement).toBe(items[1]);
     await user.keyboard("{Enter}");
     expect(onRebind).toHaveBeenCalledWith(orphan, targets[1]);
-    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.queryByText("Base A")).toBeNull();
+  });
+
+  it("closes on Escape pressed on the trigger itself, focus staying there", async () => {
+    const user = userEvent.setup();
+    const { trigger } = setup();
+    trigger.focus();
+    await user.keyboard("{Enter}");
+    await user.keyboard("{Escape}");
+    expect(screen.queryByText("Base A")).toBeNull();
+    expect(document.activeElement).toBe(trigger);
+  });
+
+  it("closes when Tab leaves the list", async () => {
+    const user = userEvent.setup();
+    const { trigger } = setup();
+    trigger.focus();
+    await user.keyboard("{Enter}");
+    await user.tab();
+    await user.tab();
+    await user.tab();
+    expect(screen.queryByText("Base A")).toBeNull();
+  });
+
+  it("closes on a click outside", async () => {
+    const user = userEvent.setup();
+    const { trigger } = setup();
+    await user.click(trigger);
+    expect(screen.getByText("Base A")).toBeTruthy();
+    await user.click(document.body);
+    expect(screen.queryByText("Base A")).toBeNull();
   });
 
   it("closes on Escape and returns the focus to the trigger", async () => {
@@ -68,7 +101,7 @@ describe("ModelCard re-bind menu keyboard access (#766)", () => {
     await user.keyboard("{Enter}");
     await user.tab();
     await user.keyboard("{Escape}");
-    expect(screen.queryByRole("menu")).toBeNull();
+    expect(screen.queryByText("Base A")).toBeNull();
     expect(document.activeElement).toBe(trigger);
   });
 });

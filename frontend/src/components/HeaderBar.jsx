@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import PropTypes from "prop-types";
 import { motion, AnimatePresence } from "framer-motion";
 import { ChevronDown, HelpCircle, SlidersHorizontal } from "lucide-react";
@@ -74,6 +74,7 @@ export default function HeaderBar({
   const rootRef = useRef(null);
   const dropdownRef = useRef(null);
   const dropdownTriggerRef = useRef(null);
+  const dropdownListId = useId();
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [tier, setTier] = useState("lg");
 
@@ -120,6 +121,21 @@ export default function HeaderBar({
       document.removeEventListener("mousedown", handleClickOutside);
     };
   }, []);
+
+  // Escape closes the model list from the button or from an entry and gives
+  // the focus back to the button.
+  useEffect(() => {
+    if (!isDropdownOpen) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape" && dropdownRef.current?.contains(document.activeElement)) {
+        e.stopPropagation();
+        setIsDropdownOpen(false);
+        dropdownTriggerRef.current?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [isDropdownOpen]);
 
   const isXs = tier === "xs";
   const isSm = tier === "sm" || tier === "xs";
@@ -229,12 +245,19 @@ export default function HeaderBar({
               {t("chat:header.chatWith")}
             </h3>
 
-            <div ref={dropdownRef} className="relative inline-flex max-w-[100%]">
+            <div
+              ref={dropdownRef}
+              className="relative inline-flex max-w-[100%]"
+              onBlur={(e) => {
+                // Tab leaving the button and its list closes the list.
+                if (!e.currentTarget.contains(e.relatedTarget)) setIsDropdownOpen(false);
+              }}
+            >
               <button
                 ref={dropdownTriggerRef}
                 type="button"
                 aria-label={t("chat:header.selectModel")}
-                aria-haspopup="menu"
+                aria-controls={isDropdownOpen ? dropdownListId : undefined}
                 aria-expanded={isDropdownOpen}
                 onClick={() => !disabled && setIsDropdownOpen(!isDropdownOpen)}
                 className={[
@@ -270,21 +293,13 @@ export default function HeaderBar({
               {/* Custom Dropdown */}
               {isDropdownOpen && (
                 <div
-                  role="menu"
-                  onKeyDown={(e) => {
-                    if (e.key === "Escape") {
-                      e.stopPropagation();
-                      setIsDropdownOpen(false);
-                      dropdownTriggerRef.current?.focus();
-                    }
-                  }}
+                  id={dropdownListId}
                   className="absolute top-full left-0 right-0 mt-1 bg-[#2a2a2a] border border-white/20 rounded-lg shadow-lg z-50 max-h-60 overflow-y-auto"
                 >
                   {models.map((m) => (
                     <button
                       key={m.id ?? m.name}
                       type="button"
-                      role="menuitem"
                       className="block w-full px-3 py-2 text-left hover:bg-white/10 focus:outline-none focus-visible:bg-white/10 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-400/60 text-gray-100 border-b border-white/10 last:border-b-0"
                       onClick={() => {
                         onModelChange?.(m.name);

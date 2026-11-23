@@ -224,6 +224,10 @@ describe("ModelPicker name layout (#754)", () => {
     expect(nameSpan.className).not.toContain("truncate");
     expect(nameSpan.className).toContain("break-words");
     expect(nameSpan.getAttribute("title")).toBe("Qwen3-4B");
+    // max-w-full on the button, with its negative margin, made it narrower than
+    // its content (the measured cause of the ellipsis).
+    expect(trigger().className).not.toContain("max-w-full");
+    expect(trigger().parentElement.className).not.toContain("max-w-full");
   });
 
   it("does the same in the attention state", () => {

@@ -330,15 +330,20 @@ export default function ChatCollapsibleSection({
   };
 
   return (
+    // While disabled (an answer is streaming) nothing in the section may take
+    // the focus or be activated: `inert` covers the buttons, the search box and
+    // the rows at once; the buttons also carry `disabled` so they read as such.
     <div
+      inert={disabled}
       className={`text-gray-200 h-full flex flex-col ${disabled ? "pointer-events-none opacity-50 select-none" : ""}`}
     >
-      <div className="flex items-center justify-between px-4 py-3 hover:bg-gray-700/30 flex-shrink-0">
+      <div className="flex items-center justify-between flex-shrink-0">
         <button
           type="button"
           aria-expanded={open}
+          disabled={disabled}
           onClick={() => setOpen(!open)}
-          className={`flex flex-1 items-center gap-2 text-left rounded ${FOCUS_RING}`}
+          className={`flex flex-1 items-center gap-2 px-4 py-3 text-left hover:bg-gray-700/30 ${FOCUS_RING}`}
         >
           {open ? (
             <ChevronDown aria-hidden="true" className="w-4 h-4" />
@@ -348,9 +353,10 @@ export default function ChatCollapsibleSection({
           <span className="font-semibold">{title}</span>
         </button>
 
-        <div className="flex gap-3">
+        <div className="flex gap-3 px-4 py-3">
           <button
             type="button"
+            disabled={disabled}
             aria-label={t("chat:history.refreshConversations")}
             className={`rounded-full p-1 -m-1 hover:opacity-70 hover:bg-gray-600/30 ${FOCUS_RING}`}
             onClick={handleRefresh}
@@ -359,6 +365,7 @@ export default function ChatCollapsibleSection({
           </button>
           <button
             type="button"
+            disabled={disabled}
             aria-label={t("chat:history.newChat")}
             className={`rounded-full p-1 -m-1 hover:opacity-70 hover:bg-gray-600/30 ${FOCUS_RING}`}
             onClick={handleNewChat}
@@ -392,6 +399,7 @@ export default function ChatCollapsibleSection({
             {query && (
               <button
                 type="button"
+                disabled={disabled}
                 aria-label={t("chat:history.clearSearch")}
                 onClick={() => setQuery("")}
                 className={`absolute right-2 top-1/2 -translate-y-1/2 rounded text-gray-400 hover:text-gray-200 ${FOCUS_RING}`}

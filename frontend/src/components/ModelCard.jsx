@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import PropTypes from "prop-types";
 import { useTranslation } from "react-i18next";
 import GradientBox from "./GradientBox";
@@ -56,6 +56,7 @@ function ModelCard({
   const [rebindOpen, setRebindOpen] = useState(false);
   const rebindTriggerRef = useRef(null);
   const rebindRootRef = useRef(null);
+  const rebindListId = useId();
   // Escape closes the re-bind menu and gives the focus back to its trigger.
   const closeRebind = (refocus) => {
     setRebindOpen(false);
@@ -69,8 +70,15 @@ function ModelCard({
         closeRebind(true);
       }
     };
+    const onMouseDown = (e) => {
+      if (!rebindRootRef.current?.contains(e.target)) closeRebind(false);
+    };
     document.addEventListener("keydown", onKey);
-    return () => document.removeEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onMouseDown);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onMouseDown);
+    };
   }, [rebindOpen]);
   const unavailable = model?.runnable === false;
   // Orphan-model UX (#225/#208): a KB assistant uses its base model's weights
@@ -241,11 +249,20 @@ function ModelCard({
                 <Info className="w-4 h-4 text-white" />
               </button>
               {isAssistant && weightsMissing && (
-                <div ref={rebindRootRef} className="relative ml-auto">
+                <div
+                  ref={rebindRootRef}
+                  className="relative ml-auto"
+                  onBlur={(e) => {
+                    // Focus leaving the trigger and its list (Tab past the last
+                    // entry) closes the list.
+                    if (rebindOpen && !e.currentTarget.contains(e.relatedTarget))
+                      closeRebind(false);
+                  }}
+                >
                   <button
                     ref={rebindTriggerRef}
                     type="button"
-                    aria-haspopup="menu"
+                    aria-controls={rebindOpen ? rebindListId : undefined}
                     aria-expanded={rebindOpen}
                     className="inline-flex focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60 items-center gap-1 px-2 py-1 text-xs font-semibold bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 rounded-lg transition-colors"
                     onClick={() => setRebindOpen((o) => !o)}
@@ -256,7 +273,7 @@ function ModelCard({
                   </button>
                   {rebindOpen && (
                     <div
-                      role="menu"
+                      id={rebindListId}
                       className="absolute bottom-full right-0 mb-1 w-48 bg-[#2a2a2a] border border-white/20 rounded-lg shadow-lg z-20 max-h-40 overflow-y-auto"
                     >
                       {rebindTargets.length === 0 ? (
@@ -268,7 +285,6 @@ function ModelCard({
                           <button
                             key={target.id}
                             type="button"
-                            role="menuitem"
                             className="block w-full px-3 py-2 text-left text-xs hover:bg-white/10 focus:outline-none focus-visible:bg-white/10 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-400/60 text-gray-100 border-b border-white/10 last:border-b-0"
                             onClick={() => {
                               setRebindOpen(false);

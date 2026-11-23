@@ -77,6 +77,19 @@ describe("ChatCollapsibleSection keyboard access (#766)", () => {
     expect(toggle.getAttribute("aria-expanded")).toBe("false");
   });
 
+  it("takes every control out of reach while disabled (an answer is streaming)", async () => {
+    const user = userEvent.setup();
+    const { container } = render(
+      <ChatCollapsibleSection title="Previous Chats" items={items} disabled />
+    );
+    expect(container.firstChild.hasAttribute("inert")).toBe(true);
+    for (const name of [/Previous Chats/, "Refresh conversations", "New chat"]) {
+      expect(screen.getByRole("button", { name }).disabled).toBe(true);
+    }
+    await user.click(screen.getByRole("button", { name: "New chat" }));
+    expect(navigateMock).not.toHaveBeenCalled();
+  });
+
   it("clears the search with a button", async () => {
     const user = userEvent.setup();
     render(<ChatCollapsibleSection title="Previous Chats" items={items} />);
