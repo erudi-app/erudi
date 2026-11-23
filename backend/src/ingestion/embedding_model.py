@@ -42,6 +42,7 @@ from typing import Optional
 from huggingface_hub import try_to_load_from_cache
 
 from src.core import config
+from src.core.hf_http import is_offline_error
 from src.core.logging import logger
 
 EMBEDDING_MODEL_ID = "intfloat/multilingual-e5-small"
@@ -61,21 +62,6 @@ REQUIRED_FILES = (
 )
 
 OFFLINE_ERROR_MESSAGE = "no internet connection — the embedding model could not be downloaded"
-
-# Lowercased substrings that mark a network-down failure anywhere in the
-# exception chain. huggingface_hub re-wraps connection errors liberally, so
-# matching by message (defensively, alongside types) is deliberate.
-_OFFLINE_MESSAGE_MARKERS = (
-    "getaddrinfo",
-    "nodename nor servname",
-    "name or service not known",
-    "temporary failure in name resolution",
-    "network is unreachable",
-    "offline mode is enabled",
-    "outgoing traffic has been disabled",
-    "connection error",
-    "couldn't connect to 'https://huggingface.co'",
-)
 
 _lock = threading.Lock()
 _state = {"downloading": False, "error": None}
@@ -167,27 +153,9 @@ def _fetch() -> None:
     )
 
 
-def _is_offline_error(exc: BaseException) -> bool:
-    """True if the exception chain looks like a no-network failure (#164)."""
-    from huggingface_hub.errors import OfflineModeIsEnabled
-    from requests.exceptions import ConnectionError as RequestsConnectionError
-
-    seen: set[int] = set()
-    current: Optional[BaseException] = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, (OfflineModeIsEnabled, RequestsConnectionError)):
-            return True
-        message = str(current).lower()
-        if any(marker in message for marker in _OFFLINE_MESSAGE_MARKERS):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
-
-
 def _describe_download_error(exc: BaseException) -> str:
     """Map raw hub failures to a message the user can act on."""
-    if _is_offline_error(exc):
+    if is_offline_error(exc):
         return OFFLINE_ERROR_MESSAGE
     return str(exc)
 
