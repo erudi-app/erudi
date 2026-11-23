@@ -3204,3 +3204,20 @@ class TestE2EConversationsRealMLX:
             assert MLX_Engine._model["proc"].is_alive()
         finally:
             MLX_Engine.cleanup()
+
+
+class TestHardwareDetectionLogging:
+    """The renderer polls diagnostics every minute; the detection line is
+    written once per process, not once per poll."""
+
+    def test_detected_line_is_info_once_then_debug(self, caplog, monkeypatch):
+        monkeypatch.setattr(MLX_Engine, "_hardware_logged", False, raising=False)
+        monkeypatch.setattr(MLX_Engine, "_detect_apple_silicon_chip", classmethod(lambda cls: "M4"))
+        with caplog.at_level(logging.DEBUG, logger="erudi"):
+            MLX_Engine.get_hardware_info()
+            MLX_Engine.get_hardware_info()
+            MLX_Engine.get_hardware_info()
+        detected = [r for r in caplog.records if "MLX hardware detected" in r.getMessage()]
+        assert len(detected) == 3
+        assert [r.levelno for r in detected].count(logging.INFO) == 1
+        assert detected[0].levelno == logging.INFO

@@ -85,7 +85,7 @@ Backend → PyInstaller bundle → copied into `frontend/backend/` → packaged 
 ```
 backend/src/
 ├── main.py              FastAPI app = api.lifespan + register_routers
-├── core/                api.py (lifespan, CORS, exception handler), config, logging, exceptions, health
+├── core/                api.py (lifespan, CORS, exception handler), config, hf_http, logging, exceptions, health
 ├── engines/             BaseEngine + MLX/CUDA/CPU — single singleton model in memory
 ├── agents/              LangChain layer: runner (create_agent/turn), prompts, checkpoint (AsyncPostgresSaver)
 ├── domains/<name>/      endpoints.py → services.py → repository.py → entities/ (Pydantic in schemas.py)

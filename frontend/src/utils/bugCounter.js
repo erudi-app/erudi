@@ -44,10 +44,10 @@
 
 /**
  * Lowercased substrings that mark a no-network failure reaching
- * huggingface.co, mirroring the two backend detectors this predicate has to
- * agree with: `backend/src/ingestion/embedding_model.py`'s
- * `_OFFLINE_MESSAGE_MARKERS` and `backend/src/domains/llms/services.py`'s
- * (same name). Kept as one list here since both scopes below draw from it.
+ * huggingface.co, mirroring the backend detector this predicate has to agree
+ * with: `backend/src/core/hf_http.py`'s `OFFLINE_MESSAGE_MARKERS`, shared by
+ * the model download and the embedding-model download. Kept as one list here
+ * since both scopes below draw from it.
  */
 const OFFLINE_NETWORK_MARKERS = [
   "getaddrinfo",
@@ -89,9 +89,9 @@ const ENVIRONMENTAL_PATTERNS = [
     name: "hf_download_offline",
     // backend/src/domains/llms/services.py's OFFLINE_DOWNLOAD_MESSAGE
     // ("you appear to be offline - check your connection and retry"),
-    // raised as a 503 HuggingFaceAPIException (services.py:811, guarded by
-    // `_is_offline_download_error`) when a model download starts with no
-    // network. Matches both the backend.log record ("... -> 503
+    // raised as a 503 HuggingFaceAPIException (`download_llm`, guarded by
+    // `src.core.hf_http.is_offline_error`) when a model download meets no
+    // network, or a network that let it down past huggingface_hub's retries. Matches both the backend.log record ("... -> 503
     // HUGGINGFACE_API_ERROR: you appear to be offline - check your
     // connection and retry") and its renderer-side echoes: the api.failure
     // entry `tracedFetch`/`APIClient` log for that response, and

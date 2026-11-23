@@ -553,6 +553,7 @@ export default function ArenaPage() {
             <QuestionInput
               onSend={handleAsk}
               disabled={loading}
+              severalModels
               canAttachImages={panels.some((p) =>
                 canAttachImages(models.find((m) => m.name === p.selectedModel))
               )}
