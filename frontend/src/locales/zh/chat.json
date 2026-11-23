@@ -306,7 +306,6 @@
     "copy": "复制详细信息"
   },
   "errors": {
-    "network": "网络错误",
     "loadModels": "加载模型失败：{{error}}",
     "loadConversations": "加载对话失败：{{error}}",
     "refreshConversations": "刷新对话失败：{{error}}",

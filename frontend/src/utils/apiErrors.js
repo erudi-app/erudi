@@ -62,6 +62,30 @@ export function apiErrorCodeMessage(body) {
   return code && Object.hasOwn(API_ERROR_KEYS, code) ? i18n.t(API_ERROR_KEYS[code]) : null;
 }
 
+/** `apiErrorMessage` for a failed `fetch` Response, its body read as JSON if it is. */
+export async function responseErrorMessage(response) {
+  let body = null;
+  try {
+    body = await response.json();
+  } catch {
+    // not JSON (or no body): the status says it
+  }
+  return apiErrorMessage(response.status, body);
+}
+
+/**
+ * The text a page shows for a caught request error: a request that got no
+ * answer (`TypeError`, the runtime's English "Failed to fetch") says the
+ * backend is not responding; any other error already carries a translated
+ * message (the client's, or the page's own).
+ */
+export function requestErrorText(err) {
+  if (err instanceof TypeError || !err?.message) {
+    return i18n.t("errors:connection.unreachable.title");
+  }
+  return err.message;
+}
+
 /** `apiErrorMessage` for a body still in text form (JSON or not). */
 export function apiErrorMessageFromText(status, text) {
   return apiErrorMessage(status, parseJson(text));

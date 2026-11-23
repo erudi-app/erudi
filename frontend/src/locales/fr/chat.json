@@ -306,7 +306,6 @@
     "copy": "Copier les détails"
   },
   "errors": {
-    "network": "Erreur réseau",
     "loadModels": "Impossible de charger les modèles : {{error}}",
     "loadConversations": "Impossible de charger les conversations : {{error}}",
     "refreshConversations": "Impossible d'actualiser les conversations : {{error}}",

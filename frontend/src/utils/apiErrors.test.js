@@ -7,6 +7,8 @@ import {
   apiErrorDetailFromText,
   apiErrorMessage,
   apiErrorMessageFromText,
+  requestErrorText,
+  responseErrorMessage,
 } from "./apiErrors";
 
 const appError = (type, message) => ({ success: false, error: { type, message } });
@@ -45,6 +47,27 @@ describe("apiErrorMessage (#780)", () => {
       fr.api.codes.databaseBusy
     );
     expect(apiErrorMessageFromText(502, "<html>Bad Gateway</html>")).toBe("Erreur API : 502");
+  });
+});
+
+describe("responseErrorMessage and requestErrorText", () => {
+  it("reads a failed response's code, or its status when the body is not JSON", async () => {
+    const busy = { status: 503, json: async () => appError("DATABASE_BUSY", "x") };
+    expect(await responseErrorMessage(busy)).toBe(i18n.t("errors:api.codes.databaseBusy"));
+    const html = {
+      status: 502,
+      json: async () => {
+        throw new SyntaxError("not JSON");
+      },
+    };
+    expect(await responseErrorMessage(html)).toBe(i18n.t("errors:api.httpStatus", { status: 502 }));
+  });
+
+  it("says a request that got no answer in the interface language, not the runtime's text", () => {
+    expect(requestErrorText(new TypeError("Failed to fetch"))).toBe(
+      i18n.t("errors:connection.unreachable.title")
+    );
+    expect(requestErrorText(new Error("Erreur API : 500"))).toBe("Erreur API : 500");
   });
 });
 

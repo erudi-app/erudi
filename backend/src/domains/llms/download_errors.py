@@ -81,6 +81,7 @@ def download_error_code(exc: BaseException) -> str:
     )
 
     from src.core.exceptions import HuggingFaceAPIException
+    from src.core.hf_http import is_offline_error
     from src.domains.llms.services import OFFLINE_DOWNLOAD_MESSAGE
 
     for current in _chain(exc):
@@ -106,4 +107,8 @@ def download_error_code(exc: BaseException) -> str:
                 return "not_found"
             if status == 429:
                 return "rate_limited"
+    # A network failure that reached here without download_llm's rename (the
+    # progress thread, a finalization step): the Hub downloads' one predicate.
+    if is_offline_error(exc):
+        return "offline"
     return "unexpected"

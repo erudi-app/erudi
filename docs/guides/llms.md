@@ -247,7 +247,7 @@ chain.
 
 | `error_code` | When |
 |--------------|------|
-| `offline` | No network reaches the Hub (`OFFLINE_DOWNLOAD_MESSAGE`) |
+| `offline` | No network reaches the Hub: `OFFLINE_DOWNLOAD_MESSAGE`, or any error `hf_http.is_offline_error` reads as a network failure |
 | `disk_full` | An `OSError` with `ENOSPC` while writing the files |
 | `gated` | The repository needs an account (`GatedRepoError`, HTTP 401/403) |
 | `not_found` | The repository or a file of it does not exist (`RepositoryNotFoundError`, `EntryNotFoundError`, HTTP 404); the Hub also answers 401 for a missing repository, which keeps this code |

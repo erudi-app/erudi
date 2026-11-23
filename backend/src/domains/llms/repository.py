@@ -495,21 +495,6 @@ class Download_Job_Repository:
         job.progress = 100.0
         self.db.flush()
 
-    def mark_failed(self, job: DownloadJobModel, error_message: str) -> None:
-        """Mark download job as failed and set error message.
-
-        Args:
-            job: Download job entity to mark as failed.
-            error_message: Error message describing the failure.
-
-        Note:
-            Does not commit. Caller must handle db.commit().
-        """
-        logger.error(f"Marking job {job.id} as failed: {error_message}")
-        job.status = "failed"
-        job.error_message = error_message
-        self.db.flush()
-
     def cleanup_job_files(self, job: DownloadJobModel) -> None:
         """Clean up temporary and final model files for failed/cancelled job.
 

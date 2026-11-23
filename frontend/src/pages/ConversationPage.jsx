@@ -54,7 +54,7 @@ import {
 import { formatBytes } from "../utils/formatBytes";
 import { withCuratedTurn } from "../utils/curatedTurns";
 import { withNotices } from "../utils/answerNotices";
-import { apiErrorCodeMessage } from "../utils/apiErrors";
+import { apiErrorCodeMessage, requestErrorText } from "../utils/apiErrors";
 import {
   automaticCompactions,
   errorDetailOf,
@@ -1248,7 +1248,7 @@ export default function ConversationPage() {
       await exportConversation(id, { t });
     } catch (err) {
       log.error("Conversation export failed", err);
-      setExportError(t("chat:export.failed", { error: err.message }));
+      setExportError(t("chat:export.failed", { error: requestErrorText(err) }));
     }
   };
 

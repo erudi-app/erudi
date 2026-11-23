@@ -18,6 +18,7 @@ import { tracedFetch } from "../services/api/client";
 import { createLogger } from "../utils/logger";
 import { conversationPath } from "../utils/routes";
 import { exportConversation } from "../utils/conversationExport";
+import { requestErrorText, responseErrorMessage } from "../utils/apiErrors";
 import { abortTurns } from "../utils/conversationTurns";
 const log = createLogger("ChatCollapsibleSection");
 // Route of the new-chat screen (mirrors the Sidebar link).
@@ -143,13 +144,13 @@ export default function ChatCollapsibleSection({
       });
 
       if (!res.ok) {
-        throw new Error(res.status);
+        throw new Error(await responseErrorMessage(res));
       }
       changeResults((rows) => rows.map((c) => (c.id === id ? { ...c, name } : c)));
       onRename?.(id, name);
     } catch (err) {
       log.error(err);
-      alert(t("chat:history.renameFailed", { error: err.message }));
+      alert(t("chat:history.renameFailed", { error: requestErrorText(err) }));
     } finally {
       setEditingId(null);
     }
@@ -175,14 +176,14 @@ export default function ChatCollapsibleSection({
       });
 
       if (!res.ok) {
-        throw new Error("Delete failed");
+        throw new Error(await responseErrorMessage(res));
       }
 
       changeResults((rows) => rows.filter((c) => c.id !== id));
       onDelete?.(id);
     } catch (err) {
       log.error(err);
-      alert(t("chat:history.deleteFailed", { error: err.message }));
+      alert(t("chat:history.deleteFailed", { error: requestErrorText(err) }));
     } finally {
       deletesInFlight.delete(String(id));
       setEditingId(null);
@@ -196,7 +197,7 @@ export default function ChatCollapsibleSection({
       await exportConversation(id, { t });
     } catch (err) {
       log.error(err);
-      setErrorMessage(t("chat:export.failed", { error: err.message }));
+      setErrorMessage(t("chat:export.failed", { error: requestErrorText(err) }));
     }
   };
 
@@ -316,7 +317,7 @@ export default function ChatCollapsibleSection({
       log.error("Failed to refresh conversations:", err);
       setErrorMessage(
         t("chat:errors.refreshConversations", {
-          error: err.message || t("chat:errors.network"),
+          error: requestErrorText(err),
         })
       );
     } finally {

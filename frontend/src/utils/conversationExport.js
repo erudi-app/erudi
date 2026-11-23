@@ -2,6 +2,7 @@ import { API_BASE_URL } from "../config/api.js";
 import { tracedFetch } from "../services/api/client";
 import { formatDate } from "../i18n/format";
 import { withNotices } from "./answerNotices";
+import { responseErrorMessage } from "./apiErrors";
 import { buildConversationMarkdown } from "./conversationMarkdown";
 import { withCuratedTurn } from "./curatedTurns";
 
@@ -47,7 +48,8 @@ export async function exportConversation(id, { t, fetcher = tracedFetch }) {
   }
   const response = await fetcher(`${API_BASE_URL}/conversations/${id}`);
   if (!response.ok) {
-    throw new Error(`Could not read the conversation (HTTP ${response.status})`);
+    // Shown to the user: the interface's sentence for the failure (#780).
+    throw new Error(await responseErrorMessage(response));
   }
   const conversation = await response.json();
   // An ephemeral conversation (#428) is never written to a file: the header

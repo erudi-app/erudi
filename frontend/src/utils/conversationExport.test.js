@@ -55,7 +55,8 @@ describe("exportConversation", () => {
 
   it("throws when the conversation cannot be fetched, and never opens the dialog", async () => {
     const { save, fetcher } = setup({ ok: false });
-    await expect(exportConversation(7, { t: tr, fetcher })).rejects.toThrow();
+    // The interface's sentence for the status, never English text (#780).
+    await expect(exportConversation(7, { t: tr, fetcher })).rejects.toThrow("API Error: 500");
     expect(save).not.toHaveBeenCalled();
   });
 

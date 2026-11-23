@@ -306,7 +306,6 @@
     "copy": "Copy details"
   },
   "errors": {
-    "network": "Network error",
     "loadModels": "Failed to load models: {{error}}",
     "loadConversations": "Failed to load conversations: {{error}}",
     "refreshConversations": "Failed to refresh conversations: {{error}}",

@@ -24,6 +24,7 @@ import useConversationSettings, { DRAFT } from "../shared/hooks/useConversationS
 import CommandNotice from "../components/CommandNotice";
 import ToggleSwitch from "../components/ToggleSwitch";
 import { markEphemeral } from "../utils/ephemeralConversations";
+import { requestErrorText } from "../utils/apiErrors";
 
 const log = createLogger("ChatPage");
 
@@ -108,9 +109,7 @@ export default function ChatPage() {
       })
       .catch((err) => {
         log.error("Failed to fetch the local models", err);
-        setErrorMessage(
-          t("chat:errors.loadModels", { error: err.message || t("chat:errors.network") })
-        );
+        setErrorMessage(t("chat:errors.loadModels", { error: requestErrorText(err) }));
       });
   }, [t]);
 
@@ -139,9 +138,7 @@ export default function ChatPage() {
         setConversations(sorted);
       } catch (err) {
         log.error("Failed to fetch conversations:", err);
-        setErrorMessage(
-          t("chat:errors.loadConversations", { error: err.message || t("chat:errors.network") })
-        );
+        setErrorMessage(t("chat:errors.loadConversations", { error: requestErrorText(err) }));
       }
     };
 
@@ -240,9 +237,7 @@ export default function ChatPage() {
         });
       } catch (err) {
         log.error("Failed to start conversation:", err);
-        setErrorMessage(
-          t("chat:errors.startConversation", { error: err.message || t("chat:errors.network") })
-        );
+        setErrorMessage(t("chat:errors.startConversation", { error: requestErrorText(err) }));
       }
     },
     [llm, navigate, ready, createPayload, ephemeral, t]
@@ -265,9 +260,7 @@ export default function ChatPage() {
       setConversations(sorted);
     } catch (err) {
       log.error("Failed to refresh conversations:", err);
-      setErrorMessage(
-        t("chat:errors.refreshConversations", { error: err.message || t("chat:errors.network") })
-      );
+      setErrorMessage(t("chat:errors.refreshConversations", { error: requestErrorText(err) }));
     }
   };
 

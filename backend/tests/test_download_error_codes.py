@@ -191,6 +191,11 @@ class TestDownloadErrorCode:
             llm_services._assert_runnable("org/model")
         assert download_error_code(caught.value) == "not_runnable"
 
+    def test_a_network_error_download_llm_did_not_rename_is_offline(self):
+        # The predicate hf_http shares with the embedding download (#747).
+        error = httpx.ConnectError("All connection attempts failed")
+        assert download_error_code(error) == "offline"
+
     def test_a_disk_full_error_wrapped_in_another_is_still_disk_full(self):
         try:
             try:

@@ -350,30 +350,6 @@ class TestDownload_Job_Repository:
         assert job.status == "completed"
         assert job.progress == 100.0
 
-    def test_mark_failed(self, test_db_session):
-        """Test marking job as failed with error message.
-
-        Args:
-            test_db_session: Database session fixture.
-        """
-        repo = Download_Job_Repository(test_db_session)
-
-        job = repo.create(
-            remote_model_id="test/model",
-            local_model_id=None,
-            remote_model_link="https://hf.co/test",
-            temp_local_model_link="/temp/1",
-            final_local_model_link="/models/1",
-        )
-        test_db_session.commit()
-
-        error_msg = "Network timeout"
-        repo.mark_failed(job, error_msg)
-        test_db_session.commit()
-
-        assert job.status == "failed"
-        assert job.error_message == error_msg
-
     def test_get_most_recent_active(self, test_db_session):
         """Test finding the most recently updated active job.
 
