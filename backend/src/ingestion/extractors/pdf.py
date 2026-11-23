@@ -13,7 +13,7 @@ from pathlib import Path
 
 from src.core.logging import logger
 from src.ingestion.cleaning import clean_extracted_text
-from src.ingestion.types import ExtractedDocument, ExtractedPage
+from src.ingestion.types import ExtractedDocument, ExtractedPage, UnreadableDocumentError
 
 
 class PdfExtractor:
@@ -24,14 +24,26 @@ class PdfExtractor:
     def extract(self, path: Path) -> ExtractedDocument:
         # Function scope: pypdf stays out of the boot heap until the first PDF (#621).
         from pypdf import PdfReader
+        from pypdf.errors import FileNotDecryptedError, PdfReadError
 
-        reader = PdfReader(str(path))
+        try:
+            reader = PdfReader(str(path))
+            raw_pages = [page.extract_text() or "" for page in reader.pages]
+        except FileNotDecryptedError as e:
+            # Locked by a password the user did not give: nothing can be read.
+            raise UnreadableDocumentError(
+                f"PDF protected by a password ({type(e).__name__})"
+            ) from e
+        except PdfReadError as e:
+            # pypdf's verdict on the file itself (PdfStreamError on a text
+            # renamed .pdf, EmptyFileError, a damaged cross-reference table):
+            # the user's file, not a defect. DependencyError (a package the
+            # build lacks, e.g. for AES) is not a PdfReadError: it stays a
+            # defect.
+            raise UnreadableDocumentError(f"not a valid PDF ({type(e).__name__})") from e
         pages = [
-            ExtractedPage(
-                page_number=number,
-                text=clean_extracted_text(page.extract_text() or ""),
-            )
-            for number, page in enumerate(reader.pages, start=1)
+            ExtractedPage(page_number=number, text=clean_extracted_text(text))
+            for number, text in enumerate(raw_pages, start=1)
         ]
 
         total_chars = sum(len(p.text) for p in pages)

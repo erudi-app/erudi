@@ -20,10 +20,12 @@ vi.mock("../services/api/client", () => ({
 }));
 vi.mock("../components/Spinner", () => ({ default: () => null }));
 
+import i18n from "../i18n";
 import { KnowledgeBaseProvider, useKnowledgeBase } from "./KnowledgeBaseContext";
 
 let createResponder;
 let statusResponder;
+const consoleSpies = {};
 
 const onComplete = vi.fn();
 const onError = vi.fn();
@@ -69,8 +71,8 @@ const startAndPollOnce = async () => {
 beforeEach(() => {
   vi.useFakeTimers();
   vi.spyOn(console, "log").mockImplementation(() => {});
-  vi.spyOn(console, "warn").mockImplementation(() => {});
-  vi.spyOn(console, "error").mockImplementation(() => {});
+  consoleSpies.warn = vi.spyOn(console, "warn").mockImplementation(() => {});
+  consoleSpies.error = vi.spyOn(console, "error").mockImplementation(() => {});
 
   onComplete.mockReset();
   onError.mockReset();
@@ -132,14 +134,17 @@ describe("KnowledgeBaseContext creation success", () => {
     });
     renderProvider();
     await startAndPollOnce();
-    expect(onComplete).toHaveBeenCalledWith({ failedFiles: ["maintenance.docx", "b.pdf"] });
+    expect(onComplete).toHaveBeenCalledWith({
+      failedFiles: ["maintenance.docx", "b.pdf"],
+      filesByReason: {},
+    });
 
     cleanup();
     onComplete.mockReset();
     statusResponder = () => ({ ok: true, json: async () => ({ status: "completed" }) });
     renderProvider();
     await startAndPollOnce();
-    expect(onComplete).toHaveBeenCalledWith({ failedFiles: [] });
+    expect(onComplete).toHaveBeenCalledWith({ failedFiles: [], filesByReason: {} });
   });
 
   it("hands the failed files to onError when the whole job failed", async () => {
@@ -156,8 +161,20 @@ describe("KnowledgeBaseContext creation success", () => {
 
     expect(onError).toHaveBeenCalledWith("No searchable content could be indexed", {
       failedFiles: ["maintenance.docx"],
+      filesByReason: {},
     });
     expect(onComplete).not.toHaveBeenCalled();
+  });
+
+  it("hands the files the user's own files kept out to onComplete, by reason", async () => {
+    const filesByReason = { unreadable: ["broken.docx"], empty: [], pending_vision: [] };
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status: "completed", failed_files: [], files_by_reason: filesByReason }),
+    });
+    renderProvider();
+    await startAndPollOnce();
+    expect(onComplete).toHaveBeenCalledWith({ failedFiles: [], filesByReason });
   });
 
   it("hands off from isStarting to isCreating once the create call returns", async () => {
@@ -220,7 +237,10 @@ describe("KnowledgeBaseContext failure routing", () => {
 
     await startAndPollOnce();
 
-    expect(onError).toHaveBeenCalledWith("ingestion crashed", { failedFiles: [] });
+    expect(onError).toHaveBeenCalledWith("ingestion crashed", {
+      failedFiles: [],
+      filesByReason: {},
+    });
     expect(onComplete).not.toHaveBeenCalled();
     expect(val("creating")).toBe("false");
   });
@@ -233,7 +253,72 @@ describe("KnowledgeBaseContext failure routing", () => {
 
     expect(onError).toHaveBeenCalledWith("Assistant creation failed unexpectedly", {
       failedFiles: [],
+      filesByReason: {},
     });
+  });
+
+  const nothingIndexed = {
+    status: "failed",
+    error_code: "nothing_indexed",
+    error_message: "No searchable content could be indexed (0 failed, 1 empty, 1 pending vision).",
+    failed_files: [],
+    files_by_reason: { pending_vision: ["scan.pdf"], empty: ["blank.txt"], unreadable: [] },
+  };
+
+  // The log lines this context writes about the finished job.
+  const jobLines = (method) =>
+    consoleSpies[method].mock.calls.filter(([line]) => String(line).includes("Knowledge base job"));
+
+  it("records a job that indexed nothing because of the user's files as a warning", async () => {
+    statusResponder = () => ({ ok: true, json: async () => nothingIndexed });
+    renderProvider();
+
+    await startAndPollOnce();
+
+    expect(jobLines("warn")).toHaveLength(1);
+    expect(jobLines("error")).toHaveLength(0);
+    // The English backend text stays in the record, for the log.
+    expect(jobLines("warn")[0][1]).toMatchObject({ error: nothingIndexed.error_message });
+    // The screen gets a translated message built from the code, not that text.
+    expect(onError).toHaveBeenCalledWith("Nothing could be indexed from the 2 files you added.", {
+      failedFiles: [],
+      filesByReason: nothingIndexed.files_by_reason,
+    });
+  });
+
+  it("records any other failed job as an error", async () => {
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status: "failed", error_code: null, error_message: "boom" }),
+    });
+    renderProvider();
+
+    await startAndPollOnce();
+
+    expect(jobLines("error")).toHaveLength(1);
+    expect(jobLines("warn")).toHaveLength(0);
+  });
+
+  it("shows the nothing-indexed message in the interface language", async () => {
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ ...nothingIndexed, files_by_reason: { empty: ["blank.txt"] } }),
+    });
+    await i18n.changeLanguage("fr");
+    try {
+      renderProvider();
+      await act(async () => {
+        fireEvent.click(screen.getByText("OPEN"));
+      });
+      await act(async () => {
+        fireEvent.click(screen.getByText(i18n.t("knowledgeBase:confirm.create")));
+        await vi.advanceTimersByTimeAsync(2000);
+      });
+
+      expect(onError.mock.calls[0][0]).toBe("Rien n'a pu être indexé à partir du fichier ajouté.");
+    } finally {
+      await i18n.changeLanguage("en");
+    }
   });
 
   it("surfaces a status poll error through onError and stops creating", async () => {

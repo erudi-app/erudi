@@ -191,6 +191,8 @@ def _expand(paths: Sequence[str]) -> tuple[list[Path], list[AttachmentIssue]]:
 def _read_one(reader: DocumentReader, path: Path) -> tuple[str, Optional[str]]:
     """Extract one file. Returns ``(text, reason)``; ``reason`` is None on
     success and a key of ``_REASON_TEXT`` otherwise. Never raises."""
+    from src.ingestion.types import UnreadableDocumentError
+
     if not path.exists() or not path.is_file():
         return "", "missing"
     try:
@@ -200,7 +202,13 @@ def _read_one(reader: DocumentReader, path: Path) -> tuple[str, Optional[str]]:
         # own and tells the user, so a WARNING with no traceback is the record.
         logger.warning(f"Attachment {path.name}: unsupported document type, skipped")
         return "", "unsupported"
+    except UnreadableDocumentError as e:
+        # The user's file is not what its extension says (a text renamed
+        # .docx, a PDF locked by a password): the same WARNING, no traceback.
+        logger.warning(f"Attachment {path.name}: skipped: {e.reason}")
+        return "", "unreadable"
     except Exception:
+        # Anything else is the extractor's own failure: a defect.
         logger.exception(f"Attachment {path.name}: extraction failed")
         return "", "unreadable"
 

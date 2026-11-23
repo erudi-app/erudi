@@ -17,6 +17,8 @@ Exception Hierarchy:
     ├── GenerationTimeoutException (504, GENERATION_TIMEOUT)
     ├── KnowledgeBaseNotFoundException (404, KB_NOT_FOUND)
     ├── KnowledgeBaseCorruptedException (500, KB_CORRUPTED)
+    ├── EmbeddingModelMissingException (409, EMBEDDING_MODEL_MISSING)
+    ├── NothingIndexedError (422, NOTHING_INDEXED)
     ├── ConversationNotFoundException (404, CONVERSATION_NOT_FOUND)
     ├── MessageNotFoundException (404, MESSAGE_NOT_FOUND)
     ├── InsufficientMemoryException (507, INSUFFICIENT_MEMORY)
@@ -599,6 +601,56 @@ class EmbeddingModelMissingException(AppBaseException):
             erudi_code="EMBEDDING_MODEL_MISSING",
             trace=trace,
         )
+
+
+# The per-file outcomes that are the user's files, not the app: a scan or an
+# image without a text layer, a file with no text, a file that is not what its
+# extension says. Shared with the job status route, which names each file
+# under its reason.
+USER_FILE_REASONS = ("pending_vision", "empty", "unreadable")
+
+
+class NothingIndexedError(AppBaseException):
+    """Exception raised when a Knowledge Base job added nothing searchable.
+
+    Every file of the job was skipped or failed, and none was a duplicate of
+    content already in the KB. The job fails, so the user sees it; whether
+    it is a defect depends on why. ``counts`` holds the per-outcome counts
+    (``failed`` plus every key of ``USER_FILE_REASONS``): when no file
+    ``failed`` the user's files are the whole cause, and the task boundary
+    records the outcome at INFO instead of ERROR.
+
+    Examples:
+        from src.core.exceptions import NothingIndexedError
+        raise NothingIndexedError({"failed": 0, "empty": 1, "pending_vision": 0,
+                                   "unreadable": 0})
+
+    """
+
+    def __init__(self, counts: dict[str, int]):
+        """Initialize exception for a job that indexed nothing.
+
+        Args:
+            counts: Files per outcome (``failed``, ``empty``,
+                ``pending_vision``, ``unreadable``); a missing key is 0.
+
+        """
+        self.counts = {key: counts.get(key, 0) for key in ("failed", *USER_FILE_REASONS)}
+        super().__init__(
+            message=(
+                f"No searchable content could be indexed "
+                f"({self.counts['failed']} failed, {self.counts['empty']} empty, "
+                f"{self.counts['pending_vision']} pending vision, "
+                f"{self.counts['unreadable']} unreadable)."
+            ),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            erudi_code="NOTHING_INDEXED",
+        )
+
+    @property
+    def has_internal_failures(self) -> bool:
+        """True when a file failed for a cause that is not the user's file."""
+        return self.counts["failed"] > 0
 
 
 class ConversationNotFoundException(AppBaseException):

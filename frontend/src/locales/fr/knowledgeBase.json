@@ -32,6 +32,11 @@
       "duplicateName": "Un modèle nommé « {{name}} » existe déjà. Choisissez un autre nom d'assistant.",
       "failedFiles_one": "{{count}} fichier n'a pas pu être indexé : {{files}}. La raison est dans la page Diagnostic.",
       "failedFiles_other": "{{count}} fichiers n'ont pas pu être indexés : {{files}}. La raison est dans la page Diagnostic."
+    },
+    "files": {
+      "group": "{{files}} ({{reason}})",
+      "notIndexed_one": "{{count}} fichier n'a pas été indexé : {{files}}.",
+      "notIndexed_other": "{{count}} fichiers n'ont pas été indexés : {{files}}."
     }
   },
   "confirm": {
@@ -48,7 +53,9 @@
       "startFailedGeneric": "Impossible de lancer la création de l'assistant",
       "unknownDetail": "Erreur inconnue",
       "failedUnexpectedly": "La création de l'assistant a échoué de manière inattendue",
-      "statusCheckFailed": "Une erreur est survenue pendant la création de l'assistant. Veuillez réessayer ou contacter l'équipe Erudi."
+      "statusCheckFailed": "Une erreur est survenue pendant la création de l'assistant. Veuillez réessayer ou contacter l'équipe Erudi.",
+      "nothingIndexed_one": "Rien n'a pu être indexé à partir du fichier ajouté.",
+      "nothingIndexed_other": "Rien n'a pu être indexé à partir des {{count}} fichiers ajoutés."
     }
   },
   "upload": {

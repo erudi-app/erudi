@@ -92,5 +92,10 @@
     "downloadBody": "Changing the inference engine restarts Erudi's engine, which cancels the model download in progress. You will have to start it again from the beginning.",
     "cancelAndSwitch": "Cancel the download and switch",
     "keepDownloading": "Keep downloading"
+  },
+  "fileReasons": {
+    "unreadable": "damaged, protected by a password, or not the format its extension says",
+    "empty": "no text",
+    "pending_vision": "no extractable text (a scan or an image), and text recognition is not bundled yet"
   }
 }

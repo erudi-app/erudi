@@ -48,6 +48,7 @@ All classes below live in `backend/src/core/exceptions.py`.
 | `MessageNotFoundException` | `(message_id, trace=None)` | 404 | `MESSAGE_NOT_FOUND` |
 | `DownloadJobNotFoundException` | `(job_id, trace=None)` | 404 | `DOWNLOAD_JOB_NOT_FOUND` |
 | `InvalidInputException` | `(field_name, trace=None)` | 422 | `INVALID_INPUT` |
+| `NothingIndexedError` | `(counts)` | 422 | `NOTHING_INDEXED` |
 | `StateConflictException` | `(message, trace=None, status_code=400, detail=None)` | 400, or 409 on request | `STATE_CONFLICT` |
 | `DatabaseException` | `(message, trace=None)` | 500 | `DATABASE_ERROR` |
 | `FileSystemException` | `(message, trace=None)` | 500 | `FILESYSTEM_ERROR` |

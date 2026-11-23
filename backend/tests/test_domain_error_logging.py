@@ -43,6 +43,43 @@ def test_kb_task_death_is_logged_once_with_job_id_and_traceback(monkeypatch, cap
     assert errors[0].exc_info
 
 
+@pytest.mark.parametrize(
+    "counts, level",
+    [
+        ({"failed": 0, "empty": 1, "pending_vision": 1, "unreadable": 1}, logging.INFO),
+        ({"failed": 1, "empty": 1, "pending_vision": 0, "unreadable": 0}, logging.ERROR),
+    ],
+    ids=["user-files-only", "an-internal-failure"],
+)
+def test_a_job_that_indexed_nothing_is_an_error_only_for_an_internal_cause(
+    monkeypatch, caplog, counts, level
+):
+    """Nothing indexed because of the user's files (scan, empty, invalid) is
+    an expected outcome: one INFO line. A file that failed for an internal
+    cause keeps the job's record at ERROR with its traceback."""
+    from src.core.exceptions import NothingIndexedError
+    from src.domains.knowledge_base import endpoints as kb_endpoints
+
+    class _Session:
+        def close(self):
+            pass
+
+    class _Service:
+        def process_and_index_documents(self, **kwargs):
+            raise NothingIndexedError(counts)
+
+    monkeypatch.setattr(kb_endpoints, "SessionLocal", lambda: _Session())
+    monkeypatch.setattr(kb_endpoints, "KB_Service", lambda: _Service())
+
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        kb_endpoints._run_kb_creation_task(78, ["/tmp/a.pdf"])
+
+    (record,) = [r for r in caplog.records if "job 78" in r.getMessage()]
+    assert record.levelno == level
+    assert "No searchable content could be indexed" in record.getMessage()
+    assert bool(record.exc_info) is (level == logging.ERROR)
+
+
 # ============ Launcher: the reason reaches backend.log ============
 
 

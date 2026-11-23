@@ -8,8 +8,11 @@ Ingestion pipeline (per file, background task):
     document → extract (DocumentReader, services stay format-agnostic) →
     ``pending_vision`` stops here (image/scanned PDF, indexed by the OCR/VLM
     tiers of a later release) → 3-pass chunking → hybrid vector store
-    (``rag.kb_chunks``). Per-file failures mark THAT document ``failed`` and
-    the run continues; the job only fails when nothing could be ingested.
+    (``rag.kb_chunks``). A file that is not a valid document of its type is
+    marked ``unreadable`` (the user's file, a WARNING); any other per-file
+    failure marks THAT document ``failed`` (an ERROR with the traceback). The
+    run continues either way; the job only fails when nothing could be
+    ingested (``NothingIndexedError``).
 
 Classes:
     KB_Service: Business logic for KB creation, updates, and job tracking.
@@ -27,13 +30,19 @@ from typing import Any, Dict, List, Tuple
 
 from sqlalchemy.orm import Session
 
-from src.core.exceptions import EmbeddingModelMissingException, StateConflictException
+from src.core.exceptions import (
+    USER_FILE_REASONS,
+    EmbeddingModelMissingException,
+    NothingIndexedError,
+    StateConflictException,
+)
 from src.domains.knowledge_base.repository import KB_Repository
 from src.entities.KBJob import KBJobModel
 from src.ingestion.chunking import chunk_document
 from src.ingestion.embedder_child import ingestion_lease
 from src.ingestion.embeddings import embedding_artifact_missing
 from src.ingestion.reader import DocumentReader
+from src.ingestion.types import UnreadableDocumentError
 from src.ingestion.vector_store import add_kb_chunks
 from src.core.logging import logger
 
@@ -63,9 +72,18 @@ class KB_Service:
             llm_id: Specialized LLM ID (new_model_id in KBJob).
 
         Returns:
-            Dict with status, updated_at, error_message and failed_files (the
-            names of the files of this job whose ingestion failed; the reason
-            is in the log and Diagnostics, never in the payload).
+            Dict with:
+              - status, status_updated_at;
+              - error_message: the English failure text, for the log;
+              - error_code: ``"nothing_indexed"`` when the job failed because
+                none of its files added searchable content, else None. The
+                interface builds its translated message from it;
+              - failed_files: the files of this job whose ingestion failed for
+                an internal cause (the reason is in the log and Diagnostics,
+                never in the payload);
+              - files_by_reason: the files the user's own files kept out, by
+                reason (``pending_vision``, ``empty``, ``unreadable``), each
+                key always present.
 
         Raises:
             ValueError: If KB job not found.
@@ -76,7 +94,12 @@ class KB_Service:
 
         # Read before any cleanup: a failed creation deletes its KB, and the
         # documents with it.
-        failed_files = self._failed_file_names(db, kb_job)
+        failed_files, files_by_reason, any_indexed = self._job_files(db, kb_job)
+        nothing_indexed = (
+            kb_job.status == "failed"
+            and not any_indexed
+            and bool(failed_files or any(files_by_reason.values()))
+        )
 
         # Cleanup failed jobs -- but ONLY failed creations. An update job
         # shares its new_model_id with base_model_id (see update_existing_kb);
@@ -92,27 +115,38 @@ class KB_Service:
             "status": kb_job.status,
             "status_updated_at": kb_job.updated_at,
             "error_message": kb_job.error_message if kb_job.status == "failed" else None,
+            "error_code": "nothing_indexed" if nothing_indexed else None,
             "failed_files": failed_files,
+            "files_by_reason": files_by_reason,
         }
 
-    def _failed_file_names(self, db: Session, kb_job: KBJobModel) -> List[str]:
-        """Names of the files this job could not ingest (no column: derived).
+    def _job_files(
+        self, db: Session, kb_job: KBJobModel
+    ) -> Tuple[List[str], Dict[str, List[str]], bool]:
+        """The files of this job by outcome (no column: derived).
 
-        The job's documents are the ones created from its start on; the failed
-        ones are those left in ``failed`` status. Nothing before the job ran
-        is counted: an earlier job's failure is not this one's. Files that
-        failed before they had a row (unreadable, not registrable) come from
-        the job's in-memory list.
+        Returns ``(failed, by_reason, any_indexed)``: the names left
+        ``failed``, the names under each of ``USER_FILE_REASONS``, and whether
+        one document of the job was indexed. The job's documents are the ones
+        created from its start on: an earlier job's files are not this one's.
+        Files that failed before they had a row (bytes that could not be read,
+        a row that could not be registered) come from the job's in-memory list.
+        A failed job with none of these files failed before its first file:
+        ``nothing_indexed`` does not apply to it.
         """
-        names = list(_UNRECORDED_FAILURES.get(kb_job.id, []))
+        failed: List[str] = []
+        by_reason: Dict[str, List[str]] = {reason: [] for reason in USER_FILE_REASONS}
+        any_indexed = False
         if kb_job.kb_id is not None and kb_job.created_at is not None:
-            names = [
-                document.name
-                for document in self.repo.list_failed_documents_since(
-                    db, kb_job.kb_id, kb_job.created_at
-                )
-            ] + names
-        return names
+            for document in self.repo.list_documents_since(db, kb_job.kb_id, kb_job.created_at):
+                if document.status == "failed":
+                    failed.append(document.name)
+                elif document.status in by_reason:
+                    by_reason[document.status].append(document.name)
+                elif document.status == "active":
+                    any_indexed = True
+        failed += _UNRECORDED_FAILURES.get(kb_job.id, [])
+        return failed, by_reason, any_indexed
 
     def _cleanup_failed_job(self, db: Session, llm_id: int, kb_job: KBJobModel) -> None:
         """Clean up database state after a failed KB job.
@@ -291,42 +325,30 @@ class KB_Service:
             while len(_UNRECORDED_FAILURES) > _UNRECORDED_JOBS_KEPT:
                 del _UNRECORDED_FAILURES[next(iter(_UNRECORDED_FAILURES))]
 
-            indexed, pending, skipped, empty, failed = 0, 0, 0, 0, 0
+            counts = dict.fromkeys(("indexed", "skipped", "failed", *USER_FILE_REASONS), 0)
             # The lease keeps the dedicated embedding child alive for the
             # whole job (#594): its idle reaper never terminates it between
             # two files, however long a file takes to parse.
             with ingestion_lease():
                 for raw_path in file_paths:
-                    outcome = self._ingest_one_file(db, kb.id, raw_path, unrecorded)
-                    if outcome == "indexed":
-                        indexed += 1
-                    elif outcome == "pending_vision":
-                        pending += 1
-                    elif outcome == "skipped":
-                        skipped += 1
-                    elif outcome == "empty":
-                        empty += 1
-                    else:
-                        failed += 1
+                    counts[self._ingest_one_file(db, kb.id, raw_path, unrecorded)] += 1
 
             duration_ms = (time.perf_counter() - start_s) * 1000
             logger.info(
                 f"KB job {kb_job_id} ({'update' if is_update else 'creation'}): "
-                f"{indexed} indexed, {pending} pending_vision, "
-                f"{skipped} duplicates, {empty} empty, {failed} failed, "
+                f"{counts['indexed']} indexed, {counts['pending_vision']} pending_vision, "
+                f"{counts['skipped']} duplicates, {counts['empty']} empty, "
+                f"{counts['unreadable']} unreadable, {counts['failed']} failed, "
                 f"duration_ms={duration_ms:.0f}"
             )
 
             # Don't report success when nothing queryable was added. A batch that
             # indexed zero chunks and had no duplicates (its files were empty,
-            # pending_vision with no OCR tier, or failed) is a failure the user must
-            # see — never a silent "completed". All-duplicates (skipped > 0) stays a
-            # success: that content is already in the KB.
-            if indexed == 0 and skipped == 0:
-                raise ValueError(
-                    f"No searchable content could be indexed "
-                    f"({failed} failed, {empty} empty, {pending} pending vision)."
-                )
+            # pending_vision with no OCR tier, unreadable, or failed) is a failure
+            # the user must see — never a silent "completed". All-duplicates
+            # (skipped > 0) stays a success: that content is already in the KB.
+            if counts["indexed"] == 0 and counts["skipped"] == 0:
+                raise NothingIndexedError(counts)
 
             self.repo.update_kb_job_status(db, kb_job, "completed")
 
@@ -340,7 +362,8 @@ class KB_Service:
         self, db: Session, kb_id: int, raw_path: str, unrecorded: List[str] | None = None
     ) -> str:
         """Ingest one file; returns "indexed" | "pending_vision" | "skipped"
-        | "failed". Never raises — a broken file must not sink the batch.
+        | "empty" | "unreadable" | "failed". Never raises — a broken file must
+        not sink the batch.
 
         ``unrecorded`` collects the names of the files that fail before they
         have a document row, so the job can still name them."""
@@ -358,15 +381,19 @@ class KB_Service:
         content_hash = hashlib.sha256(content).hexdigest()
         try:
             existing = self.repo.get_document_by_hash(db, kb_id, content_hash)
-            if existing and existing.status != "failed":
+            if existing and existing.status not in ("failed", "unreadable"):
                 logger.info(f"KB {kb_id}: {path.name} already ingested (dedup), skipping")
                 return "skipped"
             if existing:
                 # A failed ingestion left this row (and maybe a few chunks, which
                 # follow the row through ON DELETE CASCADE). It must not block the
                 # same file for good: replace it, so the retry starts clean and its
-                # name is the one the job reports if it fails again.
-                logger.info(f"KB {kb_id}: {path.name} failed earlier, ingesting it again")
+                # name is the one the job reports if it fails again. An
+                # unreadable row is replaced too: dropping the same file again
+                # names it again, instead of passing for a duplicate.
+                logger.info(
+                    f"KB {kb_id}: {path.name} was {existing.status} earlier, ingesting it again"
+                )
                 self.repo.delete_document(db, existing)
 
             # "indexing" until the chunks are stored: the row is committed first,
@@ -415,6 +442,14 @@ class KB_Service:
             self.repo.update_document_status(db, document, "active")
             logger.info(f"KB {kb_id}: {path.name} indexed ({len(chunks)} chunks)")
             return "indexed"
+
+        except UnreadableDocumentError as e:
+            # The user's file is not what its extension says: the app skipped
+            # it and names it at the end of the job. A WARNING without a
+            # traceback (nothing in the app's code to look at).
+            logger.warning(f"KB {kb_id}: {path.name} skipped: {e.reason}")
+            self.repo.update_document_status(db, document, "unreadable")
+            return "unreadable"
 
         except Exception as e:
             # The traceback matters here: this is where a broken embedding

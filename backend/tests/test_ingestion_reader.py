@@ -333,3 +333,62 @@ class TestRouting:
         path = tmp_path / "NOTES.TXT"
         path.write_text("contenu", encoding="utf-8")
         assert DocumentReader().read(path).status == "active"
+
+
+# ---------------------------------------------------------------------------
+# A file that is not what its extension says (#752): the user's file, not a bug.
+# ---------------------------------------------------------------------------
+
+
+def _write_encrypted_pdf(path):
+    """A PDF locked by a user password (RC4: no extra dependency to write it)."""
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.encrypt("secret", algorithm="RC4-128")
+    with path.open("wb") as handle:
+        writer.write(handle)
+
+
+def _write_zip_without_package_parts(path):
+    """A real zip renamed to .docx/.xlsx: no [Content_Types].xml inside."""
+    import zipfile
+
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("notes.txt", "not an Office package")
+
+
+def _write_renamed_text(path):
+    path.write_text("a text file renamed", encoding="utf-8")
+
+
+# (file name, builder, library exception the extractor converts). Shared with
+# the KB pipeline and attachment tests.
+INVALID_DOCUMENTS = [
+    pytest.param("broken.docx", _write_renamed_text, "PackageNotFoundError", id="docx-text"),
+    pytest.param("archive.docx", _write_zip_without_package_parts, "KeyError", id="docx-zip"),
+    pytest.param("broken.xlsx", _write_renamed_text, "BadZipFile", id="xlsx-text"),
+    pytest.param("archive.xlsx", _write_zip_without_package_parts, "KeyError", id="xlsx-zip"),
+    pytest.param("broken.pdf", _write_renamed_text, "PdfStreamError", id="pdf-text"),
+    pytest.param("blank.pdf", lambda p: p.write_bytes(b""), "EmptyFileError", id="pdf-empty"),
+    pytest.param("locked.pdf", _write_encrypted_pdf, "FileNotDecryptedError", id="pdf-encrypted"),
+]
+
+
+class TestUnreadableDocuments:
+    @pytest.mark.parametrize("name, build, library_error", INVALID_DOCUMENTS)
+    def test_an_invalid_file_raises_unreadable_document_error(
+        self, tmp_path, name, build, library_error
+    ):
+        from src.ingestion.types import UnreadableDocumentError
+
+        path = tmp_path / name
+        build(path)
+
+        with pytest.raises(UnreadableDocumentError) as caught:
+            DocumentReader().read(path)
+
+        # The reason names the format and the library's verdict, for the log.
+        assert library_error in caught.value.reason
+        assert type(caught.value.__cause__).__name__ == library_error

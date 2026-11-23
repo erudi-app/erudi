@@ -18,6 +18,10 @@ import { createLogger } from "../utils/logger";
 
 const log = createLogger("KnowledgeBasePage");
 
+// The reasons the user's own files keep out of a job, in the order the page
+// names them (keys of `files_by_reason` and of `common:fileReasons`).
+const FILE_REASONS = ["unreadable", "empty", "pending_vision"];
+
 export default function KnowledgeBasePage() {
   const { t } = useTranslation();
   const { open: openKnowledgeBase, isCreating, isStarting } = useKnowledgeBase();
@@ -26,6 +30,8 @@ export default function KnowledgeBasePage() {
   const [errorMessage, setErrorMessage] = useState("");
   const [isValidated, setIsValidated] = useState(false);
   const [failedFiles, setFailedFiles] = useState([]); // names, from the finished job
+  // Names the user's own files kept out of the finished job, by reason.
+  const [filesByReason, setFilesByReason] = useState({});
   const [wasUpdate, setWasUpdate] = useState(false); // the finished job updated an assistant
 
   // Inference rating readout. The state holds a status code plus the raw
@@ -108,9 +114,30 @@ export default function KnowledgeBasePage() {
     return more > 0 ? `${shown} ${t("knowledgeBase:page.form.moreFiles", { count: more })}` : shown;
   };
 
+  // The files a scan, an empty or an invalid file kept out, grouped under
+  // their reason ("broken.docx (damaged, ...); scan.pdf (no extractable
+  // text, ...)"), or "" when there are none. No pointer to Diagnostics: the
+  // user's file is the cause and the reason is right there.
+  const notIndexedMessage = (byReason) => {
+    const groups = FILE_REASONS.filter((reason) => byReason[reason]?.length > 0);
+    if (groups.length === 0) return "";
+    const count = groups.reduce((sum, reason) => sum + byReason[reason].length, 0);
+    const files = groups
+      .map((reason) =>
+        t("knowledgeBase:page.files.group", {
+          files: listFailedFiles(byReason[reason]),
+          reason: t(`common:fileReasons.${reason}`),
+        })
+      )
+      .join("; ");
+    return t("knowledgeBase:page.files.notIndexed", { count, files });
+  };
+  const notIndexed = notIndexedMessage(filesByReason); // of the finished job
+
   const resetForm = () => {
     setIsValidated(false);
     setFailedFiles([]);
+    setFilesByReason({});
     setPaths([]);
     setModelName("");
     setDescription("");
@@ -171,25 +198,35 @@ export default function KnowledgeBasePage() {
     };
 
     openKnowledgeBase(task, {
-      onComplete: ({ failedFiles = [] } = {}) => {
+      onComplete: ({ failedFiles = [], filesByReason = {} } = {}) => {
         log.log("Knowledge base assistant created successfully");
         setFailedFiles(failedFiles);
+        setFilesByReason(filesByReason);
         setWasUpdate(isUpdate);
         setIsValidated(true);
-        // Reset form after a delay. A message naming failed files stays until
-        // the user dismisses it: three seconds is not enough to read it.
-        if (failedFiles.length === 0) setTimeout(resetForm, 3000);
+        // Reset form after a delay. A message naming files that were not
+        // indexed stays until the user dismisses it: three seconds is not
+        // enough to read it.
+        if (failedFiles.length === 0 && !notIndexedMessage(filesByReason)) {
+          setTimeout(resetForm, 3000);
+        }
       },
       // UI only: the context wrote the record (it knows the job and the
       // backend's message); a second ERROR here would show one failure twice.
-      onError: (error, { failedFiles = [] } = {}) =>
+      onError: (error, { failedFiles = [], filesByReason = {} } = {}) =>
         setErrorMessage(
-          failedFiles.length > 0
-            ? `${error}\n${t("knowledgeBase:page.errors.failedFiles", {
-                count: failedFiles.length,
-                files: listFailedFiles(failedFiles),
-              })}`
-            : error
+          [
+            error,
+            notIndexedMessage(filesByReason),
+            failedFiles.length > 0
+              ? t("knowledgeBase:page.errors.failedFiles", {
+                  count: failedFiles.length,
+                  files: listFailedFiles(failedFiles),
+                })
+              : "",
+          ]
+            .filter(Boolean)
+            .join("\n")
         ),
     });
   };
@@ -439,19 +476,28 @@ export default function KnowledgeBasePage() {
               <div className="flex flex-col items-center gap-3 flex-shrink-0">
                 {isValidated ? (
                   <div className="w-full text-center">
-                    {failedFiles.length > 0 ? (
+                    {failedFiles.length > 0 || notIndexed ? (
                       <>
-                        <div className="text-amber-400 text-sm">
-                          {t(
-                            wasUpdate
-                              ? "knowledgeBase:page.form.partialUpdated"
-                              : "knowledgeBase:page.form.partialCreated",
-                            {
-                              count: failedFiles.length,
-                              files: listFailedFiles(failedFiles),
-                            }
-                          )}
-                        </div>
+                        {failedFiles.length > 0 ? (
+                          <div className="text-amber-400 text-sm">
+                            {t(
+                              wasUpdate
+                                ? "knowledgeBase:page.form.partialUpdated"
+                                : "knowledgeBase:page.form.partialCreated",
+                              {
+                                count: failedFiles.length,
+                                files: listFailedFiles(failedFiles),
+                              }
+                            )}
+                          </div>
+                        ) : (
+                          <div className="text-emerald-400 text-sm">
+                            {t("knowledgeBase:page.form.success")}
+                          </div>
+                        )}
+                        {notIndexed && (
+                          <div className="text-amber-400 text-sm mt-1">{notIndexed}</div>
+                        )}
                         <button
                           className="mt-3 py-1 px-5 rounded-full border border-emerald-500 text-emerald-400 hover:bg-emerald-500/10 transition text-sm"
                           onClick={resetForm}

@@ -9,12 +9,13 @@ order via ``Document.iter_inner_content``.
 from __future__ import annotations
 
 import re
+import zipfile
 from pathlib import Path
 
 from src.core.logging import logger
 from src.ingestion.cleaning import clean_extracted_text
 from src.ingestion.markdown import rows_to_markdown_table
-from src.ingestion.types import ExtractedDocument
+from src.ingestion.types import ExtractedDocument, UnreadableDocumentError
 
 _HEADING_STYLE_RE = re.compile(r"^Heading (\d)$")
 
@@ -32,9 +33,18 @@ class DocxExtractor:
         # Function scope: python-docx (and lxml) stay out of the boot heap until
         # the first DOCX (#621).
         import docx
+        from docx.opc.exceptions import PackageNotFoundError
         from docx.table import Table
 
-        document = docx.Document(str(path))
+        try:
+            document = docx.Document(str(path))
+        except (PackageNotFoundError, zipfile.BadZipFile, KeyError) as e:
+            # The user's file is not a Word package: not a zip at all
+            # (PackageNotFoundError, a text renamed .docx), a damaged zip, or
+            # a zip without the package's parts (KeyError from the archive
+            # lookup, a plain .zip renamed). Only the opening is guarded: a
+            # failure past it is the extractor's own and stays a defect.
+            raise UnreadableDocumentError(f"not a valid Word file ({type(e).__name__})") from e
         parts: list[str] = []
 
         for item in document.iter_inner_content():

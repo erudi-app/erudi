@@ -27,6 +27,17 @@ process against the embedded PostgreSQL cluster. No document ever leaves the mac
 
 Any other extension is rejected with an `InvalidInputException` listing the supported set.
 
+**A file that is not what its extension says is the user's, not a bug.** Each extractor turns the
+parser's verdict on the file itself into `UnreadableDocumentError` (`src/ingestion/types.py`): a
+text renamed `.docx` (`PackageNotFoundError`), an `.xlsx` that is not a zip (`BadZipFile`), a zip
+renamed `.docx`/`.xlsx` with no Office parts in it (`KeyError` from the archive lookup, caught
+around the opening call only), a PDF that is empty, damaged or not a PDF (`PdfReadError` and its
+subclasses `PdfStreamError`, `EmptyFileError`), a PDF locked by a password (`FileNotDecryptedError`).
+The document is recorded `unreadable` and the job logs one `WARNING` without a traceback. Every
+other exception (the extractor's own code, a missing optional package such as pypdf's
+`DependencyError`, the tokenizer, the embedder) stays a `failed` file logged at `ERROR` with its
+traceback.
+
 **Images are not read.** Erudi bundles no OCR or vision tier today, so images and scanned PDFs are
 registered in the KB with the status `pending_vision` and contribute zero searchable chunks. A batch
 made only of such files fails the job rather than reporting a misleading success.
@@ -37,14 +48,15 @@ single extraction surface the service layer sees.
 ## The ingestion pipeline
 
 Ingestion runs as a FastAPI background task, one file at a time
-(`backend/src/domains/knowledge_base/services.py`). A failure on one file marks that document
-`failed` and the run continues.
+(`backend/src/domains/knowledge_base/services.py`). A file that is not a valid document of its
+type marks that document `unreadable`; any other failure on one file marks it `failed`. The run
+continues either way.
 
 1. **Hash and dedup.** The file bytes are SHA-256 hashed. A hash already present in this KB
    (`knowledge_documents.content_hash_sha256`, unique per `kb_id`) is skipped as a duplicate,
-   unless its row is `failed`: a failed document never blocks its own file. The failed row is
-   deleted (its chunks follow, `ON DELETE CASCADE`) and the file goes through the pipeline again
-   as a new document.
+   unless its row is `failed` or `unreadable`: such a document never blocks its own file. The row
+   is deleted (its chunks follow, `ON DELETE CASCADE`) and the file goes through the pipeline
+   again as a new document, so the job names it again.
 2. **Register the document.** A `KnowledgeDocument` row is created in the `indexing` status and
    committed before indexing — the vector store writes through its own connection and needs the row
    for its foreign key. It becomes `active` once its chunks are stored. A failure while reading the
@@ -120,7 +132,8 @@ marked `empty`, never `active`.
 ### Document statuses
 
 `indexing` (registered, chunks not stored yet), `active` (indexed and retrievable), `empty` (no indexable content), `failed` (ingestion raised),
-`pending_vision` (image or scanned PDF, awaiting a future OCR/vision tier). Defined in
+`pending_vision` (image or scanned PDF, awaiting a future OCR/vision tier), `unreadable` (not a
+valid document of its type: damaged, locked by a password, or another format). Defined in
 `backend/src/entities/KnowledgeDocument.py`. A quit mid-file leaves its row `indexing`; the
 startup cleanup turns every such row into `failed` (and interrupted jobs into `failed`, see below),
 so the file can be added again.
@@ -129,13 +142,21 @@ so the file can be added again.
 
 The KB job reports `completed` only when at least one file was indexed, or when every file was a
 duplicate of content already in the KB. A batch that indexed nothing new and had no duplicates fails
-with a message counting the failed, empty and pending-vision files.
+with `NothingIndexedError` (`src/core/exceptions.py`), whose English message counts the failed,
+empty, pending-vision and unreadable files; the status route reports it as `error_code:
+"nothing_indexed"`. The task boundary logs it at `INFO` when the user's files are the whole cause
+(every file `pending_vision`, `empty` or `unreadable`), at `ERROR` with the traceback when a file
+`failed`.
 
-A job that completes with some files failed still reports `completed`; the status route names those
-files (see [Poll the job](#poll-the-job)) and the Knowledge Base page shows them instead of the plain
-success message, worded differently for a created assistant and an updated one. A job that fails
-because nothing could be indexed shows the same names next to its error message. At most five names
-are listed, then "and N more". The reason stays in the log and in Diagnostics.
+A job that completes with some files not indexed still reports `completed`; the status route names
+those files (see [Poll the job](#poll-the-job)) and the Knowledge Base page shows them. A file that
+`failed` replaces the plain success message with one worded differently for a created assistant and
+an updated one, which points to Diagnostics for the reason. A file the user's own file kept out is
+named under its reason, translated from `common:fileReasons` (`unreadable`, `empty`,
+`pending_vision`), with no pointer to Diagnostics. A job that fails because nothing could be indexed
+shows a translated message built from its `error_code` (the English `error_message` goes to the
+renderer's log only, at `warn`; any other failure is logged at `error`), followed by the same
+names. At most five names are listed per reason, then "and N more".
 
 ## Retrieval
 
@@ -338,16 +359,26 @@ curl http://127.0.0.1:27182/erudi/knowledge_base/108/status
   "status": "completed",
   "status_updated_at": "2026-09-03T09:12:44.310Z",
   "error_message": null,
-  "failed_files": ["maintenance.docx"]
+  "error_code": null,
+  "failed_files": ["maintenance.docx"],
+  "files_by_reason": {
+    "pending_vision": ["scan.pdf"],
+    "empty": [],
+    "unreadable": ["broken.docx"]
+  }
 }
 ```
 
-`status` is `pending`, `running`, `completed` or `failed`; `error_message` is only populated on
-`failed`. `failed_files` lists the names of the files of this job whose ingestion failed (empty
-when none did): the documents of the job's KB left in the `failed` status that were created from
-the job's start on, so no earlier job's failure appears, plus the files that failed before they had
-a row (unreadable, not registrable), which the running backend keeps in memory per job. The status
-carries no per-file reason. The names are also returned for a `failed` job.
+`status` is `pending`, `running`, `completed` or `failed`; `error_message` (English, for the log)
+is only populated on `failed`. `error_code` is `"nothing_indexed"` for a `failed` job none of whose
+files was indexed, `null` otherwise (a job that failed before its first file included).
+`failed_files` lists the names of the files of this job whose ingestion failed for an internal
+cause (empty when none did): the documents of the job's KB left in the `failed` status that were
+created from the job's start on, so no earlier job's failure appears, plus the files that failed
+before they had a row (bytes that could not be read, a row that could not be registered), which the
+running backend keeps in memory per job. The status carries no reason for them. `files_by_reason`
+names the job's documents in each of the statuses the user's file causes, every key present. The
+names are also returned for a `failed` job.
 Polling a **failed creation** also cleans up: the half-built assistant and its
 `KnowledgeBase` are deleted (a failed *update* never deletes an assistant that already works).
 

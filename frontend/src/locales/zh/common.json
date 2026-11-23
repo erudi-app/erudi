@@ -92,5 +92,10 @@
     "downloadBody": "更换推理引擎会重启 Erudi 的引擎，并取消正在进行的模型下载。之后需要从头重新开始下载。",
     "cancelAndSwitch": "取消下载并切换",
     "keepDownloading": "继续下载"
+  },
+  "fileReasons": {
+    "unreadable": "文件已损坏、受密码保护，或与其扩展名所示的格式不符",
+    "empty": "没有文本",
+    "pending_vision": "没有可提取的文本（扫描件或图片），且尚未内置文字识别"
   }
 }

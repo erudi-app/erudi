@@ -9,15 +9,19 @@ Two harnesses on the same embedded cluster:
   background task, which opens a fresh ``SessionLocal``.
 """
 
+import logging
+
 import pytest
 import psycopg
 from sqlalchemy.orm import sessionmaker
 
+from src.core.exceptions import NothingIndexedError
 from src.domains.knowledge_base.repository import COPIED_FIELDS
 from src.domains.knowledge_base.services import KB_Service
 from src.entities.KnowledgeBase import KnowledgeBase
 from src.entities.KnowledgeDocument import KnowledgeDocument
 from src.entities.Llm import Llm
+from tests.test_ingestion_reader import INVALID_DOCUMENTS
 
 pytestmark = pytest.mark.integration
 
@@ -311,6 +315,79 @@ class TestAssistantLifecycle:
 
         assert status["failed_files"] == ["maintenance.docx"]
 
+    def test_status_carries_nothing_indexed_and_the_names_by_reason(
+        self, test_db_session, mock_llm_with_kb
+    ):
+        """A job that indexed nothing says so with a code the interface
+        translates, and names each file under the reason it was not indexed;
+        a file that failed for an internal cause stays in failed_files."""
+        from datetime import datetime, timedelta, timezone
+
+        llm, kb = mock_llm_with_kb
+        service = KB_Service()
+        # The fixture's document belongs to an earlier job.
+        for document in test_db_session.query(KnowledgeDocument).filter_by(kb_id=kb.id):
+            document.created_at = datetime.now(timezone.utc) - timedelta(days=2)
+        test_db_session.flush()
+        job = service.repo.create_kb_job(
+            db=test_db_session, base_model_id=llm.id, new_model_id=llm.id, kb_id=kb.id
+        )
+        self._doc(service, test_db_session, kb, "scan.pdf", "pending_vision")
+        self._doc(service, test_db_session, kb, "blank.txt", "empty")
+        self._doc(service, test_db_session, kb, "broken.docx", "unreadable")
+        self._doc(service, test_db_session, kb, "maintenance.docx", "failed")
+        service.repo.update_kb_job_status(
+            test_db_session, job, "failed", "No searchable content could be indexed (...)."
+        )
+
+        status = service.get_kb_job_status(test_db_session, llm.id)
+
+        assert status["status"] == "failed"
+        assert status["error_code"] == "nothing_indexed"
+        # The English message stays, for the log.
+        assert status["error_message"].startswith("No searchable content")
+        assert status["failed_files"] == ["maintenance.docx"]
+        assert status["files_by_reason"] == {
+            "pending_vision": ["scan.pdf"],
+            "empty": ["blank.txt"],
+            "unreadable": ["broken.docx"],
+        }
+
+    def test_a_failure_before_any_file_carries_no_error_code(self, test_db_session, mock_llm):
+        service = KB_Service()
+        llm_id, job_id = service.create_kb_assistant(
+            db=test_db_session,
+            base_llm_id=mock_llm.id,
+            model_name="Doomed",
+            description="",
+            file_paths=[],
+        )
+        job = service.repo.get_kb_job_by_id(test_db_session, job_id)
+        service.repo.update_kb_job_status(test_db_session, job, "failed", "boom")
+
+        status = service.get_kb_job_status(test_db_session, llm_id)
+
+        assert status["error_code"] is None
+        assert status["files_by_reason"] == {"pending_vision": [], "empty": [], "unreadable": []}
+
+    def test_a_completed_job_names_its_unreadable_files_without_an_error_code(
+        self, test_db_session, mock_llm_with_kb
+    ):
+        llm, kb = mock_llm_with_kb
+        service = KB_Service()
+        job = service.repo.create_kb_job(
+            db=test_db_session, base_model_id=llm.id, new_model_id=llm.id, kb_id=kb.id
+        )
+        self._doc(service, test_db_session, kb, "notes.txt", "active")
+        self._doc(service, test_db_session, kb, "broken.docx", "unreadable")
+        service.repo.update_kb_job_status(test_db_session, job, "completed")
+
+        status = service.get_kb_job_status(test_db_session, llm.id)
+
+        assert status["error_code"] is None
+        assert status["failed_files"] == []
+        assert status["files_by_reason"]["unreadable"] == ["broken.docx"]
+
     def test_update_is_refused_while_another_job_runs_on_the_same_kb(
         self, test_db_session, mock_llm_with_kb
     ):
@@ -506,7 +583,7 @@ class TestIngestionPipeline:
         bad = tmp_path / "broken.xyz"
         bad.write_text("nope")
 
-        with pytest.raises(ValueError, match="No searchable content could be indexed"):
+        with pytest.raises(NothingIndexedError, match="No searchable content could be indexed"):
             service.process_and_index_documents(db=session, kb_job_id=job.id, file_paths=[str(bad)])
 
         session.expire_all()
@@ -523,7 +600,7 @@ class TestIngestionPipeline:
         blank = tmp_path / "blank.txt"
         blank.write_text("   \n\t\n   ", encoding="utf-8")  # whitespace -> 0 chunks
 
-        with pytest.raises(ValueError, match="No searchable content could be indexed"):
+        with pytest.raises(NothingIndexedError, match="No searchable content could be indexed"):
             service.process_and_index_documents(
                 db=session, kb_job_id=job.id, file_paths=[str(blank)]
             )
@@ -624,9 +701,164 @@ class TestIngestionPipeline:
         )
 
         session.expire_all()
-        assert service._failed_file_names(
-            session, service.repo.get_kb_job_by_id(session, job.id)
-        ) == ["ghost.txt"]
+        failed, _, _ = service._job_files(session, service.repo.get_kb_job_by_id(session, job.id))
+        assert failed == ["ghost.txt"]
+
+    @pytest.mark.parametrize("name, build, library_error", INVALID_DOCUMENTS)
+    def test_an_invalid_docx_is_a_warning_without_traceback_and_unreadable(
+        self, kb_store, real_db_session, tmp_path, caplog, name, build, library_error
+    ):
+        """A file that is not what its extension says is the user's file, not
+        an app bug (#752): one WARNING line without a traceback, the document
+        `unreadable`, the job named it under that reason, no ERROR anywhere."""
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        good = tmp_path / "ok.txt"
+        good.write_text("Texte parfaitement lisible.", encoding="utf-8")
+        bad = tmp_path / name
+        build(bad)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            service.process_and_index_documents(
+                db=session, kb_job_id=job.id, file_paths=[str(good), str(bad)]
+            )
+
+        session.expire_all()
+        job_row = service.repo.get_kb_job_by_id(session, job.id)
+        assert job_row.status == "completed"
+        statuses = {
+            d.name: d.status for d in session.query(KnowledgeDocument).filter_by(kb_id=kb.id)
+        }
+        assert statuses == {"ok.txt": "active", name: "unreadable"}
+        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+        (warning,) = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and name in r.getMessage() and r.name == "erudi"
+        ]
+        assert library_error in warning.getMessage()
+        assert not warning.exc_info
+        failed, by_reason, _ = service._job_files(session, job_row)
+        assert failed == []
+        assert by_reason["unreadable"] == [name]
+
+    @pytest.mark.parametrize("where", ["extractor", "embedding"])
+    def test_an_internal_failure_stays_an_error_with_traceback(
+        self, kb_store, real_db_session, tmp_path, caplog, monkeypatch, where
+    ):
+        from src.domains.knowledge_base import services
+
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        doc = tmp_path / "notes.md"
+        doc.write_text("# Notes\n\nContenu à indexer.", encoding="utf-8")
+
+        def explode(*args, **kwargs):
+            if where == "extractor":
+                raise AttributeError("'NoneType' object has no attribute 'text'")
+            raise RuntimeError("embedding child died")
+
+        if where == "extractor":
+            monkeypatch.setattr(service.reader, "read", explode)
+        else:
+            monkeypatch.setattr(services, "add_kb_chunks", explode)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            with pytest.raises(NothingIndexedError) as caught:
+                service.process_and_index_documents(
+                    db=session, kb_job_id=job.id, file_paths=[str(doc)]
+                )
+
+        assert caught.value.has_internal_failures
+        session.expire_all()
+        assert session.query(KnowledgeDocument).filter_by(kb_id=kb.id).one().status == "failed"
+        (error,) = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert "notes.md" in error.getMessage()
+        assert error.exc_info
+
+    def test_a_job_that_indexed_only_user_unreadable_files_logs_no_error(
+        self, kb_store, real_db_session, tmp_path, caplog, monkeypatch
+    ):
+        """A scan-only, an empty and an invalid file: the job fails (nothing
+        searchable was added) but the user's files are the cause, so the task
+        boundary writes one INFO line and nothing reaches ERROR (#764)."""
+        from pypdf import PdfWriter
+
+        from src.domains.knowledge_base import endpoints as kb_endpoints
+
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        scan = tmp_path / "scan.pdf"
+        writer = PdfWriter()
+        writer.add_blank_page(width=612, height=792)
+        with scan.open("wb") as handle:
+            writer.write(handle)
+        blank = tmp_path / "blank.txt"
+        blank.write_text("", encoding="utf-8")
+        broken = tmp_path / "broken.docx"
+        broken.write_text("a text file renamed", encoding="utf-8")
+
+        class _Session:
+            """The task closes its session; the test keeps using this one."""
+
+            def __getattr__(self, attribute):
+                return getattr(session, attribute)
+
+            def close(self):
+                pass
+
+        monkeypatch.setattr(kb_endpoints, "SessionLocal", lambda: _Session())
+        monkeypatch.setattr(kb_endpoints, "KB_Service", lambda: service)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            kb_endpoints._run_kb_update_task(job.id, [str(scan), str(blank), str(broken)])
+
+        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+        (boundary,) = [r for r in caplog.records if f"update job {job.id}" in r.getMessage()]
+        assert "indexed nothing" in boundary.getMessage()
+        assert boundary.levelno == logging.INFO
+        assert not boundary.exc_info
+        session.expire_all()
+        job_row = service.repo.get_kb_job_by_id(session, job.id)
+        assert job_row.status == "failed"
+        assert job_row.error_message.startswith("No searchable content could be indexed")
+        failed, by_reason, _ = service._job_files(session, job_row)
+        assert failed == []
+        assert by_reason == {
+            "pending_vision": ["scan.pdf"],
+            "empty": ["blank.txt"],
+            "unreadable": ["broken.docx"],
+        }
+
+    def test_the_same_unreadable_file_dropped_again_is_named_again(
+        self, kb_store, real_db_session, tmp_path
+    ):
+        """An `unreadable` row does not hide the file behind the dedup: the next
+        job reads it again and names it again, instead of a silent duplicate."""
+
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        good = tmp_path / "ok.txt"
+        good.write_text("Texte parfaitement lisible.", encoding="utf-8")
+        broken = tmp_path / "broken.docx"
+        broken.write_text("a text file renamed", encoding="utf-8")
+        service.process_and_index_documents(
+            db=session, kb_job_id=job.id, file_paths=[str(good), str(broken)]
+        )
+
+        job2 = service.repo.create_kb_job(
+            db=session, base_model_id=None, new_model_id=None, kb_id=kb.id
+        )
+        session.commit()
+        with pytest.raises(NothingIndexedError):
+            service.process_and_index_documents(
+                db=session, kb_job_id=job2.id, file_paths=[str(broken)], is_update=True
+            )
+
+        session.expire_all()
+        job2_row = service.repo.get_kb_job_by_id(session, job2.id)
+        assert service._job_files(session, job2_row)[1]["unreadable"] == ["broken.docx"]
+        assert session.query(KnowledgeDocument).filter_by(kb_id=kb.id).count() == 2
 
     def test_a_row_is_indexing_until_its_chunks_are_stored(
         self, kb_store, real_db_session, tmp_path, monkeypatch
@@ -672,10 +904,10 @@ class TestIngestionPipeline:
             raise IntegrityError("insert", {}, Exception("uq_knowledge_documents_kb_hash"))
 
         monkeypatch.setattr(service.repo, "create_document", clash)
-        with pytest.raises(ValueError, match="No searchable content"):
+        with pytest.raises(NothingIndexedError, match="No searchable content"):
             service.process_and_index_documents(db=session, kb_job_id=job.id, file_paths=[str(doc)])
 
         session.expire_all()
         job_row = service.repo.get_kb_job_by_id(session, job.id)
         assert job_row.status == "failed"
-        assert service._failed_file_names(session, job_row) == ["maintenance.md"]
+        assert service._job_files(session, job_row)[0] == ["maintenance.md"]

@@ -341,7 +341,12 @@ these rules, in both processes.
   was taken (the other `llama-server` flavour, the processor because NVML sees
   no GPU, a default title, an answer without its knowledge-base excerpts), a
   file skipped, an invalid value replaced by a default, a child that printed
-  something alarming but kept running, a probe that timed out once. So is a
+  something alarming but kept running, a probe that timed out once. A file
+  of the user's that is not what its extension says (a text renamed `.docx`,
+  a PDF locked by a password) is a skipped file: the extractor raises
+  `UnreadableDocumentError`, and the Knowledge Base job or the attachment
+  reader writes one `WARNING` line naming the file and the parser's verdict,
+  without a traceback. So is a
   curated failed turn (a prompt that does not fit the window, a model that
   did not start answering in time or went silent mid-answer, the tool-loop
   limit): the runner flags it
@@ -353,7 +358,12 @@ these rules, in both processes.
   (404), a guarded delete (409), a rejected input (422) — is one of them: it is
   not a defect, and it must not fill a page meant for bug reports. The backend
   logs it at `INFO` in the request's record, and the API client logs the same
-  status at `info` on its side.
+  status at `info` on its side. So is a Knowledge Base job that indexed
+  nothing because of the user's files alone (scans, empty or invalid files,
+  each already named at its own level): the job fails for the user to see,
+  the task boundary writes one `INFO` line, and the renderer logs the failure
+  at `warn`. When one of the job's files failed for an internal cause, that
+  file's record and the job's are `ERROR`s with the traceback.
 - Nothing that indicates a defect is logged at `INFO`/`DEBUG` or not at all.
 
 ### One record per failure
