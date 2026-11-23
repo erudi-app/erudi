@@ -6,6 +6,7 @@ import SpinnerDots from "../components/Spinner";
 import { API_BASE_URL } from "../config/api";
 import { tracedFetch } from "../services/api/client";
 import { createLogger } from "../utils/logger";
+import { failureForLog, requestErrorText, responseError } from "../utils/apiErrors";
 const log = createLogger("KnowledgeBaseContext");
 
 const KnowledgeBaseContext = createContext();
@@ -120,13 +121,15 @@ export function KnowledgeBaseProvider({ children }) {
       });
 
       if (!response.ok) {
-        const errorData = await response.json();
-        throw new Error(
-          t("knowledgeBase:creation.errors.startFailed", {
-            status: response.status,
-            detail: errorData.detail || t("knowledgeBase:creation.errors.unknownDetail"),
-          })
+        // The sentence of the response's code, else of its status (#780);
+        // the backend's English one goes to the log.
+        const answer = await responseError(response);
+        const refused = new Error(
+          t("knowledgeBase:creation.errors.startFailed", { detail: answer.message })
         );
+        refused.refused = true;
+        refused.detail = answer.detail;
+        throw refused;
       }
 
       const result = await response.json();
@@ -145,10 +148,15 @@ export function KnowledgeBaseProvider({ children }) {
         checkCreationStatus(newAssistantId);
       }, 2000);
     } catch (err) {
-      log.error("Knowledge base creation error:", err);
+      log.error("Knowledge base creation error:", failureForLog(err));
       setIsStarting(false);
-      setErrorMessage(err.message || t("knowledgeBase:creation.errors.startFailedGeneric"));
-      callbacksRef.current.onError?.(err.message);
+      // A refused start says its translated sentence; a request that got no
+      // answer, or a runtime error, says one of ours, never English text.
+      const errorMsg = err.refused
+        ? err.message
+        : t("knowledgeBase:creation.errors.startFailed", { detail: requestErrorText(err) });
+      setErrorMessage(errorMsg);
+      callbacksRef.current.onError?.(errorMsg);
     }
   }, [task, t, checkCreationStatus]);
 

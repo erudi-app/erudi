@@ -344,6 +344,12 @@ describe("what /compact answers", () => {
       "The summary failed: The model could not be loaded.",
     ],
     [
+      // #780: the backend's English sentence never reaches the notice.
+      "the server failed with a code the interface has no sentence for",
+      () => appError(500, "SOME_NEWER_CODE", "An English sentence from the backend."),
+      "The summary did not come back; the conversation shows where it stands.",
+    ],
+    [
       "the server answered without an error body",
       () => jsonResponse(502, null),
       "The summary did not come back; the conversation shows where it stands.",

@@ -49,9 +49,7 @@
   },
   "creation": {
     "errors": {
-      "startFailed": "Failed to start assistant creation ({{status}}): {{detail}}",
-      "startFailedGeneric": "Failed to start assistant creation",
-      "unknownDetail": "Unknown error",
+      "startFailed": "Failed to start assistant creation: {{detail}}",
       "failedUnexpectedly": "Assistant creation failed unexpectedly",
       "statusCheckFailed": "An error occurred during assistant creation. Please try again or contact the Erudi team.",
       "nothingIndexed_one": "Nothing could be indexed from the file you added.",

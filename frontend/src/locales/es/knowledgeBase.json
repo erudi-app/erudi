@@ -49,9 +49,7 @@
   },
   "creation": {
     "errors": {
-      "startFailed": "No se pudo iniciar la creación del asistente ({{status}}): {{detail}}",
-      "startFailedGeneric": "No se pudo iniciar la creación del asistente",
-      "unknownDetail": "Error desconocido",
+      "startFailed": "No se pudo iniciar la creación del asistente: {{detail}}",
       "failedUnexpectedly": "La creación del asistente falló de forma inesperada",
       "statusCheckFailed": "Se produjo un error durante la creación del asistente. Inténtelo de nuevo o contacte con el equipo de Erudi.",
       "nothingIndexed_one": "No se pudo indexar nada del archivo que añadiste.",

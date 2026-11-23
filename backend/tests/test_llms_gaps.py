@@ -11,7 +11,6 @@ mapping.
 
 from __future__ import annotations
 
-from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock, patch
@@ -81,32 +80,6 @@ class TestDownloadJobUpdatedAtUTC:
     (`InvalidParameterValue`) while a numeric offset -- hours east of
     Greenwich -- needs no such database and works on every platform.
     """
-
-    def test_update_status_stamps_a_true_utc_instant(self, test_db_session):
-        test_db_session.execute(text("SET TIME ZONE 2"))  # UTC+2
-        repo = Download_Job_Repository(test_db_session)
-        job = _add_job(test_db_session, None, status="pending")
-
-        repo.update_status(job, "running")
-        test_db_session.commit()
-        test_db_session.refresh(job)
-
-        now = datetime.now(timezone.utc)
-        assert job.updated_at.tzinfo is not None
-        assert abs(job.updated_at - now) < timedelta(seconds=30)
-
-    def test_update_progress_stamps_a_true_utc_instant(self, test_db_session):
-        test_db_session.execute(text("SET TIME ZONE 2"))  # UTC+2
-        repo = Download_Job_Repository(test_db_session)
-        job = _add_job(test_db_session, None, status="running")
-
-        repo.update_progress(job, progress=50.0)
-        test_db_session.commit()
-        test_db_session.refresh(job)
-
-        now = datetime.now(timezone.utc)
-        assert job.updated_at.tzinfo is not None
-        assert abs(job.updated_at - now) < timedelta(seconds=30)
 
     def test_get_most_recent_active_finds_a_job_updated_now_in_non_utc_session(
         self, test_db_session

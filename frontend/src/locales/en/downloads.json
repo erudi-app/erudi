@@ -28,10 +28,25 @@
   "errors": {
     "failedUnexpectedly": "Download failed unexpectedly",
     "pollFailed": "An error occured during download. Please check your connection and try again. If the problem persists, please contact the Erudi team.",
-    "startFailed": "Failed to start download ({{status}}): {{detail}}",
+    "startFailed": "Failed to start download: {{detail}}",
     "unexpected": "An unexpected error occurred",
     "cancelFailed": "Failed to cancel download: {{detail}}",
-    "stalled": "The download finished but the app is taking longer than expected to finalize it. The files have been saved. Restart Erudi and check your installed models before downloading again."
+    "stalled": "The download finished but the app is taking longer than expected to finalize it. The files have been saved. Restart Erudi and check your installed models before downloading again.",
+    "codes": {
+      "offline": "The download stopped because there is no internet connection. Check your connection and try again.",
+      "diskFull": "The disk is full. Free some space, then start the download again.",
+      "gated": "This model needs a Hugging Face account to download, which Erudi does not use. Choose another model.",
+      "notFound": "This model was not found on Hugging Face. It may have been removed, renamed or made private.",
+      "rateLimited": "Hugging Face is receiving too many requests right now. Wait a few minutes, then try again.",
+      "hubUnavailable": "Hugging Face is not answering properly right now. Try again in a few minutes.",
+      "interrupted": "The download was interrupted because Erudi closed. Start it again.",
+      "noEngineArtifact": "This repository has no files this computer can run. Choose a version of the model made for it, for example one found through the Hugging Face search.",
+      "rawGgufChunks": "This model is published in pieces that must be joined before it can run, which Erudi does not do. Choose another repository of this model.",
+      "incompleteSplit": "A part of this model is missing on Hugging Face, so it could not run. Choose another version of the model.",
+      "unsafeFileName": "This repository contains a file name Erudi refuses to write, for safety. Choose another repository.",
+      "notRunnable": "This model is known not to run on this computer. Choose another model.",
+      "integrityFailed": "The downloaded files are incomplete or invalid, so they were removed. Start the download again."
+    }
   },
   "hardwareWait": {
     "title": "⏳ Please Wait",

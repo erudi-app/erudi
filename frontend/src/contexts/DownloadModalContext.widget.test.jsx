@@ -28,6 +28,9 @@ vi.mock("../components/modals/ConfirmationModal", () => ({
 
 import { DownloadModalProvider, useDownloadModal } from "./DownloadModalContext";
 import { DOWNLOAD_CANCELLED } from "../utils/downloadStatus";
+import i18n from "../i18n";
+import frDownloads from "../locales/fr/downloads.json";
+import frErrors from "../locales/fr/errors.json";
 
 let postResponder;
 let statusResponder;
@@ -55,6 +58,7 @@ const renderProvider = () =>
     </DownloadModalProvider>
   );
 
+const DISK_FULL = "The disk is full. Free some space, then start the download again.";
 const widget = () => screen.queryByLabelText("Model download");
 const phaseLine = () => screen.getByRole("status").textContent;
 
@@ -232,15 +236,25 @@ describe("Download widget terminal states (#292)", () => {
   it("shows a failure inline with its message and stays until dismissed", async () => {
     statusResponder = () => ({
       ok: true,
-      json: async () => ({ status: "failed", error_message: "disk full", progress: 10 }),
+      json: async () => ({
+        status: "failed",
+        error_message: "disk full",
+        error_code: "disk_full",
+        progress: 10,
+      }),
     });
     renderProvider();
     await startPollAndExpand();
 
     expect(phaseLine()).toBe("Download failed");
-    expect(screen.getByText("disk full")).toBeTruthy();
+    expect(screen.getByText(DISK_FULL)).toBeTruthy();
+    expect(screen.queryByText("disk full")).toBeNull();
     expect(screen.getByTestId("downloading").textContent).toBe("false");
-    expect(onError).toHaveBeenCalledWith("disk full");
+    expect(onError).toHaveBeenCalledWith({
+      message: DISK_FULL,
+      code: "disk_full",
+      error_message: "disk full",
+    });
 
     await advance(30000);
     expect(widget()).toBeTruthy(); // no auto-dismiss on failure
@@ -263,7 +277,8 @@ describe("Download widget terminal states (#292)", () => {
 
     expect(phaseLine()).toBe("Download failed");
     // The FastAPI envelope is unwrapped: the sentence, not the raw JSON.
-    expect(screen.getByText("Failed to start download (500): Model 1 not found")).toBeTruthy();
+    expect(screen.getByText("Failed to start download: API Error: 500")).toBeTruthy();
+    expect(screen.queryByText(/Model 1 not found/)).toBeNull();
     expect(screen.getByText("Dismiss")).toBeTruthy();
   });
 
@@ -280,7 +295,7 @@ describe("Download widget terminal states (#292)", () => {
 
     // Before the 2 s auto-expand: the detail and Dismiss are already there.
     expect(screen.getByText("Base Model")).toBeTruthy();
-    expect(screen.getByText("Failed to start download (500): boom")).toBeTruthy();
+    expect(screen.getByText("Failed to start download: API Error: 500")).toBeTruthy();
     expect(screen.getByText("Dismiss")).toBeTruthy();
   });
 
@@ -318,7 +333,7 @@ describe("Download widget terminal states (#292)", () => {
     await startPollAndExpand();
 
     expect(phaseLine()).toBe("Downloading");
-    expect(screen.queryByText("disk full")).toBeNull();
+    expect(screen.queryByText("Download failed unexpectedly")).toBeNull();
     expect(screen.getByTestId("downloading").textContent).toBe("true");
   });
 });
@@ -381,6 +396,107 @@ describe("Cancel fallbacks", () => {
     expect(screen.getByTestId("downloading").textContent).toBe("false");
     // Still a cancellation, with the detail kept visible.
     expect(phaseLine()).toBe("Download cancelled");
-    expect(screen.getByText(/Failed to cancel download/)).toBeTruthy();
+    expect(screen.getByText("Failed to cancel download: API Error: 500")).toBeTruthy();
+  });
+});
+
+describe("Download failures in the interface language (#780)", () => {
+  // The job's English error_message is for the log; the widget says the
+  // sentence of its error_code, in the interface language.
+  const ENGLISH = "[Errno 28] No space left on device: '/models/temp_1/model.safetensors'";
+
+  beforeEach(async () => {
+    await i18n.changeLanguage("fr");
+  });
+  afterEach(async () => {
+    await i18n.changeLanguage("en");
+  });
+
+  const failWith = (job) => {
+    statusResponder = () => ({
+      ok: true,
+      json: async () => ({ status: "failed", progress: 10, error_message: ENGLISH, ...job }),
+    });
+  };
+
+  it.each([
+    ["offline", frDownloads.errors.codes.offline],
+    ["disk_full", frDownloads.errors.codes.diskFull],
+    ["gated", frDownloads.errors.codes.gated],
+    ["not_found", frDownloads.errors.codes.notFound],
+    ["rate_limited", frDownloads.errors.codes.rateLimited],
+    ["hub_unavailable", frDownloads.errors.codes.hubUnavailable],
+    ["interrupted", frDownloads.errors.codes.interrupted],
+    ["no_engine_artifact", frDownloads.errors.codes.noEngineArtifact],
+    ["integrity_failed", frDownloads.errors.codes.integrityFailed],
+    ["unexpected", frDownloads.errors.failedUnexpectedly],
+  ])("shows the French sentence for %s, never the English message", async (code, sentence) => {
+    failWith({ error_code: code });
+    renderProvider();
+    await startPollAndExpand();
+
+    expect(phaseLine()).toBe(frDownloads.widget.phase.failed);
+    expect(screen.getByText(sentence)).toBeTruthy();
+    expect(screen.queryByText(ENGLISH)).toBeNull();
+    expect(onError).toHaveBeenCalledWith({ message: sentence, code, error_message: ENGLISH });
+  });
+
+  it("shows the generic French sentence for a code it does not know", async () => {
+    failWith({ error_code: "a_code_from_a_newer_backend" });
+    renderProvider();
+    await startPollAndExpand();
+
+    expect(screen.getByText(frDownloads.errors.failedUnexpectedly)).toBeTruthy();
+    expect(screen.queryByText(ENGLISH)).toBeNull();
+  });
+
+  it("shows the generic French sentence for a job that failed before codes were stored", async () => {
+    failWith({ error_code: null });
+    renderProvider();
+    await startPollAndExpand();
+
+    expect(screen.getByText(frDownloads.errors.failedUnexpectedly)).toBeTruthy();
+    expect(screen.queryByText(ENGLISH)).toBeNull();
+  });
+
+  it("says a refused start in French, from the response's code", async () => {
+    postResponder = () => ({
+      ok: false,
+      status: 503,
+      text: async () =>
+        JSON.stringify({
+          success: false,
+          error: {
+            type: "DATABASE_BUSY",
+            message:
+              "Every database connection was in use for 30 s, so this request was not served.",
+          },
+        }),
+    });
+    renderProvider();
+    await startPollAndExpand();
+
+    const sentence = i18n.t("downloads:errors.startFailed", {
+      detail: frErrors.api.codes.databaseBusy,
+    });
+    expect(screen.getByText(sentence)).toBeTruthy();
+    expect(screen.queryByText(/Every database connection/)).toBeNull();
+  });
+
+  it("says a refused start with an unknown code by its HTTP status, in French", async () => {
+    postResponder = () => ({
+      ok: false,
+      status: 422,
+      text: async () =>
+        JSON.stringify({ detail: [{ loc: ["body", "link"], msg: "Field required" }] }),
+    });
+    renderProvider();
+    await startPollAndExpand();
+
+    const sentence = i18n.t("downloads:errors.startFailed", {
+      detail: i18n.t("errors:api.httpStatus", { status: 422 }),
+    });
+    expect(screen.getByText(sentence)).toBeTruthy();
+    expect(screen.queryByText(/Field required/)).toBeNull();
   });
 });

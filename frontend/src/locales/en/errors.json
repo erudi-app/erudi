@@ -128,7 +128,17 @@
   },
   "api": {
     "timeout": "Request timeout",
-    "httpStatus": "API Error: {{status}}"
+    "httpStatus": "API Error: {{status}}",
+    "codes": {
+      "databaseBusy": "Erudi is busy finishing other answers. Try again in a moment.",
+      "database": "Erudi's database could not complete the request. Try again.",
+      "filesystem": "Erudi could not use the model's folder on disk. Try again; if it keeps happening, report it from the Diagnostics page.",
+      "modelNotFound": "This model no longer exists. Refresh the list and try again.",
+      "internal": "Something went wrong in Erudi. Try again; if it keeps happening, report it from the Diagnostics page.",
+      "modelLoading": "The model could not be loaded.",
+      "insufficientMemory": "There is not enough memory for the model. Close other applications or choose a smaller model.",
+      "engineFailure": "The model stopped working. Try again; if it keeps happening, report it from the Diagnostics page."
+    }
   },
   "engine": {
     "codes": {

@@ -28,10 +28,25 @@
   "errors": {
     "failedUnexpectedly": "Le téléchargement a échoué de manière inattendue",
     "pollFailed": "Une erreur est survenue pendant le téléchargement. Vérifiez votre connexion et réessayez. Si le problème persiste, contactez l'équipe Erudi.",
-    "startFailed": "Impossible de démarrer le téléchargement ({{status}}) : {{detail}}",
+    "startFailed": "Impossible de démarrer le téléchargement : {{detail}}",
     "unexpected": "Une erreur inattendue est survenue",
     "cancelFailed": "Impossible d'annuler le téléchargement : {{detail}}",
-    "stalled": "Le téléchargement est terminé, mais l'application met plus de temps que prévu à le finaliser. Les fichiers ont été enregistrés. Redémarrez Erudi et vérifiez vos modèles installés avant de télécharger à nouveau."
+    "stalled": "Le téléchargement est terminé, mais l'application met plus de temps que prévu à le finaliser. Les fichiers ont été enregistrés. Redémarrez Erudi et vérifiez vos modèles installés avant de télécharger à nouveau.",
+    "codes": {
+      "offline": "Le téléchargement s'est arrêté faute de connexion internet. Vérifiez votre connexion et réessayez.",
+      "diskFull": "Le disque est plein. Libérez de l'espace, puis relancez le téléchargement.",
+      "gated": "Ce modèle demande un compte Hugging Face pour être téléchargé, ce qu'Erudi n'utilise pas. Choisissez un autre modèle.",
+      "notFound": "Ce modèle est introuvable sur Hugging Face. Il a peut-être été supprimé, renommé ou rendu privé.",
+      "rateLimited": "Hugging Face reçoit trop de requêtes en ce moment. Patientez quelques minutes, puis réessayez.",
+      "hubUnavailable": "Hugging Face ne répond pas correctement en ce moment. Réessayez dans quelques minutes.",
+      "interrupted": "Le téléchargement a été interrompu par la fermeture d'Erudi. Relancez-le.",
+      "noEngineArtifact": "Ce dépôt ne contient aucun fichier que cet ordinateur peut exécuter. Choisissez une version du modèle prévue pour lui, par exemple via la recherche Hugging Face.",
+      "rawGgufChunks": "Ce modèle est publié en morceaux qu'il faut assembler avant de pouvoir l'exécuter, ce qu'Erudi ne fait pas. Choisissez un autre dépôt de ce modèle.",
+      "incompleteSplit": "Une partie de ce modèle manque sur Hugging Face : il ne pourrait pas fonctionner. Choisissez une autre version du modèle.",
+      "unsafeFileName": "Ce dépôt contient un nom de fichier qu'Erudi refuse d'écrire, par sécurité. Choisissez un autre dépôt.",
+      "notRunnable": "Ce modèle est connu pour ne pas fonctionner sur cet ordinateur. Choisissez un autre modèle.",
+      "integrityFailed": "Les fichiers téléchargés sont incomplets ou invalides : ils ont été supprimés. Relancez le téléchargement."
+    }
   },
   "hardwareWait": {
     "title": "⏳ Veuillez patienter",

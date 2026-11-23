@@ -128,7 +128,17 @@
   },
   "api": {
     "timeout": "请求超时",
-    "httpStatus": "API 错误：{{status}}"
+    "httpStatus": "API 错误：{{status}}",
+    "codes": {
+      "databaseBusy": "Erudi 正在完成其他回答。请稍后重试。",
+      "database": "Erudi 的数据库无法完成此请求。请重试。",
+      "filesystem": "Erudi 无法使用磁盘上的模型文件夹。请重试；如果问题反复出现，请在“诊断信息”页面报告。",
+      "modelNotFound": "此模型已不存在。请刷新列表后重试。",
+      "internal": "Erudi 出现了问题。请重试；如果问题反复出现，请在“诊断信息”页面报告。",
+      "modelLoading": "无法加载模型。",
+      "insufficientMemory": "内存不足以运行此模型。请关闭其他应用程序或选择更小的模型。",
+      "engineFailure": "模型已停止工作。请重试；如果问题反复出现，请在“诊断信息”页面报告。"
+    }
   },
   "engine": {
     "codes": {

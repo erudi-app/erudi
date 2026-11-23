@@ -76,7 +76,10 @@ describe("ChatCollapsibleSection rename", () => {
     fireEvent.keyDown(input, { key: "Enter" });
 
     await waitFor(() => expect(window.alert).toHaveBeenCalledTimes(1));
-    expect(String(window.alert.mock.calls[0][0])).toContain("Could not rename conversation");
+    // The status's translated sentence, not a bare "500" (#780).
+    expect(String(window.alert.mock.calls[0][0])).toBe(
+      "Could not rename conversation, try again: API Error: 500"
+    );
     expect(onRename).not.toHaveBeenCalled();
     await waitFor(() => expect(screen.queryByRole("textbox")).toBeNull());
   });

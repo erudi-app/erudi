@@ -28,10 +28,25 @@
   "errors": {
     "failedUnexpectedly": "La descarga falló de forma inesperada",
     "pollFailed": "Se produjo un error durante la descarga. Comprueba tu conexión e inténtalo de nuevo. Si el problema persiste, contacta con el equipo de Erudi.",
-    "startFailed": "No se pudo iniciar la descarga ({{status}}): {{detail}}",
+    "startFailed": "No se pudo iniciar la descarga: {{detail}}",
     "unexpected": "Se produjo un error inesperado",
     "cancelFailed": "No se pudo cancelar la descarga: {{detail}}",
-    "stalled": "La descarga terminó, pero la aplicación está tardando más de lo esperado en finalizarla. Los archivos se han guardado. Reinicia Erudi y revisa tus modelos instalados antes de volver a descargar."
+    "stalled": "La descarga terminó, pero la aplicación está tardando más de lo esperado en finalizarla. Los archivos se han guardado. Reinicia Erudi y revisa tus modelos instalados antes de volver a descargar.",
+    "codes": {
+      "offline": "La descarga se detuvo porque no hay conexión a internet. Comprueba tu conexión e inténtalo de nuevo.",
+      "diskFull": "El disco está lleno. Libera espacio y vuelve a iniciar la descarga.",
+      "gated": "Este modelo necesita una cuenta de Hugging Face para descargarse, y Erudi no usa ninguna. Elige otro modelo.",
+      "notFound": "Este modelo no se encontró en Hugging Face. Puede que se haya eliminado, renombrado o hecho privado.",
+      "rateLimited": "Hugging Face está recibiendo demasiadas solicitudes ahora mismo. Espera unos minutos e inténtalo de nuevo.",
+      "hubUnavailable": "Hugging Face no responde correctamente en este momento. Inténtalo de nuevo en unos minutos.",
+      "interrupted": "La descarga se interrumpió porque Erudi se cerró. Vuelve a iniciarla.",
+      "noEngineArtifact": "Este repositorio no tiene archivos que este ordenador pueda ejecutar. Elige una versión del modelo hecha para él, por ejemplo una encontrada con la búsqueda de Hugging Face.",
+      "rawGgufChunks": "Este modelo se publica en trozos que hay que unir antes de poder ejecutarlo, y Erudi no lo hace. Elige otro repositorio de este modelo.",
+      "incompleteSplit": "Falta una parte de este modelo en Hugging Face, así que no podría funcionar. Elige otra versión del modelo.",
+      "unsafeFileName": "Este repositorio contiene un nombre de archivo que Erudi se niega a escribir, por seguridad. Elige otro repositorio.",
+      "notRunnable": "Se sabe que este modelo no funciona en este ordenador. Elige otro modelo.",
+      "integrityFailed": "Los archivos descargados están incompletos o no son válidos, así que se eliminaron. Vuelve a iniciar la descarga."
+    }
   },
   "hardwareWait": {
     "title": "⏳ Espera un momento",

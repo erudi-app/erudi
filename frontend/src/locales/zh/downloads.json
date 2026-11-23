@@ -28,10 +28,25 @@
   "errors": {
     "failedUnexpectedly": "下载意外失败",
     "pollFailed": "下载过程中出现错误。请检查网络连接后重试。如果问题持续存在，请联系 Erudi 团队。",
-    "startFailed": "无法开始下载（{{status}}）：{{detail}}",
+    "startFailed": "无法开始下载：{{detail}}",
     "unexpected": "发生了意外错误",
     "cancelFailed": "无法取消下载：{{detail}}",
-    "stalled": "下载已完成，但应用完成收尾所需的时间比预期更长。文件已保存。请重启 Erudi，并在再次下载前检查已安装的模型。"
+    "stalled": "下载已完成，但应用完成收尾所需的时间比预期更长。文件已保存。请重启 Erudi，并在再次下载前检查已安装的模型。",
+    "codes": {
+      "offline": "由于没有网络连接，下载已停止。请检查网络连接后重试。",
+      "diskFull": "磁盘已满。请释放一些空间，然后重新开始下载。",
+      "gated": "此模型需要 Hugging Face 账户才能下载，而 Erudi 不使用账户。请选择其他模型。",
+      "notFound": "在 Hugging Face 上找不到此模型。它可能已被删除、重命名或设为私有。",
+      "rateLimited": "Hugging Face 目前收到的请求过多。请等待几分钟后重试。",
+      "hubUnavailable": "Hugging Face 目前无法正常响应。请几分钟后重试。",
+      "interrupted": "由于 Erudi 已关闭，下载被中断。请重新开始下载。",
+      "noEngineArtifact": "此仓库中没有这台电脑可以运行的文件。请选择为它制作的模型版本，例如通过 Hugging Face 搜索找到的版本。",
+      "rawGgufChunks": "此模型以需要先拼接才能运行的分块形式发布，而 Erudi 不进行拼接。请选择此模型的其他仓库。",
+      "incompleteSplit": "此模型在 Hugging Face 上缺少一个部分，因此无法运行。请选择此模型的其他版本。",
+      "unsafeFileName": "出于安全考虑，此仓库包含 Erudi 拒绝写入的文件名。请选择其他仓库。",
+      "notRunnable": "已知此模型无法在这台电脑上运行。请选择其他模型。",
+      "integrityFailed": "下载的文件不完整或无效，已被删除。请重新开始下载。"
+    }
   },
   "hardwareWait": {
     "title": "⏳ 请稍候",

@@ -123,6 +123,7 @@ from src.domains.llms.schemas import (
     ConversationDefaultsUpdate,
 )
 from src.domains.llms.conversation_defaults import read_conversation_defaults
+from src.domains.llms.download_errors import recorded_download_error_code, with_download_code
 from src.domains.llms.services import (
     DownloadCancelled,
     DownloadInterrupted,
@@ -211,7 +212,8 @@ def _assert_downloaded_artifact_ok(final_save_dir, temp_save_dir) -> None:
         return
     try:
         validator(str(final_save_dir))
-    except Exception:
+    except Exception as exc:
+        with_download_code(exc, "integrity_failed")
         for stale_dir in (final_save_dir, temp_save_dir):
             try:
                 if stale_dir and os.path.exists(str(stale_dir)):
@@ -449,11 +451,17 @@ def _run_download(
         # written means a cancel only if the row reads ``cancelled``; a row
         # that is gone is still a failure to report.
         cancelled, unmarked = False, ""
+        code = recorded_download_error_code(e)
         try:
             session.rollback()
-            if not _write_job_unless_cancelled(
-                session, job_id, {"status": "failed", "error_message": str(e)}
-            ):
+            # The English text for the log and Diagnostics, the code for the
+            # sentence the interface shows (#780).
+            failure = {
+                "status": "failed",
+                "error_message": str(e),
+                "error_code": code,
+            }
+            if not _write_job_unless_cancelled(session, job_id, failure):
                 cancelled = _job_cancelled(session, job_id)
                 unmarked = "" if cancelled else " (the job row is gone)"
             session.commit()
@@ -471,8 +479,11 @@ def _run_download(
         else:
             # The task boundary: nobody awaits a BackgroundTask, so this is the
             # record of the failed download, with the model and the traceback.
+            # The code names it for the interface's bug counter (an environment
+            # code, such as offline, is not a defect).
             logger.exception(
-                f"Download job {job_id} failed for LLM {model_id} ({model_link}): {e}{unmarked}"
+                f"Download job {job_id} failed (code={code}) for LLM {model_id} "
+                f"({model_link}): {e}{unmarked}"
             )
     finally:
         session.close()

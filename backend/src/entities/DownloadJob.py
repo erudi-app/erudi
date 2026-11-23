@@ -34,7 +34,12 @@ class DownloadJobModel(Base):
         temp_local_model_link: Temp directory for full-precision download.
         final_local_model_link: Final directory for quantized model.
         status: Job state - "pending", "running", "completed", "failed", "cancelled".
-        error_message: Exception message if status="failed".
+        error_message: Exception message if status="failed" (English, for the
+            log and Diagnostics; never shown to the user).
+        error_code: Stable code of the failure if status="failed" (one of
+            ``DOWNLOAD_ERROR_CODES`` in ``src/domains/llms/download_errors.py``); the
+            interface shows its sentence for it. None on a job that failed
+            before the column existed.
         created_at: Job creation timestamp (server default).
         updated_at: Last status update timestamp (auto-updated).
         total_bytes: Total download size in bytes.
@@ -65,6 +70,7 @@ class DownloadJobModel(Base):
     final_local_model_link = Column(String, nullable=True)
     status = Column(String, default="pending", nullable=False)
     error_message = Column(Text, nullable=True)
+    error_code = Column(String, nullable=True)
     created_at = Column(DateTime(timezone=True), server_default=func.now())
     updated_at = Column(DateTime(timezone=True), onupdate=func.now(), server_default=func.now())
     total_bytes = Column(Float, default=0.0, nullable=False)

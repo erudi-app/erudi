@@ -49,9 +49,7 @@
   },
   "creation": {
     "errors": {
-      "startFailed": "无法开始创建助手（{{status}}）：{{detail}}",
-      "startFailedGeneric": "无法开始创建助手",
-      "unknownDetail": "未知错误",
+      "startFailed": "无法开始创建助手：{{detail}}",
       "failedUnexpectedly": "助手创建意外失败",
       "statusCheckFailed": "创建助手时发生错误。请重试或联系 Erudi 团队。",
       "nothingIndexed_one": "无法从您添加的文件中索引任何内容。",

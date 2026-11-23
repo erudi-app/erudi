@@ -55,19 +55,25 @@ describe("exportConversation", () => {
 
   it("throws when the conversation cannot be fetched, and never opens the dialog", async () => {
     const { save, fetcher } = setup({ ok: false });
-    await expect(exportConversation(7, { t: tr, fetcher })).rejects.toThrow();
+    // The interface's sentence for the status, never English text (#780).
+    await expect(exportConversation(7, { t: tr, fetcher })).rejects.toThrow("API Error: 500");
     expect(save).not.toHaveBeenCalled();
   });
 
   it("throws when main reports a failure", async () => {
     const { fetcher } = setup({ save: vi.fn(async () => ({ status: "error" })) });
-    await expect(exportConversation(7, { t: tr, fetcher })).rejects.toThrow();
+    // A sentence of the interface, never English text (#780).
+    await expect(exportConversation(7, { t: tr, fetcher })).rejects.toThrow(
+      "chat:export.errors.saveFailed"
+    );
   });
 
   it("throws when the bridge is missing (a plain browser)", async () => {
     globalThis.window = {};
     const fetcher = vi.fn(async () => ({ ok: true, json: async () => conversation }));
-    await expect(exportConversation(7, { t: tr, fetcher })).rejects.toThrow();
+    await expect(exportConversation(7, { t: tr, fetcher })).rejects.toThrow(
+      "chat:export.errors.bridgeUnavailable"
+    );
   });
 
   it("never exports an ephemeral conversation (#428)", async () => {
@@ -78,7 +84,9 @@ describe("exportConversation", () => {
       json: async () => ({ ...conversation, ephemeral: true }),
     }));
 
-    await expect(exportConversation(7, { t: tr, fetcher })).rejects.toThrow(/ephemeral/);
+    await expect(exportConversation(7, { t: tr, fetcher })).rejects.toThrow(
+      "chat:export.errors.ephemeral"
+    );
     expect(save).not.toHaveBeenCalled();
   });
 });

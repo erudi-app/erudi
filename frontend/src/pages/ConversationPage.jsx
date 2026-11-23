@@ -54,6 +54,7 @@ import {
 import { formatBytes } from "../utils/formatBytes";
 import { withCuratedTurn } from "../utils/curatedTurns";
 import { withNotices } from "../utils/answerNotices";
+import { apiErrorCodeMessage, failureForLog, requestErrorText } from "../utils/apiErrors";
 import {
   automaticCompactions,
   errorDetailOf,
@@ -156,8 +157,9 @@ const COMPACT_ERRORS = {
 /**
  * What a /compact answer (`ok`, its JSON `body` or null) says and what
  * follows it: `{ notice: { tone, key, values } | null, after }`. An error
- * without its own copy says the server's message when it sent one ("The
- * summary failed: ..."), else that the summary did not come back.
+ * without its own copy says the interface's sentence for its code when it
+ * has one ("The summary failed: ...", `apiErrorCodeMessage`), else that the
+ * summary did not come back; never the server's English message (#780).
  */
 function compactOutcome(ok, body) {
   if (ok && body?.summarized === 0) {
@@ -174,12 +176,13 @@ function compactOutcome(ok, body) {
   if (known) {
     return { notice: { tone: "error", key: known.key }, after: known.after };
   }
-  if (!ok && typeof error?.message === "string" && error.message.trim()) {
+  const message = ok ? null : apiErrorCodeMessage(body);
+  if (message) {
     return {
       notice: {
         tone: "error",
         key: "chat:compact.errors.failedWithMessage",
-        values: { message: error.message.trim() },
+        values: { message },
       },
       after: AFTER_COMPACT.REREAD,
     };
@@ -1244,8 +1247,8 @@ export default function ConversationPage() {
     try {
       await exportConversation(id, { t });
     } catch (err) {
-      log.error("Conversation export failed", err);
-      setExportError(t("chat:export.failed", { error: err.message }));
+      log.error("Conversation export failed", failureForLog(err));
+      setExportError(t("chat:export.failed", { error: requestErrorText(err) }));
     }
   };
 
@@ -1370,6 +1373,8 @@ export default function ConversationPage() {
         write(`Manual compaction of conversation ${conversationId} ended in HTTP ${res.status}`, {
           type: body?.error?.type ?? null,
           reason: body?.error?.detail?.reason ?? null,
+          // The server's English sentence, for the log only (#780).
+          message: body?.error?.message ?? null,
         });
       }
     } catch {

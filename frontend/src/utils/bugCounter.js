@@ -79,12 +79,45 @@ const HF_SERVICE_TROUBLE_MARKERS = [
 ];
 
 /**
+ * The download failure codes that are the environment's doing (#780),
+ * mirrored from ENVIRONMENTAL_DOWNLOAD_CODES in
+ * backend/src/domains/llms/download_errors.py.
+ */
+export const ENVIRONMENTAL_DOWNLOAD_CODES = [
+  "offline",
+  "disk_full",
+  "gated",
+  "not_found",
+  "rate_limited",
+  "hub_unavailable",
+  "interrupted",
+];
+
+// "download job 12 failed (code=offline)" (backend.log, DownloadModalContext)
+// or "download failed for <model> (code=offline)" (ModelCard), lowercased.
+const DOWNLOAD_FAILURE_CODE = new RegExp(
+  `download (?:job \\d+ failed|failed for .*) \\(code=(${ENVIRONMENTAL_DOWNLOAD_CODES.join("|")})\\)`
+);
+
+/**
  * Environmental patterns, each documented with the real record it exists to
  * match. A record is environmental when it matches ANY of these; everything
  * else -- including every other 5xx, every other HuggingFace API failure, and
  * a request that failed against Erudi's OWN local backend -- counts.
  */
 const ENVIRONMENTAL_PATTERNS = [
+  {
+    name: "download_failure_environmental_code",
+    // A failed model download names its code in every record of it (#780):
+    // backend/src/domains/llms/endpoints.py's `_run_download` ("Download job
+    // N failed (code=offline) for LLM ..."), DownloadModalContext's "Download
+    // job N failed (code=offline) ..." and ModelCard's "Download failed for
+    // <model> (code=offline)". The code is Erudi's own text, and the widget's
+    // sentence is translated, so this is the one pattern that holds in every
+    // interface language. A residual risk: ModelCard's line carries the
+    // model's name before the code, which a repository's name could forge.
+    test: (message) => DOWNLOAD_FAILURE_CODE.test(message),
+  },
   {
     name: "hf_download_offline",
     // backend/src/domains/llms/services.py's OFFLINE_DOWNLOAD_MESSAGE

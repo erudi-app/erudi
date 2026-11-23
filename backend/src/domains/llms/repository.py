@@ -38,6 +38,7 @@ from src.entities.DownloadJob import DownloadJobModel
 from src.entities.ModelDefaults import ModelDefaults
 from src.core.logging import logger
 from src.core import config
+from src.domains.llms.download_errors import recorded_download_error_code
 
 
 def dir_size_bytes(path) -> int:
@@ -348,7 +349,6 @@ class Download_Job_Repository:
     Example:
         >>> job_repo = Download_Job_Repository(db)
         >>> job = job_repo.create(remote_model_id="meta-llama/...", status="pending")
-        >>> job_repo.update_progress(job, progress=50.0, eta_seconds=120.0)
     """
 
     def __init__(self, db: Session):
@@ -453,84 +453,6 @@ class Download_Job_Repository:
             )
             .update({"status": "cancelled"}, synchronize_session=False)
         )
-
-    def update_status(
-        self, job: DownloadJobModel, status: str, error_message: Optional[str] = None
-    ) -> None:
-        """Update download job status and optionally set error message.
-
-        Args:
-            job: Download job entity to update.
-            status: New status (e.g., "running", "completed", "failed").
-            error_message: Optional error message if status="failed".
-
-        Note:
-            Does not commit. Caller must handle db.commit().
-        """
-        logger.info(f"Updating job {job.id} status: {status}")
-        job.status = status
-        if error_message:
-            job.error_message = error_message
-        self.db.flush()
-
-    def update_progress(
-        self,
-        job: DownloadJobModel,
-        total_bytes: Optional[float] = None,
-        progress: Optional[float] = None,
-        elapsed_seconds: Optional[float] = None,
-        eta_seconds: Optional[float] = None,
-    ) -> None:
-        """Update download job progress metrics.
-
-        Args:
-            job: Download job entity to update.
-            total_bytes: Total download size in bytes.
-            progress: Progress percentage (0.0-100.0).
-            elapsed_seconds: Total elapsed time in seconds.
-            eta_seconds: Estimated time remaining in seconds.
-
-        Note:
-            Does not commit. Caller must handle db.commit().
-        """
-        if total_bytes is not None:
-            job.total_bytes = total_bytes
-        if progress is not None:
-            job.progress = progress
-        if elapsed_seconds is not None:
-            job.total_time_elapsed = elapsed_seconds
-        if eta_seconds is not None:
-            job.time_left = eta_seconds
-        self.db.flush()
-
-    def mark_completed(self, job: DownloadJobModel) -> None:
-        """Mark download job as completed (100% progress).
-
-        Args:
-            job: Download job entity to mark as completed.
-
-        Note:
-            Does not commit. Caller must handle db.commit().
-        """
-        logger.info(f"Marking job {job.id} as completed")
-        job.status = "completed"
-        job.progress = 100.0
-        self.db.flush()
-
-    def mark_failed(self, job: DownloadJobModel, error_message: str) -> None:
-        """Mark download job as failed and set error message.
-
-        Args:
-            job: Download job entity to mark as failed.
-            error_message: Error message describing the failure.
-
-        Note:
-            Does not commit. Caller must handle db.commit().
-        """
-        logger.error(f"Marking job {job.id} as failed: {error_message}")
-        job.status = "failed"
-        job.error_message = error_message
-        self.db.flush()
 
     def cleanup_job_files(self, job: DownloadJobModel) -> None:
         """Clean up temporary and final model files for failed/cancelled job.
@@ -711,6 +633,7 @@ def update_db_with_progress(job_tracker, job_id: int, model_id: int) -> None:
         try:
             dbj.status = "failed"
             dbj.error_message = str(e)
+            dbj.error_code = recorded_download_error_code(e)
 
             # Clean up temp files
             if dbj.temp_local_model_link:

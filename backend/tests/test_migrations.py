@@ -577,6 +577,44 @@ def test_ephemeral_flag_lands_off_on_a_populated_database(fresh_cluster):
 
 
 @pytest.mark.integration
+def test_download_error_code_lands_null_on_a_populated_database(fresh_cluster):
+    # #780: a failed download stores a code the interface translates. A job
+    # that failed before the column existed has none: the interface shows its
+    # generic sentence for it, so the column is nullable and nothing is guessed.
+    url = fresh_cluster.sqlalchemy_url
+    cfg = _alembic_config(url)
+    command.upgrade(cfg, "a6e3f9d2c815")
+    engine = create_engine(url)
+    try:
+        with engine.begin() as conn:
+            conn.execute(
+                text(
+                    "INSERT INTO download_jobs (remote_model_id, remote_model_link, status, "
+                    "error_message, total_bytes, progress, total_time_elapsed, time_left) "
+                    "VALUES ('org/old', 'org/old', 'failed', 'disk full', 0, 0, 0, 0)"
+                )
+            )
+    finally:
+        engine.dispose()
+
+    run_migrations(fresh_cluster)
+
+    assert _alembic_version(url) == _head_revision(cfg)
+    command.check(cfg)
+    engine = create_engine(url)
+    try:
+        with engine.connect() as conn:
+            row = conn.execute(text("SELECT error_code, error_message FROM download_jobs")).one()
+            column = {c["name"]: c for c in inspect(conn).get_columns("download_jobs")}[
+                "error_code"
+            ]
+    finally:
+        engine.dispose()
+    assert row == (None, "disk full")
+    assert column["nullable"] is True
+
+
+@pytest.mark.integration
 def test_backup_database_writes_a_dump(fresh_cluster):
     # pg_dump (custom format) of the LIVE cluster produces a non-empty snapshot.
     engine = create_engine(fresh_cluster.sqlalchemy_url)

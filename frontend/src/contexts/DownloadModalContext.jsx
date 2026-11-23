@@ -12,9 +12,10 @@ import {
   DOWNLOAD_CANCELLED,
   DOWNLOAD_STALLED,
   deriveDownloadPhase,
-  downloadFailureDetail,
   downloadStalledMessage,
 } from "../utils/downloadStatus";
+import { downloadFailureMessage } from "../utils/downloadErrors";
+import { isNetworkFailure, requestErrorText, responseError } from "../utils/apiErrors";
 const log = createLogger("DownloadModalContext");
 
 // Poll cadence, and the stall guard on top of it (#315).
@@ -223,13 +224,21 @@ export function DownloadModalProvider({ children }) {
           } else {
             // The backend logged the traceback under this job; this side
             // records that the download the user started did not happen.
-            log.error(`Download job ${id} failed with status "${data.status}"`, {
+            // The English message stays in the log; the user reads the
+            // sentence of its code, in the interface language (#780).
+            // The code is in the record's text: the bug counter reads it.
+            const code = data.error_code || null;
+            log.error(`Download job ${id} failed (code=${code ?? "none"})`, {
               error: data.error_message || null,
             });
-            const errorMsg = data.error_message || t("downloads:errors.failedUnexpectedly");
+            const errorMsg = downloadFailureMessage(code);
             setErrorMessage(errorMsg);
             revealPanel();
-            callbacksRef.current.onError?.(errorMsg);
+            callbacksRef.current.onError?.({
+              message: errorMsg,
+              code,
+              error_message: data.error_message || null,
+            });
           }
         }
       } catch (err) {
@@ -247,7 +256,11 @@ export function DownloadModalProvider({ children }) {
         const errorMsg = t("downloads:errors.pollFailed");
         setErrorMessage(errorMsg);
         revealPanel();
-        callbacksRef.current.onError?.(errorMsg);
+        callbacksRef.current.onError?.({
+          message: errorMsg,
+          code: null,
+          error_message: String(err),
+        });
       }
     },
     [t, scheduleDismiss, settleCancelled, revealPanel]
@@ -273,10 +286,14 @@ export function DownloadModalProvider({ children }) {
           log.log(`Download job ${id} had already ended when the cancel arrived`);
           return "ended";
         }
-        throw new Error(`Server responded with ${response.status}: ${response.statusText}`);
+        // The sentence of the response's code, else of its status (#780).
+        throw await responseError(response);
       } catch (error) {
-        log.error("Failed to cancel download:", error);
-        setErrorMessage(t("downloads:errors.cancelFailed", { detail: error.message }));
+        log.error("Failed to cancel download:", {
+          error: String(error),
+          detail: error.detail ?? null,
+        });
+        setErrorMessage(t("downloads:errors.cancelFailed", { detail: requestErrorText(error) }));
         return "failed";
       }
     },
@@ -327,8 +344,14 @@ export function DownloadModalProvider({ children }) {
               }),
             });
       if (!res.ok) {
-        const detail = downloadFailureDetail(await res.text());
-        throw new Error(t("downloads:errors.startFailed", { status: res.status, detail }));
+        // The sentence of the response's code, else of its status, in the
+        // interface language; the backend's English one goes to the log (#780).
+        const answer = await responseError(res);
+        const refused = new Error(t("downloads:errors.startFailed", { detail: answer.message }));
+        refused.refused = true;
+        refused.code = answer.code;
+        refused.detail = answer.detail;
+        throw refused;
       }
       const job = await res.json();
 
@@ -354,12 +377,26 @@ export function DownloadModalProvider({ children }) {
         // cancel; reporting it would contradict the "cancelled" on screen.
         return;
       }
-      log.error("Download start error:", err);
-      const errorMsg = err.message || err.toString() || t("downloads:errors.unexpected");
+      log.error("Download start error:", { error: String(err), detail: err.detail ?? null });
+      // A refused start says its own translated sentence; a request that got
+      // no answer, or any other failure, says one of ours, never the
+      // runtime's English text.
+      let errorMsg = t("downloads:errors.unexpected");
+      if (err.refused) {
+        errorMsg = err.message;
+      } else if (isNetworkFailure(err)) {
+        errorMsg = t("downloads:errors.startFailed", {
+          detail: t("errors:connection.unreachable.title"),
+        });
+      }
       setErrorMessage(errorMsg);
       revealPanel();
       setIsDownloading(false);
-      callbacksRef.current.onError?.(errorMsg);
+      callbacksRef.current.onError?.({
+        message: errorMsg,
+        code: err.refused ? (err.code ?? null) : null,
+        error_message: err.detail ?? String(err),
+      });
     } finally {
       startRef.current = null;
       startSettled();

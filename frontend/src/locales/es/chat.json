@@ -27,7 +27,12 @@
     "created": "Iniciada el {{date}}",
     "compaction_one": "Aquí se resumió {{count}} mensaje anterior.",
     "compaction_other": "Aquí se resumieron {{count}} mensajes anteriores.",
-    "compactionNoCount": "Aquí se resumieron los mensajes anteriores."
+    "compactionNoCount": "Aquí se resumieron los mensajes anteriores.",
+    "errors": {
+      "bridgeUnavailable": "la exportación no está disponible en esta ventana",
+      "ephemeral": "una conversación efímera no se exporta",
+      "saveFailed": "no se pudo guardar el archivo"
+    }
   },
   "header": {
     "chatWith": "Chatear con",
@@ -306,7 +311,6 @@
     "copy": "Copiar los detalles"
   },
   "errors": {
-    "network": "Error de red",
     "loadModels": "No se pudieron cargar los modelos: {{error}}",
     "loadConversations": "No se pudieron cargar las conversaciones: {{error}}",
     "refreshConversations": "No se pudieron actualizar las conversaciones: {{error}}",

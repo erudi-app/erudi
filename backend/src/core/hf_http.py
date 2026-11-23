@@ -169,7 +169,7 @@ OFFLINE_MESSAGE_MARKERS = (
 
 # What huggingface_hub's retry loop retries, then raises once its retries are
 # spent: the connection let the transfer down, not Erudi.
-_NETWORK_ERRORS = (
+NETWORK_ERRORS = (
     OfflineModeIsEnabled,
     httpx.TimeoutException,
     httpx.NetworkError,
@@ -185,7 +185,7 @@ def is_offline_error(exc: BaseException) -> bool:
     current: Optional[BaseException] = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, _NETWORK_ERRORS):
+        if isinstance(current, NETWORK_ERRORS):
             return True
         message = str(current).lower()
         if any(marker in message for marker in OFFLINE_MESSAGE_MARKERS):

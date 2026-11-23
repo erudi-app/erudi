@@ -1020,6 +1020,7 @@ class Job_Cleanup_Service:
                     job.status = "completed"
                     job.progress = 100.0
                     job.error_message = None
+                    job.error_code = None
                     rescued += 1
                     logger.info(
                         f"Download job {job.id}: artifact at {llm.link} is "
@@ -1047,9 +1048,11 @@ class Job_Cleanup_Service:
                     self.db.delete(llm)
                     job.status = "failed"
                     job.error_message = "Download interrupted due to application shutdown"
+                    job.error_code = "interrupted"
                 else:
                     job.status = "failed"
                     job.error_message = "Download interrupted due to application shutdown"
+                    job.error_code = "interrupted"
 
                 # Delete temp files. The staging dir is scratch space in every
                 # case: on a rescue its contents were already moved into place.

@@ -92,7 +92,16 @@ function ModelCard({
     if (model) {
       open(model, {
         onComplete: () => onDownload && onDownload(model),
-        onError: (error) => log.error(`Download failed for ${model.name}`, error),
+        // A failure comes as { message, code, error_message }; a cancel or a
+        // stall as its status string, which the download context records
+        // itself. The record names the code (the bug counter reads it) and
+        // carries the backend's English message, not the translated one.
+        onError: (failure) => {
+          if (typeof failure !== "object" || failure === null) return;
+          log.error(`Download failed for ${model.name} (code=${failure.code ?? "none"})`, {
+            error: failure.error_message ?? null,
+          });
+        },
       });
     } else if (type === "add" && onDownload) {
       onDownload();
