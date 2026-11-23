@@ -178,7 +178,8 @@
       "documentTooLarge": "Ese archivo es demasiado grande (maximo 50 MB).",
       "tooManyFiles_one": "Puedes adjuntar hasta {{count}} archivo a la vez.",
       "tooManyFiles_other": "Puedes adjuntar hasta {{count}} archivos a la vez.",
-      "noFilePath": "Ese elemento no tiene un archivo en el disco, asi que no se puede adjuntar."
+      "noFilePath": "Ese elemento no tiene un archivo en el disco, asi que no se puede adjuntar.",
+      "noVision": "Este modelo no puede leer imágenes. Elige un modelo compatible con imágenes para adjuntar una."
     },
     "attachFile": "Adjuntar archivo",
     "attachFileHint": "Adjunta un documento o una carpeta (o arrastra y suelta)",

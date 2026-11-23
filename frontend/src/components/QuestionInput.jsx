@@ -159,8 +159,10 @@ export default function QuestionInput({
 
     // Images keep their own gate: a non-vision model never collects an image
     // the backend would just strip (#133). Documents are model-agnostic.
+    // The refusal is said, not silent: a dropped photo that vanishes reads as
+    // a broken composer.
     if (!canAttachImages) {
-      setAttachError(message);
+      setAttachError(imageFiles.length ? t("chat:composer.errors.noVision") : message);
       return;
     }
     // Validate before anything touches disk or the model: reject unsupported

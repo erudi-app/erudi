@@ -108,6 +108,34 @@ describe("QuestionInput document attachments (#492)", () => {
     expect(onSend).toHaveBeenCalledWith("", [], [], ["/docs/report.pdf"]);
   });
 
+  describe("an image on a model that cannot read images", () => {
+    const png = () =>
+      new File([new Uint8Array([0x89, 0x50, 0x4e, 0x47])], "photo.png", { type: "image/png" });
+    const drop = (files) =>
+      fireEvent.drop(screen.getByPlaceholderText("ask").closest("div"), {
+        dataTransfer: { files, items: [] },
+      });
+
+    it("says why nothing was attached when a PNG is dropped", async () => {
+      render(<QuestionInput placeholder="ask" onSend={vi.fn()} canAttachImages={false} />);
+
+      drop([png()]);
+
+      expect((await screen.findByRole("alert")).textContent).toMatch(/cannot read images/);
+      expect(screen.queryByAltText("attachment 1")).toBeNull();
+    });
+
+    it("attaches the document of a mixed drop and still says why the image was not", async () => {
+      render(<QuestionInput placeholder="ask" onSend={vi.fn()} canAttachImages={false} />);
+
+      drop([png(), new File(["hello"], "notes.txt", { type: "text/plain" })]);
+
+      expect((await screen.findByRole("alert")).textContent).toMatch(/cannot read images/);
+      expect(screen.getByText("notes.txt")).toBeTruthy();
+      expect(screen.queryByAltText("attachment 1")).toBeNull();
+    });
+  });
+
   it("attaches a dropped folder by its path and lets the backend walk it", () => {
     const onSend = vi.fn();
     render(<QuestionInput placeholder="ask" onSend={onSend} />);
