@@ -178,6 +178,201 @@ async def test_a_message_too_long_for_a_memory_bound_window_names_memory(monkeyp
     assert summary.prompts == []
 
 
+async def test_the_message_alone_refusal_counts_digits_as_the_loaded_tokenizer_does(monkeypatch):
+    """A tokenizer that splits numbers digit by digit (Qwen on MLX) spends one
+    token per digit: the refusal counts them that way, as the output budget
+    does, not at the grouped 0.34."""
+    _WindowEngine.window = 10_000
+    monkeypatch.setattr(_WindowEngine, "memory_bound_tokens", classmethod(lambda cls: 10_000))
+    monkeypatch.setattr(runner_module, "budget_digit_tokens", lambda engine: 1.0, raising=False)
+    summary = _ScriptedSummaryModel(messages=iter([]))
+    _models(monkeypatch, ["never sent"], summary)
+    # 12 000 digits and 3 000 spaces: about 4 830 tokens at the grouped 0.34
+    # (fits 10 000), about 12 750 one token per digit (does not).
+    message = "4821 " * 3_000
+
+    events = await _turn(AgentRunner(checkpointer=InMemorySaver()), "digits1", message)
+
+    (curated,) = _curated(events)
+    assert curated["kind"] == "message_too_long_memory"
+    assert curated["params"]["context_tokens"] == 10_000
+    assert curated["params"]["prompt_tokens"] > 12_000
+    assert summary.prompts == []
+
+
+class _OverflowError(Exception):
+    """llama-server's context overflow as the openai SDK hands it over."""
+
+    def __init__(self, prompt_tokens: int, context_tokens: int):
+        super().__init__("Error code: 400")
+        self.body = {
+            "type": "exceed_context_size_error",
+            "n_prompt_tokens": prompt_tokens,
+            "n_ctx": context_tokens,
+        }
+
+
+def _overflowing_models(monkeypatch, prompt_tokens: int, context_tokens: int):
+    """The REAL chat client, its HTTP layer replaced by the engine's overflow
+    rejection: what the client adds to the error on its way to the runner is
+    what the runner classifies."""
+    from langchain_openai import ChatOpenAI
+
+    from src.agents.chat_model import erudi_chat_openai_class
+    from src.agents.reasoning_effort import NO_REASONING_PLAN
+
+    async def _server(self, messages, *args, **kw):
+        raise _OverflowError(prompt_tokens, context_tokens)
+        yield  # pragma: no cover  (makes this an async generator function)
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    main = erudi_chat_openai_class()(
+        base_url="http://127.0.0.1:1/v1", api_key="k", model="m", streaming=True
+    )
+    summary = _ScriptedSummaryModel(messages=iter([]))
+
+    def _build(llm, **kw):
+        return summary if kw.get("effort_plan") is NO_REASONING_PLAN else main
+
+    monkeypatch.setattr(runner_module, "build_chat_model", _build)
+    return summary
+
+
+async def test_an_engine_overflow_caused_by_the_new_message_is_the_message_alone_kind(
+    monkeypatch,
+):
+    """The QA case of #759: the estimate let the request through, the engine
+    counted 14 453 tokens for a memory bound of 11 886, and the new message is
+    about 95 % of the request -- without the history it still does not fit."""
+    _WindowEngine.window = 11_886
+    monkeypatch.setattr(_WindowEngine, "memory_bound_tokens", classmethod(lambda cls: 11_886))
+    summary = _overflowing_models(monkeypatch, 14_453, 11_886)
+    cp = InMemorySaver()
+    await _seed(
+        cp, "eng1", [HumanMessage(_text(100, "h"), id="h0"), AIMessage(_text(100, "a"), id="a0")]
+    )
+
+    events = await _turn(AgentRunner(checkpointer=cp), "eng1", _text(3_800, "x"))
+
+    (curated,) = _curated(events)
+    assert curated["kind"] == "message_too_long_memory"
+    assert curated["params"]["context_tokens"] == 11_886
+    # About 95 % of the engine's 14 453, plus the answer's floor.
+    assert 13_000 < curated["params"]["prompt_tokens"] < 14_453 + 512
+    assert summary.prompts == []
+
+
+async def test_an_engine_overflow_of_a_window_bound_model_is_the_window_kind(monkeypatch):
+    _WindowEngine.window = 11_886
+    _overflowing_models(monkeypatch, 14_453, 11_886)
+    cp = InMemorySaver()
+    await _seed(
+        cp, "eng2", [HumanMessage(_text(100, "h"), id="h0"), AIMessage(_text(100, "a"), id="a0")]
+    )
+
+    events = await _turn(AgentRunner(checkpointer=cp), "eng2", _text(3_800, "x"))
+
+    (curated,) = _curated(events)
+    assert curated["kind"] == "message_too_long"
+
+
+async def test_an_engine_overflow_caused_by_the_history_stays_the_conversation_kind(monkeypatch):
+    """A long history and a short new message: without the history the
+    request would fit, so the conversation is what no longer fits."""
+    _WindowEngine.window = 11_886
+    monkeypatch.setattr(_WindowEngine, "memory_bound_tokens", classmethod(lambda cls: 11_886))
+    _overflowing_models(monkeypatch, 14_453, 11_886)
+    cp = InMemorySaver()
+    await _seed(cp, "eng3", _alternating(10, 380))
+
+    events = await _turn(AgentRunner(checkpointer=cp), "eng3", _text(200, "x"))
+
+    (curated,) = _curated(events)
+    assert curated == {
+        "kind": "memory_overflow",
+        "params": {"prompt_tokens": 14_453, "context_tokens": 11_886},
+        "text": curated["text"],
+    }
+
+
+async def test_a_hop_two_overflow_caused_by_a_big_tool_result_is_the_message_alone_kind(
+    monkeypatch,
+):
+    """The current turn's tool round comes back in a new conversation too:
+    a short question whose tool result fills the window is "this message
+    alone", not "this conversation"."""
+    from langchain_core.messages import AIMessageChunk
+    from langchain_core.tools import tool
+    from langchain_openai import ChatOpenAI
+
+    from src.agents.chat_model import erudi_chat_openai_class
+    from src.agents.reasoning_effort import NO_REASONING_PLAN
+    from tests.test_compaction_keep import _PARAMS, _Llm
+
+    @tool
+    def lookup(query: str) -> str:
+        """Look something up."""
+        return _text(3_800, "r")
+
+    calls = []
+
+    async def _server(self, messages, *args, **kw):
+        calls.append(len(messages))
+        if len(calls) > 1:
+            raise _OverflowError(14_453, 11_886)
+        delta = {
+            "tool_calls": [
+                {
+                    "index": 0,
+                    "id": "c1",
+                    "type": "function",
+                    "function": {"name": "lookup", "arguments": '{"query": "x"}'},
+                }
+            ]
+        }
+        yield self._convert_chunk_to_generation_chunk(
+            {"choices": [{"index": 0, "delta": delta, "finish_reason": "tool_calls"}]},
+            AIMessageChunk,
+            {},
+        )
+
+    _WindowEngine.window = 11_886
+    monkeypatch.setattr(_WindowEngine, "memory_bound_tokens", classmethod(lambda cls: 11_886))
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    main = erudi_chat_openai_class()(
+        base_url="http://127.0.0.1:1/v1", api_key="k", model="m", streaming=True
+    )
+    summary = _ScriptedSummaryModel(messages=iter([]))
+    monkeypatch.setattr(
+        runner_module,
+        "build_chat_model",
+        lambda llm, **kw: summary if kw.get("effort_plan") is NO_REASONING_PLAN else main,
+    )
+    cp = InMemorySaver()
+    await _seed(
+        cp, "hop2", [HumanMessage(_text(100, "h"), id="h0"), AIMessage(_text(100, "a"), id="a0")]
+    )
+
+    events = [
+        e
+        async for e in AgentRunner(checkpointer=cp).astream_text(
+            llm=_Llm(),
+            user_message="look it up",
+            system_prompt="s",
+            params=_PARAMS,
+            thread_id="hop2",
+            tools=[lookup],
+            summarize=True,
+            compaction_threshold=80,
+        )
+    ]
+
+    assert len(calls) == 2
+    (curated,) = _curated(events)
+    assert curated["kind"] == "message_too_long_memory"
+    assert curated["params"]["context_tokens"] == 11_886
+
+
 async def test_a_message_that_fits_on_its_own_still_compacts_the_history(monkeypatch):
     """A long message that fits with the summary: the compaction runs, the
     turn is answered."""

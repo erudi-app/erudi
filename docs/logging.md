@@ -229,9 +229,11 @@ Each model call of a conversation or Arena turn writes one `INFO` line to `backe
 server reports with the call. `hop` is the call's ordinal in the turn (the tool round-trips of the
 agent loop); `<id>` is the conversation's thread, or `arena:<llm id>` for an Arena panel (one per
 model). A call that ends without usage (it failed, was cut or abandoned: the fatal hop of an
-out-of-memory) writes, once, `Model call: thread_id=<id> hop=<n> failed est_prompt_tokens=<n>`,
-where the count is the app's own estimate of the request (about 4 characters per token, tool
-schemas included), not a measure; a call the engine rejects on its preflight and the app retries
+out-of-memory) writes, once, `Model call: thread_id=<id> hop=<n> failed est_prompt_tokens=<n>
+est_budget_tokens=<n>`, where the counts are the app's own estimates of the request, not a measure:
+`est_prompt_tokens` at about 4 characters per token, `est_budget_tokens` as the output budget
+counts it (the script weight of each new text, a digit as the loaded model's tokenizer spends it),
+tool schemas included in both; a call the engine rejects on its preflight and the app retries
 once is one call and writes the single line of the attempt that answered. The lines carry counts
 only, no content and no path; they are one per call, like the `ChatOpenAI built` line of each turn,
 and the summary and title clients write none. They are what the prompt size per hop is read from
@@ -395,7 +397,16 @@ done callback for the same reason.
 
 A record says what failed, on what, and why: the model id, path, port, request
 id, exit code or HTTP status, and the exception with its traceback when it was
-unexpected. Huge payloads are truncated. Secrets never reach a line: the
+unexpected. Huge payloads are truncated, and a `data:<mime>;base64,` URL (an image the
+model could not decode quotes it back in its error) is cut to
+`data:<mime>;base64,<N chars>` (parameters such as `;charset=` kept) in the
+message and the traceback, by a filter on both handlers (`DataUrlFilter`, also
+on what `RootFileBridge` forwards and on uvicorn's own handlers, attached in
+`run.py`: `uvicorn.error` writes to stderr, not through ours). The MLX child
+log (`mlx-child-<port>.log`) gets the same reduction from a log-record factory
+the child installs before mlx-vlm configures its handlers
+(`install_data_url_record_factory`), since mlx-vlm quotes the whole URL in its
+"Failed to load image" error. Secrets never reach a line: the
 `HF_TOKEN`, the `--api-key` minted for `llama-server`, database URLs with a
 password, `Authorization` headers; argv, headers and environment blocks are
 not logged.

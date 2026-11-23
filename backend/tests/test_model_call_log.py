@@ -134,8 +134,82 @@ async def test_a_call_that_fails_before_its_usage_writes_one_estimated_line(
 
     (line,) = _lines(caplog)
     assert line.startswith("Model call: thread_id=abc hop=1 failed est_prompt_tokens=")
-    assert int(line.rsplit("=", 1)[1]) >= 100  # 400 chars at about 4 per token
+    fields = dict(part.split("=", 1) for part in line.split() if "=" in part)
+    assert int(fields["est_prompt_tokens"]) >= 100  # 400 chars at about 4 per token
+    assert int(fields["est_budget_tokens"]) >= 100
+    assert line.isascii()
     assert "x" * 20 not in caplog.text
+
+
+async def test_the_failed_line_carries_the_estimate_at_the_loaded_tokenizers_digit_weight(
+    monkeypatch, caplog
+):
+    """chars/4 reads 400 digits as about 100 tokens; a tokenizer that splits
+    them one by one spends 400. The line carries both."""
+    client = _failing_client(monkeypatch, call_log_label="thread_id=abc", digit_tokens=1.0)
+
+    with caplog.at_level(logging.INFO, logger="erudi"):
+        with pytest.raises(RuntimeError):
+            _ = [c async for c in client._astream([HumanMessage("7" * 400)])]
+
+    (line,) = _lines(caplog)
+    fields = dict(part.split("=", 1) for part in line.split() if "=" in part)
+    assert int(fields["est_prompt_tokens"]) < 150
+    assert int(fields["est_budget_tokens"]) >= 400
+
+
+# ===== An engine overflow carries the new message's share of the request =====
+
+
+class _Overflow(Exception):
+    def __init__(self):
+        super().__init__("Error code: 400")
+        self.body = {"type": "exceed_context_size_error", "n_prompt_tokens": 9000, "n_ctx": 8192}
+
+
+def _rejecting_client(monkeypatch, exc, **kwargs):
+    async def _server(self, messages, *args, **kw):
+        raise exc
+        yield  # pragma: no cover  (makes this an async generator function)
+
+    monkeypatch.setattr(ChatOpenAI, "_astream", _server)
+    return erudi_chat_openai_class()(
+        base_url="http://127.0.0.1:1/v1", api_key="k", model="m", **kwargs
+    )
+
+
+async def test_an_overflow_carries_the_share_the_request_keeps_without_its_history(monkeypatch):
+    from langchain_core.messages import AIMessage, SystemMessage
+
+    from src.agents.overflow import parse_context_overflow
+
+    exc = _Overflow()
+    client = _rejecting_client(monkeypatch, exc)
+    messages = [
+        SystemMessage("s" * 400),
+        HumanMessage("h" * 4_000),
+        AIMessage("a" * 4_000),
+        HumanMessage("q" * 11_600),
+    ]
+
+    with pytest.raises(_Overflow):
+        _ = [c async for c in client._astream(messages)]
+
+    overflow = parse_context_overflow(exc)
+    # The system prompt and the last question: 12 000 of 20 000 characters.
+    assert overflow.alone_share == pytest.approx(0.6, abs=0.01)
+
+
+async def test_an_error_that_is_not_an_overflow_carries_no_share(monkeypatch):
+    from src.agents.overflow import ALONE_SHARE_ATTR
+
+    exc = RuntimeError("boom")
+    client = _rejecting_client(monkeypatch, exc)
+
+    with pytest.raises(RuntimeError):
+        _ = [c async for c in client._astream([HumanMessage("q")])]
+
+    assert not hasattr(exc, ALONE_SHARE_ATTR)
 
 
 async def test_a_retried_preflight_rejection_logs_only_the_successful_call(monkeypatch, caplog):

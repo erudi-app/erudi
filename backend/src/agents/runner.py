@@ -86,7 +86,6 @@ from src.agents.token_accounting import (
     BUDGET_DENSE_TOKENS,
     COUNTER_DENSE_TOKENS,
     COUNTER_WEIGHT_FLOOR,
-    GROUPED_DIGIT_TOKENS,
     STALE_TOOL_RESULT_MARKERS,
     SUMMARY_SOURCE_MARKER,
     RequestOverhead,
@@ -119,7 +118,7 @@ from src.engines.memory_brake import (
     POINT_TURN_END,
     POINT_TURN_START,
 )
-from src.engines.memory_budget import MemoryBudget
+from src.engines.memory_budget import MemoryBudget, budget_digit_tokens
 from src.engines.working_window import canonical_working_window, trigger_tokens
 
 if TYPE_CHECKING:
@@ -1302,8 +1301,8 @@ def _summarization_middleware_class():
             """The per-call context, from the FULL raw state as sent: one
             weight per message id, the past tool results' ids, and O -- with
             the counter's settings (the trigger, the keep, the summarizer's
-            trim) and with the output budget's (the refusals,
-            ``_budget_count``)."""
+            trim) and with the output budget's, the loaded tokenizer's digit
+            weight included (the refusals, ``_budget_count``)."""
             from src.agents.middleware import past_tool_result_ids, strip_stale_tool_results
 
             self._ensure_message_ids(messages)
@@ -1316,8 +1315,11 @@ def _summarization_middleware_class():
                 dense=COUNTER_DENSE_TOKENS,
                 weight_floor=COUNTER_WEIGHT_FLOOR,
             )
+            # A digit costs what the loaded tokenizer spends on it, as in the
+            # output budget the chat client sizes (``budget_digit_tokens``).
+            digits = budget_digit_tokens(self.engine)
             budget_weights, _ratio = message_weights(
-                sent, dense=BUDGET_DENSE_TOKENS, digit_tokens=GROUPED_DIGIT_TOKENS
+                sent, dense=BUDGET_DENSE_TOKENS, digit_tokens=digits
             )
             self._budget_weights = {
                 m.id: w for m, w in zip(sent, budget_weights) if getattr(m, "id", None) is not None
@@ -1326,12 +1328,13 @@ def _summarization_middleware_class():
                 self.overhead,
                 ratio,
                 dense=BUDGET_DENSE_TOKENS,
-                digit_tokens=GROUPED_DIGIT_TOKENS,
+                digit_tokens=digits,
             )
 
         def _budget_count(self, messages) -> int:
             """``O`` + ``messages`` as the output budget counts them (no 1.2
-            floor, CJK 0.65 token per character): what a refusal judges on.
+            floor, CJK 0.65 token per character, a digit at the loaded
+            tokenizer's ``budget_digit_tokens``): what a refusal judges on.
             The counter counts high to compact a little early; a refusal
             counted that way would turn away requests the engine serves."""
             return self._budget_overhead + real_token_count(
@@ -1790,24 +1793,58 @@ def _closing_messages(committed: list, answer_text: str) -> list:
 # only grows), the other says it started and then stopped.
 
 
+def _message_alone_tokens(overflow: ContextOverflow) -> Optional[int]:
+    """What the rejected request would need WITHOUT its history, in the
+    engine's own tokens: ``ceil(P * s) + OUTPUT_BUDGET_FLOOR_TOKENS``, with
+    ``P`` the engine's prompt count (the prompt alone when the error breaks
+    it out) and ``s`` the share of that request the chat client estimated for
+    the system prompt, the tool schemas, the last user message and the
+    current turn's tool round (``ContextOverflow.alone_share``). The estimate can be off in absolute
+    terms (digits, short words); its error is about the same on every part of
+    one request, so the share scales the exact count. ``None`` without a
+    share."""
+    if overflow.alone_share is None or overflow.prompt_tokens is None:
+        return None
+    prompt = (
+        overflow.prompt_only_tokens
+        if overflow.prompt_only_tokens is not None
+        else overflow.prompt_tokens
+    )
+    return math.ceil(prompt * overflow.alone_share) + OUTPUT_BUDGET_FLOOR_TOKENS
+
+
 def _context_overflow_answer(overflow: ContextOverflow, memory_bound: Optional[int]) -> dict:
     """The curated turn a parsed ``ContextOverflow`` becomes: the numbers
     when the wire error carried them, the numberless kind when it matched
     but didn't parse (still an honest overflow message, just without figures).
     ``memory_bound`` is the loaded engine's ``memory_bound_tokens()``: a limit
-    equal to it is the machine's memory, not the model's window."""
+    equal to it is the machine's memory, not the model's window.
+
+    "This message alone" (``message_too_long``, its memory variant) when the
+    request would still not fit without its history
+    (``_message_alone_tokens`` above the limit), with that figure: a new
+    conversation would not help. The conversation kinds otherwise, with the
+    engine's own figures."""
     if overflow.prompt_tokens is None or overflow.context_tokens is None:
         return curated_answer("context_overflow_unsized")
-    kind = (
-        "memory_overflow"
-        if memory_bound is not None and overflow.context_tokens == memory_bound
-        else "context_overflow"
-    )
+    memory = memory_bound is not None and overflow.context_tokens == memory_bound
+    alone = _message_alone_tokens(overflow)
+    if alone is not None and alone > overflow.context_tokens:
+        return curated_answer(
+            "message_too_long_memory" if memory else "message_too_long",
+            prompt_tokens=alone,
+            context_tokens=overflow.context_tokens,
+        )
     return curated_answer(
-        kind,
+        "memory_overflow" if memory else "context_overflow",
         prompt_tokens=overflow.prompt_tokens,
         context_tokens=overflow.context_tokens,
     )
+
+
+def _share_field(share: Optional[float]) -> str:
+    """``alone_share`` as the overflow WARNING writes it."""
+    return "unknown" if share is None else f"{share:.2f}"
 
 
 def _prefill_timeout_answer(budget_s: float) -> dict:
@@ -2859,7 +2896,8 @@ class AgentRunner:
                                 f"Agent stream hit a context-window overflow: llm={getattr(llm, 'id', '?')} "
                                 f"({getattr(llm, 'name', '?')}), thread_id={thread_id}, "
                                 f"prompt_tokens={overflow.prompt_tokens}, "
-                                f"context_tokens={overflow.context_tokens}"
+                                f"context_tokens={overflow.context_tokens}, "
+                                f"alone_share={_share_field(overflow.alone_share)}"
                             )
                             if stateful:
                                 await self._repair_alternation(agent, run_config)

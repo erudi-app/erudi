@@ -1040,6 +1040,13 @@ def main() -> None:
             timeout_graceful_shutdown=GRACEFUL_SHUTDOWN_TIMEOUT_SECONDS,
         )
     )
+    # uvicorn.Config configured its loggers on construction. `uvicorn.error` does
+    # not propagate to ours: its "Exception in ASGI application" goes to stderr
+    # (copied into the app log by Electron), and quotes an undecodable image's
+    # data URL in full unless its handlers carry the filter (#760).
+    from src.core.logging import attach_data_url_filter
+
+    attach_data_url_filter("uvicorn", "uvicorn.error", "uvicorn.access")
 
     def _request_graceful_shutdown(signum: int, frame: object) -> None:
         # Relay to uvicorn's exit flag (downloads interrupted first): the

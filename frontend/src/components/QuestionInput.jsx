@@ -4,6 +4,7 @@ import { ArrowRight, FileText, ImagePlus, Paperclip, Plus, X } from "lucide-reac
 import { useTranslation } from "react-i18next";
 import { matchCommands, parseSlashCommand } from "../utils/slashCommands";
 import { IMAGE_EXTENSIONS, MAX_IMAGE_BYTES, SUPPORTED_IMAGE_TYPES } from "../utils/imageLimits";
+import { SIGNATURE_BYTES, sniffImageType } from "../utils/imageSignature";
 
 const DEFAULT_MAX_IMAGES = 4;
 
@@ -29,6 +30,31 @@ const hasExtension = (name, extensions) => {
 // document candidate, judged on its extension.
 const looksLikeImage = (file) =>
   file.type?.startsWith("image/") || hasExtension(file.name, IMAGE_EXTENSIONS);
+
+// The MIME type an image file's bytes announce, once the browser has decoded
+// them too; null for anything else (text renamed .png, truncated data, ...).
+const verifiedImageType = async (file) => {
+  try {
+    const head = new Uint8Array(await file.slice(0, SIGNATURE_BYTES).arrayBuffer());
+    const mime = sniffImageType(head);
+    if (!mime || !SUPPORTED_IMAGE_TYPES.includes(mime)) return null;
+    const bitmap = await createImageBitmap(file);
+    bitmap.close?.();
+    return mime;
+  } catch {
+    // Unreadable or undecodable: the caller reports it as an unreadable image.
+    return null;
+  }
+};
+
+// The data URL of a blob, or null when the reader fails.
+const readAsDataUrl = (blob) =>
+  new Promise((resolve) => {
+    const reader = new FileReader();
+    reader.onerror = () => resolve(null);
+    reader.onload = () => resolve(reader.result);
+    reader.readAsDataURL(blob);
+  });
 
 export default function QuestionInput({
   placeholder,
@@ -121,7 +147,7 @@ export default function QuestionInput({
     return message;
   };
 
-  const addFiles = (files, folderCandidates = []) => {
+  const addFiles = async (files, folderCandidates = []) => {
     const list = Array.from(files || []);
     const imageFiles = list.filter(looksLikeImage);
     const documentFiles = list.filter((file) => !looksLikeImage(file));
@@ -149,31 +175,56 @@ export default function QuestionInput({
         supported.push(file);
       }
     }
-    // Cap at the per-model budget; tell the user if they picked more than fits.
-    const remaining = Math.max(0, maxImages - images.length);
-    const toAdd = supported.slice(0, remaining);
-    if (supported.length > remaining) {
-      message = t("chat:composer.errors.tooMany", { count: maxImages });
+    if (supported.length === 0) {
+      setAttachError(message);
+      return;
     }
-    setAttachError(message);
 
-    toAdd.forEach((file) => {
+    // A name and a declared type prove nothing (#760): the bytes must be a
+    // supported image and the browser must decode them. Verify first, one file
+    // at a time (a decode holds the whole bitmap), and only then apply the
+    // per-model budget, so a refused file never takes a slot from a good one.
+    const remaining = Math.max(0, maxImages - images.length);
+    const toAdd = [];
+    let dropped = false;
+    let unreadable = false;
+    for (const file of supported) {
+      if (toAdd.length >= remaining) {
+        dropped = true;
+        break;
+      }
+      const mime = await verifiedImageType(file);
+      if (mime) {
+        toAdd.push({ file, mime });
+      } else {
+        unreadable = true;
+      }
+    }
+
+    // Attach in the order the files were picked.
+    for (const { file, mime } of toAdd) {
+      // The data URL carries the detected type, not the declared one.
+      const result = await readAsDataUrl(file.slice(0, file.size, mime));
+      if (typeof result !== "string" || !result.startsWith("data:image/")) {
+        unreadable = true;
+        continue;
+      }
       const knownPath = window.electron?.getFilePath?.(file) || "";
-      const reader = new FileReader();
-      reader.onerror = () => setAttachError(t("chat:composer.errors.unreadable"));
-      reader.onload = async () => {
-        const result = reader.result;
-        if (typeof result !== "string" || !result.startsWith("data:image/")) {
-          setAttachError(t("chat:composer.errors.unreadable"));
-          return;
-        }
-        // No source path (clipboard paste) -> persist to disk to obtain one.
-        const filePath = knownPath || (await persistPastedImage(result));
-        setImages((prev) => (prev.length >= maxImages ? prev : [...prev, result]));
-        setImagePaths((prev) => (prev.length >= maxImages ? prev : [...prev, filePath]));
-      };
-      reader.readAsDataURL(file);
-    });
+      // No source path (clipboard paste) -> persist to disk to obtain one.
+      const filePath = knownPath || (await persistPastedImage(result));
+      setImages((prev) => (prev.length >= maxImages ? prev : [...prev, result]));
+      setImagePaths((prev) => (prev.length >= maxImages ? prev : [...prev, filePath]));
+    }
+
+    // One message: the budget outranks an unreadable file, which outranks an
+    // earlier format or size refusal.
+    if (dropped) {
+      setAttachError(t("chat:composer.errors.tooMany", { count: maxImages }));
+    } else if (unreadable) {
+      setAttachError(t("chat:composer.errors.unreadable"));
+    } else {
+      setAttachError(message);
+    }
   };
 
   const removeImage = (idx) => {

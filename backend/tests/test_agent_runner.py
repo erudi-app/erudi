@@ -1852,7 +1852,11 @@ async def test_events_a_real_overflow_survives_the_output_budget_retry(monkeypat
     assert len(attempts) == 1, "a prompt that alone fills the window is never retried"
     text = _answers(events)
     assert ERROR_SENTINEL in text
-    assert "9008" in text and "4096" in text
+    # A first message with no history: the request alone is what does not
+    # fit, so the turn is "this message alone", quoting the engine's 9000
+    # prompt tokens plus the answer's 512-token floor.
+    assert "This message alone" in text
+    assert "9512" in text and "4096" in text
     assert text != runner_module.ERROR_MESSAGE
 
 
