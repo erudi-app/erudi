@@ -404,19 +404,47 @@ _BRAKE_WARNINGS = {
 RELOAD_REASON_MEMORY = "memory"
 
 
+def _adopt_loaded_model(engine: Any, llm: Any) -> None:
+    """Re-key the loaded child to this turn's model when it already serves
+    its weights -- a KB assistant and its base share one artifact (#755) --
+    read defensively like the other engine probes. Runs under the generation
+    lock, before every id-keyed probe: at the start of a turn and of a
+    manual compaction, the reload announcements, the ``turn_start`` brake
+    sample and the contention check all compare the loaded id.
+
+    ``llm`` is the row the service fetched before queuing on the lock; the
+    row is not re-checked here (no session on this path). A turn whose
+    assistant was deleted while it waited can therefore re-key the child to
+    the deleted id -- harmless and self-healing: an assistant delete keeps
+    the weights, the turn answers on them, ``GET /llms/loaded`` reads an id
+    without a row as null meanwhile, and the next turn, unload or delete
+    re-keys or clears the id again."""
+    probe = getattr(engine, "adopt_loaded_model", None)
+    if callable(probe):
+        probe(getattr(llm, "id", None), getattr(llm, "link", None))
+
+
 def _brake_reload_pending(engine: Any, llm: Any) -> bool:
     """Whether this turn reloads a model the memory brake unloaded, read
-    defensively like the other engine probes."""
+    defensively like the other engine probes. The llm's link names its
+    weights, so a record left under a sibling id on the same artifact
+    answers too (#755)."""
     probe = getattr(engine, "brake_reload_pending", None)
-    return bool(probe(getattr(llm, "id", None))) if callable(probe) else False
+    if not callable(probe):
+        return False
+    return bool(probe(getattr(llm, "id", None), getattr(llm, "link", None)))
 
 
 def _unload_reason_taken(engine: Any, llm: Any) -> Optional[str]:
     """Why this turn reloads a model the idle delay (``"idle"``) or the
     user's Unload button (``"manual"``) unloaded, None otherwise (the record
-    is consumed), read defensively like the other engine probes."""
+    is consumed), read defensively like the other engine probes. The llm's
+    link names its weights, so the record of an unload taken under a sibling
+    id on the same artifact answers too (#755)."""
     probe = getattr(engine, "take_idle_reload", None)
-    reason = probe(getattr(llm, "id", None)) if callable(probe) else None
+    if not callable(probe):
+        return None
+    reason = probe(getattr(llm, "id", None), getattr(llm, "link", None))
     return reason if isinstance(reason, str) else None
 
 
@@ -2421,6 +2449,10 @@ class AgentRunner:
 
         async with engine.generation_guard():
             try:
+                # The loaded child may serve this turn's weights under a
+                # sibling id (a KB assistant and its base, #755): re-key it
+                # first, so every probe below sees this turn's model loaded.
+                _adopt_loaded_model(engine, llm)
                 # The memory brake unloaded this model while memory was
                 # tight: resolving it below reloads it, which takes a while.
                 # Said first (the conversation service's attachment notices
@@ -3293,6 +3325,10 @@ class AgentRunner:
         if manual_compaction_cutoff(_closed_thread(messages), compaction_threshold) <= 0:
             return nothing
         async with engine.try_generation_guard():
+            # The loaded child may serve this compaction's weights under a
+            # sibling id (a KB assistant and its base, #755): re-key it
+            # first, like a turn, so the brake sample below is not skipped.
+            _adopt_loaded_model(engine, llm)
             # A turn may have run while the guard was awaited.
             messages = _closed_thread(await self._committed_messages(run_config))
             await store.refuse_if_open()
@@ -3495,20 +3531,24 @@ class AgentRunner:
         window under the one sized at spawn, neither of the others applying.
 
         The loaded child is read ONCE: its handle is taken, checked to serve
-        this conversation's model (``loaded_child_for``) and to still be the
-        engine's handle after that check, and the allocated window, the
-        memory bound and the memory budget all come from that one snapshot --
-        a model swapped meanwhile never lends its window to this one.
+        this conversation's model (``loaded_child_serves``: by its id, or by
+        this conversation's weights when the child is keyed to a sibling row
+        on the same artifact, #755 -- the window belongs to the artifact, and
+        this gauge runs outside the generation lock, so it never re-keys)
+        and to still be the engine's handle after that check, and the
+        allocated window, the memory bound and the memory budget all come
+        from that one snapshot -- a model swapped meanwhile never lends its
+        window to this one.
         """
         engine = config.LLM_Engine
         messages = await self._committed_messages({"configurable": {"thread_id": thread_id}})
         trained = trained_context_window(llm)
         handle = getattr(engine, "_model", None)
-        probe = getattr(engine, "loaded_child_for", None)
+        probe = getattr(engine, "loaded_child_serves", None)
         loaded = (
             isinstance(handle, dict)
             and callable(probe)
-            and bool(probe(getattr(llm, "id", None)))
+            and bool(probe(getattr(llm, "id", None), getattr(llm, "link", None)))
             and getattr(engine, "_model", None) is handle
         )
         allocated, working, reduced, estimated, braked = None, None, False, False, False

@@ -195,8 +195,12 @@ class TestSpawnContextAndArgv:
         assert ctx["spawn_memory_bound"] is False
         assert ctx["spawn_cut_by_estimate"] is True
 
-    def test_the_alias_window_memory_caps_a_load(self, gpu):
-        CUDA_Engine._window_memory["erudi-9"] = {"cap": 20_480, "faulty": None, "at": time.time()}
+    def test_the_artifact_window_memory_caps_a_load(self, gpu):
+        CUDA_Engine._window_memory[str(Path("/m.gguf"))] = {
+            "cap": 20_480,
+            "faulty": None,
+            "at": time.time(),
+        }
         ctx = CUDA_Engine._prepare_spawn_context(Path("/m.gguf"), "erudi-9")
         assert ctx["ctx_size"] == 20_480
         assert ctx["static_window_tokens"] == 40_960

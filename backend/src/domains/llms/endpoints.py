@@ -703,7 +703,10 @@ async def get_loaded_llm(llm_repo: Llm_Repository = Depends(get_llm_repository))
     The child's liveness is checked (``loaded_child_for``), not just the
     engine's cached id: a child that died leaves nothing to unload. A child
     whose model row is gone (a delete unloads first, so it does not happen)
-    has nothing to name and reads as null too.
+    has nothing to name and reads as null too. A base model and its KB
+    assistant share one child (#755): the name is the model that last used
+    it (one child, one name; the unload endpoint accepts the sibling id, so
+    a header still showing the other name keeps a working Unload).
 
     Example:
         GET /erudi/llms/loaded -> {"llm_id": 57, "name": "Qwen3-4B"} or null
@@ -719,7 +722,10 @@ async def get_loaded_llm(llm_repo: Llm_Repository = Depends(get_llm_repository))
 
 
 @router.post("/loaded/unload", status_code=http_status.HTTP_204_NO_CONTENT)
-async def unload_loaded_llm(payload: UnloadRequest) -> Response:
+async def unload_loaded_llm(
+    payload: UnloadRequest,
+    llm_repo: Llm_Repository = Depends(get_llm_repository),
+) -> Response:
     """Unload the model the Unload button names now (the header, #619).
 
     The body carries the ``llm_id`` the button shows. 204 once the child is
@@ -728,15 +734,19 @@ async def unload_loaded_llm(payload: UnloadRequest) -> Response:
     memory-brake sample or the idle check holds the engine for more than
     2 s: nothing is interrupted. 409 (``LoadedModelChangedException``,
     "Another model is loaded now.") when another model was loaded since the
-    button read it: nothing is unloaded. The next turn of the unloaded model
-    says the user unloaded it (``memory_reload`` with ``reason: "manual"``);
-    on llama.cpp the window the memory brake reduced recently stays reduced
-    at that reload, as after an idle unload.
+    button read it: nothing is unloaded. The named model's weights folder is
+    read from its row and handed to the engine, so a child loaded under a
+    sibling id on the same weights (a KB assistant and its base, #755) is
+    unloaded, not refused. The next turn of the unloaded model says the user
+    unloaded it (``memory_reload`` with ``reason: "manual"``); on llama.cpp
+    the window the memory brake reduced recently stays reduced at that
+    reload, as after an idle unload.
 
     Example:
         POST /erudi/llms/loaded/unload {"llm_id": 57} -> 204
     """
-    await config.LLM_Engine.unload(payload.llm_id)
+    llm = llm_repo.get_by_id(payload.llm_id)
+    await config.LLM_Engine.unload(payload.llm_id, link=llm.link if llm else None)
     return Response(status_code=http_status.HTTP_204_NO_CONTENT)
 
 
@@ -921,19 +931,18 @@ async def update_llm(
 async def _unload_if_resident(llm_id: int, weights: Optional[str] = None) -> None:
     """Stop the inference child when the delete would leave it on dead ground.
 
-    Deleting the model in memory without this leaves its child running: for a
-    base model, on a path that no longer exists; for a KB assistant, on weights
-    that belong to the base and survive. Either way the accelerator stays busy
-    after the one action that should free it, and Diagnostics keeps naming a
-    model the user just deleted, until the idle sweep (the Settings idle delay,
-    checked every 30 s; never with the delay at Never) happens to notice
-    (#521).
+    Deleting the model in memory without this leaves its child running on a
+    path that no longer exists: the accelerator stays busy after the one
+    action that should free it, and Diagnostics keeps naming a model the user
+    just deleted, until the idle sweep (the Settings idle delay, checked every
+    30 s; never with the delay at Never) happens to notice (#521).
 
     The child goes when it was loaded under ``llm_id``, or, when the caller is
     about to delete the weights folder ``weights``, when it runs on a file under
     that folder: a KB assistant is loaded under its own id from the base's
-    weights, so the id alone would miss it (#762). An assistant delete passes no
-    ``weights``: it keeps the files, so a loaded base stays loaded.
+    weights, so the id alone would miss it (#762). The base-model branch alone
+    calls this; an assistant delete keeps the files, so it goes through
+    ``_rekey_or_unload_before_assistant_delete`` instead (#755).
 
     Takes the same lock as that sweep, so it can never land under a generation.
     Called per delete branch rather than once up front: a delete refused with
@@ -948,6 +957,38 @@ async def _unload_if_resident(llm_id: int, weights: Optional[str] = None) -> Non
     async with engine.generation_guard():
         await asyncio.to_thread(engine.cleanup)
     logger.info(f"Unloaded model {llm_id} before deleting it")
+
+
+async def _rekey_or_unload_before_assistant_delete(llm: Llm, llm_repo: Llm_Repository) -> None:
+    """Make the engine safe before an assistant delete, which keeps the weights.
+
+    The shared child may be keyed to the assistant being deleted (it answered
+    last, #755): its row is about to disappear, but the weights stay the
+    base's, so the child is re-keyed to the first surviving row that shares
+    them (``get_weight_siblings``, the base first) instead of being stopped --
+    the base keeps its loaded child and ``GET /llms/loaded`` keeps naming a
+    row that exists. With no surviving row (an orphaned assistant: nothing
+    could ever address the child again), it is unloaded like a base delete
+    would. A child keyed to another model is left alone.
+
+    Takes the same lock as ``_unload_if_resident``, re-checking the keyed id
+    under it.
+    """
+    engine = config.LLM_Engine
+    if engine is None or str(getattr(engine, "_model_id", None)) != str(llm.id):
+        return
+    siblings = llm_repo.get_weight_siblings(llm)
+    adopt = getattr(engine, "adopt_loaded_model", None)
+    async with engine.generation_guard():
+        if str(getattr(engine, "_model_id", None)) != str(llm.id):
+            return
+        for sibling in siblings:
+            # adopt_loaded_model logs the re-key; it refuses weights the
+            # child does not serve (an assistant rebound elsewhere).
+            if callable(adopt) and adopt(sibling.id, sibling.link):
+                return
+        await asyncio.to_thread(engine.cleanup)
+    logger.info(f"Unloaded model {llm.id} before deleting it")
 
 
 @router.delete("/{llm_id}")
@@ -1008,7 +1049,7 @@ async def delete_llm(
             # The assistant's conversations survive server-side (llm_id SET NULL).
             from src.entities.KnowledgeBase import KnowledgeBase
 
-            await _unload_if_resident(llm.id)
+            await _rekey_or_unload_before_assistant_delete(llm, llm_repo)
             kb = db.query(KnowledgeBase).filter(KnowledgeBase.id == llm.kb_id).first()
             if kb:
                 db.delete(kb)

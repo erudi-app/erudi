@@ -1359,9 +1359,10 @@ class MLX_Engine(BaseChatServerEngine):
     #   the next eligible sample retries;
     # * unload (idle only): the reap path, under the lock the idle monitor
     #   holds; the episode and the cap go to ``_brake_reload``, keyed by the
-    #   model's alias, and the next spawn of that model is seeded with them
-    #   (``_read_server_properties``) -- it resumes with the reduced window
-    #   and takes no second unload in the same episode.
+    #   model's resolved artifact path (two model rows can share one
+    #   artifact, #755), and the next spawn of that artifact is seeded with
+    #   them (``_read_server_properties``) -- it resumes with the reduced
+    #   window and takes no second unload in the same episode.
     #
     # Every sample runs through ``run_reset_shielded`` (it may talk to the
     # child): the next lock holder drains it. A sample never raises.
@@ -1626,11 +1627,12 @@ class MLX_Engine(BaseChatServerEngine):
         cause: Optional[str] = None,
     ) -> None:
         """Reap the child (the caller holds the generation lock) and leave
-        the episode for the next spawn of the same model. ONE WARNING: the
-        app degraded on its own; ``cause`` names what made it unload when it
-        is not two idle criticals (a release that timed out)."""
+        the episode for the next spawn of the same artifact. ONE WARNING:
+        the app degraded on its own; ``cause`` names what made it unload
+        when it is not two idle criticals (a release that timed out)."""
         record = {
             "alias": handle.get("alias"),
+            "model_path": str(handle["model_path"]) if handle.get("model_path") else None,
             **decision.state.carry(),
             "unloaded_at": time.time(),
         }

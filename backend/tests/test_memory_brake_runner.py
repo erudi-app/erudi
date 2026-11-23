@@ -62,6 +62,8 @@ class _BrakeEngine(BaseEngine):
     contention: ClassVar[Optional[dict]] = None
     # The models whose child is loaded and alive (``loaded_child_for``).
     loaded_ids: ClassVar[set] = set()
+    # The loaded child's weights link (``adopt_loaded_model``), or None.
+    serves_weights: ClassVar[Optional[str]] = None
     turn_start_outcome: ClassVar[BrakeOutcome] = BrakeOutcome()
 
     @classmethod
@@ -71,6 +73,14 @@ class _BrakeEngine(BaseEngine):
     @classmethod
     def loaded_child_for(cls, llm_id):
         return llm_id in cls.loaded_ids
+
+    @classmethod
+    def adopt_loaded_model(cls, llm_id, link):
+        cls.calls.append(("adopt", llm_id, link))
+        if link is None or link != cls.serves_weights or not cls.loaded_ids:
+            return False
+        cls.loaded_ids = {llm_id}
+        return True
 
     @classmethod
     def brake_point(cls, point, *, llm_id=None):
@@ -85,14 +95,14 @@ class _BrakeEngine(BaseEngine):
         return notice
 
     @classmethod
-    def brake_reload_pending(cls, llm_id):
+    def brake_reload_pending(cls, llm_id, link=None):
         cls.calls.append(("pending", llm_id))
         return llm_id in cls.pending
 
     @classmethod
-    def take_idle_reload(cls, llm_id):
+    def take_idle_reload(cls, llm_id, link=None):
         cls.calls.append(("take", llm_id))
-        return super().take_idle_reload(llm_id)
+        return super().take_idle_reload(llm_id, link)
 
     @classmethod
     def begin_memory_window(cls):
@@ -128,6 +138,7 @@ def _engine(monkeypatch):
     _BrakeEngine.window = None
     _BrakeEngine.contention = None
     _BrakeEngine.loaded_ids = {_Llm.id}
+    _BrakeEngine.serves_weights = None
     _BrakeEngine.turn_start_outcome = BrakeOutcome()
     _BrakeEngine._idle_unload = None
     _BrakeEngine._model = None
@@ -474,6 +485,40 @@ async def test_another_model_contended_says_nothing_at_the_turn_start(monkeypatc
     assert "memory_warning" not in kinds[: kinds.index("answer")]
 
 
+async def test_the_turn_rekeys_a_child_loaded_for_a_sibling_id_before_every_probe(monkeypatch):
+    """A KB assistant's turn finds the child loaded under its base's id but
+    on the same weights (#755): the runner re-keys it first, under the
+    generation lock, so the reload probes and the turn_start sample all see
+    this turn's model loaded."""
+    _answer(monkeypatch)
+    _BrakeEngine.loaded_ids = {_Llm.id + 1}
+    _BrakeEngine.serves_weights = _Llm.link
+
+    await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    calls = _BrakeEngine.calls
+    adopt = calls.index(("adopt", _Llm.id, _Llm.link))
+    assert adopt < calls.index(("pending", _Llm.id))
+    assert adopt < calls.index(("brake", "turn_start", _Llm.id, True))
+    assert _BrakeEngine.loaded_ids == {_Llm.id}
+
+
+async def test_contention_on_the_siblings_child_warns_this_turn(monkeypatch):
+    """The child was loaded under the base's id on the assistant's weights
+    (#755): another app taking the card from it concerns this turn's model,
+    so the warning is said."""
+    _answer(monkeypatch)
+    _patch_budget(monkeypatch, _StubBudget(ceiling=16_000))
+    _BrakeEngine.loaded_ids = {_Llm.id + 1}
+    _BrakeEngine.serves_weights = _Llm.link
+    _BrakeEngine.contention = _contended()
+
+    events = await _events(AgentRunner(checkpointer=InMemorySaver()))
+
+    kinds = [e["t"] for e in events]
+    assert "memory_warning" in kinds[: kinds.index("answer")]
+
+
 async def test_no_contention_at_the_turn_start_says_nothing_then(monkeypatch):
     _answer(monkeypatch)
     _patch_budget(monkeypatch, _StubBudget(ceiling=16_000))
@@ -542,7 +587,7 @@ async def test_a_tick_at_the_turn_end_never_takes_the_gpu_contention_warning(mon
         async with _BrakeEngine._acquire_generation_lock():
             _BrakeEngine.contention = _contended(active=False)
 
-    def _pending(cls, llm_id):
+    def _pending(cls, llm_id, link=None):
         # Inside the turn's generation guard, on the event loop.
         ticks.append(asyncio.get_running_loop().create_task(_tick()))
         return False

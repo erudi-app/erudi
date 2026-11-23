@@ -352,9 +352,10 @@ being deleted.
 A delete that goes through first unloads the resident model it would strand. For a base model
 that is the loaded model whether it was loaded under the base's own id or under a dependent
 assistant's, since the engine matches the weights folder the child runs on
-(`BaseEngine.serves_artifact_under`). Deleting an assistant unloads it only when it is the
-loaded model: the files stay, so a loaded base stays loaded. A refused delete (409) unloads
-nothing.
+(`BaseEngine.serves_artifact_under`). Deleting an assistant keeps the files, so it strands no
+child: a child keyed to the assistant is re-keyed to the surviving row that shares the weights
+(the base first) and stays loaded; it is unloaded only when no such row remains. A refused
+delete (409) unloads nothing.
 
 ### Rebinding an orphaned assistant
 
@@ -423,7 +424,8 @@ model changes, and after an unload). Pressing it calls `POST /erudi/llms/loaded/
 holds the engine (waited out for at most 2 seconds) it answers 409 "The model is busy; try again in
 a moment." and nothing is interrupted; when another model is loaded than the one named it answers
 409 "Another model is loaded now." and nothing is unloaded, not even the loaded model's idle clock
-restarted (the button then names the loaded model);
+restarted (the button then names the loaded model) — a model sharing the loaded one's weights (a
+KB assistant and its base) is not "another model": its id unloads the child too;
 otherwise the model goes through the same `cleanup()` as an idle unload, so on llama.cpp a window
 the memory brake reduced recently stays reduced at the next load. The cleanup thread is shielded: a
 request cancelled meanwhile keeps the lock until the thread is done, the record is written, then the
@@ -432,7 +434,11 @@ cancellation is raised.
 The next request reloads an unloaded model, which costs the usual load time; the next turn of an
 existing conversation says why it reloads (`memory_reload` with `reason: "idle"` after the idle
 delay, `"manual"` after the Unload button; a new conversation shows its usual first-reply hint).
-Switching to another model swaps the resident one.
+Switching to another model swaps the resident one — unless the two rows share one weights
+folder (a Knowledge Base assistant and its base model): one inference child serves one set
+of weights, so switching between them, in a conversation or between Arena panels, re-keys
+the running child instead of restarting it, and `GET /erudi/llms/loaded` then names the
+model that last used it. The Unload button works under either name.
 
 Do not instantiate engines. Call class methods on the result of `BaseEngine.get_engine()`; the
 selected engine is also available as `src.core.config.LLM_Engine`.

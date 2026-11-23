@@ -126,7 +126,7 @@ class CPU_Engine(BaseLlamaCppEngine):
         (CPU-only inference) and the window: `ERUDI_CTX` verbatim when the
         user pinned one, else the window Erudi sizes from the GGUF and the
         machine's RAM, folded with the memory brake's cap -- ``brake_cap``
-        for a brake respawn, else the one remembered for ``alias``
+        for a brake respawn, else the one remembered for the artifact
         (`ctx_size=None` -- llama-server's own fit -- when the GGUF cannot be
         read). A respawn re-sizes like a load (the RAM budget is
         deterministic): ``respawn_from`` is not read. No thread count: see
@@ -168,10 +168,10 @@ class CPU_Engine(BaseLlamaCppEngine):
         return cls._llama_begin_memory_window()
 
     @classmethod
-    def brake_reload_pending(cls, llm_id: Any) -> bool:
+    def brake_reload_pending(cls, llm_id: Any, link: Any = None) -> bool:
         """An unload's record for ``llm_id`` (the shared answer), or a brake
         respawn of its loaded child whose reload state is still owed."""
-        return super().brake_reload_pending(llm_id) or cls._llama_respawn_pending(llm_id)
+        return super().brake_reload_pending(llm_id, link) or cls._llama_respawn_pending(llm_id)
 
     @classmethod
     def _build_spawn_argv(

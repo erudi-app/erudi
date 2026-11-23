@@ -182,13 +182,10 @@ class BaseChatServerEngine(BaseEngine):
         model folder for GGUF, the folder itself for MLX. Two model rows (a base
         and a KB assistant) can share one folder while the engine knows only the
         id it was loaded under, so "is this folder in use" is answered from the
-        path. Both sides are resolved; the comparison is by path component, so
-        ``/m/38`` does not claim ``/m/384``.
+        path.
         """
         model_path = cls._model.get("model_path") if isinstance(cls._model, dict) else None
-        if not model_path:
-            return False
-        return Path(model_path).resolve().is_relative_to(Path(link).resolve())
+        return cls._artifact_under(model_path, link)
 
     @classmethod
     def child_output_mark(cls) -> Optional[int]:
@@ -268,7 +265,7 @@ class BaseChatServerEngine(BaseEngine):
         machine's RAM, CUDA from the GGUF and the GPU's memory (NVML), both
         folding in the memory brake's cap -- ``brake_cap`` (a brake respawn,
         or CUDA's out-of-memory retry), else the cap remembered for that
-        alias. ``respawn_from`` is the live handle a brake respawn replaces,
+        artifact. ``respawn_from`` is the live handle a brake respawn replaces,
         passed explicitly (never inferred from ``cls._model``, which during
         a load still holds the PREVIOUS model): CUDA reuses its window facts.
         """
@@ -633,8 +630,12 @@ class BaseChatServerEngine(BaseEngine):
         """Spawn (or reuse) the child server for `llm_id`.
 
         Singleton semantics: a second call with the same `llm_id` reuses the
-        existing subprocess; a call with a different `llm_id` terminates the
-        old child (including unregistering its atexit handler) before spawning.
+        existing subprocess, and so does one with a different `llm_id` whose
+        weights the live child already serves (a KB assistant and its base
+        share one folder, #755): the child is re-keyed to `llm_id`
+        (``adopt_loaded_model``), never respawned. Any other `llm_id`
+        terminates the old child (including unregistering its atexit handler)
+        before spawning.
         """
         # Serialized by the caller's generation_guard (same asyncio lock as the
         # idle-cleanup tick), so no threading lock is needed around the swap.
@@ -649,8 +650,14 @@ class BaseChatServerEngine(BaseEngine):
         cls._assert_requests()
         # Pre-spawn integrity gate (#88): surface a precise "the files are
         # incomplete/corrupt" load error here, before the expensive spawn +
-        # probe would fail with an opaque child crash.
+        # probe would fail with an opaque child crash. The in-call reuse
+        # below validates like a spawn; the same-id cache path above does
+        # not, and neither does an adoption taken earlier in the turn (the
+        # runner's, before the probes) -- like the cache, those reuse a
+        # child already running on weights validated at ITS load.
         cls.validate_local_artifact(llm_local_path)
+        if cls.adopt_loaded_model(llm_id, llm_local_path):
+            return cls._return_cached_model_and_tokenizer()
         resolved = cls._resolve_model_artifact(llm_local_path)
         # Stop previous child (also unregisters its stale atexit handler).
         cls._stop_server_if_running()
@@ -702,18 +709,63 @@ class BaseChatServerEngine(BaseEngine):
         )
 
     @classmethod
-    def brake_reload_pending(cls, llm_id: Any) -> bool:
+    def loaded_child_serves(cls, llm_id: Any, link: Any = None) -> bool:
+        """``loaded_child_for``, or the sibling case (#755): a live child on
+        weights under ``link``. Read-only (see the base docstring)."""
+        if cls.loaded_child_for(llm_id):
+            return True
+        handle = cls._model
+        return (
+            isinstance(handle, dict)
+            and cls._proc_is_alive(handle.get("proc"))
+            and link is not None
+            and cls.serves_artifact_under(Path(link))
+        )
+
+    @classmethod
+    def adopt_loaded_model(cls, llm_id: Any, link: Any) -> bool:
+        """Re-key the live child to ``llm_id`` when it serves the weights
+        under ``link`` (#755); True when it did.
+
+        The caller holds the generation lock (the runner at turn start,
+        ``unload``, ``get_model_and_tokenizer``). The child keeps its alias
+        (``{prefix}{first id}``), which is cosmetic from here on: identity
+        follows ``_model_id`` and the artifact path. ``_last_used`` is
+        stamped, so the idle clock follows the adopting model.
+        """
+        if llm_id is None or cls._model_id == llm_id:
+            return False
+        handle = cls._model
+        if not isinstance(handle, dict) or not cls._proc_is_alive(handle.get("proc")):
+            return False
+        if link is None or not cls.serves_artifact_under(Path(link)):
+            return False
+        previous = cls._model_id
+        cls._model_id = llm_id
+        cls._last_used = datetime.now()
+        logger.info(
+            f"[{cls.__name__}] Model {llm_id} serves the same weights as loaded "
+            f"model {previous}: child kept (alias={handle.get('alias')})"
+        )
+        return True
+
+    @classmethod
+    def brake_reload_pending(cls, llm_id: Any, link: Any = None) -> bool:
         """Whether the next turn for ``llm_id`` reloads the model the brake
-        unloaded: a record for its alias, younger than the TTL, and no child
-        loaded."""
+        unloaded: a record younger than the TTL, no child loaded, and the
+        record names ``llm_id``'s alias or -- two rows sharing one artifact
+        (#755) -- an artifact under ``link``."""
         record = cls._brake_reload
         if not isinstance(record, dict) or cls._model is not None:
             return False
         unloaded_at = record.get("unloaded_at")
-        return (
-            record.get("alias") == f"{cls._server_alias_prefix}{llm_id}"
-            and isinstance(unloaded_at, (int, float))
-            and time.time() - unloaded_at < memory_brake.BRAKE_RELOAD_TTL_S
+        if (
+            not isinstance(unloaded_at, (int, float))
+            or time.time() - unloaded_at >= memory_brake.BRAKE_RELOAD_TTL_S
+        ):
+            return False
+        return record.get("alias") == f"{cls._server_alias_prefix}{llm_id}" or cls._artifact_under(
+            record.get("model_path"), link
         )
 
     @classmethod
@@ -726,14 +778,16 @@ class BaseChatServerEngine(BaseEngine):
 
     @classmethod
     def _carried_brake(cls, handle: Dict[str, Any]) -> Optional[BrakeState]:
-        """The episode an unload of the same model carried (within the TTL),
-        or None."""
+        """The episode an unload of the same artifact carried (within the
+        TTL), or None. Matched by the resolved artifact path, not the alias:
+        two model rows can share one artifact (#755)."""
         record = cls._brake_reload
         now = time.time()
         unloaded_at = record.get("unloaded_at") if isinstance(record, dict) else None
         if (
             not isinstance(record, dict)
-            or record.get("alias") != handle.get("alias")
+            or not record.get("model_path")
+            or str(record.get("model_path")) != str(handle.get("model_path"))
             or not isinstance(unloaded_at, (int, float))
             or now - unloaded_at >= memory_brake.BRAKE_RELOAD_TTL_S
         ):

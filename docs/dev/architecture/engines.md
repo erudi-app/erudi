@@ -340,18 +340,23 @@ none: the user loses nothing visible. A stateful turn end consumes the notice
 [Conversations](../../guides/conversations.md)).
 
 **The carry.** An unload records `_brake_reload` on the engine — the model's alias
-(`erudi-<llm id>`), the cap, the window that hurt, the episode (level, shrinks, the
-unload itself) and the time. The next spawn of the same alias within 30 minutes
-(`BRAKE_RELOAD_TTL_S`) is seeded with it before anything else in
-`_read_server_properties`, so it loads with the reduced window, takes no second unload
-in the same episode and no extra shrink. Any successful spawn, an idle reap, a manual
-unload and the shutdown forget the record; `brake_reload_pending(llm_id)` lets the runner
-announce the reload (`memory_reload` with `reason: "memory"`) before it resolves the model.
+(`erudi-<llm id>`), its resolved artifact path, the cap, the window that hurt, the
+episode (level, shrinks, the unload itself) and the time. The next spawn of the same
+artifact within 30 minutes (`BRAKE_RELOAD_TTL_S`) is seeded with it before anything else
+in `_read_server_properties` — matched by the artifact path, since two model rows can
+share one artifact (a base and its KB assistant, #755) — so it loads with the reduced
+window, takes no second unload in the same episode and no extra shrink. Any successful
+spawn, an idle reap, a manual unload and the shutdown forget the record;
+`brake_reload_pending(llm_id, link)` lets the runner announce the reload (`memory_reload`
+with `reason: "memory"`) before it resolves the model, for the id the record names or for
+a sibling id whose `link` holds the record's artifact.
 
 **The idle and manual reloads.** The idle reap (`BaseEngine._cleanup_tick`) and the
 header's Unload button (`BaseEngine.unload`, behind `POST /erudi/llms/loaded/unload`) both
 go through `_unload_and_record`, which leaves
-`_idle_unload = {"model_id": ..., "reason": "idle" | "manual"}` after `cleanup()` returns;
+`_idle_unload = {"model_id": ..., "model_path": ..., "reason": "idle" | "manual"}`
+(the unloaded artifact's path beside the id, like the brake's record: two model rows can
+share one artifact, #755) after `cleanup()` returns;
 `cleanup()` itself clears it, so a delete, the shutdown and the brake's unload never leave
 one. `unload` runs under `try_generation_guard`: busy (an answer, a reload, a brake sample or
 the idle check holds the lock, or a turn waits for it, for more than 2 s) it raises
@@ -362,13 +367,14 @@ and unloads nothing; `try_generation_guard` then stamps neither `_last_used` nor
 were. `_unload_and_record` runs `cleanup()` in a thread task waited through
 `wait_shielded`, like a prefix-cache reset: a cancelled caller keeps the lock until the thread is
 done, the record is written, then the cancellation is raised. Being the
-same `cleanup()` as the idle reap, a manual unload on llama.cpp keeps the per-alias window
+same `cleanup()` as the idle reap, a manual unload on llama.cpp keeps the per-artifact window
 memory, so the next load keeps a recent brake reduction exactly as after an idle unload. A
 model switch does not call `cleanup()`: what keeps it from reading as an unload is that
 `take_idle_reload` drops a record found while a model is loaded. The runner calls
-`take_idle_reload(llm.id)` when no brake reload is pending, always consuming the record
-before it resolves the model (a turn cancelled before the load loses the notice); it returns
-the record's reason once for the unloaded model while nothing is loaded, else None. The turn
+`take_idle_reload(llm.id, llm.link)` when no brake reload is pending, always consuming the
+record before it resolves the model (a turn cancelled before the load loses the notice); it
+returns the record's reason once, while nothing is loaded, for the unloaded model or for a
+sibling whose link holds the unloaded artifact, else None. The turn
 yields `{"t": "memory_reload", "reason": <that reason>}` only when the caller passes
 `announce_idle_reload=True`, which the conversation service does for a conversation that
 already has messages (a new one shows its first-reply hint). A turn announces at most one
@@ -547,10 +553,11 @@ idle is said by the next turn, through `brake_reload_pending`. The turn's
 **Three carries.** The live state crosses a respawn whole (`BrakeState.respawned`). An
 unload carries the episode to the next spawn of the same model (`_brake_reload`, 30
 minutes, forgotten by any successful spawn, a reap and the shutdown). And every change
-of the cap or of the window that hurt is written through to a per-model **window
-memory** (`_window_memory`, keyed by alias, 30 minutes from its last write, checked at
+of the cap or of the window that hurt is written through to a per-artifact **window
+memory** (`_window_memory`, keyed by the resolved artifact path — two model rows can
+share one artifact, #755 — 30 minutes from its last write, checked at
 every read; an entry whose cap and faulty window are both gone is deleted). Every spawn
-of the model — a brake reload, a swap back, a reap's reload, a crash respawn — reads it:
+of the artifact — a brake reload, a swap back, a reap's reload, a crash respawn — reads it:
 the cap folds into `-c` and seeds the brake (an unload's record seeds first). A reap
 forgets the unload's record, never the window memory, so growth never returns to 90 % of
 the window that hurt while it is remembered, whatever reloads happen.
@@ -971,7 +978,23 @@ callback and never reaches the next holder.
 ## Memory lifecycle
 
 `BaseEngine` keeps `_model`, `_tokenizer`, `_model_id` and `_last_used` as class
-attributes shared across requests. A cleanup monitor started in the FastAPI lifespan
+attributes shared across requests. The loaded child is keyed by `llm_id`, but one child
+serves one set of weights: when another `llm` row names the same weights folder (a KB
+assistant copies its base's `link`, #755), the live child is re-keyed to the asking id
+instead of being stopped and respawned — `adopt_loaded_model(llm_id, link)`, called by
+the runner at the start of every turn and of a manual compaction (under the generation
+lock, before the id-keyed probes: the reload announcements, the `turn_start` brake
+sample, the contention check), by `BaseEngine.unload` with the row's link (so the Unload
+button works under either sibling's name), and by `get_model_and_tokenizer` (so switching
+between a base and its assistant, in a conversation or between Arena panels, never pays a
+respawn). Callers outside the generation lock never re-key; they read
+`loaded_child_serves(llm_id, link)` (the `/context` gauge) or
+`chat_template_caps(llm_id, link)` (the reasoning lever), which answer by id or by
+weights — the window and the template capabilities belong to the artifact.
+`GET /erudi/llms/loaded` names the model that last used the child; deleting an assistant
+whose child is keyed to it re-keys the child to the surviving row sharing the weights
+(the base first) instead of stopping it; the child's alias (`erudi-<first id>`) stays
+what it was spawned with and is cosmetic. A cleanup monitor started in the FastAPI lifespan
 (`core/api.py`, `start_cleanup_task()`) ticks every 30 seconds and unloads the model once
 it has been idle for longer than `_max_idle_time` (`base_engine.py`): the Settings idle delay in
 seconds, or None for Never, which `_should_cleanup` reads as "never reap". The lifespan applies

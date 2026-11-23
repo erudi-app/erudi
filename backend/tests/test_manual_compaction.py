@@ -69,6 +69,11 @@ class _BrakeEngine(_WindowEngine):
     turn_end_delay: ClassVar[float] = 0.0
 
     @classmethod
+    def adopt_loaded_model(cls, llm_id, link):
+        cls.points.append(("adopt", (llm_id, link)))
+        return False
+
+    @classmethod
     def brake_point(cls, point, *, llm_id=None):
         cls.points.append((point, llm_id))
         if point == POINT_TURN_END and cls.turn_end_delay:
@@ -233,9 +238,11 @@ async def test_the_brake_samples_surround_it_and_turn_start_comes_before_the_loa
 
     await _compact(AgentRunner(checkpointer=cp), "m3")
 
-    # A turn's order: the start sample, the load, the claim, the memory
+    # A turn's order: the child re-keyed to this model when it serves its
+    # weights (#755), the start sample, the load, the claim, the memory
     # window open around the work, closed normally, then the end sample.
     assert _BrakeEngine.points == [
+        ("adopt", (7, "/fake/path")),
         (POINT_TURN_START, 7),
         ("begin_window", None),
         ("end_window", ("token", False, 80)),
@@ -243,7 +250,7 @@ async def test_the_brake_samples_surround_it_and_turn_start_comes_before_the_loa
     ]
     first_kind, points_at_first_build, _kw = builds.calls[0]
     assert first_kind == "main"
-    assert points_at_first_build == [(POINT_TURN_START, 7)]
+    assert points_at_first_build == [("adopt", (7, "/fake/path")), (POINT_TURN_START, 7)]
 
 
 async def test_the_summary_client_is_the_turns_one(monkeypatch):
@@ -724,6 +731,7 @@ async def test_a_client_gone_closes_the_window_as_abandoned_without_an_end_sampl
         await task
 
     assert _BrakeEngine.points == [
+        ("adopt", (7, "/fake/path")),
         (POINT_TURN_START, 7),
         ("begin_window", None),
         ("end_window", ("token", True, 80)),

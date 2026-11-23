@@ -170,16 +170,21 @@ def test_the_gguf_template_view_verdict_matches_the_tokenizer_one():
 
 
 class _CapsEngine:
-    """Engine stub whose loaded child reported chat-template capabilities."""
+    """Engine stub whose loaded child reported chat-template capabilities.
+
+    ``weights`` is the loaded child's weights link: like the real engines, the
+    caps also answer a sibling id planning on the same artifact (#755)."""
 
     caps: dict = {}
     loaded_id = 7
+    weights = None
     probed: list = []
 
     @classmethod
-    def chat_template_caps(cls, llm_id=None):
+    def chat_template_caps(cls, llm_id=None, link=None):
         if llm_id is not None and llm_id != cls.loaded_id:
-            return {}
+            if link is None or cls.weights is None or link != cls.weights:
+                return {}
         return cls.caps
 
     @classmethod
@@ -195,6 +200,7 @@ def caps_engine(monkeypatch):
 
     reasoning_lever.reset_lever_cache()
     _CapsEngine.caps = {}
+    _CapsEngine.weights = None
     _CapsEngine.probed = []
     monkeypatch.setattr(config, "LLM_Engine", _CapsEngine)
     yield _CapsEngine
@@ -215,6 +221,17 @@ def test_caps_from_another_loaded_model_are_ignored(caps_engine):
     verdict = model_reasoning_lever("/models/other", llm_id=99)
     assert verdict.lever is ReasoningLever.NONE
     assert caps_engine.probed == ["/models/other"]
+
+
+def test_caps_of_the_siblings_child_on_the_same_weights_apply(caps_engine):
+    """The child is keyed to the base's id; the turn is planned for its KB
+    assistant, whose link IS the loaded artifact (#755): the caps belong to
+    the artifact, so the lever is the same for both rows, without a probe."""
+    caps_engine.caps = {"supports_reasoning_effort": True}
+    caps_engine.weights = "/models/384"
+    verdict = model_reasoning_lever("/models/384", llm_id=99)
+    assert verdict.lever is ReasoningLever.NATIVE_EFFORT
+    assert caps_engine.probed == []
 
 
 def test_caps_without_the_effort_capability_fall_through_to_the_probe(caps_engine):

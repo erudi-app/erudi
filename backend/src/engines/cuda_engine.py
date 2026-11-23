@@ -195,7 +195,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
         * ``ERUDI_CTX`` pinned: ``-c`` verbatim, ``-ngl -1``, never resized;
         * a load: ``-c`` sized for a full offload against the GPU's memory
           now (``cuda_memory.window_for_vram``), folded with ``brake_cap`` or
-          the cap remembered for ``alias``, ``-ngl -1``;
+          the cap remembered for the artifact, ``-ngl -1``;
         * the floor does not fit, the GGUF cannot be modelled (MLA) or read,
           or NVML is unreadable: no ``-c``, ``-ngl -1`` -- fit sizes the
           window and places the layers -- and the brake off
@@ -289,7 +289,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
             return ctx
         shape, weights = inputs
         if brake_cap is None:
-            entry = cls._window_memory_entry(alias)
+            entry = cls._window_memory_entry(model_path)
             brake_cap = entry.get("cap") if entry else None
         window = cuda_memory.window_for_vram(
             shape,
@@ -1307,10 +1307,10 @@ class CUDA_Engine(BaseLlamaCppEngine):
         return cls._llama_begin_memory_window()
 
     @classmethod
-    def brake_reload_pending(cls, llm_id: Any) -> bool:
+    def brake_reload_pending(cls, llm_id: Any, link: Any = None) -> bool:
         """An unload's record for ``llm_id`` (the shared answer), or a brake
         respawn of its loaded child whose reload state is still owed."""
-        return super().brake_reload_pending(llm_id) or cls._llama_respawn_pending(llm_id)
+        return super().brake_reload_pending(llm_id, link) or cls._llama_respawn_pending(llm_id)
 
     # ---------- CUDA-specific helpers (kept from pre-refactor) ----------
 
