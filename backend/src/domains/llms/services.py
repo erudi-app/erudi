@@ -68,6 +68,7 @@ from src.domains.llms.repository import remove_tree_reporting, update_db_with_pr
 
 from src.core.config import HF_TOKEN
 from src.core import config
+from src.core.hf_http import is_offline_error
 from src.core.logging import logger
 from src.core.exceptions import (
     DownloadJobNotFoundException,
@@ -87,55 +88,6 @@ FILES_TO_EXCLUDE = ["consolidated.safetensors"]
 # reads as "offline" instead of the raw hf_hub "Cannot reach https://..."
 # string (#109). Kept ASCII (no em dash) for log-safety on cp1252 consoles.
 OFFLINE_DOWNLOAD_MESSAGE = "you appear to be offline - check your connection and retry"
-
-# Lowercased substrings marking a no-network failure anywhere in the exception
-# chain. hf_hub/transformers re-wrap connection errors, so matching by message
-# (defensively, alongside the requests ConnectionError type) is deliberate.
-_OFFLINE_MESSAGE_MARKERS = (
-    "cannot reach https://huggingface.co",
-    "couldn't connect to 'https://huggingface.co'",
-    "we couldn't connect to 'https://huggingface.co'",
-    "offline mode is enabled",
-    "outgoing traffic has been disabled",
-    "getaddrinfo",
-    "name or service not known",
-    "temporary failure in name resolution",
-    "network is unreachable",
-    "max retries exceeded",
-    "connection error",
-)
-
-
-def _is_offline_download_error(exc: BaseException) -> bool:
-    """True if the exception chain looks like a no-network download failure (#109).
-
-    That includes the network errors huggingface_hub's retry loop retries and
-    then raises once its retries are spent (httpx connect, timeout, read and
-    cut-off-body errors): the connection let the download down, not Erudi
-    (#747)."""
-    import httpx
-    from huggingface_hub.errors import OfflineModeIsEnabled
-    from requests.exceptions import ConnectionError as RequestsConnectionError
-
-    network_errors = (
-        OfflineModeIsEnabled,
-        RequestsConnectionError,
-        httpx.TimeoutException,
-        httpx.NetworkError,
-        httpx.RemoteProtocolError,
-    )
-    seen: set = set()
-    current: BaseException | None = exc
-    while current is not None and id(current) not in seen:
-        seen.add(id(current))
-        if isinstance(current, network_errors):
-            return True
-        message = str(current).lower()
-        if any(marker in message for marker in _OFFLINE_MESSAGE_MARKERS):
-            return True
-        current = current.__cause__ or current.__context__
-    return False
-
 
 # Registry of active download trackers keyed by job_id for cancellation support
 _active_trackers: dict = {}
@@ -1123,7 +1075,7 @@ async def download_llm(
         # Re-raised in both branches: the download task that owns the job
         # writes the record, with the traceback. Named here so the offline
         # case still says which model it was about.
-        if _is_offline_download_error(e):
+        if is_offline_error(e):
             raise HuggingFaceAPIException(
                 OFFLINE_DOWNLOAD_MESSAGE, trace=f"{actual_download_link}: {e}"
             )

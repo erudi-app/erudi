@@ -173,11 +173,15 @@ def test_download_error_is_surfaced(monkeypatch):
 
 
 def _offline_exceptions():
-    import requests
+    import httpx
     from huggingface_hub.errors import OfflineModeIsEnabled
 
     yield OfflineModeIsEnabled("Cannot reach https://huggingface.co: offline mode is enabled.")
-    yield requests.exceptions.ConnectionError("Max retries exceeded with url: /intfloat/...")
+    yield httpx.ConnectError("All connection attempts failed")
+    # The network errors huggingface_hub retries, then raises (#747).
+    yield httpx.ReadTimeout("The read operation timed out")
+    yield httpx.ReadError("[Errno 54] Connection reset by peer")
+    yield httpx.RemoteProtocolError("peer closed connection without sending complete message")
     yield OSError("[Errno 8] getaddrinfo failed")
     # huggingface_hub often re-wraps the network failure; the original cause
     # survives on __cause__/__context__ and must still be recognized.

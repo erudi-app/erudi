@@ -162,14 +162,20 @@ weights are such pieces is refused with a message saying so.
 
 The files of a download go through `HfFileSystem`, the `.safetensors` shards of an MLX model side
 by side in threads. huggingface_hub retries a request that meets a network error (connection,
-timeout, cut-off read) on a fresh HTTP client, up to 5 times. That client is one object shared by
-every thread, and the retry that meets a connection error closes it; Erudi's client
+timeout, cut-off read) up to 5 times. Its HTTP client is one object shared by every Hub request in
+the process: the files of a download, the catalog's metadata calls, the Hugging Face search, the
+sampling hints, the embedding model's download. A connection error closes that client and the retry
+goes out on a new one (a timeout or a cut-off read is retried on the same client). Erudi's client
 (`src/core/hf_http.py`, installed by `src/core/config.py` before any Hub request) hands a request
-another thread had already started on the closed client to the live one, so one shard's retry never
-fails a sibling shard. The same client caps a server's `Retry-After` or `RateLimit` reset at 30
-seconds per retry. A download whose retries run out fails with "you appear to be offline - check
-your connection and retry": an environmental failure, which Diagnostics leaves out of its recent
-errors and its badge (see [logging](../logging.md)).
+another thread had already started on the closed client to the live one, so one request's retry
+never fails a concurrent one. The same client caps a server's `Retry-After` or `RateLimit` reset at
+330 seconds per retry, above the Hub's own 300-second rate-limit window, so only an absurd wait is
+shortened. A download whose retries run out fails with "you appear to be offline - check your
+connection and retry" (the embedding model's download with its own no-connection message; both
+decide through `is_offline_error`): an environmental failure, which Diagnostics leaves out of its
+recent errors and its badge (see [logging](../logging.md)). If huggingface_hub's own client
+settings cannot be read at start, the backend logs one WARNING and keeps huggingface_hub's client
+as it is.
 
 ### What happens on completion
 
