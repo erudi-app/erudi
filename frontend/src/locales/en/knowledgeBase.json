@@ -22,8 +22,8 @@
       "partialCreated_other": "The assistant was created, but {{count}} files could not be indexed: {{files}}. The reason is on the Diagnostics page.",
       "partialUpdated_one": "The knowledge base was updated, but {{count}} file could not be indexed: {{files}}. The reason is on the Diagnostics page.",
       "partialUpdated_other": "The knowledge base was updated, but {{count}} files could not be indexed: {{files}}. The reason is on the Diagnostics page.",
-      "moreFiles_one": "and {{count}} more",
-      "moreFiles_other": "and {{count}} more",
+      "moreFiles_one": "{{count}} more",
+      "moreFiles_other": "{{count}} more",
       "create": "Create Assistant",
       "creating": "Creating Assistant..."
     },
@@ -32,6 +32,11 @@
       "duplicateName": "A model named \"{{name}}\" already exists. Choose a different assistant name.",
       "failedFiles_one": "{{count}} file could not be indexed: {{files}}. The reason is on the Diagnostics page.",
       "failedFiles_other": "{{count}} files could not be indexed: {{files}}. The reason is on the Diagnostics page."
+    },
+    "files": {
+      "group": "{{files}} ({{reason}})",
+      "notIndexed_one": "{{count}} file was not indexed: {{files}}.",
+      "notIndexed_other": "{{count}} files were not indexed: {{files}}."
     }
   },
   "confirm": {
@@ -48,7 +53,9 @@
       "startFailedGeneric": "Failed to start assistant creation",
       "unknownDetail": "Unknown error",
       "failedUnexpectedly": "Assistant creation failed unexpectedly",
-      "statusCheckFailed": "An error occurred during assistant creation. Please try again or contact the Erudi team."
+      "statusCheckFailed": "An error occurred during assistant creation. Please try again or contact the Erudi team.",
+      "nothingIndexed_one": "Nothing could be indexed from the file you added.",
+      "nothingIndexed_other": "Nothing could be indexed from the {{count}} files you added."
     }
   },
   "upload": {

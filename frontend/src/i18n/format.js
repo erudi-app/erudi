@@ -59,6 +59,15 @@ export function formatGigabytes(gigabytes, { maximumFractionDigits = 1 } = {}) {
   return `${formatNumber(gigabytes, { maximumFractionDigits })} ${i18n.t("common:units.gb")}`;
 }
 
+/**
+ * Join items as a list in the app language ("a, b, and c", "a, b et c",
+ * "a、b和c"). The conjunction form: the unit form has no separator at all in
+ * Chinese.
+ */
+export function formatList(items) {
+  return new Intl.ListFormat(currentLocale(), { type: "conjunction" }).format(items);
+}
+
 export function formatDate(value, options = { dateStyle: "medium" }) {
   const date = value instanceof Date ? value : new Date(value);
   if (Number.isNaN(date.getTime())) return "";
