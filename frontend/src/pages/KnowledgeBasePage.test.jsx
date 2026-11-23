@@ -389,7 +389,7 @@ describe("KnowledgeBasePage assistant creation", () => {
     expect(screen.queryByText("Data attached to your Assistant successfully!")).toBeNull();
     expect(
       screen.getByText(
-        /The assistant was created, but 2 files could not be indexed: maintenance\.docx, notes\.rtf\. The reason is on the Diagnostics page\./
+        /The assistant was created, but 2 files could not be indexed: maintenance\.docx and notes\.rtf\. The reason is on the Diagnostics page\./
       )
     ).toBeTruthy();
 
@@ -446,7 +446,7 @@ describe("KnowledgeBasePage assistant creation", () => {
     act(() => openKB.mock.calls[0][1].onComplete({ failedFiles: names }));
 
     expect(
-      screen.getByText(/a\.docx, b\.docx, c\.docx, d\.docx, e\.docx and 2 more\./)
+      screen.getByText(/a\.docx, b\.docx, c\.docx, d\.docx, e\.docx, and 2 more\./)
     ).toBeTruthy();
     expect(screen.queryByText(/f\.docx/)).toBeNull();
   });
@@ -493,7 +493,7 @@ describe("KnowledgeBasePage assistant creation", () => {
     expect(await screen.findByText(/Nothing could be indexed from the 3 files/)).toBeTruthy();
     expect(
       screen.getByText(
-        /3 files were not indexed: broken\.docx \(damaged, protected by a password, or not the format its extension says\); blank\.txt \(no text\); scan\.pdf \(no extractable text/
+        /3 files were not indexed: broken\.docx \(damaged, protected by a password, or not the format its extension says\), blank\.txt \(no text\), and scan\.pdf \(no extractable text/
       )
     ).toBeTruthy();
     // The user's files are the cause: nothing to look for on the Diagnostics page.

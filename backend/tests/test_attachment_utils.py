@@ -276,14 +276,14 @@ class TestPerFileFailures:
         with caplog.at_level(logging.INFO, logger="erudi"):
             resolved = resolve_attachments([str(path)])
 
-        assert [issue.reason for issue in resolved.issues] == ["unreadable"]
+        assert [issue.reason for issue in resolved.issues] == ["failed"]
         assert "could not be read" in resolved.block
         # Our own extractor failing is a defect: ERROR, with the traceback.
         (error,) = [r for r in caplog.records if r.levelno >= logging.ERROR]
         assert error.exc_info
 
     @pytest.mark.parametrize("name, build, library_error", INVALID_DOCUMENTS)
-    def test_an_invalid_docx_attachment_is_a_warning(
+    def test_an_invalid_document_attachment_is_a_warning(
         self, tmp_path, caplog, name, build, library_error
     ):
         """The user's file is not what its extension says (#752): reported as

@@ -12,7 +12,7 @@ Ingestion pipeline (per file, background task):
     marked ``unreadable`` (the user's file, a WARNING); any other per-file
     failure marks THAT document ``failed`` (an ERROR with the traceback). The
     run continues either way; the job only fails when nothing could be
-    ingested (``NothingIndexedError``).
+    ingested (``NothingIndexedException``).
 
 Classes:
     KB_Service: Business logic for KB creation, updates, and job tracking.
@@ -25,6 +25,7 @@ Architecture:
 
 import hashlib
 import time
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Tuple
 
@@ -33,8 +34,9 @@ from sqlalchemy.orm import Session
 from src.core.exceptions import (
     USER_FILE_REASONS,
     EmbeddingModelMissingException,
-    NothingIndexedError,
+    NothingIndexedException,
     StateConflictException,
+    UnreadableDocumentException,
 )
 from src.domains.knowledge_base.repository import KB_Repository
 from src.entities.KBJob import KBJobModel
@@ -42,16 +44,33 @@ from src.ingestion.chunking import chunk_document
 from src.ingestion.embedder_child import ingestion_lease
 from src.ingestion.embeddings import embedding_artifact_missing
 from src.ingestion.reader import DocumentReader
-from src.ingestion.types import UnreadableDocumentError
 from src.ingestion.vector_store import add_kb_chunks
 from src.core.logging import logger
 
 
-# Names of the files a job could not even register (unreadable bytes, a row that
-# could not be created): no KnowledgeDocument exists for them, so the job keeps
-# them in memory, by job id, for the status route. Only the latest jobs are kept.
-_UNRECORDED_FAILURES: Dict[int, List[str]] = {}
-_UNRECORDED_JOBS_KEPT = 32
+@dataclass
+class _JobFileLedger:
+    """What a job knows about its files that its document rows cannot say.
+
+    Attributes:
+        rowless: Names of the job's files that have no document row, by
+            outcome: a file whose bytes could not be read or whose row could
+            not be registered (``failed``), and a file with the same bytes as
+            one earlier in the job, which shares that file's row and outcome
+            (the hash is unique per KB).
+        outcome_by_hash: The outcome of each content this job ingested.
+    """
+
+    rowless: Dict[str, List[str]] = field(default_factory=dict)
+    outcome_by_hash: Dict[str, str] = field(default_factory=dict)
+
+    def add_rowless(self, outcome: str, name: str) -> None:
+        self.rowless.setdefault(outcome, []).append(name)
+
+
+# Kept in memory, by job id, for the status route. Only the latest jobs are kept.
+_JOB_LEDGERS: Dict[int, _JobFileLedger] = {}
+_JOB_LEDGERS_KEPT = 32
 
 
 class KB_Service:
@@ -129,10 +148,11 @@ class KB_Service:
         ``failed``, the names under each of ``USER_FILE_REASONS``, and whether
         one document of the job was indexed. The job's documents are the ones
         created from its start on: an earlier job's files are not this one's.
-        Files that failed before they had a row (bytes that could not be read,
-        a row that could not be registered) come from the job's in-memory list.
-        A failed job with none of these files failed before its first file:
-        ``nothing_indexed`` does not apply to it.
+        Files without a row of their own (bytes that could not be read, a row
+        that could not be registered, the same bytes as a file earlier in the
+        job) come from the job's in-memory ledger. A failed job with none of
+        these files failed before its first file: ``nothing_indexed`` does not
+        apply to it.
         """
         failed: List[str] = []
         by_reason: Dict[str, List[str]] = {reason: [] for reason in USER_FILE_REASONS}
@@ -145,7 +165,11 @@ class KB_Service:
                     by_reason[document.status].append(document.name)
                 elif document.status == "active":
                     any_indexed = True
-        failed += _UNRECORDED_FAILURES.get(kb_job.id, [])
+        ledger = _JOB_LEDGERS.get(kb_job.id)
+        if ledger is not None:
+            failed += ledger.rowless.get("failed", [])
+            for reason, names in by_reason.items():
+                names += ledger.rowless.get(reason, [])
         return failed, by_reason, any_indexed
 
     def _cleanup_failed_job(self, db: Session, llm_id: int, kb_job: KBJobModel) -> None:
@@ -321,9 +345,9 @@ class KB_Service:
                 f"{len(file_paths)} file(s))"
             )
 
-            unrecorded = _UNRECORDED_FAILURES.setdefault(kb_job_id, [])
-            while len(_UNRECORDED_FAILURES) > _UNRECORDED_JOBS_KEPT:
-                del _UNRECORDED_FAILURES[next(iter(_UNRECORDED_FAILURES))]
+            ledger = _JOB_LEDGERS.setdefault(kb_job_id, _JobFileLedger())
+            while len(_JOB_LEDGERS) > _JOB_LEDGERS_KEPT:
+                del _JOB_LEDGERS[next(iter(_JOB_LEDGERS))]
 
             counts = dict.fromkeys(("indexed", "skipped", "failed", *USER_FILE_REASONS), 0)
             # The lease keeps the dedicated embedding child alive for the
@@ -331,7 +355,7 @@ class KB_Service:
             # two files, however long a file takes to parse.
             with ingestion_lease():
                 for raw_path in file_paths:
-                    counts[self._ingest_one_file(db, kb.id, raw_path, unrecorded)] += 1
+                    counts[self._ingest_one_file(db, kb.id, raw_path, ledger)] += 1
 
             duration_ms = (time.perf_counter() - start_s) * 1000
             logger.info(
@@ -348,49 +372,80 @@ class KB_Service:
             # the user must see — never a silent "completed". All-duplicates
             # (skipped > 0) stays a success: that content is already in the KB.
             if counts["indexed"] == 0 and counts["skipped"] == 0:
-                raise NothingIndexedError(counts)
+                raise NothingIndexedException(counts)
 
             self.repo.update_kb_job_status(db, kb_job, "completed")
 
         except Exception as e:
             # Marked failed for the polling UI and re-raised: the background
-            # task that owns this job logs the record, with the traceback.
+            # task that owns this job writes its record.
             self._handle_indexing_error(db, kb_job_id, str(e))
             raise
 
     def _ingest_one_file(
-        self, db: Session, kb_id: int, raw_path: str, unrecorded: List[str] | None = None
+        self, db: Session, kb_id: int, raw_path: str, ledger: _JobFileLedger | None = None
     ) -> str:
         """Ingest one file; returns "indexed" | "pending_vision" | "skipped"
         | "empty" | "unreadable" | "failed". Never raises — a broken file must
         not sink the batch.
 
-        ``unrecorded`` collects the names of the files that fail before they
-        have a document row, so the job can still name them."""
-        unrecorded = unrecorded if unrecorded is not None else []
+        ``ledger`` records the job's files that have no document row of their
+        own, so the job can still name them."""
+        ledger = ledger if ledger is not None else _JobFileLedger()
         path = Path(raw_path)
         try:
             content = path.read_bytes()
         except OSError as e:
-            # One file skipped; the batch goes on (and fails as a whole only
-            # when nothing at all could be indexed).
-            logger.warning(f"KB {kb_id}: cannot read {path.name}, skipping it: {e}")
-            unrecorded.append(path.name)
+            # The file the user picked could not be read (moved, deleted,
+            # denied) or the app handed a wrong path: the two cannot be told
+            # apart here, so this is a `failed` file, and every `failed` file
+            # has its ERROR with the traceback. The batch goes on (and fails
+            # as a whole only when nothing at all could be indexed).
+            logger.error(f"KB {kb_id}: cannot read {path.name}: {e}", exc_info=True)
+            ledger.add_rowless("failed", path.name)
             return "failed"
 
         content_hash = hashlib.sha256(content).hexdigest()
+        earlier = ledger.outcome_by_hash.get(content_hash)
+        if earlier is not None:
+            # The same bytes as a file earlier in this job: that file's row
+            # (unique per hash) and outcome stand for this one too. Replacing
+            # the row would erase the earlier file's name from the job.
+            if earlier in ("indexed", "skipped"):
+                logger.info(f"KB {kb_id}: {path.name} already ingested (dedup), skipping")
+                return "skipped"
+            logger.info(
+                f"KB {kb_id}: {path.name} has the same content as a file earlier in this job "
+                f"({earlier})"
+            )
+            ledger.add_rowless(earlier, path.name)
+            return earlier
+        outcome = self._ingest_new_content(db, kb_id, path, content, content_hash, ledger)
+        ledger.outcome_by_hash[content_hash] = outcome
+        return outcome
+
+    def _ingest_new_content(
+        self,
+        db: Session,
+        kb_id: int,
+        path: Path,
+        content: bytes,
+        content_hash: str,
+        ledger: _JobFileLedger,
+    ) -> str:
+        """The rest of ``_ingest_one_file`` for a content new to this job."""
         try:
             existing = self.repo.get_document_by_hash(db, kb_id, content_hash)
-            if existing and existing.status not in ("failed", "unreadable"):
+            if existing and existing.status == "active":
                 logger.info(f"KB {kb_id}: {path.name} already ingested (dedup), skipping")
                 return "skipped"
             if existing:
-                # A failed ingestion left this row (and maybe a few chunks, which
-                # follow the row through ON DELETE CASCADE). It must not block the
-                # same file for good: replace it, so the retry starts clean and its
-                # name is the one the job reports if it fails again. An
-                # unreadable row is replaced too: dropping the same file again
-                # names it again, instead of passing for a duplicate.
+                # An earlier job left this row without indexing it: it failed
+                # (maybe with a few chunks, which follow the row through ON
+                # DELETE CASCADE), or the file was empty, a scan, or invalid.
+                # It must not hide the same file for good: replace it, so the
+                # retry starts clean and the job names the file again if it is
+                # still not indexed, instead of passing it for a duplicate.
                 logger.info(
                     f"KB {kb_id}: {path.name} was {existing.status} earlier, ingesting it again"
                 )
@@ -414,7 +469,7 @@ class KB_Service:
             # the unique hash, a database error): this file fails, the batch goes on.
             db.rollback()
             logger.error(f"KB {kb_id}: cannot register {path.name}: {e}", exc_info=True)
-            unrecorded.append(path.name)
+            ledger.add_rowless("failed", path.name)
             return "failed"
 
         try:
@@ -443,7 +498,7 @@ class KB_Service:
             logger.info(f"KB {kb_id}: {path.name} indexed ({len(chunks)} chunks)")
             return "indexed"
 
-        except UnreadableDocumentError as e:
+        except UnreadableDocumentException as e:
             # The user's file is not what its extension says: the app skipped
             # it and names it at the end of the job. A WARNING without a
             # traceback (nothing in the app's code to look at).

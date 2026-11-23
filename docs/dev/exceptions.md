@@ -9,8 +9,10 @@ frontend consumes them.
   from `backend/src/core/exceptions.py`.
 - Every exception carries an HTTP status code and an `erudi_code`, so a client can branch
   on the error type instead of matching on message text.
-- Constructing an exception logs it: `WARNING` for client errors (status < 500), `ERROR`
-  for server errors (status >= 500). There is no separate "log then raise" step.
+- Constructing an exception logs nothing. The record is written where the exception is
+  handled: by the global handler when it ends a request (`INFO` below 500, `ERROR` with the
+  traceback from 500), or by the `except` that catches and recovers from it (see
+  [Logging rules](../logging.md#logging-rules)).
 - Never use a bare `except:`. Catch the specific exceptions you can handle, and let the
   rest bubble up to the global handlers.
 
@@ -48,7 +50,8 @@ All classes below live in `backend/src/core/exceptions.py`.
 | `MessageNotFoundException` | `(message_id, trace=None)` | 404 | `MESSAGE_NOT_FOUND` |
 | `DownloadJobNotFoundException` | `(job_id, trace=None)` | 404 | `DOWNLOAD_JOB_NOT_FOUND` |
 | `InvalidInputException` | `(field_name, trace=None)` | 422 | `INVALID_INPUT` |
-| `NothingIndexedError` | `(counts)` | 422 | `NOTHING_INDEXED` |
+| `NothingIndexedException` | `(counts)` | 422 (caught in the backend, never sent) | `NOTHING_INDEXED` |
+| `UnreadableDocumentException` | `(reason)` | 422 (caught in the backend, never sent) | `DOCUMENT_UNREADABLE` |
 | `StateConflictException` | `(message, trace=None, status_code=400, detail=None)` | 400, or 409 on request | `STATE_CONFLICT` |
 | `DatabaseException` | `(message, trace=None)` | 500 | `DATABASE_ERROR` |
 | `FileSystemException` | `(message, trace=None)` | 500 | `FILESYSTEM_ERROR` |

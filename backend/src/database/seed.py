@@ -1135,8 +1135,8 @@ class Job_Cleanup_Service:
                 continue
 
         # A quit mid-file leaves its document `indexing`, without chunks. Make it
-        # `failed`: the dedup skips every other status, `failed` is the one that
-        # lets the same file be added again.
+        # `failed`, which is what happened to that file: it is named as such, and
+        # the dedup (which skips only an `active` row) lets it be added again.
         stranded = (
             self.db.query(KnowledgeDocument).filter(KnowledgeDocument.status == "indexing").all()
         )

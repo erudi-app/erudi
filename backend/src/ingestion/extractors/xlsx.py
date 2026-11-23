@@ -13,7 +13,12 @@ from pathlib import Path
 from src.core.logging import logger
 from src.ingestion.cleaning import clean_extracted_text
 from src.ingestion.markdown import rows_to_markdown_table
-from src.ingestion.types import ExtractedDocument, UnreadableDocumentError
+from src.core.exceptions import UnreadableDocumentException
+from src.ingestion.types import ExtractedDocument
+
+# openpyxl 3.1's OSError for a zip package without a workbook part
+# (openpyxl/reader/excel.py, ``_find_workbook_part``).
+_NO_WORKBOOK_PART = "File contains no valid workbook part"
 
 
 class XlsxExtractor:
@@ -28,8 +33,20 @@ class XlsxExtractor:
             # The user's file is not an Excel workbook: not a zip (BadZipFile,
             # a text renamed .xlsx), a zip without the workbook's parts
             # (KeyError from the archive lookup), or a format openpyxl refuses.
-            # Only the opening is guarded, as in the DOCX extractor.
-            raise UnreadableDocumentError(f"not a valid Excel workbook ({type(e).__name__})") from e
+            # Only the opening is guarded, as in the DOCX extractor, with the
+            # same compromise on a KeyError openpyxl itself would raise there.
+            raise UnreadableDocumentException(
+                f"not a valid Excel workbook ({type(e).__name__})"
+            ) from e
+        except OSError as e:
+            # Another Office package renamed .xlsx (a Word document): openpyxl
+            # finds no workbook part. Matched on openpyxl's own wording, so a
+            # real I/O error (a file that vanished, a denied read) is not hidden.
+            if _NO_WORKBOOK_PART not in str(e):
+                raise
+            raise UnreadableDocumentException(
+                f"not an Excel workbook, another Office file ({type(e).__name__})"
+            ) from e
         try:
             sections: list[str] = []
             for sheet in workbook.worksheets:

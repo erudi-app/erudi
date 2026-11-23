@@ -25,7 +25,7 @@ from src.core.exceptions import (
     KnowledgeBaseNotFoundException,
     DatabaseException,
     InvalidInputException,
-    NothingIndexedError,
+    NothingIndexedException,
     StateConflictException,
 )
 from fastapi import status as http_status
@@ -204,11 +204,16 @@ def _log_task_failure(kind: str, kb_job_id: int, error: Exception) -> None:
     failure in the log; the job row already says "failed" to the polling UI.
     A job that indexed nothing only because of the user's files (scans, empty
     or invalid files, each already named at its own level) is an expected
-    outcome: one INFO line. Anything else, a file that failed for an internal
-    cause included, is an ERROR with the traceback.
+    outcome: one INFO line. When a file failed for an internal cause, that
+    file's own ERROR carries the traceback that matters; the job's outcome is
+    an ERROR without one (it would only point at the raise). Anything else is
+    an ERROR with the traceback.
     """
-    if isinstance(error, NothingIndexedError) and not error.has_internal_failures:
-        logger.info(f"KB {kind} job {kb_job_id} indexed nothing: {error}")
+    if isinstance(error, NothingIndexedException):
+        if error.has_internal_failures:
+            logger.error(f"KB {kind} task failed for job {kb_job_id}: {error}")
+        else:
+            logger.info(f"KB {kind} job {kb_job_id} indexed nothing: {error}")
         return
     logger.error(f"KB {kind} task failed for job {kb_job_id}: {error}", exc_info=error)
 

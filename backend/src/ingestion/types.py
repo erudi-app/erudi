@@ -5,25 +5,6 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 
-class UnreadableDocumentError(Exception):
-    """The file is not a valid document of the type its extension names.
-
-    Raised by an extractor in place of the parser's own exception when that
-    exception means the user's file is the cause (a text file renamed
-    ``.docx``, a damaged archive, a PDF locked by a password), never for a
-    failure of the app's own code. Callers record it as a skipped file, at
-    WARNING and without a traceback (docs/logging.md, "Logging rules").
-
-    Attributes:
-        reason: What is wrong with the file, ASCII, for the log line, e.g.
-            ``not a valid Word file (PackageNotFoundError)``.
-    """
-
-    def __init__(self, reason: str):
-        self.reason = reason
-        super().__init__(reason)
-
-
 @dataclass(slots=True)
 class ExtractedPage:
     """One physical page of a paginated document (PDF)."""

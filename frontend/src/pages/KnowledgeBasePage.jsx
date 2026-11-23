@@ -2,7 +2,7 @@ import React, { useEffect, useRef, useState } from "react";
 import { HelpCircle } from "lucide-react";
 import { useTranslation } from "react-i18next";
 import { inferenceTierLabel } from "../utils/inferenceTier";
-import { formatNumber } from "../i18n/format";
+import { formatList, formatNumber } from "../i18n/format";
 import { useSearchParams, useNavigate } from "react-router-dom";
 import Sidebar from "../components/Sidebar";
 import ModelLibrary from "../components/ModelLibrary";
@@ -106,30 +106,34 @@ export default function KnowledgeBasePage() {
     }
   };
 
-  // At most five names, then how many more: a long list would bury the message.
+  // At most five names, then how many more: a long list would bury the
+  // message. Joined as a list of the interface language ("a, b, and 2 more",
+  // "a、b和另外 2 个").
   const MAX_LISTED_FILES = 5;
   const listFailedFiles = (names) => {
-    const shown = names.slice(0, MAX_LISTED_FILES).join(", ");
+    const shown = names.slice(0, MAX_LISTED_FILES);
     const more = names.length - MAX_LISTED_FILES;
-    return more > 0 ? `${shown} ${t("knowledgeBase:page.form.moreFiles", { count: more })}` : shown;
+    return formatList(
+      more > 0 ? [...shown, t("knowledgeBase:page.form.moreFiles", { count: more })] : shown
+    );
   };
 
   // The files a scan, an empty or an invalid file kept out, grouped under
-  // their reason ("broken.docx (damaged, ...); scan.pdf (no extractable
+  // their reason ("broken.docx (damaged, ...) and scan.pdf (no extractable
   // text, ...)"), or "" when there are none. No pointer to Diagnostics: the
   // user's file is the cause and the reason is right there.
   const notIndexedMessage = (byReason) => {
     const groups = FILE_REASONS.filter((reason) => byReason[reason]?.length > 0);
     if (groups.length === 0) return "";
     const count = groups.reduce((sum, reason) => sum + byReason[reason].length, 0);
-    const files = groups
-      .map((reason) =>
+    const files = formatList(
+      groups.map((reason) =>
         t("knowledgeBase:page.files.group", {
           files: listFailedFiles(byReason[reason]),
           reason: t(`common:fileReasons.${reason}`),
         })
       )
-      .join("; ");
+    );
     return t("knowledgeBase:page.files.notIndexed", { count, files });
   };
   const notIndexed = notIndexedMessage(filesByReason); // of the finished job

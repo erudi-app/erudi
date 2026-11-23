@@ -22,8 +22,8 @@
       "partialCreated_other": "The assistant was created, but {{count}} files could not be indexed: {{files}}. The reason is on the Diagnostics page.",
       "partialUpdated_one": "The knowledge base was updated, but {{count}} file could not be indexed: {{files}}. The reason is on the Diagnostics page.",
       "partialUpdated_other": "The knowledge base was updated, but {{count}} files could not be indexed: {{files}}. The reason is on the Diagnostics page.",
-      "moreFiles_one": "and {{count}} more",
-      "moreFiles_other": "and {{count}} more",
+      "moreFiles_one": "{{count}} more",
+      "moreFiles_other": "{{count}} more",
       "create": "Create Assistant",
       "creating": "Creating Assistant..."
     },

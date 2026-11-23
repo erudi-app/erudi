@@ -57,7 +57,7 @@ def test_a_job_that_indexed_nothing_is_an_error_only_for_an_internal_cause(
     """Nothing indexed because of the user's files (scan, empty, invalid) is
     an expected outcome: one INFO line. A file that failed for an internal
     cause keeps the job's record at ERROR with its traceback."""
-    from src.core.exceptions import NothingIndexedError
+    from src.core.exceptions import NothingIndexedException
     from src.domains.knowledge_base import endpoints as kb_endpoints
 
     class _Session:
@@ -66,7 +66,7 @@ def test_a_job_that_indexed_nothing_is_an_error_only_for_an_internal_cause(
 
     class _Service:
         def process_and_index_documents(self, **kwargs):
-            raise NothingIndexedError(counts)
+            raise NothingIndexedException(counts)
 
     monkeypatch.setattr(kb_endpoints, "SessionLocal", lambda: _Session())
     monkeypatch.setattr(kb_endpoints, "KB_Service", lambda: _Service())
@@ -77,7 +77,8 @@ def test_a_job_that_indexed_nothing_is_an_error_only_for_an_internal_cause(
     (record,) = [r for r in caplog.records if "job 78" in r.getMessage()]
     assert record.levelno == level
     assert "No searchable content could be indexed" in record.getMessage()
-    assert bool(record.exc_info) is (level == logging.ERROR)
+    # A failed file has its own ERROR with the traceback; the job outcome needs none.
+    assert not record.exc_info
 
 
 # ============ Launcher: the reason reaches backend.log ============

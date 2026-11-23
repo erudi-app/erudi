@@ -22,8 +22,8 @@
       "partialCreated_other": "助手已创建，但有 {{count}} 个文件无法建立索引：{{files}}。原因请见“诊断信息”页面。",
       "partialUpdated_one": "知识库已更新，但有 {{count}} 个文件无法建立索引：{{files}}。原因请见“诊断信息”页面。",
       "partialUpdated_other": "知识库已更新，但有 {{count}} 个文件无法建立索引：{{files}}。原因请见“诊断信息”页面。",
-      "moreFiles_one": "等另外 {{count}} 个",
-      "moreFiles_other": "等另外 {{count}} 个",
+      "moreFiles_one": "另外 {{count}} 个",
+      "moreFiles_other": "另外 {{count}} 个",
       "create": "创建助手",
       "creating": "正在创建助手..."
     },

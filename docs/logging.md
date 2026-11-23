@@ -344,9 +344,13 @@ these rules, in both processes.
   something alarming but kept running, a probe that timed out once. A file
   of the user's that is not what its extension says (a text renamed `.docx`,
   a PDF locked by a password) is a skipped file: the extractor raises
-  `UnreadableDocumentError`, and the Knowledge Base job or the attachment
+  `UnreadableDocumentException`, and the Knowledge Base job or the attachment
   reader writes one `WARNING` line naming the file and the parser's verdict,
-  without a traceback. So is a
+  without a traceback. The verdict is taken from the parsers' own exceptions,
+  with two accepted approximations: a pypdf `PdfReadError` raised while a
+  page is extracted, and a `KeyError` python-docx or openpyxl raises while
+  opening the package, count as the file's fault even in the rare case where
+  the library is. So is a
   curated failed turn (a prompt that does not fit the window, a model that
   did not start answering in time or went silent mid-answer, the tool-loop
   limit): the runner flags it
@@ -363,7 +367,11 @@ these rules, in both processes.
   each already named at its own level): the job fails for the user to see,
   the task boundary writes one `INFO` line, and the renderer logs the failure
   at `warn`. When one of the job's files failed for an internal cause, that
-  file's record and the job's are `ERROR`s with the traceback.
+  file's own record is the `ERROR` with the traceback, and the job's outcome
+  is an `ERROR` without one (one traceback per failure). A file whose bytes
+  cannot be read when the job starts (moved, deleted, a denied read, or a
+  wrong path from the app: they look the same) is such a `failed` file, at
+  `ERROR`.
 - Nothing that indicates a defect is logged at `INFO`/`DEBUG` or not at all.
 
 ### One record per failure

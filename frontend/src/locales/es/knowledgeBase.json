@@ -22,8 +22,8 @@
       "partialCreated_other": "El asistente se creó, pero {{count}} archivos no se pudieron indexar: {{files}}. El motivo está en la página Diagnóstico.",
       "partialUpdated_one": "La base de conocimientos se actualizó, pero {{count}} archivo no se pudo indexar: {{files}}. El motivo está en la página Diagnóstico.",
       "partialUpdated_other": "La base de conocimientos se actualizó, pero {{count}} archivos no se pudieron indexar: {{files}}. El motivo está en la página Diagnóstico.",
-      "moreFiles_one": "y {{count}} más",
-      "moreFiles_other": "y {{count}} más",
+      "moreFiles_one": "{{count}} más",
+      "moreFiles_other": "{{count}} más",
       "create": "Crear asistente",
       "creating": "Creando asistente..."
     },

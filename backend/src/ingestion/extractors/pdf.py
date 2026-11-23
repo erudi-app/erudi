@@ -13,7 +13,8 @@ from pathlib import Path
 
 from src.core.logging import logger
 from src.ingestion.cleaning import clean_extracted_text
-from src.ingestion.types import ExtractedDocument, ExtractedPage, UnreadableDocumentError
+from src.core.exceptions import UnreadableDocumentException
+from src.ingestion.types import ExtractedDocument, ExtractedPage
 
 
 class PdfExtractor:
@@ -31,7 +32,7 @@ class PdfExtractor:
             raw_pages = [page.extract_text() or "" for page in reader.pages]
         except FileNotDecryptedError as e:
             # Locked by a password the user did not give: nothing can be read.
-            raise UnreadableDocumentError(
+            raise UnreadableDocumentException(
                 f"PDF protected by a password ({type(e).__name__})"
             ) from e
         except PdfReadError as e:
@@ -39,8 +40,11 @@ class PdfExtractor:
             # renamed .pdf, EmptyFileError, a damaged cross-reference table):
             # the user's file, not a defect. DependencyError (a package the
             # build lacks, e.g. for AES) is not a PdfReadError: it stays a
-            # defect.
-            raise UnreadableDocumentError(f"not a valid PDF ({type(e).__name__})") from e
+            # defect. Compromise: the guard spans the page extraction too, so
+            # a PdfReadError pypdf raises there on a page it cannot parse
+            # marks the whole file unreadable, even if pypdf were the one at
+            # fault.
+            raise UnreadableDocumentException(f"not a valid PDF ({type(e).__name__})") from e
         pages = [
             ExtractedPage(page_number=number, text=clean_extracted_text(text))
             for number, text in enumerate(raw_pages, start=1)

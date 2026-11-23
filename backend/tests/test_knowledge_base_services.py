@@ -15,7 +15,7 @@ import pytest
 import psycopg
 from sqlalchemy.orm import sessionmaker
 
-from src.core.exceptions import NothingIndexedError
+from src.core.exceptions import NothingIndexedException
 from src.domains.knowledge_base.repository import COPIED_FIELDS
 from src.domains.knowledge_base.services import KB_Service
 from src.entities.KnowledgeBase import KnowledgeBase
@@ -583,7 +583,7 @@ class TestIngestionPipeline:
         bad = tmp_path / "broken.xyz"
         bad.write_text("nope")
 
-        with pytest.raises(NothingIndexedError, match="No searchable content could be indexed"):
+        with pytest.raises(NothingIndexedException, match="No searchable content could be indexed"):
             service.process_and_index_documents(db=session, kb_job_id=job.id, file_paths=[str(bad)])
 
         session.expire_all()
@@ -600,7 +600,7 @@ class TestIngestionPipeline:
         blank = tmp_path / "blank.txt"
         blank.write_text("   \n\t\n   ", encoding="utf-8")  # whitespace -> 0 chunks
 
-        with pytest.raises(NothingIndexedError, match="No searchable content could be indexed"):
+        with pytest.raises(NothingIndexedException, match="No searchable content could be indexed"):
             service.process_and_index_documents(
                 db=session, kb_job_id=job.id, file_paths=[str(blank)]
             )
@@ -686,26 +686,31 @@ class TestIngestionPipeline:
             ).fetchone()[0]
         assert chunks >= 1
 
-    def test_an_unreadable_file_is_named_among_the_failed_files(
-        self, kb_store, real_db_session, tmp_path
+    def test_a_file_whose_bytes_cannot_be_read_is_named_among_the_failed_files(
+        self, kb_store, real_db_session, tmp_path, caplog
     ):
         """A file whose bytes cannot be read creates no document row; the job
-        keeps its name in memory so the end of the job still names it."""
+        keeps its name in memory so the end of the job still names it. A moved
+        file and a wrong path look the same here: an ERROR with the traceback,
+        like every `failed` file."""
         session, created = real_db_session
         service, kb, job = _make_kb_and_job(session, created)
         good = tmp_path / "ok.txt"
         good.write_text("Texte parfaitement lisible.", encoding="utf-8")
 
-        service.process_and_index_documents(
-            db=session, kb_job_id=job.id, file_paths=[str(good), str(tmp_path / "ghost.txt")]
-        )
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            service.process_and_index_documents(
+                db=session, kb_job_id=job.id, file_paths=[str(good), str(tmp_path / "ghost.txt")]
+            )
 
         session.expire_all()
         failed, _, _ = service._job_files(session, service.repo.get_kb_job_by_id(session, job.id))
         assert failed == ["ghost.txt"]
+        (error,) = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert "ghost.txt" in error.getMessage() and error.exc_info
 
     @pytest.mark.parametrize("name, build, library_error", INVALID_DOCUMENTS)
-    def test_an_invalid_docx_is_a_warning_without_traceback_and_unreadable(
+    def test_an_invalid_document_is_a_warning_without_traceback_and_unreadable(
         self, kb_store, real_db_session, tmp_path, caplog, name, build, library_error
     ):
         """A file that is not what its extension says is the user's file, not
@@ -764,7 +769,7 @@ class TestIngestionPipeline:
             monkeypatch.setattr(services, "add_kb_chunks", explode)
 
         with caplog.at_level(logging.INFO, logger="erudi"):
-            with pytest.raises(NothingIndexedError) as caught:
+            with pytest.raises(NothingIndexedException) as caught:
                 service.process_and_index_documents(
                     db=session, kb_job_id=job.id, file_paths=[str(doc)]
                 )
@@ -830,35 +835,68 @@ class TestIngestionPipeline:
             "unreadable": ["broken.docx"],
         }
 
-    def test_the_same_unreadable_file_dropped_again_is_named_again(
-        self, kb_store, real_db_session, tmp_path
+    @pytest.mark.parametrize(
+        "name, content, reason",
+        [
+            ("broken.docx", "a text file renamed", "unreadable"),
+            ("blank.txt", "   ", "empty"),
+            ("photo.jpg", "not a real jpeg", "pending_vision"),
+        ],
+    )
+    def test_a_file_the_user_adds_again_is_named_again(
+        self, kb_store, real_db_session, tmp_path, name, content, reason
     ):
-        """An `unreadable` row does not hide the file behind the dedup: the next
-        job reads it again and names it again, instead of a silent duplicate."""
-
+        """A row an earlier job left unindexed (an invalid file, an empty one, a
+        scan) does not hide the file behind the dedup: the next job reads it
+        again and names it again, instead of passing it for a duplicate."""
         session, created = real_db_session
         service, kb, job = _make_kb_and_job(session, created)
         good = tmp_path / "ok.txt"
         good.write_text("Texte parfaitement lisible.", encoding="utf-8")
-        broken = tmp_path / "broken.docx"
-        broken.write_text("a text file renamed", encoding="utf-8")
+        again = tmp_path / name
+        again.write_text(content, encoding="utf-8")
         service.process_and_index_documents(
-            db=session, kb_job_id=job.id, file_paths=[str(good), str(broken)]
+            db=session, kb_job_id=job.id, file_paths=[str(good), str(again)]
         )
 
         job2 = service.repo.create_kb_job(
             db=session, base_model_id=None, new_model_id=None, kb_id=kb.id
         )
         session.commit()
-        with pytest.raises(NothingIndexedError):
+        with pytest.raises(NothingIndexedException):
             service.process_and_index_documents(
-                db=session, kb_job_id=job2.id, file_paths=[str(broken)], is_update=True
+                db=session, kb_job_id=job2.id, file_paths=[str(again)], is_update=True
             )
 
         session.expire_all()
         job2_row = service.repo.get_kb_job_by_id(session, job2.id)
-        assert service._job_files(session, job2_row)[1]["unreadable"] == ["broken.docx"]
+        assert service._job_files(session, job2_row)[1][reason] == [name]
         assert session.query(KnowledgeDocument).filter_by(kb_id=kb.id).count() == 2
+
+    def test_two_identical_files_in_one_job_are_both_named(
+        self, kb_store, real_db_session, tmp_path
+    ):
+        """Same bytes under two names in one job: the second does not replace
+        the first one's row (the hash is unique per KB), and both are named."""
+        session, created = real_db_session
+        service, kb, job = _make_kb_and_job(session, created)
+        first = tmp_path / "broken.docx"
+        first.write_text("a text file renamed", encoding="utf-8")
+        second = tmp_path / "copy of broken.docx"
+        second.write_text("a text file renamed", encoding="utf-8")
+
+        with pytest.raises(NothingIndexedException) as caught:
+            service.process_and_index_documents(
+                db=session, kb_job_id=job.id, file_paths=[str(first), str(second)]
+            )
+
+        assert caught.value.counts["unreadable"] == 2
+        session.expire_all()
+        job_row = service.repo.get_kb_job_by_id(session, job.id)
+        failed, by_reason, _ = service._job_files(session, job_row)
+        assert failed == []
+        assert by_reason["unreadable"] == ["broken.docx", "copy of broken.docx"]
+        assert session.query(KnowledgeDocument).filter_by(kb_id=kb.id).count() == 1
 
     def test_a_row_is_indexing_until_its_chunks_are_stored(
         self, kb_store, real_db_session, tmp_path, monkeypatch
@@ -904,7 +942,7 @@ class TestIngestionPipeline:
             raise IntegrityError("insert", {}, Exception("uq_knowledge_documents_kb_hash"))
 
         monkeypatch.setattr(service.repo, "create_document", clash)
-        with pytest.raises(NothingIndexedError, match="No searchable content"):
+        with pytest.raises(NothingIndexedException, match="No searchable content"):
             service.process_and_index_documents(db=session, kb_job_id=job.id, file_paths=[str(doc)])
 
         session.expire_all()

@@ -28,11 +28,16 @@ process against the embedded PostgreSQL cluster. No document ever leaves the mac
 Any other extension is rejected with an `InvalidInputException` listing the supported set.
 
 **A file that is not what its extension says is the user's, not a bug.** Each extractor turns the
-parser's verdict on the file itself into `UnreadableDocumentError` (`src/ingestion/types.py`): a
+parser's verdict on the file itself into `UnreadableDocumentException` (`src/core/exceptions.py`): a
 text renamed `.docx` (`PackageNotFoundError`), an `.xlsx` that is not a zip (`BadZipFile`), a zip
-renamed `.docx`/`.xlsx` with no Office parts in it (`KeyError` from the archive lookup, caught
-around the opening call only), a PDF that is empty, damaged or not a PDF (`PdfReadError` and its
-subclasses `PdfStreamError`, `EmptyFileError`), a PDF locked by a password (`FileNotDecryptedError`).
+renamed `.docx`/`.xlsx` with no Office parts in it (`KeyError` from the archive lookup), another
+Office file renamed (a workbook or a `.docm` renamed `.docx`: python-docx's `ValueError` "is not a
+Word file"; a Word document renamed `.xlsx`: openpyxl's `OSError` "File contains no valid workbook
+part", both matched on that wording so no other `ValueError` or `OSError` is hidden), a PDF that
+is empty, damaged or not a PDF (`PdfReadError` and its subclasses `PdfStreamError`,
+`EmptyFileError`), a PDF locked by a password (`FileNotDecryptedError`). The Office exceptions are
+caught around the opening call only; the PDF ones around the page extraction too, so a page pypdf
+cannot parse marks the whole file `unreadable`.
 The document is recorded `unreadable` and the job logs one `WARNING` without a traceback. Every
 other exception (the extractor's own code, a missing optional package such as pypdf's
 `DependencyError`, the tokenizer, the embedder) stays a `failed` file logged at `ERROR` with its
@@ -53,10 +58,12 @@ type marks that document `unreadable`; any other failure on one file marks it `f
 continues either way.
 
 1. **Hash and dedup.** The file bytes are SHA-256 hashed. A hash already present in this KB
-   (`knowledge_documents.content_hash_sha256`, unique per `kb_id`) is skipped as a duplicate,
-   unless its row is `failed` or `unreadable`: such a document never blocks its own file. The row
-   is deleted (its chunks follow, `ON DELETE CASCADE`) and the file goes through the pipeline
-   again as a new document, so the job names it again.
+   (`knowledge_documents.content_hash_sha256`, unique per `kb_id`) is skipped as a duplicate
+   when its row is `active`. A row an earlier job left unindexed (`failed`, `empty`,
+   `pending_vision`, `unreadable`) never blocks its own file: it is deleted (its chunks follow,
+   `ON DELETE CASCADE`) and the file goes through the pipeline again as a new document, so the job
+   names it again. Two files with the same bytes in one job share the first one's row and outcome:
+   the second is counted and named with it (from the job's in-memory ledger), never replacing it.
 2. **Register the document.** A `KnowledgeDocument` row is created in the `indexing` status and
    committed before indexing — the vector store writes through its own connection and needs the row
    for its foreign key. It becomes `active` once its chunks are stored. A failure while reading the
@@ -142,11 +149,11 @@ so the file can be added again.
 
 The KB job reports `completed` only when at least one file was indexed, or when every file was a
 duplicate of content already in the KB. A batch that indexed nothing new and had no duplicates fails
-with `NothingIndexedError` (`src/core/exceptions.py`), whose English message counts the failed,
+with `NothingIndexedException` (`src/core/exceptions.py`), whose English message counts the failed,
 empty, pending-vision and unreadable files; the status route reports it as `error_code:
 "nothing_indexed"`. The task boundary logs it at `INFO` when the user's files are the whole cause
-(every file `pending_vision`, `empty` or `unreadable`), at `ERROR` with the traceback when a file
-`failed`.
+(every file `pending_vision`, `empty` or `unreadable`), at `ERROR` without a traceback when a
+file `failed` (that file's own `ERROR` carries it).
 
 A job that completes with some files not indexed still reports `completed`; the status route names
 those files (see [Poll the job](#poll-the-job)) and the Knowledge Base page shows them. A file that
