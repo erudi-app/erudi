@@ -13,6 +13,7 @@ import pytest
 import asyncio
 import shutil
 import contextlib
+from pathlib import Path
 from unittest.mock import patch, AsyncMock
 from fastapi import status
 from datetime import datetime, timedelta, timezone
@@ -33,14 +34,21 @@ class _FakeEngine:
     still on disk -- the ordering is the whole point of #521.
     """
 
-    def __init__(self, model_id):
+    def __init__(self, model_id, model_path=None):
         self._model_id = model_id
+        self._model_path = model_path
         self.cleanup_calls = 0
         self.cleaned_before_rmtree = None
 
     @contextlib.asynccontextmanager
     async def generation_guard(self):
         yield
+
+    def serves_artifact_under(self, link):
+        """Same contract as ``BaseEngine.serves_artifact_under``."""
+        if self._model_path is None:
+            return False
+        return Path(self._model_path).resolve().is_relative_to(Path(link).resolve())
 
     def cleanup(self):
         self.cleanup_calls += 1
@@ -807,6 +815,94 @@ class TestLLM_Endpoints:
         assert engine.cleanup_calls == 1
         # The base model's files are still there: this branch never deletes them.
         assert (model_dir / "weights.safetensors").exists()
+
+    def test_delete_base_unloads_a_resident_assistant_sharing_its_weights(
+        self, client, test_db_session, tmp_path
+    ):
+        """A KB assistant has its own llm id but runs the base's weights. The
+        engine reports the assistant's id, so an id comparison alone would let
+        the base's folder be deleted under the running child (#762).
+        """
+        from src.entities.KnowledgeBase import KnowledgeBase
+
+        model_dir = tmp_path / "models" / "384"
+        model_dir.mkdir(parents=True)
+        (model_dir / "model.gguf").write_bytes(b"fake weights")
+        base = Llm(name="Base", local=1, type="qwen", link=str(model_dir), param_size=4.0)
+        test_db_session.add(base)
+        kb = KnowledgeBase()
+        test_db_session.add(kb)
+        test_db_session.flush()
+        assistant = Llm(
+            name="Assistant",
+            local=1,
+            type="qwen",
+            link=str(model_dir),
+            is_attached_to_kb=True,
+            kb_id=kb.id,
+            param_size=4.0,
+        )
+        test_db_session.add(assistant)
+        test_db_session.commit()
+        base_id, assistant_id = base.id, assistant.id
+
+        engine = _FakeEngine(model_id=str(assistant_id), model_path=str(model_dir / "model.gguf"))
+        with patch("src.core.config.LLM_Engine", engine):
+            response = client.delete(f"/erudi/llms/{base_id}?orphan_dependents=true")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert engine.cleanup_calls == 1
+        assert not model_dir.exists()
+
+    def test_delete_base_leaves_a_child_serving_other_weights(
+        self, client, test_db_session, tmp_path
+    ):
+        """A loaded model whose artifact lies elsewhere stays loaded."""
+        model_dir = tmp_path / "models" / "384"
+        model_dir.mkdir(parents=True)
+        other_dir = tmp_path / "models" / "38"
+        other_dir.mkdir(parents=True)
+        base = Llm(name="Base", local=1, type="qwen", link=str(model_dir), param_size=4.0)
+        test_db_session.add(base)
+        test_db_session.commit()
+
+        engine = _FakeEngine(model_id=str(base.id + 1000), model_path=str(other_dir / "model.gguf"))
+        with patch("src.core.config.LLM_Engine", engine):
+            response = client.delete(f"/erudi/llms/{base.id}")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert engine.cleanup_calls == 0
+
+    def test_delete_assistant_keeps_a_resident_base_loaded(self, client, test_db_session, tmp_path):
+        """Deleting an assistant keeps the files, so the loaded base stays."""
+        from src.entities.KnowledgeBase import KnowledgeBase
+
+        model_dir = tmp_path / "models" / "384"
+        model_dir.mkdir(parents=True)
+        base = Llm(name="Base", local=1, type="qwen", link=str(model_dir), param_size=4.0)
+        test_db_session.add(base)
+        kb = KnowledgeBase()
+        test_db_session.add(kb)
+        test_db_session.flush()
+        assistant = Llm(
+            name="Assistant",
+            local=1,
+            type="qwen",
+            link=str(model_dir),
+            is_attached_to_kb=True,
+            kb_id=kb.id,
+            param_size=4.0,
+        )
+        test_db_session.add(assistant)
+        test_db_session.commit()
+        base_id, assistant_id = base.id, assistant.id
+
+        engine = _FakeEngine(model_id=str(base_id), model_path=str(model_dir / "model.gguf"))
+        with patch("src.core.config.LLM_Engine", engine):
+            response = client.delete(f"/erudi/llms/{assistant_id}")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert engine.cleanup_calls == 0
 
     @patch("os.path.exists")
     @patch("shutil.rmtree")
