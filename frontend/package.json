@@ -94,6 +94,15 @@
     "katex": "$katex",
     "@tailwindcss/typography": {
       "postcss-selector-parser": "^6.1.5"
+    },
+    "app-builder-lib": {
+      "minimatch": "^11.0.1"
+    },
+    "@electron/universal": {
+      "minimatch": "^11.0.1"
+    },
+    "filelist": {
+      "minimatch": "^11.0.1"
     }
   }
 }
