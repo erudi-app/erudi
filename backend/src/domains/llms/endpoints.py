@@ -915,8 +915,8 @@ async def update_llm(
         raise DatabaseException("Failed to update LLM", trace=str(e))
 
 
-async def _unload_if_resident(llm_id: int) -> None:
-    """Stop the inference child when the model being deleted is the loaded one.
+async def _unload_if_resident(llm_id: int, weights: Optional[str] = None) -> None:
+    """Stop the inference child when the delete would leave it on dead ground.
 
     Deleting the model in memory without this leaves its child running: for a
     base model, on a path that no longer exists; for a KB assistant, on weights
@@ -926,12 +926,21 @@ async def _unload_if_resident(llm_id: int) -> None:
     checked every 30 s; never with the delay at Never) happens to notice
     (#521).
 
+    The child goes when it was loaded under ``llm_id``, or, when the caller is
+    about to delete the weights folder ``weights``, when it runs on a file under
+    that folder: a KB assistant is loaded under its own id from the base's
+    weights, so the id alone would miss it (#762). An assistant delete passes no
+    ``weights``: it keeps the files, so a loaded base stays loaded.
+
     Takes the same lock as that sweep, so it can never land under a generation.
     Called per delete branch rather than once up front: a delete refused with
     409 (dependent assistants, no opt-in) must not unload anything.
     """
     engine = config.LLM_Engine
-    if engine is None or str(getattr(engine, "_model_id", None)) != str(llm_id):
+    if engine is None:
+        return
+    by_id = str(getattr(engine, "_model_id", None)) == str(llm_id)
+    if not by_id and not (weights and engine.serves_artifact_under(Path(weights))):
         return
     async with engine.generation_guard():
         await asyncio.to_thread(engine.cleanup)
@@ -1023,7 +1032,7 @@ async def delete_llm(
 
         # Unload before the weights go, and only now: the 409 above means the
         # delete was refused, and a refused delete must leave the engine alone.
-        await _unload_if_resident(llm.id)
+        await _unload_if_resident(llm.id, weights=llm.link)
 
         # Delete files from disk if they exist
         if llm.link and os.path.exists(llm.link):

@@ -780,7 +780,7 @@ const createApplicationMenu = () => {
   Menu.setApplicationMenu(menu);
 };
 
-const createWindow = () => {
+const createWindow = async () => {
   if (isCreatingWindow || mainWindow) {
     log("Window creation already in progress or window exists, skipping...");
     return;
@@ -792,109 +792,126 @@ const createWindow = () => {
   }
 
   isCreatingWindow = true;
-  log("Creating main window...");
+  let win = null;
+  try {
+    log("Creating main window...");
 
-  mainWindow = new BrowserWindow({
-    width: 1280,
-    height: 800,
-    title: "erudi - BETA",
-    webPreferences: {
-      preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY,
-      nodeIntegration: false,
-      contextIsolation: true,
-      enableRemoteModule: false,
-      webSecurity: true,
-    },
-    autoHideMenuBar: true,
-    // Personnalisation de la fenêtre - boutons à droite style Windows
-    titleBarStyle: "default",
-    frame: true,
-    icon:
-      process.platform !== "darwin"
-        ? path.join(__dirname, "..", "assets", "icons", "icon.png")
-        : undefined,
-  });
+    mainWindow = new BrowserWindow({
+      width: 1280,
+      height: 800,
+      title: "erudi - BETA",
+      webPreferences: {
+        preload: MAIN_WINDOW_PRELOAD_WEBPACK_ENTRY,
+        nodeIntegration: false,
+        contextIsolation: true,
+        enableRemoteModule: false,
+        webSecurity: true,
+      },
+      autoHideMenuBar: true,
+      // Personnalisation de la fenêtre - boutons à droite style Windows
+      titleBarStyle: "default",
+      frame: true,
+      icon:
+        process.platform !== "darwin"
+          ? path.join(__dirname, "..", "assets", "icons", "icon.png")
+          : undefined,
+    });
+    win = mainWindow;
 
-  // External links (window.open / target="_blank") must reach the system
-  // browser instead of spawning a bare second Electron window.
-  mainWindow.webContents.setWindowOpenHandler(({ url }) => {
-    if (url.startsWith("https://") || url.startsWith("http://")) {
-      shell.openExternal(url);
-    }
-    return { action: "deny" };
-  });
+    // External links (window.open / target="_blank") must reach the system
+    // browser instead of spawning a bare second Electron window.
+    mainWindow.webContents.setWindowOpenHandler(({ url }) => {
+      if (url.startsWith("https://") || url.startsWith("http://")) {
+        shell.openExternal(url);
+      }
+      return { action: "deny" };
+    });
 
-  mainWindow.on("closed", () => {
-    log("Main window closed");
-    mainWindow = null;
-    isCreatingWindow = false;
-  });
+    mainWindow.on("closed", () => {
+      log("Main window closed");
+      mainWindow = null;
+      isCreatingWindow = false;
+    });
 
-  // A hung renderer is the app not working, from the user's chair; both
-  // transitions are recorded so the log says how long it lasted.
-  mainWindow.webContents.on("unresponsive", () => {
-    logError("The window's renderer is not responding");
-  });
-  mainWindow.webContents.on("responsive", () => {
-    log("The window's renderer is responding again");
-  });
+    // A hung renderer is the app not working, from the user's chair; both
+    // transitions are recorded so the log says how long it lasted.
+    mainWindow.webContents.on("unresponsive", () => {
+      logError("The window's renderer is not responding");
+    });
+    mainWindow.webContents.on("responsive", () => {
+      log("The window's renderer is responding again");
+    });
 
-  mainWindow.webContents.on("dom-ready", () => {
-    mainWindow.webContents
-      .executeJavaScript(
-        `
+    mainWindow.webContents.on("dom-ready", () => {
+      mainWindow.webContents
+        .executeJavaScript(
+          `
       // Block navigation everywhere, but let events bubble to React
       ['dragover','drop'].forEach(type =>
         window.addEventListener(type, e => e.preventDefault(), false)
       );
     `
-      )
-      .catch((error) => logWarn("Could not install the drop-navigation guard", error));
-  });
+        )
+        .catch((error) => logWarn("Could not install the drop-navigation guard", error));
+    });
 
-  mainWindow.webContents.on("will-navigate", (event) => {
-    event.preventDefault();
-  });
+    mainWindow.webContents.on("will-navigate", (event) => {
+      event.preventDefault();
+    });
 
-  mainWindow.webContents.session
-    .clearCache()
-    .catch((error) => logWarn("Could not clear the session cache", error));
+    mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
+      // Skip header modification for backend API responses to preserve
+      // chunked transfer-encoding and avoid buffering streaming responses.
+      if (details.url.includes("/erudi/")) {
+        callback({ cancel: false });
+        return;
+      }
 
-  mainWindow.webContents.session.webRequest.onHeadersReceived((details, callback) => {
-    // Skip header modification for backend API responses to preserve
-    // chunked transfer-encoding and avoid buffering streaming responses.
-    if (details.url.includes("/erudi/")) {
-      callback({ cancel: false });
-      return;
+      // `img-src` deliberately omits `https:`. The window has no use for remote
+      // images (the logo is bundled, attachments are data: URLs), and allowing the
+      // scheme would let a markdown image link written by a model, or carried by a
+      // knowledge-base document, fetch a remote host and reveal the user's IP to
+      // it. Keep the scheme out; webpack.config.js pins the same policy for the
+      // packaged file:// document.
+      callback({
+        responseHeaders: {
+          ...details.responseHeaders,
+          "Content-Security-Policy": [
+            "default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:*; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:;",
+          ],
+        },
+      });
+    });
+
+    // The window only talks to loopback (the CSP's connect-src allows nothing
+    // else), and Chromium holds a request until the system proxy configuration
+    // (PAC/WPAD) is ready, loopback included: a slow one may delay the first
+    // requests (#746). A direct connection does not wait for it. electron-updater
+    // downloads through its own session (fromPartition("electron-updater")), so
+    // updates keep the system proxy. A failure here never blocks the window.
+    try {
+      await win.webContents.session.setProxy({ mode: "direct" });
+    } catch (error) {
+      logWarn("Could not set the window session to a direct connection", error);
     }
 
-    // `img-src` deliberately omits `https:`. The window has no use for remote
-    // images (the logo is bundled, attachments are data: URLs), and allowing the
-    // scheme would let a markdown image link written by a model, or carried by a
-    // knowledge-base document, fetch a remote host and reveal the user's IP to
-    // it. Keep the scheme out; webpack.config.js pins the same policy for the
-    // packaged file:// document.
-    callback({
-      responseHeaders: {
-        ...details.responseHeaders,
-        "Content-Security-Policy": [
-          "default-src 'self'; connect-src 'self' http://127.0.0.1:* http://localhost:*; script-src 'self' 'unsafe-inline' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self' data:;",
-        ],
-      },
-    });
-  });
+    // The window may have been closed, and another created, while the setting
+    // was applied: that one owns the flag and the load now.
+    if (win.isDestroyed() || mainWindow !== win) return;
 
-  if (app.isPackaged) {
-    mainWindow.loadFile(MAIN_WINDOW_RENDERER_INDEX);
-  } else {
-    mainWindow.loadURL(RENDERER_DEV_URL);
+    if (app.isPackaged) {
+      win.loadFile(MAIN_WINDOW_RENDERER_INDEX);
+    } else {
+      win.loadURL(RENDERER_DEV_URL);
+    }
+
+    if (process.env.NODE_ENV === "development") {
+      win.webContents.openDevTools();
+    }
+  } finally {
+    // Not when another window owns the flag by now (see the check above).
+    if (!mainWindow || mainWindow === win) isCreatingWindow = false;
   }
-
-  if (process.env.NODE_ENV === "development") {
-    mainWindow.webContents.openDevTools();
-  }
-
-  isCreatingWindow = false;
 };
 
 // Chromium sandbox stays ON everywhere it can (#89): the switch below was a
