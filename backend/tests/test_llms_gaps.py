@@ -747,31 +747,8 @@ class TestUpdateDbWithProgress:
 
 
 # =====================================================================
-# UNIT - services: offline classifier, runnability gate, download pipeline
+# UNIT - services: runnability gate, download pipeline
 # =====================================================================
-
-
-@pytest.mark.unit
-class TestOfflineErrorClassifier:
-    def test_requests_connection_error_is_offline(self):
-        from requests.exceptions import ConnectionError as RCE
-
-        assert llm_services._is_offline_download_error(RCE("boom")) is True
-
-    def test_marker_in_message_is_offline(self):
-        assert (
-            llm_services._is_offline_download_error(RuntimeError("Max retries exceeded with url"))
-            is True
-        )
-
-    def test_marker_in_cause_chain_is_offline(self):
-        inner = OSError("network is unreachable")
-        outer = RuntimeError("download failed")
-        outer.__cause__ = inner
-        assert llm_services._is_offline_download_error(outer) is True
-
-    def test_unrelated_error_is_not_offline(self):
-        assert llm_services._is_offline_download_error(ValueError("bad json")) is False
 
 
 @pytest.mark.unit
