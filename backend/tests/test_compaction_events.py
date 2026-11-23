@@ -197,9 +197,13 @@ async def test_a_summary_that_cannot_be_written_announces_start_and_no_done():
 
 
 async def test_two_compactions_on_one_middleware_announce_twice_each_with_its_own_facts():
-    summary = _ProbeSummaryModel(
-        messages=iter([]), script=[f"First. {SUMMARY}", f"Second. {SUMMARY}"]
+    # The second summary really differs from the first: a near-copy of the
+    # previous summary would be rejected as stale (#748).
+    second = (
+        f"{SUMMARY} She then pasted a long tide-table document and asked "
+        "the assistant to keep the harbour schedule in mind."
     )
+    summary = _ProbeSummaryModel(messages=iter([]), script=[SUMMARY, second])
     mw = _middleware(summary, window=10_000)
     runtime = _runtime(summary.written)
 
@@ -210,10 +214,7 @@ async def test_two_compactions_on_one_middleware_announce_twice_each_with_its_ow
     await mw.abefore_model({"messages": after + growth}, runtime)
 
     assert [e["phase"] for e in summary.written] == ["start", "done", "start", "done"]
-    assert [e["summary"] for e in summary.written if e["phase"] == "done"] == [
-        f"First. {SUMMARY}",
-        f"Second. {SUMMARY}",
-    ]
+    assert [e["summary"] for e in summary.written if e["phase"] == "done"] == [SUMMARY, second]
 
 
 async def test_a_failing_stream_writer_never_fails_the_turn_and_warns_once(caplog):
