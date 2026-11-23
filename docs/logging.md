@@ -149,7 +149,10 @@ them belong on a page whose whole point is nudging a real defect toward a
 report. The exclusion is one predicate, `isEnvironmental` in
 `frontend/src/utils/bugCounter.js`, matched against the error codes and
 message shapes the app itself produces for each case (documented inline,
-patch by patch) — never a request to Erudi's OWN backend or one of its
+patch by patch). A failed model download names its code in every record of
+it (`Download job N failed (code=offline) ...`); its environment codes
+(`ENVIRONMENTAL_DOWNLOAD_CODES`, the same list as the backend's
+`download_errors.py`) are excluded whatever the interface language — never a request to Erudi's OWN backend or one of its
 inference children, which stays counted no matter how "connection"-shaped its
 message reads.
 

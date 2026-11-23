@@ -242,16 +242,24 @@ a sentence in the interface language (`downloads:errors.codes.*`,
 `frontend/src/utils/downloadErrors.js`). The widget never shows `error_message`. The code is
 read off the exception where the failure is recorded (`download_error_code` in
 `src/domains/llms/download_errors.py`): a refusal Erudi raises itself is marked with its code at
-the raise site, a failure from below is recognised from its type anywhere in the exception
-chain.
+the raise site, a failure from below is recognised from its type, on the exception or on its
+explicit `__cause__` chain (`raise ... from`). The implicit `__context__` is never followed: a
+defect raised while another error was being handled is a defect. If the classification itself
+raises, the job is still marked `failed`, with `unexpected` and one WARNING. The job's ERROR
+record names the code (`Download job N failed (code=offline) for LLM ...`), and so do the
+renderer's records of it: the codes that are the environment's doing (`offline`, `disk_full`,
+`gated`, `not_found`, `rate_limited`, `hub_unavailable`, `interrupted`,
+`ENVIRONMENTAL_DOWNLOAD_CODES`) never count on the bug badge (see
+[Logging](../logging.md)).
 
 | `error_code` | When |
 |--------------|------|
-| `offline` | No network reaches the Hub: `OFFLINE_DOWNLOAD_MESSAGE`, or any error `hf_http.is_offline_error` reads as a network failure |
-| `disk_full` | An `OSError` with `ENOSPC` while writing the files |
+| `offline` | No network reaches the Hub: `OFFLINE_DOWNLOAD_MESSAGE`, or one of `hf_http.NETWORK_ERRORS` |
+| `disk_full` | An `OSError` with `ENOSPC`, or `EDQUOT` (a quota), while writing the files |
 | `gated` | The repository needs an account (`GatedRepoError`, HTTP 401/403) |
-| `not_found` | The repository or a file of it does not exist (`RepositoryNotFoundError`, `EntryNotFoundError`, HTTP 404); the Hub also answers 401 for a missing repository, which keeps this code |
+| `not_found` | The repository or a file of it does not exist or is private (`RepositoryNotFoundError`, `EntryNotFoundError`, HTTP 404); the Hub also answers 401 for such a repository, which keeps this code and an English message saying it was not found |
 | `rate_limited` | HTTP 429 once huggingface_hub's own retries are spent |
+| `hub_unavailable` | Any other HTTP 5xx from the Hub |
 | `interrupted` | The app quit during the transfer (written by the next start's cleanup) |
 | `no_engine_artifact` | The repository ships nothing this engine runs |
 | `raw_gguf_chunks` | The GGUF weights are raw byte pieces only |

@@ -16,6 +16,7 @@ export const DOWNLOAD_ERROR_KEYS = {
   gated: "downloads:errors.codes.gated",
   not_found: "downloads:errors.codes.notFound",
   rate_limited: "downloads:errors.codes.rateLimited",
+  hub_unavailable: "downloads:errors.codes.hubUnavailable",
   interrupted: "downloads:errors.codes.interrupted",
   no_engine_artifact: "downloads:errors.codes.noEngineArtifact",
   raw_gguf_chunks: "downloads:errors.codes.rawGgufChunks",

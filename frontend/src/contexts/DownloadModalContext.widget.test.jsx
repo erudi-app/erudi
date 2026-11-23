@@ -250,7 +250,11 @@ describe("Download widget terminal states (#292)", () => {
     expect(screen.getByText(DISK_FULL)).toBeTruthy();
     expect(screen.queryByText("disk full")).toBeNull();
     expect(screen.getByTestId("downloading").textContent).toBe("false");
-    expect(onError).toHaveBeenCalledWith(DISK_FULL);
+    expect(onError).toHaveBeenCalledWith({
+      message: DISK_FULL,
+      code: "disk_full",
+      error_message: "disk full",
+    });
 
     await advance(30000);
     expect(widget()).toBeTruthy(); // no auto-dismiss on failure
@@ -421,6 +425,7 @@ describe("Download failures in the interface language (#780)", () => {
     ["gated", frDownloads.errors.codes.gated],
     ["not_found", frDownloads.errors.codes.notFound],
     ["rate_limited", frDownloads.errors.codes.rateLimited],
+    ["hub_unavailable", frDownloads.errors.codes.hubUnavailable],
     ["interrupted", frDownloads.errors.codes.interrupted],
     ["no_engine_artifact", frDownloads.errors.codes.noEngineArtifact],
     ["integrity_failed", frDownloads.errors.codes.integrityFailed],
@@ -433,7 +438,7 @@ describe("Download failures in the interface language (#780)", () => {
     expect(phaseLine()).toBe(frDownloads.widget.phase.failed);
     expect(screen.getByText(sentence)).toBeTruthy();
     expect(screen.queryByText(ENGLISH)).toBeNull();
-    expect(onError).toHaveBeenCalledWith(sentence);
+    expect(onError).toHaveBeenCalledWith({ message: sentence, code, error_message: ENGLISH });
   });
 
   it("shows the generic French sentence for a code it does not know", async () => {

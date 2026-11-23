@@ -335,17 +335,19 @@ describe("KnowledgeBaseContext failure routing", () => {
   });
 
   it("reports a failed create START through onError and never begins polling", async () => {
+    // FastAPI's validation detail is a list: it never reaches the screen,
+    // as text or as [object Object] (#780).
     createResponder = () => ({
       ok: false,
-      status: 400,
-      json: async () => ({ detail: "bad paths" }),
+      status: 422,
+      text: async () => JSON.stringify({ detail: [{ loc: ["body"], msg: "Field required" }] }),
     });
     renderProvider();
 
     await startAndPollOnce();
 
     expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError.mock.calls[0][0]).toContain("Failed to start assistant creation (400)");
+    expect(onError.mock.calls[0][0]).toBe("Failed to start assistant creation: API Error: 422");
     expect(val("creating")).toBe("false");
     expect(statusCalls()).toHaveLength(0);
   });

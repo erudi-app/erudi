@@ -62,41 +62,65 @@ export function apiErrorCodeMessage(body) {
   return code && Object.hasOwn(API_ERROR_KEYS, code) ? i18n.t(API_ERROR_KEYS[code]) : null;
 }
 
-/** `apiErrorMessage` for a failed `fetch` Response, its body read as JSON if it is. */
-export async function responseErrorMessage(response) {
-  let body = null;
+/**
+ * The error a page throws for a failed `fetch` Response: its message is the
+ * interface's sentence (`apiErrorMessage`), `status` the HTTP status, `code`
+ * the backend's code and `detail` the backend's English sentence, for the
+ * renderer log (support reads it there).
+ * @param {Response} response - A non-OK response, body not read yet.
+ * @returns {Promise<Error>}
+ */
+export async function responseError(response) {
+  let text = "";
   try {
-    body = await response.json();
+    text = await response.text();
   } catch {
-    // not JSON (or no body): the status says it
+    // no readable body: the status says it
   }
-  return apiErrorMessage(response.status, body);
+  const body = parseJson(text);
+  const error = new Error(apiErrorMessage(response.status, body));
+  error.status = response.status;
+  error.code = apiErrorCode(body);
+  error.detail = body !== null ? (apiErrorDetail(body) ?? text) : text.trim() || null;
+  return error;
+}
+
+/**
+ * Whether `err` is a request that got no answer: `fetch` rejects with a
+ * `TypeError` whose message names the fetch ("Failed to fetch", "fetch
+ * failed"), the shape `client.js` retries as transient.
+ */
+export function isNetworkFailure(err) {
+  return err instanceof TypeError && String(err.message ?? "").includes("fetch");
 }
 
 /**
  * The text a page shows for a caught request error: a request that got no
- * answer (`TypeError`, the runtime's English "Failed to fetch") says the
- * backend is not responding; any other error already carries a translated
- * message (the client's, or the page's own).
+ * answer says the backend is not responding; an error without a message, or
+ * any other runtime error (a `TypeError` from a bug), says the generic
+ * sentence; any other error already carries a translated message (the
+ * client's, `responseError`'s, or the page's own).
  */
 export function requestErrorText(err) {
-  if (err instanceof TypeError || !err?.message) {
-    return i18n.t("errors:connection.unreachable.title");
+  if (isNetworkFailure(err)) return i18n.t("errors:connection.unreachable.title");
+  if (!err?.message || err instanceof TypeError || err instanceof ReferenceError) {
+    return i18n.t("errors:api.codes.internal");
   }
   return err.message;
 }
 
-/** `apiErrorMessage` for a body still in text form (JSON or not). */
-export function apiErrorMessageFromText(status, text) {
-  return apiErrorMessage(status, parseJson(text));
-}
-
-/** `apiErrorDetail` for a body still in text form; the raw text otherwise. */
-export function apiErrorDetailFromText(text) {
-  const parsed = parseJson(text);
-  if (parsed !== null) return apiErrorDetail(parsed) ?? text;
-  const trimmed = (text ?? "").trim();
-  return trimmed || null;
+/**
+ * What a renderer log record carries of a caught request error: the text the
+ * user read, the HTTP status and code, and the backend's English sentence
+ * (`detail`), which support needs and the screen never shows.
+ */
+export function failureForLog(err) {
+  return {
+    error: String(err?.message ?? err),
+    status: err?.status ?? null,
+    code: typeof err?.code === "string" ? err.code : null,
+    detail: err?.detail ?? null,
+  };
 }
 
 function parseJson(text) {

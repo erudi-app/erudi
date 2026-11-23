@@ -27,7 +27,12 @@
     "created": "Started {{date}}",
     "compaction_one": "{{count}} earlier message was summarized here.",
     "compaction_other": "{{count}} earlier messages were summarized here.",
-    "compactionNoCount": "Earlier messages were summarized here."
+    "compactionNoCount": "Earlier messages were summarized here.",
+    "errors": {
+      "bridgeUnavailable": "export is not available in this window",
+      "ephemeral": "an ephemeral conversation is not exported",
+      "saveFailed": "the file could not be saved"
+    }
   },
   "header": {
     "chatWith": "Chat with",

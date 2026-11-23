@@ -41,6 +41,24 @@ describe("isEnvironmental", () => {
     ).toBe(true);
   });
 
+  it.each([
+    "Download job 7 failed (code=offline) for LLM 3 (org/model): you appear to be offline - check your connection and retry",
+    'Download job 7 failed (code=not_found) with status "failed" {"error":"org/x was not found on Hugging Face"}',
+    'Download failed for Qwen2.5 7B (code=hub_unavailable) {"error":"502 Bad Gateway"}',
+    "Download job 7 failed (code=disk_full) for LLM 3 (org/model): quota",
+    "Download job 7 failed (code=interrupted)",
+  ])("matches a download failure whose code is the environment's (#780): %s", (message) => {
+    expect(isEnvironmental({ message })).toBe(true);
+  });
+
+  it.each([
+    "Download job 7 failed (code=unexpected) for LLM 3 (org/model): KeyError",
+    "Download job 7 failed (code=integrity_failed) for LLM 3 (org/model): no weights",
+    "Download failed for Qwen2.5 7B (code=no_engine_artifact)",
+  ])("counts a download failure that is Erudi's or the repository's: %s", (message) => {
+    expect(isEnvironmental({ message })).toBe(false);
+  });
+
   it("matches the embedding model download failing offline", () => {
     expect(
       isEnvironmental({

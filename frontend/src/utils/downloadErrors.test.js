@@ -11,6 +11,7 @@ const BACKEND_CODES = [
   "gated",
   "not_found",
   "rate_limited",
+  "hub_unavailable",
   "interrupted",
   "no_engine_artifact",
   "raw_gguf_chunks",

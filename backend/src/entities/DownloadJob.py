@@ -37,7 +37,7 @@ class DownloadJobModel(Base):
         error_message: Exception message if status="failed" (English, for the
             log and Diagnostics; never shown to the user).
         error_code: Stable code of the failure if status="failed" (one of
-            ``DOWNLOAD_ERROR_CODES`` in ``src/domains/llms/services.py``); the
+            ``DOWNLOAD_ERROR_CODES`` in ``src/domains/llms/download_errors.py``); the
             interface shows its sentence for it. None on a job that failed
             before the column existed.
         created_at: Job creation timestamp (server default).

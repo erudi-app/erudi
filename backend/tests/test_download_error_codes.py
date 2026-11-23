@@ -11,6 +11,7 @@ The Hub is faked; the download task, the job row and Postgres are real.
 from __future__ import annotations
 
 import errno
+import re
 from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import MagicMock
@@ -23,10 +24,35 @@ from src.core import config
 from src.domains.llms import endpoints as llm_endpoints
 from src.domains.llms import services as llm_services
 from src.domains.llms.schemas import DownloadJobResponse
-from src.domains.llms.download_errors import DOWNLOAD_ERROR_CODES, download_error_code
+from src.domains.llms.download_errors import (
+    DOWNLOAD_ERROR_CODES,
+    ENVIRONMENTAL_DOWNLOAD_CODES,
+    download_error_code,
+)
 from tests.test_download_cancel import _RealDownload
 
 URL = "https://huggingface.co/api/models/org/model"
+
+FRONTEND = Path(__file__).resolve().parents[2] / "frontend" / "src"
+
+
+def _js_string_array(path: Path, name: str) -> list[str]:
+    source = path.read_text(encoding="utf-8")
+    body = re.search(rf"{name} = \[(.*?)\];", source, re.S).group(1)
+    return re.findall(r'"([^"]+)"', body)
+
+
+@pytest.mark.unit
+def test_the_interface_knows_every_code_and_which_ones_are_environmental():
+    """downloadErrors.js has a sentence for every code, and bugCounter.js does
+    not count the same environment codes as the backend declares."""
+    keys = (FRONTEND / "utils" / "downloadErrors.js").read_text(encoding="utf-8")
+    for code in DOWNLOAD_ERROR_CODES:
+        assert re.search(rf"^\s+{code}: ", keys, re.M), code
+    bug_counter = FRONTEND / "utils" / "bugCounter.js"
+    assert _js_string_array(bug_counter, "ENVIRONMENTAL_DOWNLOAD_CODES") == list(
+        ENVIRONMENTAL_DOWNLOAD_CODES
+    )
 
 
 def _response(status: int) -> httpx.Response:
@@ -99,6 +125,10 @@ FAILURES = {
         _api(FILES, repo_info_error=HfHubHTTPError("Too many requests", response=_response(429))),
         _Fs(),
     ),
+    "hub_unavailable": lambda: (
+        _api(FILES, repo_info_error=HfHubHTTPError("Bad gateway", response=_response(502))),
+        _Fs(),
+    ),
     "no_engine_artifact": lambda: (_api(FILES, tags=("transformers",)), _Fs()),
     "unexpected": lambda: (_api(FILES), _Fs(RuntimeError("something nobody planned for"))),
 }
@@ -129,7 +159,34 @@ class TestAFailedDownloadPersistsItsCode:
 
         real_download.run()
 
-        assert real_download.job().error_code == "gated"
+        job = real_download.job()
+        assert job.error_code == "gated"
+        assert "requires HuggingFace authentication" in job.error_message
+
+    def test_a_repository_the_hub_hides_behind_a_401_says_not_found_in_english_too(
+        self, real_download, monkeypatch
+    ):
+        # The Hub answers 401 for a missing or private repository: the code
+        # and the English message say the same thing.
+        error = RepositoryNotFoundError("Repository Not Found", response=_response(401))
+        _hub(monkeypatch, _api(FILES, repo_info_error=error), _Fs())
+
+        real_download.run()
+
+        job = real_download.job()
+        assert job.error_code == "not_found"
+        assert "was not found on Hugging Face" in job.error_message
+        assert "authentication" not in job.error_message
+
+    def test_the_backend_record_names_the_code(self, real_download, monkeypatch, caplog):
+        # The interface's bug counter reads it: an offline download is no defect.
+        _hub(monkeypatch, _api(FILES), _Fs(OSError("[Errno 11001] getaddrinfo failed")))
+
+        with caplog.at_level("ERROR", logger="erudi"):
+            real_download.run()
+
+        (record,) = [r for r in caplog.records if r.levelname == "ERROR"]
+        assert f"Download job {real_download.job_id} failed (code=offline)" in record.getMessage()
 
     def test_an_artifact_that_fails_the_integrity_gate_is_integrity_failed(
         self, real_download, monkeypatch
@@ -150,6 +207,15 @@ class TestDownloadErrorCode:
 
     def test_every_code_is_declared(self):
         assert set(FAILURES) | {"integrity_failed", "interrupted"} <= set(DOWNLOAD_ERROR_CODES)
+        assert set(DOWNLOAD_ERROR_CODES) == set(FAILURES) | {
+            "gated",
+            "integrity_failed",
+            "interrupted",
+            "raw_gguf_chunks",
+            "incomplete_split",
+            "unsafe_file_name",
+            "not_runnable",
+        }
 
     def test_raw_gguf_chunks(self, monkeypatch):
         monkeypatch.setattr(
@@ -205,8 +271,63 @@ class TestDownloadErrorCode:
         except RuntimeError as outer:
             assert download_error_code(outer) == "disk_full"
 
+    def test_a_quota_exceeded_is_disk_full(self):
+        assert download_error_code(OSError(errno.EDQUOT, "Disk quota exceeded")) == "disk_full"
+
+    def test_a_defect_raised_while_handling_a_network_error_is_not_offline(self):
+        # Only an explicit cause counts: a bug in an except block that was
+        # handling a ConnectError is a bug, not the network.
+        try:
+            try:
+                raise httpx.ConnectError("All connection attempts failed")
+            except httpx.ConnectError:
+                None.missing  # noqa: B018 - the defect under test
+        except AttributeError as defect:
+            assert defect.__context__ is not None
+            assert download_error_code(defect) == "unexpected"
+
+    def test_a_defect_raised_while_handling_a_full_disk_is_not_disk_full(self):
+        try:
+            try:
+                raise OSError(errno.ENOSPC, "No space left on device")
+            except OSError:
+                raise KeyError("missing")
+        except KeyError as defect:
+            assert download_error_code(defect) == "unexpected"
+
     def test_anything_else_is_unexpected(self):
         assert download_error_code(ValueError("nope")) == "unexpected"
+
+    def test_the_environmental_codes_are_declared(self):
+        assert set(ENVIRONMENTAL_DOWNLOAD_CODES) <= set(DOWNLOAD_ERROR_CODES)
+
+
+@pytest.mark.unit
+def test_a_failing_classification_still_marks_the_job_failed(monkeypatch, caplog):
+    from src.domains.llms import download_errors
+
+    job = SimpleNamespace(status="pending", error_message=None, updated_at=None)
+    session = MagicMock()
+    session.query.return_value.get.return_value = job
+    monkeypatch.setattr(llm_endpoints, "SessionLocal", lambda: session)
+
+    async def broken(**kwargs):
+        raise RuntimeError("the download broke")
+
+    def classifier_bug(exc):
+        raise TypeError("the classifier broke")
+
+    monkeypatch.setattr(llm_endpoints, "download_llm", broken)
+    monkeypatch.setattr(download_errors, "download_error_code", classifier_bug)
+
+    with caplog.at_level("WARNING", logger="erudi"):
+        llm_endpoints._run_download_task("org/model", 1, "/tmp/t", "/tmp/f", job_id=9)
+
+    values = session.query.return_value.filter.return_value.update.call_args_list[1].args[0]
+    assert values["status"] == "failed"
+    assert values["error_code"] == "unexpected"
+    warnings = [r for r in caplog.records if r.levelname == "WARNING"]
+    assert any("Could not derive the code" in r.getMessage() for r in warnings)
 
 
 @pytest.mark.unit

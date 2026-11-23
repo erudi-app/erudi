@@ -38,6 +38,7 @@
       "gated": "Ce modèle demande un compte Hugging Face pour être téléchargé, ce qu'Erudi n'utilise pas. Choisissez un autre modèle.",
       "notFound": "Ce modèle est introuvable sur Hugging Face. Il a peut-être été supprimé, renommé ou rendu privé.",
       "rateLimited": "Hugging Face reçoit trop de requêtes en ce moment. Patientez quelques minutes, puis réessayez.",
+      "hubUnavailable": "Hugging Face ne répond pas correctement en ce moment. Réessayez dans quelques minutes.",
       "interrupted": "Le téléchargement a été interrompu par la fermeture d'Erudi. Relancez-le.",
       "noEngineArtifact": "Ce dépôt ne contient aucun fichier que cet ordinateur peut exécuter. Choisissez une version du modèle prévue pour lui, par exemple via la recherche Hugging Face.",
       "rawGgufChunks": "Ce modèle est publié en morceaux qu'il faut assembler avant de pouvoir l'exécuter, ce qu'Erudi ne fait pas. Choisissez un autre dépôt de ce modèle.",

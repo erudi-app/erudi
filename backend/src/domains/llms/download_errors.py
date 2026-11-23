@@ -10,25 +10,37 @@ The code is read off the exception where the failure is recorded
 (``download_error_code``). A refusal Erudi raises itself carries its code
 (``with_download_code``, at the raise site); a failure that comes from below
 (the network, the disk, the Hub's HTTP status) is recognised from its type,
-anywhere in the exception chain.
+on the exception or on its explicit ``__cause__`` chain (``raise ... from``).
+The implicit ``__context__`` is never followed: an unrelated defect raised
+while another error was being handled (an ``AttributeError`` in an
+``except ConnectError`` block) is a defect, not that other error.
+
+The ``environmental`` codes describe the user's machine or the Hub, not Erudi
+being wrong: the interface's bug counter does not count them
+(``frontend/src/utils/bugCounter.js``).
 """
 
 import errno
 from typing import Optional
+
+from src.core.logging import logger
 
 # Every code a download job can store. The interface has a sentence for each;
 # one it does not know shows its generic sentence.
 DOWNLOAD_ERROR_CODES = (
     # No network reaching the Hub.
     "offline",
-    # The disk the model is written to is full.
+    # The disk the model is written to is full (ENOSPC, or a quota: EDQUOT).
     "disk_full",
-    # The repository needs a Hugging Face account (gated, private: 401/403).
+    # The repository needs a Hugging Face account (gated: 401/403).
     "gated",
-    # The repository, or a file of it, does not exist (404).
+    # The repository, or a file of it, does not exist or is private (404,
+    # and the 401 the Hub answers for a repository it does not show).
     "not_found",
     # The Hub refused for too many requests (429).
     "rate_limited",
+    # The Hub answered with a server error (5xx).
+    "hub_unavailable",
     # The app stopped during the download (recorded by the next start).
     "interrupted",
     # The repository ships nothing this machine's engine runs.
@@ -47,6 +59,24 @@ DOWNLOAD_ERROR_CODES = (
     "unexpected",
 )
 
+# The codes that are the environment's doing, mirrored by
+# ENVIRONMENTAL_DOWNLOAD_CODES in frontend/src/utils/bugCounter.js.
+ENVIRONMENTAL_DOWNLOAD_CODES = (
+    "offline",
+    "disk_full",
+    "gated",
+    "not_found",
+    "rate_limited",
+    "hub_unavailable",
+    "interrupted",
+)
+
+# ENOSPC everywhere; EDQUOT where the platform defines it (122 on Linux, 69 on
+# macOS). Windows' ERROR_DISK_FULL reaches Python as ENOSPC.
+_DISK_FULL_ERRNOS = frozenset(
+    code for code in (errno.ENOSPC, getattr(errno, "EDQUOT", None)) if code is not None
+)
+
 _ATTRIBUTE = "download_error_code"
 
 
@@ -58,13 +88,14 @@ def with_download_code(exc: BaseException, code: str) -> BaseException:
     return exc
 
 
-def _chain(exc: BaseException):
+def _cause_chain(exc: BaseException):
+    """``exc``, then each explicit ``__cause__`` (never ``__context__``)."""
     seen: set[int] = set()
     current: Optional[BaseException] = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
         yield current
-        current = current.__cause__ or current.__context__
+        current = current.__cause__
 
 
 def _http_status(exc: BaseException) -> Optional[int]:
@@ -81,10 +112,10 @@ def download_error_code(exc: BaseException) -> str:
     )
 
     from src.core.exceptions import HuggingFaceAPIException
-    from src.core.hf_http import is_offline_error
+    from src.core.hf_http import NETWORK_ERRORS
     from src.domains.llms.services import OFFLINE_DOWNLOAD_MESSAGE
 
-    for current in _chain(exc):
+    for current in _cause_chain(exc):
         marked = getattr(current, _ATTRIBUTE, None)
         if marked:
             return marked
@@ -92,7 +123,11 @@ def download_error_code(exc: BaseException) -> str:
             current.message == OFFLINE_DOWNLOAD_MESSAGE
         ):
             return "offline"
-        if isinstance(current, OSError) and current.errno == errno.ENOSPC:
+        # A network failure that reached here without download_llm's rename
+        # (the progress thread, a finalization step).
+        if isinstance(current, NETWORK_ERRORS):
+            return "offline"
+        if isinstance(current, OSError) and current.errno in _DISK_FULL_ERRNOS:
             return "disk_full"
         # GatedRepoError is a RepositoryNotFoundError: checked first.
         if isinstance(current, GatedRepoError):
@@ -107,8 +142,25 @@ def download_error_code(exc: BaseException) -> str:
                 return "not_found"
             if status == 429:
                 return "rate_limited"
-    # A network failure that reached here without download_llm's rename (the
-    # progress thread, a finalization step): the Hub downloads' one predicate.
-    if is_offline_error(exc):
-        return "offline"
+            if status is not None and status >= 500:
+                return "hub_unavailable"
     return "unexpected"
+
+
+def recorded_download_error_code(exc: BaseException) -> str:
+    """``download_error_code`` for a failure being written to its job row.
+
+    The classification never stops the job from being marked failed: if it
+    raises, the job gets ``"unexpected"`` (the interface's generic sentence)
+    and one WARNING with the traceback says the code could not be derived.
+    """
+    try:
+        return download_error_code(exc)
+    except Exception:
+        # Degraded, not broken: the failure is still recorded, generically.
+        logger.warning(
+            f"Could not derive the code of a download failure ({type(exc).__name__}); "
+            f"recording it as unexpected",
+            exc_info=True,
+        )
+        return "unexpected"

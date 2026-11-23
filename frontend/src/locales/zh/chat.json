@@ -27,7 +27,12 @@
     "created": "开始于 {{date}}",
     "compaction_one": "此处已汇总 {{count}} 条较早的消息。",
     "compaction_other": "此处已汇总 {{count}} 条较早的消息。",
-    "compactionNoCount": "此处已汇总较早的消息。"
+    "compactionNoCount": "此处已汇总较早的消息。",
+    "errors": {
+      "bridgeUnavailable": "此窗口中无法导出",
+      "ephemeral": "临时对话不会被导出",
+      "saveFailed": "无法保存文件"
+    }
   },
   "header": {
     "chatWith": "聊天对象",

@@ -1084,14 +1084,22 @@ async def download_llm(
     except (GatedRepoError, HfHubHTTPError) as e:
         status = getattr(getattr(e, "response", None), "status_code", None)
         if isinstance(e, GatedRepoError) or status in (401, 403):
-            # The Hub answers 401 for a private repository and for one that
-            # does not exist alike: the code keeps which of the two it said.
+            # The Hub answers 401 for a repository it does not show (missing
+            # or private) as well as for a gated one: the error says which.
+            if download_error_code(e) == "not_found":
+                raise with_download_code(
+                    HuggingFaceAPIException(
+                        f"{model_link} was not found on Hugging Face: the repository does "
+                        f"not exist, was renamed, or is private"
+                    ),
+                    "not_found",
+                )
             raise with_download_code(
                 UnsupportedPlatformException(
                     feature=model_link,
                     reason="requires HuggingFace authentication and cannot be downloaded anonymously",
                 ),
-                download_error_code(e),
+                "gated",
             )
         raise
     except DownloadCancelled:

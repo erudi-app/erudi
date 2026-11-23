@@ -27,7 +27,12 @@
     "created": "Commencée le {{date}}",
     "compaction_one": "{{count}} message précédent a été résumé ici.",
     "compaction_other": "{{count}} messages précédents ont été résumés ici.",
-    "compactionNoCount": "Les messages précédents ont été résumés ici."
+    "compactionNoCount": "Les messages précédents ont été résumés ici.",
+    "errors": {
+      "bridgeUnavailable": "l'export n'est pas disponible dans cette fenêtre",
+      "ephemeral": "une conversation éphémère n'est pas exportée",
+      "saveFailed": "le fichier n'a pas pu être enregistré"
+    }
   },
   "header": {
     "chatWith": "Discuter avec",

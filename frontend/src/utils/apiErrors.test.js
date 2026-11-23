@@ -4,12 +4,14 @@ import fr from "../locales/fr/errors.json";
 import {
   API_ERROR_KEYS,
   apiErrorCode,
-  apiErrorDetailFromText,
   apiErrorMessage,
-  apiErrorMessageFromText,
+  failureForLog,
   requestErrorText,
-  responseErrorMessage,
+  responseError,
 } from "./apiErrors";
+
+const detailOf = async (text) =>
+  (await responseError({ status: 500, text: async () => text })).detail;
 
 const appError = (type, message) => ({ success: false, error: { type, message } });
 
@@ -41,26 +43,26 @@ describe("apiErrorMessage (#780)", () => {
     expect(apiErrorMessage(502, null)).toBe("Erreur API : 502");
     expect(apiErrorMessage(500, appError("constructor", "x"))).toBe("Erreur API : 500");
   });
-
-  it("reads a body still in text form, JSON or not", () => {
-    expect(apiErrorMessageFromText(503, JSON.stringify(appError("DATABASE_BUSY", "busy")))).toBe(
-      fr.api.codes.databaseBusy
-    );
-    expect(apiErrorMessageFromText(502, "<html>Bad Gateway</html>")).toBe("Erreur API : 502");
-  });
 });
 
-describe("responseErrorMessage and requestErrorText", () => {
+describe("responseError and requestErrorText", () => {
   it("reads a failed response's code, or its status when the body is not JSON", async () => {
-    const busy = { status: 503, json: async () => appError("DATABASE_BUSY", "x") };
-    expect(await responseErrorMessage(busy)).toBe(i18n.t("errors:api.codes.databaseBusy"));
-    const html = {
-      status: 502,
-      json: async () => {
-        throw new SyntaxError("not JSON");
-      },
+    const busy = {
+      status: 503,
+      text: async () => JSON.stringify(appError("DATABASE_BUSY", "Every connection was in use")),
     };
-    expect(await responseErrorMessage(html)).toBe(i18n.t("errors:api.httpStatus", { status: 502 }));
+    const error = await responseError(busy);
+    expect(error.message).toBe(i18n.t("errors:api.codes.databaseBusy"));
+    expect(error.status).toBe(503);
+    expect(error.code).toBe("DATABASE_BUSY");
+    // The English sentence, for the renderer log.
+    expect(error.detail).toBe("Every connection was in use");
+
+    const html = { status: 502, text: async () => "<html>Bad Gateway</html>" };
+    expect((await responseError(html)).message).toBe(
+      i18n.t("errors:api.httpStatus", { status: 502 })
+    );
+    expect((await responseError(html)).detail).toBe("<html>Bad Gateway</html>");
   });
 
   it("says a request that got no answer in the interface language, not the runtime's text", () => {
@@ -68,6 +70,12 @@ describe("responseErrorMessage and requestErrorText", () => {
       i18n.t("errors:connection.unreachable.title")
     );
     expect(requestErrorText(new Error("Erreur API : 500"))).toBe("Erreur API : 500");
+  });
+
+  it("says the generic sentence for a code TypeError, never the backend-down one", () => {
+    const bug = new TypeError("Cannot read properties of undefined (reading 'name')");
+    expect(requestErrorText(bug)).toBe(i18n.t("errors:api.codes.internal"));
+    expect(requestErrorText(new Error(""))).toBe(i18n.t("errors:api.codes.internal"));
   });
 });
 
@@ -79,21 +87,37 @@ describe("apiErrorCode", () => {
   });
 });
 
-describe("apiErrorDetailFromText: the backend's own sentence, for the log", () => {
-  it("unwraps both of the backend's envelopes", () => {
-    expect(apiErrorDetailFromText('{"detail":"Model 14 not found"}')).toBe("Model 14 not found");
-    expect(apiErrorDetailFromText(JSON.stringify(appError("MODEL_NOT_FOUND", "gone")))).toBe(
-      "gone"
-    );
+describe("failureForLog", () => {
+  it("keeps the backend's English sentence beside the text the user read", async () => {
+    const error = await responseError({
+      status: 503,
+      text: async () => JSON.stringify(appError("DATABASE_BUSY", "Every connection was in use")),
+    });
+    expect(failureForLog(error)).toEqual({
+      error: error.message,
+      status: 503,
+      code: "DATABASE_BUSY",
+      detail: "Every connection was in use",
+    });
+    expect(failureForLog(new TypeError("Failed to fetch"))).toMatchObject({
+      error: "Failed to fetch",
+      detail: null,
+    });
+  });
+});
+
+describe("responseError's detail: the backend's own sentence, for the log", () => {
+  it("unwraps both of the backend's envelopes", async () => {
+    expect(await detailOf('{"detail":"Model 14 not found"}')).toBe("Model 14 not found");
+    expect(await detailOf(JSON.stringify(appError("MODEL_NOT_FOUND", "gone")))).toBe("gone");
   });
 
-  it("keeps a structured detail as JSON and any other text as it is", () => {
-    expect(apiErrorDetailFromText('{"detail":[{"msg":"Field required"}]}')).toBe(
+  it("keeps a structured detail as JSON and any other text as it is", async () => {
+    expect(await detailOf('{"detail":[{"msg":"Field required"}]}')).toBe(
       '[{"msg":"Field required"}]'
     );
-    expect(apiErrorDetailFromText('{"error":"x"}')).toBe('{"error":"x"}');
-    expect(apiErrorDetailFromText("  Bad Gateway \n")).toBe("Bad Gateway");
-    expect(apiErrorDetailFromText("")).toBeNull();
-    expect(apiErrorDetailFromText(undefined)).toBeNull();
+    expect(await detailOf('{"error":"x"}')).toBe('{"error":"x"}');
+    expect(await detailOf("  Bad Gateway \n")).toBe("Bad Gateway");
+    expect(await detailOf("")).toBeNull();
   });
 });

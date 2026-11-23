@@ -18,7 +18,7 @@ import { tracedFetch } from "../services/api/client";
 import { createLogger } from "../utils/logger";
 import { conversationPath } from "../utils/routes";
 import { exportConversation } from "../utils/conversationExport";
-import { requestErrorText, responseErrorMessage } from "../utils/apiErrors";
+import { failureForLog, requestErrorText, responseError } from "../utils/apiErrors";
 import { abortTurns } from "../utils/conversationTurns";
 const log = createLogger("ChatCollapsibleSection");
 // Route of the new-chat screen (mirrors the Sidebar link).
@@ -144,12 +144,12 @@ export default function ChatCollapsibleSection({
       });
 
       if (!res.ok) {
-        throw new Error(await responseErrorMessage(res));
+        throw await responseError(res);
       }
       changeResults((rows) => rows.map((c) => (c.id === id ? { ...c, name } : c)));
       onRename?.(id, name);
     } catch (err) {
-      log.error(err);
+      log.error("Conversation rename failed", failureForLog(err));
       alert(t("chat:history.renameFailed", { error: requestErrorText(err) }));
     } finally {
       setEditingId(null);
@@ -176,13 +176,13 @@ export default function ChatCollapsibleSection({
       });
 
       if (!res.ok) {
-        throw new Error(await responseErrorMessage(res));
+        throw await responseError(res);
       }
 
       changeResults((rows) => rows.filter((c) => c.id !== id));
       onDelete?.(id);
     } catch (err) {
-      log.error(err);
+      log.error("Conversation delete failed", failureForLog(err));
       alert(t("chat:history.deleteFailed", { error: requestErrorText(err) }));
     } finally {
       deletesInFlight.delete(String(id));
@@ -196,7 +196,7 @@ export default function ChatCollapsibleSection({
     try {
       await exportConversation(id, { t });
     } catch (err) {
-      log.error(err);
+      log.error("Conversation export failed", failureForLog(err));
       setErrorMessage(t("chat:export.failed", { error: requestErrorText(err) }));
     }
   };

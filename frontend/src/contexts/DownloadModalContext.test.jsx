@@ -203,9 +203,13 @@ describe("DownloadModalContext failure and cancel routing", () => {
 
     await startAndPollOnce();
 
-    expect(onError).toHaveBeenCalledWith(
-      "The disk is full. Free some space, then start the download again."
-    );
+    // The sentence for the screen, the code and the English message for the
+    // record a consumer writes (#780).
+    expect(onError).toHaveBeenCalledWith({
+      message: "The disk is full. Free some space, then start the download again.",
+      code: "disk_full",
+      error_message: "[Errno 28] No space left on device",
+    });
     expect(onComplete).not.toHaveBeenCalled();
     expect(val("completions")).toBe("0");
     expect(val("downloading")).toBe("false");
@@ -243,7 +247,7 @@ describe("DownloadModalContext failure and cancel routing", () => {
     await startAndPollOnce();
 
     expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError.mock.calls[0][0]).toContain("An error occured during download");
+    expect(onError.mock.calls[0][0].message).toContain("An error occured during download");
     expect(val("downloading")).toBe("false");
   });
 
@@ -254,7 +258,11 @@ describe("DownloadModalContext failure and cancel routing", () => {
     await startAndPollOnce();
 
     expect(onError).toHaveBeenCalledTimes(1);
-    expect(onError.mock.calls[0][0]).toBe("Failed to start download: API Error: 500");
+    expect(onError.mock.calls[0][0]).toMatchObject({
+      message: "Failed to start download: API Error: 500",
+      code: null,
+      error_message: "gone",
+    });
     expect(val("downloading")).toBe("false");
     expect(statusCalls()).toHaveLength(0); // no interval was ever armed
   });

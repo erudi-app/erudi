@@ -38,6 +38,7 @@
       "gated": "此模型需要 Hugging Face 账户才能下载，而 Erudi 不使用账户。请选择其他模型。",
       "notFound": "在 Hugging Face 上找不到此模型。它可能已被删除、重命名或设为私有。",
       "rateLimited": "Hugging Face 目前收到的请求过多。请等待几分钟后重试。",
+      "hubUnavailable": "Hugging Face 目前无法正常响应。请几分钟后重试。",
       "interrupted": "由于 Erudi 已关闭，下载被中断。请重新开始下载。",
       "noEngineArtifact": "此仓库中没有这台电脑可以运行的文件。请选择为它制作的模型版本，例如通过 Hugging Face 搜索找到的版本。",
       "rawGgufChunks": "此模型以需要先拼接才能运行的分块形式发布，而 Erudi 不进行拼接。请选择此模型的其他仓库。",
