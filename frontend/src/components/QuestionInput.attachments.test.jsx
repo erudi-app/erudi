@@ -125,6 +125,58 @@ describe("QuestionInput document attachments (#492)", () => {
       expect(screen.queryByAltText("attachment 1")).toBeNull();
     });
 
+    it("lets rich text paste as text: no preventDefault, no message", () => {
+      render(<QuestionInput placeholder="ask" onSend={vi.fn()} canAttachImages={false} />);
+      const image = { kind: "file", type: "image/png", getAsFile: () => png() };
+      const event = new Event("paste", { bubbles: true, cancelable: true });
+      event.clipboardData = { items: [image], getData: () => "A1\tB1" };
+
+      screen.getByPlaceholderText("ask").dispatchEvent(event);
+
+      expect(event.defaultPrevented).toBe(false);
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("shows the document refusal rather than the vision notice", async () => {
+      render(<QuestionInput placeholder="ask" onSend={vi.fn()} canAttachImages={false} />);
+
+      drop([png(), zipFile()]);
+
+      expect((await screen.findByRole("alert")).textContent).toMatch(/file type isn't supported/);
+    });
+
+    it("clears the notice when the model changes", async () => {
+      const { rerender } = render(
+        <QuestionInput placeholder="ask" onSend={vi.fn()} canAttachImages={false} />
+      );
+      drop([png()]);
+      await screen.findByRole("alert");
+
+      rerender(<QuestionInput placeholder="ask" onSend={vi.fn()} canAttachImages />);
+
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("clears the notice once a message is sent", async () => {
+      render(<QuestionInput placeholder="ask" onSend={vi.fn()} canAttachImages={false} />);
+      drop([png()]);
+      await screen.findByRole("alert");
+
+      fireEvent.change(screen.getByPlaceholderText("ask"), { target: { value: "hello" } });
+      fireEvent.click(screen.getByLabelText("Send"));
+
+      expect(screen.queryByRole("alert")).toBeNull();
+    });
+
+    it("uses the plural wording for several models", async () => {
+      render(
+        <QuestionInput placeholder="ask" onSend={vi.fn()} canAttachImages={false} severalModels />
+      );
+      drop([png()]);
+
+      expect((await screen.findByRole("alert")).textContent).toMatch(/None of the selected/);
+    });
+
     it("attaches the document of a mixed drop and still says why the image was not", async () => {
       render(<QuestionInput placeholder="ask" onSend={vi.fn()} canAttachImages={false} />);
 

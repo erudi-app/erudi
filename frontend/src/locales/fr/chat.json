@@ -179,7 +179,8 @@
       "tooManyFiles_one": "Vous pouvez joindre jusqu'à {{count}} fichier à la fois.",
       "tooManyFiles_other": "Vous pouvez joindre jusqu'à {{count}} fichiers à la fois.",
       "noFilePath": "Cet élément n'a pas de fichier sur le disque, il ne peut pas être joint.",
-      "noVision": "Ce modèle ne peut pas lire les images. Choisissez un modèle qui prend en charge les images pour en joindre une."
+      "noVision": "Ce modèle ne peut pas lire les images. Choisissez un modèle qui prend en charge les images pour en joindre une.",
+      "noVisionAny": "Aucun des modèles sélectionnés ne peut lire les images. Choisissez un modèle qui prend en charge les images pour en joindre une."
     },
     "attachFile": "Joindre un fichier",
     "attachFileHint": "Joindre un document ou un dossier (ou glisser-déposer)",

@@ -62,6 +62,8 @@ export default function QuestionInput({
   disabled = false,
   className = "",
   canAttachImages = true,
+  // The Arena composer serves several models: its notice says "none of them".
+  severalModels = false,
   maxImages = DEFAULT_MAX_IMAGES,
   maxAttachments = DEFAULT_MAX_ATTACHMENTS,
   // Slash commands (#585): the registry entries this page offers, and what
@@ -83,6 +85,13 @@ export default function QuestionInput({
   const [attachments, setAttachments] = useState([]);
   const [dragging, setDragging] = useState(false);
   const [attachError, setAttachError] = useState("");
+  // A refusal belongs to the model it was said for: reset it during render
+  // when the vision capability changes (no effect, no extra paint).
+  const [errorFor, setErrorFor] = useState(canAttachImages);
+  if (errorFor !== canAttachImages) {
+    setErrorFor(canAttachImages);
+    setAttachError("");
+  }
   const textareaRef = useRef(null);
   const fileInputRef = useRef(null);
   // The drop-up: the commands matching what is typed, the highlighted one,
@@ -162,7 +171,15 @@ export default function QuestionInput({
     // The refusal is said, not silent: a dropped photo that vanishes reads as
     // a broken composer.
     if (!canAttachImages) {
-      setAttachError(imageFiles.length ? t("chat:composer.errors.noVision") : message);
+      // One message area: a document refusal in the same drop explains a
+      // missing document, and the image is plainly not attached either, so it
+      // wins over the vision notice.
+      setAttachError(
+        message ||
+          (imageFiles.length
+            ? t(`chat:composer.errors.${severalModels ? "noVisionAny" : "noVision"}`)
+            : "")
+      );
       return;
     }
     // Validate before anything touches disk or the model: reject unsupported
@@ -284,6 +301,7 @@ export default function QuestionInput({
     setImages([]);
     setImagePaths([]);
     setAttachments([]);
+    setAttachError("");
     resizeTextarea();
   };
 
@@ -337,6 +355,11 @@ export default function QuestionInput({
           files.push(f);
         }
       }
+    }
+    // Rich text copied from a spreadsheet or a page carries an image next to
+    // its text: on a model without vision the text must still paste.
+    if (files.length && !canAttachImages && e.clipboardData.getData?.("text/plain")) {
+      return;
     }
     if (files.length) {
       e.preventDefault();
@@ -624,6 +647,7 @@ QuestionInput.propTypes = {
   disabled: PropTypes.bool,
   className: PropTypes.string,
   canAttachImages: PropTypes.bool,
+  severalModels: PropTypes.bool,
   maxImages: PropTypes.number,
   maxAttachments: PropTypes.number,
   commands: PropTypes.arrayOf(
