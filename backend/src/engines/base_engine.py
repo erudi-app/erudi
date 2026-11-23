@@ -1014,7 +1014,7 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     @classmethod
     def _return_cached_model_and_tokenizer(cls) -> Tuple[Any, Any]:
         cls._last_used = datetime.now()
-        logger.info(f"Using cached model {cls._model_id}")
+        logger.debug(f"Using cached model {cls._model_id}")
         return cls._model, cls._tokenizer
 
     @classmethod

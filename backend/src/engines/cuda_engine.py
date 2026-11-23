@@ -127,6 +127,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
     # --- BaseChatServerEngine / BaseLlamaCppEngine config overrides ---
     _server_name = "llama-server"
     _tokenizer_provider = "llama-server-cuda"
+    _hardware_logged = False
     _use_cuda_build = True  # → BaseLlamaCppEngine._default_install_dir picks the cuda/ artifact
 
     # The last spawn context was a load sized above the floor: an
@@ -1766,7 +1767,10 @@ class CUDA_Engine(BaseLlamaCppEngine):
                 "timestamp": time.time(),
             }
 
-            logger.info(
+            # The diagnostics poll reads this every minute: INFO once per process.
+            log = logger.debug if CUDA_Engine._hardware_logged else logger.info
+            CUDA_Engine._hardware_logged = True
+            log(
                 f"CUDA hardware detected: {gpu_info['gpu_name']}, "
                 f"{gpu_info['cuda_cores']} CUDA cores, "
                 f"{gpu_info['vram_total_gb']:.1f}GB VRAM"

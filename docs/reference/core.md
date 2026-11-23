@@ -10,4 +10,6 @@
 
 ::: src.core.health
 
+::: src.core.hf_http
+
 ::: src.core.logging

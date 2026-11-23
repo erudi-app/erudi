@@ -210,6 +210,10 @@ class MLX_Engine(BaseChatServerEngine):
     _server_name = "mlx_vlm.server"
     _tokenizer_provider = "mlx-vlm-server"
 
+    # The diagnostics poll reads the hardware every minute: the detection line
+    # is INFO the first time in this process and DEBUG afterwards.
+    _hardware_logged = False
+
     # mlx_vlm masks the request seed to 32 bits (`generation.py:_position_seed`);
     # staying below 2**31 also keeps it a valid signed int32 for any consumer.
     _SEED_UPPER_BOUND = 2**31
@@ -2190,9 +2194,15 @@ class MLX_Engine(BaseChatServerEngine):
                 "timestamp": time.time(),
             }
 
-            logger.info(
-                f"MLX hardware detected: {chip_model}, {gpu_cores} GPU cores, {total_memory_gb:.1f}GB unified memory"
+            detected_line = (
+                f"MLX hardware detected: {chip_model}, {gpu_cores} GPU cores, "
+                f"{total_memory_gb:.1f}GB unified memory"
             )
+            if cls._hardware_logged:
+                logger.debug(detected_line)
+            else:
+                logger.info(detected_line)
+                cls._hardware_logged = True
             return hardware_info
 
         except Exception as e:

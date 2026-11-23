@@ -637,14 +637,16 @@ class BaseChatServerEngine(BaseEngine):
         terminates the old child (including unregistering its atexit handler)
         before spawning.
         """
+        # Serialized by the caller's generation_guard (same asyncio lock as the
+        # idle-cleanup tick), so no threading lock is needed around the swap.
+        # A turn resolves the model twice (the chat client, the summary
+        # client): the cached path says nothing at INFO, "Loading" is a spawn.
+        if cls._should_not_reload_model(llm_id):
+            return cls._return_cached_model_and_tokenizer()
         logger.info(
             f"[{cls.__name__}] Loading model '{llm_id}' from {llm_local_path} "
             f"via {cls._server_name}..."
         )
-        # Serialized by the caller's generation_guard (same asyncio lock as the
-        # idle-cleanup tick), so no threading lock is needed around the swap.
-        if cls._should_not_reload_model(llm_id):
-            return cls._return_cached_model_and_tokenizer()
         cls._assert_requests()
         # Pre-spawn integrity gate (#88): surface a precise "the files are
         # incomplete/corrupt" load error here, before the expensive spawn +
