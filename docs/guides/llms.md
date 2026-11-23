@@ -246,8 +246,36 @@ curl 'http://127.0.0.1:27182/erudi/llms/search/huggingface?q=uncensored&limit=30
 ```
 
 Hugging Face hits (`HFSearchResult`: `link`, `name`, `param_size`, `category`, `downloads`, `likes`,
-`gated`, `pipeline_tag`, `quantized`, `published_at`) are ephemeral. Download a chosen one through
-`POST /llms/download/huggingface`.
+`gated`, `pipeline_tag`, `quantized`, `published_at`, `artifact_size_bytes`) are ephemeral. Download
+a chosen one through `POST /llms/download/huggingface`.
+
+`artifact_size_bytes` is the size a download of the hit installs, measured the way a catalog row's
+is: after the hits are filtered, the search asks Hugging Face for each one's file listing
+(`model_info(files_metadata=True)`) and sums the files the downloader would fetch, so for a GGUF
+repo holding several quantizations it is the one quantization picked, not the whole repo. Those
+requests are bounded so the search still answers quickly:
+
+- at most four at once, one per hit (so at most `limit`), each without retry;
+- one budget of 4 seconds for the whole batch; a request not sent by then is not sent;
+- the first `429` from Hugging Face stops every request still to send for that search, and no
+  search sends a size request for a cooldown after it: 60 seconds, or longer when the response's
+  `Retry-After` or `RateLimit` header announces a later reset;
+- a measured size is kept in memory for an hour (256 repos at most), so the same search typed again
+  sends no size request for the hits already measured (the search itself still goes out);
+- the requests run on daemon threads, so one still on the wire when the app quits does not hold the
+  backend's exit.
+
+On Windows and Linux (GGUF), a repo from which the downloader selects no loadable GGUF (only raw
+byte pieces, only an `mmproj`, a split missing a part) carries `null`: the download refuses it, so
+no size is shown as measured for it.
+
+A hit whose size could not be read (timeout, rate limit, cooldown, a gated repo without a token, any
+other failure) carries `null`, and its card shows the `~` estimate from `param_size`, as before;
+the search itself never fails because of a size. Each search writes one `INFO` line to
+`backend.log`,
+`HF search sizes: enriched=<measured>/<hits> elapsed_ms=<ms> stopped_on_429=<True|False> cooldown=<True|False>`
+(`cooldown=True`: an earlier `429`'s cooldown kept every size request from going out), plus a
+`WARNING` when Hugging Face rate-limited the batch or when requests failed.
 
 ## Installed models
 

@@ -97,6 +97,9 @@ export default function HuggingFaceSearchPanel({
         link: m.link,
         category: m.category,
         param_size: m.param_size,
+        // Measured download size, read from Hugging Face for each hit; null
+        // when it could not be read in time, and the card shows the estimate.
+        artifact_size_bytes: m.artifact_size_bytes ?? null,
         quantized: m.quantized,
         gated: m.gated,
         runnable: true,
