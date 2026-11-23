@@ -51,9 +51,9 @@ class _GgufEngine(_MlxEngine):
 class _Status(Exception):
     """An HTTP error the way huggingface_hub raises one: ``.response.status_code``."""
 
-    def __init__(self, status):
+    def __init__(self, status, headers=None):
         super().__init__(f"{status} Client Error")
-        self.response = SimpleNamespace(status_code=status, headers={})
+        self.response = SimpleNamespace(status_code=status, headers=headers or {})
 
 
 class _FakeApi:
@@ -85,10 +85,28 @@ class _FakeApi:
 
 
 @pytest.fixture(autouse=True)
-def _empty_size_cache():
+def _empty_size_cache(monkeypatch):
     hf_search._size_cache.clear()
+    monkeypatch.setattr(hf_search, "_rate_limited_until", 0.0)
     yield
     hf_search._size_cache.clear()
+
+
+class _Clock:
+    """An injected ``hf_search._clock``: time moves only when the test says so."""
+
+    def __init__(self, now=1000.0):
+        self.now = now
+
+    def __call__(self):
+        return self.now
+
+
+@pytest.fixture
+def clock(monkeypatch):
+    c = _Clock()
+    monkeypatch.setattr(hf_search, "_clock", c)
+    return c
 
 
 def _use(monkeypatch, api, engine=_MlxEngine):
@@ -253,17 +271,106 @@ class TestSearchHitSizes:
         assert api.calls == ["org/a-4bit"]
         assert first[0]["artifact_size_bytes"] == second[0]["artifact_size_bytes"] == 9
 
-    def test_the_cache_expires_and_is_bounded(self, monkeypatch):
-        now = [1000.0]
-        monkeypatch.setattr(hf_search.time, "monotonic", lambda: now[0])
+    def test_the_cache_expires_and_is_bounded(self, monkeypatch, clock):
         monkeypatch.setattr(hf_search, "_SIZE_CACHE_MAX", 2)
         hf_search._cache_put("org/a", 1)
         hf_search._cache_put("org/b", 2)
         hf_search._cache_put("org/c", 3)
         assert hf_search._cache_get("org/a") is None  # evicted, oldest first
         assert hf_search._cache_get("org/c") == 3
-        now[0] += hf_search._SIZE_CACHE_TTL_SECONDS + 1
+        clock.now += hf_search._SIZE_CACHE_TTL_SECONDS + 1
         assert hf_search._cache_get("org/c") is None
+
+    def test_after_a_429_no_search_sends_a_size_request_for_a_minute(
+        self, monkeypatch, clock, caplog
+    ):
+        hits = [_hit("org/m0-4bit")]
+        answers = [_Status(429)]
+        api = _FakeApi(
+            hits,
+            {"org/m0-4bit": lambda _: answers.pop(0) if answers else _info([("w", 8)])},
+        )
+        _use(monkeypatch, api)
+
+        hf_search.search_huggingface("x")
+        assert len(api.calls) == 1
+
+        clock.now += 59
+        with caplog.at_level("INFO", logger="erudi"):
+            (r,) = hf_search.search_huggingface("x")
+        assert len(api.calls) == 1  # the listing went out, no size request did
+        assert r["artifact_size_bytes"] is None
+        assert any("cooldown=True" in m for m in caplog.messages)
+
+        clock.now += 2  # 61 s after the 429
+        (r,) = hf_search.search_huggingface("x")
+        assert len(api.calls) == 2
+        assert r["artifact_size_bytes"] == 8
+
+    @pytest.mark.parametrize(
+        "headers",
+        [{"Retry-After": "120"}, {"RateLimit": '"api";r=0;t=120'}],
+        ids=["retry-after", "ratelimit"],
+    )
+    def test_the_cooldown_follows_a_longer_announced_reset(self, monkeypatch, clock, headers):
+        answers = [_Status(429, headers)]
+        api = _FakeApi(
+            [_hit("org/m0-4bit")],
+            {"org/m0-4bit": lambda _: answers.pop(0) if answers else _info([("w", 8)])},
+        )
+        _use(monkeypatch, api)
+
+        hf_search.search_huggingface("x")
+        clock.now += 61
+        hf_search.search_huggingface("x")
+        assert len(api.calls) == 1  # still inside the announced 120 s
+        clock.now += 60
+        hf_search.search_huggingface("x")
+        assert len(api.calls) == 2
+
+    def test_a_shorter_announced_reset_keeps_the_floor(self, monkeypatch, clock):
+        answers = [_Status(429, {"Retry-After": "5"})]
+        api = _FakeApi(
+            [_hit("org/m0-4bit")],
+            {"org/m0-4bit": lambda _: answers.pop(0) if answers else _info([("w", 8)])},
+        )
+        _use(monkeypatch, api)
+
+        hf_search.search_huggingface("x")
+        clock.now += 30
+        hf_search.search_huggingface("x")
+        assert len(api.calls) == 1
+
+    @pytest.mark.parametrize(
+        "files",
+        [
+            [("mmproj-model-f16.gguf", 600), ("README.md", 1)],
+            [("model-Q4_K_M.gguf.part1of2", 900), ("model-Q4_K_M.gguf.part2of2", 900)],
+        ],
+        ids=["only-mmproj", "only-raw-chunks"],
+    )
+    def test_a_gguf_repo_the_downloader_refuses_has_no_measured_size(self, monkeypatch, files):
+        api = _FakeApi([_hit("org/odd-GGUF")], {"org/odd-GGUF": _info(files)})
+        _use(monkeypatch, api, engine=_GgufEngine)
+
+        (r,) = hf_search.search_huggingface("odd", limit=5)
+        assert r["artifact_size_bytes"] is None
+
+    def test_size_requests_run_on_daemon_threads(self, monkeypatch):
+        """A request still on the wire at quit must not hold the interpreter's
+        exit (the launcher's exit deadline): its thread is a daemon."""
+        seen = []
+
+        def record(_):
+            seen.append(threading.current_thread().daemon)
+            return _info([("w", 1)])
+
+        hits = [_hit(f"org/m{i}-4bit") for i in range(3)]
+        api = _FakeApi(hits, {h.id: record for h in hits})
+        _use(monkeypatch, api)
+
+        hf_search.search_huggingface("x")
+        assert seen == [True, True, True]
 
     def test_a_failure_is_not_cached(self, monkeypatch):
         answers = [RuntimeError("blip"), _info([("w.safetensors", 5)])]

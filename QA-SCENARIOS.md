@@ -38,7 +38,7 @@ non-functional behavior.
 - [ ] When a category carousel has more than 4 models, then a "See all" control expands it to a grid (and back).
 - [ ] When I apply a **size filter** or **"Fits my machine"** and nothing matches, then I see "No models match these filters. Widen the size range or turn off 'Fits my machine'."
 - [ ] When there are no base models at all, then the browse area shows "No base models available" (not a crash).
-- [ ] When I search Hugging Face (for example "qwen") and download a hit whose card shows a size without `~`, then the installed card shows the same size (Qwen2.5 VL 3B Instruct 4bit: 3.1 GB on both, not "~2.3 GB" on the search card), and `backend.log` has one `HF search sizes: enriched=<n>/<hits> elapsed_ms=<ms> stopped_on_429=False` line for the search.
+- [ ] When I search Hugging Face (for example "qwen") and download a hit whose card shows a size without `~`, then the installed card shows the same size (Qwen2.5 VL 3B Instruct 4bit: 3.1 GB on both, not "~2.3 GB" on the search card), and `backend.log` has one `HF search sizes: enriched=<n>/<hits> elapsed_ms=<ms> stopped_on_429=False cooldown=False` line for the search.
 - [ ] When a Hugging Face search hit's size cannot be read (offline after the listing, rate-limited, a gated repo), then its card keeps the `~` estimate and the search still lists every hit.
 - [ ] When a Hugging Face search returns nothing runnable, then I see "Nothing runnable matched…" (a helpful message, not an error).
 - [ ] When I am **offline** and run a Hugging Face search, then I see "No internet connection for the moment." and no request is made.

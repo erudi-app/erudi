@@ -10,11 +10,11 @@ hit gets its measured download size (#761), one bounded metadata request per hit
 
 from __future__ import annotations
 
+import queue
 import threading
 import time
 from collections import OrderedDict
-from concurrent.futures import ThreadPoolExecutor, wait
-from typing import Any, Dict, List, Optional
+from typing import Any, Callable, Dict, List, Optional
 
 from src.core import config
 from src.core.exceptions import AppBaseException
@@ -27,6 +27,7 @@ from src.database.catalog_classify import (
 )
 from src.engines.model_resolver import base_key
 from src.database.generation_hints import resolve_base_repo
+from src.domains.llms.services import pick_best_gguf
 from src.utils.hf_model_metadata import _chosen_artifact_bytes, humanize_model_name
 
 # Pipelines that correspond to a runnable chat/vision LLM (everything else a text
@@ -50,16 +51,26 @@ _SEARCH_MAX_BACKOFF = 4.0
 # The requests are bounded so the search answers well inside the client's 30 s
 # ceiling (#210): a small pool, no retry, one short budget for the whole batch.
 # A hit whose size is not read in time keeps ``artifact_size_bytes = None`` and its
-# card keeps the ``~`` estimate. The first 429 stops every request still to send.
+# card keeps the ``~`` estimate. The first 429 stops every request still to send,
+# and no search sends a size request for a cooldown after it (the larger of 60 s
+# and the reset Hugging Face announced), so a user re-running the search does not
+# keep knocking on a Hub that already refuses.
 _SIZE_WORKERS = 4
 _SIZE_BUDGET_SECONDS = 4.0
 _SIZE_CACHE_MAX = 256
 _SIZE_CACHE_TTL_SECONDS = 3600.0
+_SIZE_COOLDOWN_SECONDS = 60.0
 
-# repo id -> (expiry on the monotonic clock, measured bytes). Only measured sizes
-# are stored: a failure is asked again by the next search.
+# The clock of the cache expiry and the 429 cooldown (monotonic; tests inject one).
+_clock: Callable[[], float] = time.monotonic
+
+# repo id -> (expiry on ``_clock``, measured bytes). Only measured sizes are
+# stored: a failure is asked again by the next search.
 _size_cache: "OrderedDict[str, tuple[float, int]]" = OrderedDict()
 _size_cache_lock = threading.Lock()
+
+# ``_clock`` value before which no size request is sent (set by a 429).
+_rate_limited_until = 0.0
 
 
 def _cache_get(repo_id: str) -> Optional[int]:
@@ -68,7 +79,7 @@ def _cache_get(repo_id: str) -> Optional[int]:
         if entry is None:
             return None
         expires, size = entry
-        if time.monotonic() >= expires:
+        if _clock() >= expires:
             del _size_cache[repo_id]
             return None
         _size_cache.move_to_end(repo_id)
@@ -77,10 +88,69 @@ def _cache_get(repo_id: str) -> Optional[int]:
 
 def _cache_put(repo_id: str, size: int) -> None:
     with _size_cache_lock:
-        _size_cache[repo_id] = (time.monotonic() + _SIZE_CACHE_TTL_SECONDS, size)
+        _size_cache[repo_id] = (_clock() + _SIZE_CACHE_TTL_SECONDS, size)
         _size_cache.move_to_end(repo_id)
         while len(_size_cache) > _SIZE_CACHE_MAX:
             _size_cache.popitem(last=False)
+
+
+def _cooldown_seconds(err: BaseException) -> float:
+    """How long to send no size request after this 429: at least
+    ``_SIZE_COOLDOWN_SECONDS``, longer when the response's ``Retry-After`` or
+    ``RateLimit`` reset says so. An unreadable header leaves the floor."""
+    headers = getattr(getattr(err, "response", None), "headers", None) or {}
+    announced = 0.0
+    try:
+        retry_after = headers.get("Retry-After") or headers.get("retry-after")
+        if retry_after:
+            announced = float(retry_after)
+    except (TypeError, ValueError, AttributeError):
+        pass  # an HTTP-date or garbage Retry-After: the floor applies
+    try:
+        from huggingface_hub.utils import parse_ratelimit_headers
+
+        info = parse_ratelimit_headers(headers)
+        if info is not None:
+            announced = max(announced, float(info.reset_in_seconds))
+    except Exception:
+        pass  # a malformed RateLimit header: the floor applies
+    return max(_SIZE_COOLDOWN_SECONDS, announced)
+
+
+def _run_bounded(fn: Callable[[str], Optional[int]], items: List[str], workers: int, budget: float):
+    """Run ``fn`` over ``items`` on ``workers`` daemon threads; return what finished
+    within ``budget`` seconds as ``{item: result}``.
+
+    Daemon threads, not a ``ThreadPoolExecutor``: the executor's workers are joined
+    at interpreter exit, so a request still on the wire when the user quits would
+    hold the backend's exit up to its timeout (and trip the launcher's exit
+    deadline). A daemon thread is dropped at exit; ``fn`` only reads the Hub and
+    fills the in-memory cache, so nothing is lost.
+    """
+    todo: "queue.SimpleQueue[str]" = queue.SimpleQueue()
+    for item in items:
+        todo.put(item)
+    results: Dict[str, Optional[int]] = {}
+    lock = threading.Lock()
+    all_done = threading.Event()
+
+    def worker() -> None:
+        while True:
+            try:
+                item = todo.get_nowait()
+            except queue.Empty:
+                return
+            value = fn(item)
+            with lock:
+                results[item] = value
+                if len(results) == len(items):
+                    all_done.set()
+
+    for _ in range(min(workers, len(items))):
+        threading.Thread(target=worker, name="hf-size", daemon=True).start()
+    all_done.wait(budget)
+    with lock:
+        return dict(results)
 
 
 def _attach_artifact_sizes(results: List[Dict[str, Any]]) -> None:
@@ -92,21 +162,31 @@ def _attach_artifact_sizes(results: List[Dict[str, Any]]) -> None:
     ``_max_retries=0``. Never ``get_disk_size_after_quant``: it falls back to an
     estimate, and an estimate must not be shown as a measured size.
 
+    For a GGUF engine, a repo from which the downloader selects no loadable GGUF
+    (only raw byte pieces, only an ``mmproj``) gets ``None``: the download refuses
+    it, and ``_chosen_artifact_bytes`` would report the whole repo's sum.
+
     Writes one INFO line per search (``HF search sizes: enriched=<n>/<hits>
-    elapsed_ms=<ms> stopped_on_429=<bool>``), a WARNING when Hugging Face
-    rate-limited the batch, and one WARNING when requests failed otherwise. A
-    gated repo this install has no token for (401/403) is expected and logged at
-    DEBUG only.
+    elapsed_ms=<ms> stopped_on_429=<bool> cooldown=<bool>``; ``cooldown`` is True
+    when an earlier 429's cooldown kept every request from going out), a WARNING
+    when Hugging Face rate-limited the batch, and one WARNING when requests failed
+    otherwise. A gated repo this install has no token for (401/403) is expected
+    and logged at DEBUG only.
     """
-    started = time.monotonic()
+    started = time.perf_counter()
     for r in results:
         r["artifact_size_bytes"] = _cache_get(r["link"])
-    pending = [r for r in results if r["artifact_size_bytes"] is None]
+    pending = [r["link"] for r in results if r["artifact_size_bytes"] is None]
+    in_cooldown = bool(pending) and _clock() < _rate_limited_until
+    if in_cooldown:
+        pending = []
     stop = threading.Event()
     rate_limited = threading.Event()
     failed: List[str] = []
+    uses_gguf = bool(getattr(config.LLM_Engine, "USES_GGUF", False))
 
     def measure(repo_id: str) -> Optional[int]:
+        global _rate_limited_until
         # A request not yet sent when the budget ran out or a 429 came back is
         # never sent.
         if stop.is_set():
@@ -118,6 +198,10 @@ def _attach_artifact_sizes(results: List[Dict[str, Any]]) -> None:
                 timeout=_SIZE_BUDGET_SECONDS,
                 _max_retries=0,
             )
+            names = [s.rfilename for s in info.siblings]
+            if uses_gguf and pick_best_gguf(names, log=False) is None:
+                logger.debug(f"HF search size of {repo_id}: no loadable GGUF selected")
+                return None
             size = _chosen_artifact_bytes(info) or None
         except AppBaseException as e:
             # The downloader's selection refused the listing (a llama.cpp split
@@ -130,6 +214,7 @@ def _attach_artifact_sizes(results: List[Dict[str, Any]]) -> None:
             if status == 429:
                 rate_limited.set()
                 stop.set()
+                _rate_limited_until = max(_rate_limited_until, _clock() + _cooldown_seconds(e))
             elif status in (401, 403):
                 logger.debug(f"HF search size of {repo_id} not readable ({status})")
             else:
@@ -140,29 +225,23 @@ def _attach_artifact_sizes(results: List[Dict[str, Any]]) -> None:
         return size
 
     if pending:
-        pool = ThreadPoolExecutor(
-            max_workers=min(_SIZE_WORKERS, len(pending)), thread_name_prefix="hf-size"
-        )
-        try:
-            futures = {pool.submit(measure, r["link"]): r for r in pending}
-            done, _ = wait(futures, timeout=_SIZE_BUDGET_SECONDS)
-            stop.set()
-            for f in done:
-                futures[f]["artifact_size_bytes"] = f.result()
-        finally:
-            # A request already sent when the budget ran out ends on its own
-            # timeout in the background; its size still lands in the cache.
-            pool.shutdown(wait=False, cancel_futures=True)
+        measured = _run_bounded(measure, pending, _SIZE_WORKERS, _SIZE_BUDGET_SECONDS)
+        # A request already sent when the budget ran out ends on its own timeout
+        # in the background; its size still lands in the cache.
+        stop.set()
+        for r in results:
+            if r["link"] in measured:
+                r["artifact_size_bytes"] = measured[r["link"]]
 
     if rate_limited.is_set():
         logger.warning("HF rate-limited (429) the search size requests; remaining sizes skipped")
     if failed:
         logger.warning(f"HF search size requests: {len(failed)} failed, first: {failed[0]}")
     enriched = sum(1 for r in results if r["artifact_size_bytes"] is not None)
-    elapsed_ms = int((time.monotonic() - started) * 1000)
+    elapsed_ms = int((time.perf_counter() - started) * 1000)
     logger.info(
         f"HF search sizes: enriched={enriched}/{len(results)} elapsed_ms={elapsed_ms} "
-        f"stopped_on_429={rate_limited.is_set()}"
+        f"stopped_on_429={rate_limited.is_set()} cooldown={in_cooldown}"
     )
 
 
