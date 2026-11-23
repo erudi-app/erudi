@@ -22,6 +22,9 @@ import { abortTurns } from "../utils/conversationTurns";
 const log = createLogger("ChatCollapsibleSection");
 // Route of the new-chat screen (mirrors the Sidebar link).
 const CHAT_PATH = "/erudi/chat";
+
+// Keyboard focus ring shared by the header buttons (same as ModelPicker).
+const FOCUS_RING = "focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60";
 // The name the backend stores for a conversation with no title (a new one, a
 // greeting, a title that did not come out); shown translated, so the stored
 // name stays right when the interface language changes.
@@ -327,31 +330,48 @@ export default function ChatCollapsibleSection({
   };
 
   return (
+    // While disabled (an answer is streaming) nothing in the section may take
+    // the focus or be activated: `inert` covers the buttons, the search box and
+    // the rows at once; the buttons also carry `disabled` so they read as such.
     <div
+      inert={disabled}
       className={`text-gray-200 h-full flex flex-col ${disabled ? "pointer-events-none opacity-50 select-none" : ""}`}
     >
-      <div
-        className="flex items-center justify-between px-4 py-3 cursor-pointer hover:bg-gray-700/30 flex-shrink-0"
-        onClick={() => setOpen(!open)}
-      >
-        <div className="flex items-center gap-2">
-          {open ? <ChevronDown className="w-4 h-4" /> : <ChevronRight className="w-4 h-4" />}
+      <div className="flex items-center justify-between flex-shrink-0">
+        <button
+          type="button"
+          aria-expanded={open}
+          disabled={disabled}
+          onClick={() => setOpen(!open)}
+          className={`flex flex-1 items-center gap-2 px-4 py-3 text-left hover:bg-gray-700/30 ${FOCUS_RING}`}
+        >
+          {open ? (
+            <ChevronDown aria-hidden="true" className="w-4 h-4" />
+          ) : (
+            <ChevronRight aria-hidden="true" className="w-4 h-4" />
+          )}
           <span className="font-semibold">{title}</span>
-        </div>
+        </button>
 
-        <div className="flex gap-3">
-          <RefreshCcw
-            role="button"
+        <div className="flex gap-3 px-4 py-3">
+          <button
+            type="button"
+            disabled={disabled}
             aria-label={t("chat:history.refreshConversations")}
-            className="w-6 h-6 hover:opacity-70 hover:bg-gray-600/30 rounded-full p-1 -m-1 cursor-pointer"
+            className={`rounded-full p-1 -m-1 hover:opacity-70 hover:bg-gray-600/30 ${FOCUS_RING}`}
             onClick={handleRefresh}
-          />
-          <Plus
-            role="button"
+          >
+            <RefreshCcw aria-hidden="true" className="w-4 h-4" />
+          </button>
+          <button
+            type="button"
+            disabled={disabled}
             aria-label={t("chat:history.newChat")}
-            className="w-6 h-6 hover:opacity-70 hover:bg-gray-600/30 rounded-full p-1 -m-1 cursor-pointer"
+            className={`rounded-full p-1 -m-1 hover:opacity-70 hover:bg-gray-600/30 ${FOCUS_RING}`}
             onClick={handleNewChat}
-          />
+          >
+            <Plus aria-hidden="true" className="w-4 h-4" />
+          </button>
         </div>
       </div>
 
@@ -377,12 +397,15 @@ export default function ChatCollapsibleSection({
               className="w-full rounded-md bg-gray-700/40 py-1.5 pl-9 pr-8 text-sm text-gray-100 placeholder-gray-400 focus:outline-none focus:ring-1 focus:ring-emerald-400 [&::-webkit-search-cancel-button]:hidden"
             />
             {query && (
-              <X
-                role="button"
+              <button
+                type="button"
+                disabled={disabled}
                 aria-label={t("chat:history.clearSearch")}
                 onClick={() => setQuery("")}
-                className="absolute right-2 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400 hover:text-gray-200 cursor-pointer"
-              />
+                className={`absolute right-2 top-1/2 -translate-y-1/2 rounded text-gray-400 hover:text-gray-200 ${FOCUS_RING}`}
+              >
+                <X aria-hidden="true" className="w-4 h-4" />
+              </button>
             )}
           </div>
         </div>

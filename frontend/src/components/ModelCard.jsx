@@ -1,4 +1,4 @@
-import React, { useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import PropTypes from "prop-types";
 import { useTranslation } from "react-i18next";
 import GradientBox from "./GradientBox";
@@ -54,6 +54,32 @@ function ModelCard({
   const publishedText = publishedLabel(model?.publishedAt);
   const { open } = useDownloadModal();
   const [rebindOpen, setRebindOpen] = useState(false);
+  const rebindTriggerRef = useRef(null);
+  const rebindRootRef = useRef(null);
+  const rebindListId = useId();
+  // Escape closes the re-bind menu and gives the focus back to its trigger.
+  const closeRebind = (refocus) => {
+    setRebindOpen(false);
+    if (refocus) rebindTriggerRef.current?.focus();
+  };
+  useEffect(() => {
+    if (!rebindOpen) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape" && rebindRootRef.current?.contains(document.activeElement)) {
+        e.stopPropagation();
+        closeRebind(true);
+      }
+    };
+    const onMouseDown = (e) => {
+      if (!rebindRootRef.current?.contains(e.target)) closeRebind(false);
+    };
+    document.addEventListener("keydown", onKey);
+    document.addEventListener("mousedown", onMouseDown);
+    return () => {
+      document.removeEventListener("keydown", onKey);
+      document.removeEventListener("mousedown", onMouseDown);
+    };
+  }, [rebindOpen]);
   const unavailable = model?.runnable === false;
   // Orphan-model UX (#225/#208): a KB assistant uses its base model's weights
   // (its own link is a copy — it owns no disk space). When those weights are
@@ -123,8 +149,9 @@ function ModelCard({
                 onDelete && onDelete(model);
               }}
               title={t("models:card.deleteModel")}
+              aria-label={t("models:card.deleteModel")}
             >
-              <Trash2 className="w-4 h-4 text-red-400" />
+              <Trash2 aria-hidden="true" className="w-4 h-4 text-red-400" />
             </button>
           )}
         </div>
@@ -222,33 +249,50 @@ function ModelCard({
                 <Info className="w-4 h-4 text-white" />
               </button>
               {isAssistant && weightsMissing && (
-                <div className="relative ml-auto">
+                <div
+                  ref={rebindRootRef}
+                  className="relative ml-auto"
+                  onBlur={(e) => {
+                    // Focus leaving the trigger and its list (Tab past the last
+                    // entry) closes the list.
+                    if (rebindOpen && !e.currentTarget.contains(e.relatedTarget))
+                      closeRebind(false);
+                  }}
+                >
                   <button
-                    className="inline-flex items-center gap-1 px-2 py-1 text-xs font-semibold bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 rounded-lg transition-colors"
+                    ref={rebindTriggerRef}
+                    type="button"
+                    aria-controls={rebindOpen ? rebindListId : undefined}
+                    aria-expanded={rebindOpen}
+                    className="inline-flex focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60 items-center gap-1 px-2 py-1 text-xs font-semibold bg-emerald-500/20 hover:bg-emerald-500/30 text-emerald-300 rounded-lg transition-colors"
                     onClick={() => setRebindOpen((o) => !o)}
                     title={t("models:card.rebindTitle")}
                   >
-                    <Link2 className="w-3.5 h-3.5" />
+                    <Link2 aria-hidden="true" className="w-3.5 h-3.5" />
                     {t("models:card.rebind")}
                   </button>
                   {rebindOpen && (
-                    <div className="absolute bottom-full right-0 mb-1 w-48 bg-[#2a2a2a] border border-white/20 rounded-lg shadow-lg z-20 max-h-40 overflow-y-auto">
+                    <div
+                      id={rebindListId}
+                      className="absolute bottom-full right-0 mb-1 w-48 bg-[#2a2a2a] border border-white/20 rounded-lg shadow-lg z-20 max-h-40 overflow-y-auto"
+                    >
                       {rebindTargets.length === 0 ? (
                         <p className="px-3 py-2 text-xs text-gray-400">
                           {t("models:card.noRebindTarget")}
                         </p>
                       ) : (
                         rebindTargets.map((target) => (
-                          <div
+                          <button
                             key={target.id}
-                            className="px-3 py-2 text-xs hover:bg-white/10 cursor-pointer text-gray-100 border-b border-white/10 last:border-b-0"
+                            type="button"
+                            className="block w-full px-3 py-2 text-left text-xs hover:bg-white/10 focus:outline-none focus-visible:bg-white/10 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-400/60 text-gray-100 border-b border-white/10 last:border-b-0"
                             onClick={() => {
                               setRebindOpen(false);
                               onRebind && onRebind(model, target);
                             }}
                           >
                             {target.name}
-                          </div>
+                          </button>
                         ))
                       )}
                     </div>

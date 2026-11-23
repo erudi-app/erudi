@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from "react";
+import React, { useEffect, useId, useRef, useState } from "react";
 import PropTypes from "prop-types";
 import { motion, AnimatePresence } from "framer-motion";
 import { ChevronDown, HelpCircle, SlidersHorizontal } from "lucide-react";
@@ -73,6 +73,8 @@ export default function HeaderBar({
 
   const rootRef = useRef(null);
   const dropdownRef = useRef(null);
+  const dropdownTriggerRef = useRef(null);
+  const dropdownListId = useId();
   const [isDropdownOpen, setIsDropdownOpen] = useState(false);
   const [tier, setTier] = useState("lg");
 
@@ -119,6 +121,21 @@ export default function HeaderBar({
       document.removeEventListener("mousedown", handleClickOutside);
     };
   }, []);
+
+  // Escape closes the model list from the button or from an entry and gives
+  // the focus back to the button.
+  useEffect(() => {
+    if (!isDropdownOpen) return undefined;
+    const onKey = (e) => {
+      if (e.key === "Escape" && dropdownRef.current?.contains(document.activeElement)) {
+        e.stopPropagation();
+        setIsDropdownOpen(false);
+        dropdownTriggerRef.current?.focus();
+      }
+    };
+    document.addEventListener("keydown", onKey);
+    return () => document.removeEventListener("keydown", onKey);
+  }, [isDropdownOpen]);
 
   const isXs = tier === "xs";
   const isSm = tier === "sm" || tier === "xs";
@@ -230,52 +247,68 @@ export default function HeaderBar({
 
             <div
               ref={dropdownRef}
-              role="button"
-              aria-label={t("chat:header.selectModel")}
-              className={[
-                "inline-flex items-center rounded-lg relative",
-                pillPx,
-                pillPy,
-                pillText,
-                "border transition",
-                "bg-white/5 hover:bg-white/10 border-white/10 hover:border-white/20",
-                "backdrop-blur-sm text-gray-100",
-                "max-w-[100%] cursor-pointer",
-              ].join(" ")}
-              onClick={() => !disabled && setIsDropdownOpen(!isDropdownOpen)}
+              className="relative inline-flex max-w-[100%]"
+              onBlur={(e) => {
+                // Tab leaving the button and its list closes the list.
+                if (!e.currentTarget.contains(e.relatedTarget)) setIsDropdownOpen(false);
+              }}
             >
-              <div
+              <button
+                ref={dropdownTriggerRef}
+                type="button"
+                aria-label={t("chat:header.selectModel")}
+                aria-controls={isDropdownOpen ? dropdownListId : undefined}
+                aria-expanded={isDropdownOpen}
+                onClick={() => !disabled && setIsDropdownOpen(!isDropdownOpen)}
                 className={[
-                  "font-medium truncate",
-                  selectPadRight,
-                  isNarrow ? "max-w-[110px]" : "max-w-[150px]",
+                  "inline-flex items-center rounded-lg max-w-full",
+                  pillPx,
+                  pillPy,
+                  pillText,
+                  "border transition",
+                  "bg-white/5 hover:bg-white/10 border-white/10 hover:border-white/20",
+                  "backdrop-blur-sm text-gray-100",
+                  "cursor-pointer focus:outline-none focus-visible:ring-2 focus-visible:ring-emerald-400/60",
                 ].join(" ")}
-                title={currentModel}
               >
-                {currentModel || t("chat:header.selectModelPlaceholder")}
-              </div>
-              <ChevronDown
-                size={isXs ? 14 : 16}
-                className={`opacity-70 shrink-0 transition-transform ${
-                  isDropdownOpen ? "rotate-180" : ""
-                }`}
-              />
+                <span
+                  className={[
+                    "font-medium truncate",
+                    selectPadRight,
+                    isNarrow ? "max-w-[110px]" : "max-w-[150px]",
+                  ].join(" ")}
+                  title={currentModel}
+                >
+                  {currentModel || t("chat:header.selectModelPlaceholder")}
+                </span>
+                <ChevronDown
+                  aria-hidden="true"
+                  size={isXs ? 14 : 16}
+                  className={`opacity-70 shrink-0 transition-transform ${
+                    isDropdownOpen ? "rotate-180" : ""
+                  }`}
+                />
+              </button>
 
               {/* Custom Dropdown */}
               {isDropdownOpen && (
-                <div className="absolute top-full left-0 right-0 mt-1 bg-[#2a2a2a] border border-white/20 rounded-lg shadow-lg z-50 max-h-60 overflow-y-auto">
+                <div
+                  id={dropdownListId}
+                  className="absolute top-full left-0 right-0 mt-1 bg-[#2a2a2a] border border-white/20 rounded-lg shadow-lg z-50 max-h-60 overflow-y-auto"
+                >
                   {models.map((m) => (
-                    <div
+                    <button
                       key={m.id ?? m.name}
-                      className="px-3 py-2 hover:bg-white/10 cursor-pointer text-gray-100 border-b border-white/10 last:border-b-0"
-                      onClick={(e) => {
-                        e.stopPropagation();
+                      type="button"
+                      className="block w-full px-3 py-2 text-left hover:bg-white/10 focus:outline-none focus-visible:bg-white/10 focus-visible:ring-2 focus-visible:ring-inset focus-visible:ring-emerald-400/60 text-gray-100 border-b border-white/10 last:border-b-0"
+                      onClick={() => {
                         onModelChange?.(m.name);
                         setIsDropdownOpen(false);
+                        dropdownTriggerRef.current?.focus();
                       }}
                     >
                       {m.name}
-                    </div>
+                    </button>
                   ))}
                 </div>
               )}
