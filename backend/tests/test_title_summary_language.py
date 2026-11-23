@@ -11,7 +11,12 @@ import pytest
 from langchain_core.messages import AIMessage, HumanMessage
 
 from src.agents import runner as runner_module
-from src.agents.language import is_greeting, language_name, strip_foreign_scripts
+from src.agents.language import (
+    TITLE_LANGUAGE_LINES,
+    is_greeting,
+    language_name,
+    strip_foreign_scripts,
+)
 from src.domains.conversations.services import ConversationService, _sanitize_title
 
 pytestmark = pytest.mark.unit
@@ -20,6 +25,11 @@ FRENCH = "Explique-moi comment fonctionne la photosynthèse chez les plantes ver
 ENGLISH = "Explain how photosynthesis works in green plants, please."
 SPANISH = "Explícame cómo funciona la fotosíntesis en las plantas verdes."
 CHINESE = "请解释一下绿色植物是如何进行光合作用的。"
+GERMAN = "Erkläre mir bitte, wie die Photosynthese bei grünen Pflanzen funktioniert."
+ITALIAN = "Spiegami come funziona la fotosintesi nelle piante verdi, per favore."
+PORTUGUESE = "Explique-me como funciona a fotossíntese nas plantas verdes, por favor."
+DUTCH = "Leg me alsjeblieft uit hoe de fotosynthese bij groene planten werkt."
+RUSSIAN = "Объясни, пожалуйста, как работает фотосинтез у зелёных растений."
 
 
 class TestLanguageName:
@@ -56,6 +66,114 @@ class TestTitlePromptLanguage:
         prompt = ConversationService(test_db_session)._build_title_prompt_text("ok", model_type)
         assert "same language as the user's message" in prompt
         assert "Write the title in English." not in prompt
+
+    @pytest.mark.parametrize("model_type", ["mistral", "qwen"])
+    @pytest.mark.parametrize(
+        "question,line",
+        [
+            (FRENCH, "Écris le titre en français."),
+            (SPANISH, "Escribe el título en español."),
+            (CHINESE, "用中文写标题。"),
+            (GERMAN, "Schreibe den Titel auf Deutsch."),
+            (ITALIAN, "Scrivi il titolo in italiano."),
+            (PORTUGUESE, "Escreva o título em português."),
+            (DUTCH, "Schrijf de titel in het Nederlands."),
+        ],
+    )
+    def test_title_prompt_carries_the_instruction_in_the_target_language(
+        self, test_db_session, question, line, model_type
+    ):
+        prompt = ConversationService(test_db_session)._build_title_prompt_text(question, model_type)
+        assert line in prompt
+        # The last instruction: only the question itself follows it.
+        tail = prompt.split(line, 1)[1]
+        assert question in tail
+        assert tail.replace(question, "").strip(" \n:") in ("", "User message", "Message")
+        assert "Examples" not in tail
+
+    def test_mistral_french_separates_the_examples_from_the_line(self, test_db_session):
+        prompt = ConversationService(test_db_session)._build_title_prompt_text(FRENCH, "mistral")
+        assert "Compte De Pommes\n\nÉcris le titre en français.\n" in prompt
+
+    def test_the_default_prompt_labels_the_question_after_the_line(self, test_db_session):
+        prompt = ConversationService(test_db_session)._build_title_prompt_text(FRENCH, "qwen")
+        assert prompt.endswith(f"Écris le titre en français.\nMessage:\n{FRENCH}")
+
+    @pytest.mark.parametrize("model_type", ["mistral", "qwen"])
+    def test_a_language_without_a_line_keeps_every_example(self, test_db_session, model_type):
+        prompt = ConversationService(test_db_session)._build_title_prompt_text(RUSSIAN, model_type)
+        assert "Write the title in Russian." in prompt
+        assert "Pizza Recipe" in prompt
+        assert "Compte De Pommes" in prompt
+        assert not any(line in prompt for line in TITLE_LANGUAGE_LINES.values())
+
+    def test_an_english_prompt_is_unchanged(self, test_db_session):
+        service = ConversationService(test_db_session)
+        examples = (
+            "Examples (user question -> title):\n"
+            "give me pizza recipe -> Pizza Recipe\n"
+            "google founding team members -> Google Founding Team\n"
+            "what's the capital of japan -> Japan Capital\n"
+            "female of the pig -> Pig Female Name\n"
+            "combien de pommes me reste-t-il -> Compte De Pommes\n"
+        )
+        language = (
+            "Write the title in the same language as the user's message.\n"
+            "Write the title in English.\n"
+        )
+        assert service._build_title_prompt_text(ENGLISH, "mistral") == (
+            "You are a TITLE generator. Produce ONLY a very short title (2–4 words maximum).\n"
+            "Rules: only the title text; Title Case; no question mark; no quotes; no emojis; "
+            "no hashtags; no code; no trailing punctuation; never answer the question; "
+            "if empty/URL/noise => output nothing.\n"
+            f"{language}"
+            f"User message: {ENGLISH}\n"
+            "Do not answer the question, only create a relevant title. "
+            "Do NOT add quotes around the title.\n"
+            f"{examples}"
+        )
+        assert service._build_title_prompt_text(ENGLISH, "qwen") == (
+            "You are a very-short-title generator. Return ONLY a concise title. "
+            "No punctuation (except apostrophes in possessives), no quotes, no hashtags, "
+            "no emojis, no trailing filler words. Capitalize important words. "
+            "The title shouldn't be a question.\n"
+            "Do not answer the question, only create a relevant title.\n"
+            f"{language}"
+            "If the message is empty or meaningless, return nothing.\n"
+            f"{examples}"
+            "Format: just the title, nothing else.\n\n"
+            f"Create a 2-to-4-word title for:\n{ENGLISH}"
+        )
+
+    @pytest.mark.parametrize("model_type", ["mistral", "qwen"])
+    def test_title_prompt_has_no_english_examples_for_a_french_question(
+        self, test_db_session, model_type
+    ):
+        prompt = ConversationService(test_db_session)._build_title_prompt_text(FRENCH, model_type)
+        for english in ("Pizza Recipe", "Google Founding Team", "Japan Capital", "Pig Female"):
+            assert english not in prompt
+        assert "Compte De Pommes" in prompt
+
+    @pytest.mark.parametrize("model_type", ["mistral", "qwen"])
+    def test_no_examples_next_to_another_named_language(self, test_db_session, model_type):
+        prompt = ConversationService(test_db_session)._build_title_prompt_text(SPANISH, model_type)
+        assert "Pizza Recipe" not in prompt
+        assert "Compte De Pommes" not in prompt
+
+    @pytest.mark.parametrize("model_type", ["mistral", "qwen"])
+    def test_an_english_question_keeps_its_examples(self, test_db_session, model_type):
+        prompt = ConversationService(test_db_session)._build_title_prompt_text(ENGLISH, model_type)
+        assert "Pizza Recipe" in prompt
+        assert "Compte De Pommes" in prompt
+        assert "Écris le titre" not in prompt
+
+    @pytest.mark.parametrize("model_type", ["mistral", "qwen"])
+    def test_unconfident_detection_keeps_examples_and_no_localized_line(
+        self, test_db_session, model_type
+    ):
+        prompt = ConversationService(test_db_session)._build_title_prompt_text("ok", model_type)
+        assert "Pizza Recipe" in prompt
+        assert "Écris le titre" not in prompt
 
     def test_mistral_variant_is_kept(self, test_db_session):
         service = ConversationService(test_db_session)
@@ -126,7 +244,7 @@ class TestTitleStream:
     async def _run(test_db_session, mock_llm, monkeypatch, question, *model_output):
         from src.agents import runner as agent_runner
         from src.core import config
-        from tests.test_conversations import _FakeEngine, _fake_chat_model
+        from tests.test_conversations import _fake_chat_model, _FakeEngine
 
         monkeypatch.setattr(config, "LLM_Engine", _FakeEngine)
         monkeypatch.setattr(agent_runner, "build_chat_model", _fake_chat_model(*model_output))
