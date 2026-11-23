@@ -27,14 +27,31 @@ UNLOAD = "/erudi/llms/loaded/unload"
 
 
 class _Engine(BaseEngine):
-    """The engine singleton, its child faked by ``alive``."""
+    """The engine singleton, its child faked by ``alive`` and the weights it
+    serves by ``weights`` (``adopt_loaded_model`` mirrors the child-server
+    engines: a live child on the same weights is re-keyed, #755)."""
 
     alive: ClassVar[bool] = True
     cleanups: ClassVar[int] = 0
+    weights: ClassVar[Any] = None
 
     @classmethod
     def loaded_child_for(cls, llm_id: Any) -> bool:
         return cls._model_id == llm_id and cls._model is not None and cls.alive
+
+    @classmethod
+    def adopt_loaded_model(cls, llm_id: Any, link: Any) -> bool:
+        if (
+            cls._model is None
+            or not cls.alive
+            or cls._model_id == llm_id
+            or link is None
+            or cls.weights is None
+            or str(link) != str(cls.weights)
+        ):
+            return False
+        cls._model_id = llm_id
+        return True
 
     @classmethod
     def cleanup(cls) -> None:
@@ -47,6 +64,7 @@ def engine(monkeypatch):
     monkeypatch.setattr(config, "LLM_Engine", _Engine)
     _Engine.alive = True
     _Engine.cleanups = 0
+    _Engine.weights = None
     _Engine._model = None
     _Engine._tokenizer = None
     _Engine._model_id = None
@@ -120,6 +138,52 @@ def test_unload_with_nothing_loaded_is_a_204_no_op(client):
     assert response.status_code == 204, response.text
     assert _Engine.cleanups == 0
     assert _Engine._idle_unload is None
+
+
+def _sibling_row(session, link, name="Nimbus"):
+    """A second ``llm`` row on ``link`` -- a KB assistant copies its base's
+    weights folder (#755)."""
+    from src.entities.Llm import Llm
+
+    row = Llm(
+        name=name,
+        description="KB assistant on the base's weights",
+        local=1,
+        link=link,
+        type="test",
+        is_attached_to_kb=True,
+        param_size=7.0,
+        quantized=True,
+    )
+    session.add(row)
+    session.commit()
+    session.refresh(row)
+    return row
+
+
+def test_unload_accepts_a_sibling_id_on_the_same_weights(client, mock_llm, test_db_session):
+    # The child was loaded under the base's id; the conversation's model is
+    # the assistant, whose link copies the base's: its Unload must work.
+    assistant = _sibling_row(test_db_session, mock_llm.link)
+    _load(mock_llm.id)
+    _Engine.weights = mock_llm.link
+    response = client.post(UNLOAD, json={"llm_id": assistant.id})
+    assert response.status_code == 204, response.text
+    assert _Engine._model is None
+    assert _Engine.cleanups == 1
+    assert _Engine._idle_unload == {"model_id": assistant.id, "reason": "manual"}
+
+
+def test_unload_of_another_model_on_other_weights_stays_a_409(client, mock_llm, test_db_session):
+    other = _sibling_row(test_db_session, "other/model/path", name="Other")
+    _load(mock_llm.id)
+    _Engine.weights = mock_llm.link
+    response = client.post(UNLOAD, json={"llm_id": other.id})
+    assert response.status_code == 409, response.text
+    assert response.json()["error"]["type"] == "LOADED_MODEL_CHANGED"
+    assert _Engine._model is not None
+    assert _Engine._model_id == mock_llm.id
+    assert _Engine.cleanups == 0
 
 
 def test_unload_of_a_model_that_is_no_longer_loaded_is_a_409(client, mock_llm):

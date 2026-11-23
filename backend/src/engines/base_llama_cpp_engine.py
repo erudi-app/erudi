@@ -773,8 +773,9 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
     #
     # * The window: at spawn, the CPU engine's `_llama_spawn_context` asks
     #   `gguf_memory` for min(trained window, what 0.75 x RAM affords) folded
-    #   with the cap the brake remembers for the alias, and passes it as `-c`;
-    #   the CUDA engine sizes it against the GPU's memory (`cuda_memory`).
+    #   with the cap the brake remembers for the artifact, and passes it as
+    #   `-c`; the CUDA engine sizes it against the GPU's memory
+    #   (`cuda_memory`).
     # * The sensors: `_llama_read_signals` reads them into the law's terms --
     #   the RAM's on CPU; on CUDA the Windows VRAM spill alone (no RAM sensor:
     #   a full offload holds almost nothing a smaller window or an unload
@@ -787,39 +788,48 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
     #     that fails degrades into an unload (the record below);
     #   - unload: the reap path, the episode carried to the next spawn of the
     #     same model through `_brake_reload` (the MLX shape);
-    #   - the per-alias window memory: every change of the brake's cap or
+    #   - the per-artifact window memory: every change of the brake's cap or
     #     faulty window is written through to `_window_memory`, read (TTL
-    #     checked) at every spawn of that alias -- a brake reload, a swap
+    #     checked) at every spawn of that artifact -- a brake reload, a swap
     #     back, a reap's reload, a crash respawn -- so a grow or a shrink the
-    #     brake decided applies at the next spawn. A reap forgets
-    #     `_brake_reload`, never the window memory.
+    #     brake decided applies at the next spawn. Keyed by the resolved
+    #     artifact path, not the alias: two model rows can share one artifact
+    #     (#755). A reap forgets `_brake_reload`, never the window memory.
 
-    # alias -> {"cap", "faulty", "at"}; written by the brake only.
+    # resolved artifact path (str) -> {"cap", "faulty", "at"}; written by the
+    # brake only.
     _window_memory: ClassVar[Dict[str, Dict[str, Any]]] = {}
 
     @classmethod
-    def _window_memory_entry(cls, alias: str) -> Optional[Dict[str, Any]]:
-        """The remembered cap and faulty window of ``alias``, younger than
-        ``BRAKE_RELOAD_TTL_S`` (an expired entry is deleted here)."""
-        entry = cls._window_memory.get(alias)
+    def _window_memory_entry(cls, model_path: Any) -> Optional[Dict[str, Any]]:
+        """The remembered cap and faulty window of the artifact at
+        ``model_path``, younger than ``BRAKE_RELOAD_TTL_S`` (an expired entry
+        is deleted here)."""
+        if model_path is None:
+            return None
+        entry = cls._window_memory.get(str(model_path))
         if not isinstance(entry, dict):
             return None
         at = entry.get("at")
         if not isinstance(at, (int, float)) or time.time() - at >= memory_brake.BRAKE_RELOAD_TTL_S:
-            cls._window_memory.pop(alias, None)
+            cls._window_memory.pop(str(model_path), None)
             return None
         return entry
 
     @classmethod
-    def _remember_window(cls, alias: Any, state: BrakeState) -> None:
-        """Write ``state``'s cap and faulty window through for ``alias``; an
-        entry with neither is deleted."""
-        if not isinstance(alias, str):
+    def _remember_window(cls, model_path: Any, state: BrakeState) -> None:
+        """Write ``state``'s cap and faulty window through for the artifact
+        at ``model_path``; an entry with neither is deleted."""
+        if model_path is None:
             return
         if state.cap is None and state.faulty is None:
-            cls._window_memory.pop(alias, None)
+            cls._window_memory.pop(str(model_path), None)
             return
-        cls._window_memory[alias] = {"cap": state.cap, "faulty": state.faulty, "at": time.time()}
+        cls._window_memory[str(model_path)] = {
+            "cap": state.cap,
+            "faulty": state.faulty,
+            "at": time.time(),
+        }
 
     @classmethod
     def _llama_spawn_context(
@@ -829,9 +839,10 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         facts the brake and the post-load check read back; `ctx_size=None`
         (llama-server's own fit) when the window cannot be sized --
         `gguf_memory.spawn_window` wrote the one WARNING. The cap folded in
-        is ``brake_cap`` (a brake respawn), else the alias's window memory."""
+        is ``brake_cap`` (a brake respawn), else the artifact's window
+        memory."""
         if brake_cap is None:
-            entry = cls._window_memory_entry(alias)
+            entry = cls._window_memory_entry(model_path)
             brake_cap = entry.get("cap") if entry else None
         mmproj = cls._find_mmproj(model_path)
         window = gguf_memory.spawn_window(
@@ -861,15 +872,15 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
 
     @classmethod
     def _llama_seed(cls, handle: Dict[str, Any]) -> None:
-        """The new child's brake -- the episode an unload of the same model
-        carried, else its remembered cap and faulty window, else a fresh
-        state. No sensor is read here: the CPU engine takes its first paging
-        reading beside it, the CUDA engine stamps its spill baseline. A
-        successful spawn forgets the unload's record, whichever model it
+        """The new child's brake -- the episode an unload of the same
+        artifact carried, else its remembered cap and faulty window, else a
+        fresh state. No sensor is read here: the CPU engine takes its first
+        paging reading beside it, the CUDA engine stamps its spill baseline.
+        A successful spawn forgets the unload's record, whichever model it
         loads."""
         state = cls._carried_brake(handle)
         if state is None:
-            entry = cls._window_memory_entry(handle.get("alias"))
+            entry = cls._window_memory_entry(handle.get("model_path"))
             state = (
                 BrakeState(cap=entry.get("cap"), faulty=entry.get("faulty"))
                 if entry
@@ -1049,7 +1060,7 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
             # A paced-out sample keeps the paging of its interval for the next.
             handle["damage_last"] = signals.ram_damage_total
         if (decision.state.cap, decision.state.faulty) != (previous.cap, previous.faulty):
-            cls._remember_window(handle.get("alias"), decision.state)
+            cls._remember_window(handle.get("model_path"), decision.state)
         if decision.unload:
             cls._llama_brake_unload(handle, decision, point, footprint)
             return BrakeOutcome(acted=True, action="unload")
@@ -1100,7 +1111,12 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
                 respawn_from=handle,
             )
         except Exception as exc:
-            record = {"alias": handle.get("alias"), **live.carry(), "unloaded_at": time.time()}
+            record = {
+                "alias": handle.get("alias"),
+                "model_path": str(handle["model_path"]) if handle.get("model_path") else None,
+                **live.carry(),
+                "unloaded_at": time.time(),
+            }
             cls._log_llama_brake(
                 logger.warning,
                 point,
@@ -1137,14 +1153,15 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         footprint: Optional[int],
     ) -> None:
         """Reap the child (the caller holds the generation lock) and leave
-        the episode for the next spawn of the same model. ONE WARNING: the
-        app degraded on its own."""
+        the episode for the next spawn of the same artifact. ONE WARNING:
+        the app degraded on its own."""
         record = {
             "alias": handle.get("alias"),
+            "model_path": str(handle["model_path"]) if handle.get("model_path") else None,
             **decision.state.carry(),
             "unloaded_at": time.time(),
         }
-        cls._remember_window(handle.get("alias"), decision.state)
+        cls._remember_window(handle.get("model_path"), decision.state)
         window = handle.get("context_tokens")
         cls._log_llama_brake(
             logger.warning,

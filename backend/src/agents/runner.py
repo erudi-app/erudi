@@ -404,11 +404,27 @@ _BRAKE_WARNINGS = {
 RELOAD_REASON_MEMORY = "memory"
 
 
+def _adopt_loaded_model(engine: Any, llm: Any) -> None:
+    """Re-key the loaded child to this turn's model when it already serves
+    its weights -- a KB assistant and its base share one artifact (#755) --
+    read defensively like the other engine probes. Runs under the generation
+    lock, before every id-keyed probe of the turn: the reload announcements,
+    the ``turn_start`` brake sample and the contention check all compare the
+    loaded id."""
+    probe = getattr(engine, "adopt_loaded_model", None)
+    if callable(probe):
+        probe(getattr(llm, "id", None), getattr(llm, "link", None))
+
+
 def _brake_reload_pending(engine: Any, llm: Any) -> bool:
     """Whether this turn reloads a model the memory brake unloaded, read
-    defensively like the other engine probes."""
+    defensively like the other engine probes. The llm's link names its
+    weights, so a record left under a sibling id on the same artifact
+    answers too (#755)."""
     probe = getattr(engine, "brake_reload_pending", None)
-    return bool(probe(getattr(llm, "id", None))) if callable(probe) else False
+    if not callable(probe):
+        return False
+    return bool(probe(getattr(llm, "id", None), getattr(llm, "link", None)))
 
 
 def _unload_reason_taken(engine: Any, llm: Any) -> Optional[str]:
@@ -2421,6 +2437,10 @@ class AgentRunner:
 
         async with engine.generation_guard():
             try:
+                # The loaded child may serve this turn's weights under a
+                # sibling id (a KB assistant and its base, #755): re-key it
+                # first, so every probe below sees this turn's model loaded.
+                _adopt_loaded_model(engine, llm)
                 # The memory brake unloaded this model while memory was
                 # tight: resolving it below reloads it, which takes a while.
                 # Said first (the conversation service's attachment notices

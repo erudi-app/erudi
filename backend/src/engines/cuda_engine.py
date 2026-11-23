@@ -288,7 +288,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
             return ctx
         shape, weights = inputs
         if brake_cap is None:
-            entry = cls._window_memory_entry(alias)
+            entry = cls._window_memory_entry(model_path)
             brake_cap = entry.get("cap") if entry else None
         window = cuda_memory.window_for_vram(
             shape,
@@ -1306,10 +1306,10 @@ class CUDA_Engine(BaseLlamaCppEngine):
         return cls._llama_begin_memory_window()
 
     @classmethod
-    def brake_reload_pending(cls, llm_id: Any) -> bool:
+    def brake_reload_pending(cls, llm_id: Any, link: Any = None) -> bool:
         """An unload's record for ``llm_id`` (the shared answer), or a brake
         respawn of its loaded child whose reload state is still owed."""
-        return super().brake_reload_pending(llm_id) or cls._llama_respawn_pending(llm_id)
+        return super().brake_reload_pending(llm_id, link) or cls._llama_respawn_pending(llm_id)
 
     # ---------- CUDA-specific helpers (kept from pre-refactor) ----------
 

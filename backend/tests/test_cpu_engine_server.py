@@ -68,7 +68,7 @@ class TestSpawnContextAndArgv:
 
         monkeypatch.delenv("ERUDI_CTX", raising=False)
         monkeypatch.setattr(memory_pressure, "effective_total_ram_bytes", lambda: 16 * 1024**3)
-        CPU_Engine._window_memory = {"erudi-7": {"cap": 20_480, "faulty": None, "at": time.time()}}
+        CPU_Engine._window_memory = {"/m.gguf": {"cap": 20_480, "faulty": None, "at": time.time()}}
         seen = {}
 
         def _spawn_window(path, *, total_ram_bytes, brake_cap=None, mmproj_path=None):

@@ -497,10 +497,11 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         return None
 
     @classmethod
-    def brake_reload_pending(cls, llm_id: Any) -> bool:
+    def brake_reload_pending(cls, llm_id: Any, link: Any = None) -> bool:
         """Whether the next turn for ``llm_id`` reloads a model the brake
         unloaded (or, on the CPU engine, re-prefills a child it respawned).
-        Never here."""
+        ``link`` names the model's weights, so a record left under a sibling
+        id on the same artifact (#755) answers too. Never here."""
         return False
 
     @classmethod
@@ -1161,6 +1162,22 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         return False
 
     @classmethod
+    def adopt_loaded_model(cls, llm_id: Any, link: Any) -> bool:
+        """Re-key the loaded model to ``llm_id`` when it already serves the
+        weights under ``link``; True when it did.
+
+        Two ``llm`` rows can share one weights folder (a base model and its
+        KB assistant, #755); the engine keys the loaded model by id alone.
+        The runner calls this at the start of every turn (under the
+        generation lock) and ``unload`` before its identity check, so every
+        id-keyed probe treats "the child serves this llm's weights" as "this
+        llm is loaded". False by default: an engine that does not load from
+        a folder on disk has no path identity to re-key on. The child-server
+        engines override it.
+        """
+        return False
+
+    @classmethod
     def cleanup(cls) -> None:
         """Free model and tokenizer from memory, reset state.
 
@@ -1226,19 +1243,22 @@ class BaseEngine(ABC, metaclass=EngineMeta):
             raise failure
 
     @classmethod
-    async def unload(cls, llm_id: Any) -> Optional[Any]:
+    async def unload(cls, llm_id: Any, link: Any = None) -> Optional[Any]:
         """Unload ``llm_id`` now (the header's Unload button, #619).
 
         Taken through ``try_generation_guard``: while an answer, a reload, a
         brake sample or the idle check holds the engine it is refused with
-        ``EngineBusyException`` (409) and nothing is interrupted. When
-        another model is loaded than the one the button named (a model
-        switch and a turn since it read it), it is refused with
+        ``EngineBusyException`` (409) and nothing is interrupted. ``link``
+        names the model's weights: a loaded model keyed to a sibling id on
+        the same artifact (a KB assistant and its base, #755) is re-keyed
+        first (``adopt_loaded_model``), so the button works under either
+        name. When another model is loaded than the one the button named (a
+        model switch and a turn since it read it), it is refused with
         ``LoadedModelChangedException`` (409) and nothing is unloaded.
         Otherwise the model goes exactly as on an idle reap (same
-        ``cleanup()``, so on llama.cpp the per-model window memory survives
-        and the next load keeps a recent brake reduction), and the record
-        says ``manual`` so the next turn of that model says the user
+        ``cleanup()``, so on llama.cpp the per-artifact window memory
+        survives and the next load keeps a recent brake reduction), and the
+        record says ``manual`` so the next turn of that model says the user
         unloaded it.
 
         Returns:
@@ -1248,6 +1268,7 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         async with cls.try_generation_guard():
             if cls._model is None:
                 return None
+            cls.adopt_loaded_model(llm_id, link)
             if cls._model_id != llm_id:
                 raise LoadedModelChangedException()
             unloaded_id = cls._model_id

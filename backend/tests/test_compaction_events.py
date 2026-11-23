@@ -433,7 +433,7 @@ class _ReloadEngine(_WindowEngine):
     pending: ClassVar[bool] = True
 
     @classmethod
-    def brake_reload_pending(cls, llm_id):
+    def brake_reload_pending(cls, llm_id, link=None):
         return cls.pending
 
 

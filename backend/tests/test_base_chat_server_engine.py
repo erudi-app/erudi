@@ -746,3 +746,87 @@ class TestEffectiveContextTokens:
         }
         _TestEngine.cleanup()
         assert _TestEngine.effective_context_tokens() is None
+
+
+# =====================================================================
+# UNIT — one child for one set of weights (#755)
+# =====================================================================
+
+
+@pytest.mark.unit
+class TestSharedWeightsChild:
+    """A KB assistant is a separate ``llm`` row whose ``link`` copies its
+    base's: the same weights keep the same child when the id changes (#755).
+    ``get_model_and_tokenizer`` re-keys the live child instead of respawning,
+    and ``adopt_loaded_model`` does the same for the turn's probes and the
+    unload endpoint."""
+
+    def _load(self, llm_id, path="/m"):
+        with (
+            patch.object(_TestEngine, "_probe_ready", return_value=None),
+            patch("src.engines.base_chat_server_engine.atexit.register"),
+            patch("src.engines.base_chat_server_engine.atexit.unregister"),
+        ):
+            model, _ = _TestEngine.get_model_and_tokenizer(llm_id=llm_id, llm_local_path=path)
+        return model
+
+    def test_a_second_id_on_the_same_weights_reuses_the_child(self):
+        first = self._load("385")
+        with patch.object(_TestEngine, "_spawn_child") as spawn:
+            second = self._load("386")
+        spawn.assert_not_called()
+        assert second is first
+        assert _TestEngine._model_id == "386"
+
+    def test_a_different_link_still_respawns(self):
+        first = self._load("385", "/m")
+        second = self._load("386", "/other")
+        assert second is not first
+        assert second["model_path"] == Path("/other")
+        assert _TestEngine._model_id == "386"
+
+    def test_arena_alternation_spawns_once(self):
+        with patch.object(_TestEngine, "_spawn_child", wraps=_TestEngine._spawn_child) as spawn:
+            for llm_id in ("385", "386", "385", "386"):
+                self._load(llm_id)
+        assert spawn.call_count == 1
+        assert _TestEngine._model_id == "386"
+
+    def test_a_dead_child_on_the_same_weights_respawns(self):
+        self._load("385")
+        with (
+            patch.object(_TestEngine, "_proc_is_alive", return_value=False),
+            patch.object(_TestEngine, "_spawn_child", wraps=_TestEngine._spawn_child) as spawn,
+        ):
+            self._load("386")
+        spawn.assert_called_once()
+        assert _TestEngine._model_id == "386"
+
+    def test_adopt_rekeys_a_live_child_serving_the_weights(self):
+        self._load("385")
+        assert _TestEngine.adopt_loaded_model("386", "/m") is True
+        assert _TestEngine._model_id == "386"
+        assert _TestEngine.loaded_child_for("386")
+        assert not _TestEngine.loaded_child_for("385")
+
+    def test_adopt_refuses_other_weights(self):
+        self._load("385")
+        assert _TestEngine.adopt_loaded_model("386", "/other") is False
+        assert _TestEngine._model_id == "385"
+
+    def test_adopt_refuses_a_dead_child(self):
+        self._load("385")
+        with patch.object(_TestEngine, "_proc_is_alive", return_value=False):
+            assert _TestEngine.adopt_loaded_model("386", "/m") is False
+        assert _TestEngine._model_id == "385"
+
+    def test_adopt_is_a_no_op_for_the_loaded_id_and_without_a_child(self):
+        assert _TestEngine.adopt_loaded_model("385", "/m") is False
+        self._load("385")
+        assert _TestEngine.adopt_loaded_model("385", "/m") is False
+        assert _TestEngine._model_id == "385"
+
+    def test_adopt_on_the_base_engine_is_a_no_op(self):
+        from src.engines.base_engine import BaseEngine
+
+        assert BaseEngine.adopt_loaded_model("386", "/m") is False

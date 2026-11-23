@@ -652,8 +652,10 @@ def test_two_idle_criticals_unload_and_carry_the_episode(child, http, sensors, c
     assert record["unloaded_this_episode"] is True
     assert record["in_episode"] is True
     assert record["episode_level"] == 4
+    assert record["model_path"] == "/models/qwen"
     assert set(record) == {
         "alias",
+        "model_path",
         "cap",
         "faulty",
         "in_episode",
@@ -671,16 +673,19 @@ def test_two_idle_criticals_unload_and_carry_the_episode(child, http, sensors, c
     assert not MLX_Engine.brake_reload_pending(8)
 
 
-def _spawned_handle(alias="erudi-7"):
-    handle = _handle(alias=alias, context_tokens=32_768, memory_bound_tokens=None)
+def _spawned_handle(alias="erudi-7", **extra):
+    handle = _handle(alias=alias, context_tokens=32_768, memory_bound_tokens=None, **extra)
     del handle["brake"]
     del handle["last_request_tokens"]
     return handle
 
 
-def test_a_same_alias_spawn_within_the_ttl_is_seeded_with_the_carry(sensors, http, ceiling):
+def test_a_spawn_of_the_same_artifact_within_the_ttl_is_seeded_with_the_carry(
+    sensors, http, ceiling
+):
     MLX_Engine._brake_reload = {
         "alias": "erudi-7",
+        "model_path": "/models/qwen",
         "cap": 12_000,
         "faulty": 16_000,
         "in_episode": True,
@@ -709,6 +714,7 @@ def test_a_same_alias_spawn_within_the_ttl_is_seeded_with_the_carry(sensors, htt
 def test_another_model_is_not_seeded_and_its_spawn_clears_the_record(sensors, http, ceiling):
     MLX_Engine._brake_reload = {
         "alias": "erudi-7",
+        "model_path": "/models/qwen",
         "cap": 12_000,
         "faulty": None,
         "in_episode": True,
@@ -717,7 +723,7 @@ def test_another_model_is_not_seeded_and_its_spawn_clears_the_record(sensors, ht
         "unloaded_this_episode": True,
         "unloaded_at": time.time(),
     }
-    handle = _spawned_handle(alias="erudi-8")
+    handle = _spawned_handle(alias="erudi-8", model_path="/models/other")
 
     MLX_Engine._read_server_properties(handle)
 
@@ -750,6 +756,44 @@ def test_a_pending_reload_needs_no_child_loaded(child):
     assert not MLX_Engine.brake_reload_pending(7)
     MLX_Engine._model = None
     assert MLX_Engine.brake_reload_pending(7)
+
+
+def test_a_pending_reload_answers_the_sibling_id_by_its_link(child):
+    """A KB assistant's link copies its base's (#755): the record left under
+    the base's id answers the assistant's turn through the artifact path."""
+    MLX_Engine._model = None
+    MLX_Engine._brake_reload = {
+        "alias": "erudi-7",
+        "model_path": "/models/qwen",
+        "unloaded_at": time.time(),
+    }
+    assert not MLX_Engine.brake_reload_pending(9)
+    assert MLX_Engine.brake_reload_pending(9, link="/models/qwen")
+    assert not MLX_Engine.brake_reload_pending(9, link="/models/other")
+
+
+def test_a_sibling_spawn_on_the_same_artifact_is_seeded_with_the_carry(sensors, http, ceiling):
+    """The carry follows the artifact, not the alias (#755): a spawn under
+    the sibling id on the same weights is seeded with the episode."""
+    MLX_Engine._brake_reload = {
+        "alias": "erudi-7",
+        "model_path": "/models/qwen",
+        "cap": 12_000,
+        "faulty": 16_000,
+        "in_episode": True,
+        "episode_level": 4,
+        "shrinks_this_episode": 2,
+        "unloaded_this_episode": True,
+        "unloaded_at": time.time() - 30,
+    }
+    handle = _spawned_handle(alias="erudi-9")
+
+    MLX_Engine._read_server_properties(handle)
+
+    state = handle["brake"]
+    assert state.cap == 12_000
+    assert state.shrinks_this_episode == 2
+    assert MLX_Engine._brake_reload is None
 
 
 async def test_the_idle_timeout_reap_forgets_the_record(child):
@@ -1050,6 +1094,7 @@ def test_a_reload_spawn_applies_the_carried_cap_without_a_measured_base(
 ):
     MLX_Engine._brake_reload = {
         "alias": "erudi-7",
+        "model_path": "/models/qwen",
         "cap": 12_000,
         "faulty": None,
         "in_episode": True,

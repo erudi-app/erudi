@@ -385,7 +385,11 @@ cancellation is raised.
 The next request reloads an unloaded model, which costs the usual load time; the next turn of an
 existing conversation says why it reloads (`memory_reload` with `reason: "idle"` after the idle
 delay, `"manual"` after the Unload button; a new conversation shows its usual first-reply hint).
-Switching to another model swaps the resident one.
+Switching to another model swaps the resident one — unless the two rows share one weights
+folder (a Knowledge Base assistant and its base model): one inference child serves one set
+of weights, so switching between them, in a conversation or between Arena panels, re-keys
+the running child instead of restarting it, and `GET /erudi/llms/loaded` then names the
+model that last used it. The Unload button works under either name.
 
 Do not instantiate engines. Call class methods on the result of `BaseEngine.get_engine()`; the
 selected engine is also available as `src.core.config.LLM_Engine`.

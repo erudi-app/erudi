@@ -167,10 +167,10 @@ class CPU_Engine(BaseLlamaCppEngine):
         return cls._llama_begin_memory_window()
 
     @classmethod
-    def brake_reload_pending(cls, llm_id: Any) -> bool:
+    def brake_reload_pending(cls, llm_id: Any, link: Any = None) -> bool:
         """An unload's record for ``llm_id`` (the shared answer), or a brake
         respawn of its loaded child whose reload state is still owed."""
-        return super().brake_reload_pending(llm_id) or cls._llama_respawn_pending(llm_id)
+        return super().brake_reload_pending(llm_id, link) or cls._llama_respawn_pending(llm_id)
 
     @classmethod
     def _build_spawn_argv(

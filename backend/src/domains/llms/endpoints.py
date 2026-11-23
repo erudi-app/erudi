@@ -700,7 +700,10 @@ async def get_loaded_llm(llm_repo: Llm_Repository = Depends(get_llm_repository))
     The child's liveness is checked (``loaded_child_for``), not just the
     engine's cached id: a child that died leaves nothing to unload. A child
     whose model row is gone (a delete unloads first, so it does not happen)
-    has nothing to name and reads as null too.
+    has nothing to name and reads as null too. A base model and its KB
+    assistant share one child (#755): the name is the model that last used
+    it (one child, one name; the unload endpoint accepts the sibling id, so
+    a header still showing the other name keeps a working Unload).
 
     Example:
         GET /erudi/llms/loaded -> {"llm_id": 57, "name": "Qwen3-4B"} or null
@@ -716,7 +719,10 @@ async def get_loaded_llm(llm_repo: Llm_Repository = Depends(get_llm_repository))
 
 
 @router.post("/loaded/unload", status_code=http_status.HTTP_204_NO_CONTENT)
-async def unload_loaded_llm(payload: UnloadRequest) -> Response:
+async def unload_loaded_llm(
+    payload: UnloadRequest,
+    llm_repo: Llm_Repository = Depends(get_llm_repository),
+) -> Response:
     """Unload the model the Unload button names now (the header, #619).
 
     The body carries the ``llm_id`` the button shows. 204 once the child is
@@ -725,15 +731,19 @@ async def unload_loaded_llm(payload: UnloadRequest) -> Response:
     memory-brake sample or the idle check holds the engine for more than
     2 s: nothing is interrupted. 409 (``LoadedModelChangedException``,
     "Another model is loaded now.") when another model was loaded since the
-    button read it: nothing is unloaded. The next turn of the unloaded model
-    says the user unloaded it (``memory_reload`` with ``reason: "manual"``);
-    on llama.cpp the window the memory brake reduced recently stays reduced
-    at that reload, as after an idle unload.
+    button read it: nothing is unloaded. The named model's weights folder is
+    read from its row and handed to the engine, so a child loaded under a
+    sibling id on the same weights (a KB assistant and its base, #755) is
+    unloaded, not refused. The next turn of the unloaded model says the user
+    unloaded it (``memory_reload`` with ``reason: "manual"``); on llama.cpp
+    the window the memory brake reduced recently stays reduced at that
+    reload, as after an idle unload.
 
     Example:
         POST /erudi/llms/loaded/unload {"llm_id": 57} -> 204
     """
-    await config.LLM_Engine.unload(payload.llm_id)
+    llm = llm_repo.get_by_id(payload.llm_id)
+    await config.LLM_Engine.unload(payload.llm_id, link=llm.link if llm else None)
     return Response(status_code=http_status.HTTP_204_NO_CONTENT)
 
 
