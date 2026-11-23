@@ -267,7 +267,32 @@ message can still not fit; the turn is then refused with the "this message alone
 A file that cannot be read never fails the turn: its block says so in the model's view, and the
 answer opens with an italic notice naming the file and why - unsupported type, missing file, no
 extractable text (Erudi bundles no OCR tier, so images and scanned PDFs land here), or an extractor
-failure. Truncated files are named in the same notice.
+failure. Truncated files are named in a second notice of their own, and images the model cannot see
+in a notice before both.
+
+Each notice (`src/agents/answer_notices.py`) is one `answer` event carrying
+`notice: {"kind", "params"}`, its English line in italics, followed by a blank line:
+
+| Kind | `params` | Notice |
+|------|----------|--------|
+| `images_ignored` | — | The turn carries images and the model is not positively vision-capable |
+| `attachments_unreadable` | `files`: `[{"name", "reason"}]`, `reason` a key of `attachment_utils.REASON_TEXT`: `missing`, `unsupported`, `pending_vision`, `empty`, `unreadable`, `failed`, `empty_folder`, `too_many` (no `name`, with `limit`, the file cap); optional `more` | Files the reader could not turn into text |
+| `attachments_truncated` | `files`: the names; optional `more` | Files shortened to fit the budget |
+
+`files` names at most the first 20 files (`NOTICE_FILES_SHOWN`); `more` counts the others, said
+"and 3 more". The model never sees a notice: it is added to the answer the database stores, not to
+the conversation's state (the checkpointer holds the model's own answer only), and an Arena turn
+has no state. The English line is what the message content stores, what an older interface shows;
+the trace keeps `{"t": "notice", "kind", "params"}` per notice, pinned like an `error_detail`. The
+renderer rebuilds the English line from its `en` catalog, which says exactly what the backend writes
+(`backend/tests/fixtures/answer_notices.json` holds both sides to the same lines), finds it in the
+content, and shows `chat:notices.<kind>` in the interface language in its place
+(`frontend/src/utils/answerNotices.js`): the file names joined as a list of that language, each
+reason from `common:fileReasons.<reason>`, live, after a reload, after a language switch, in an
+Arena panel and in the Markdown export. A message stored before notices carried their kind, a kind
+or a reason the interface has no key for, or content that no longer holds the line shows as stored.
+A new kind is one entry of `NOTICE_KINDS`, `chat:notices.<kind>` in the four locales and a case of
+the fixture.
 
 Both marker paths are percent-encoded when stored — `%` as `%25`, then `]` as `%5D` — so a path
 holding a closing bracket cannot end its own marker; the renderer decodes them in
@@ -303,7 +328,7 @@ an image pasted before pasted images moved into the data folder stays where it i
 
 | `t` | Payload | Meaning |
 |-----|---------|---------|
-| `answer` | `text`; optional `curated_error` | A chunk of the answer, streamed. The curated line of a turn that ended without an answer (see below) carries `curated_error` |
+| `answer` | `text`; optional `curated_error` or `notice` | A chunk of the answer, streamed. The curated line of a turn that ended without an answer (see below) carries `curated_error`; a notice opening the answer (images ignored, an attachment unreadable or shortened, see [Attached documents](#attached-documents)) carries `notice` |
 | `thinking` | `text` | A chunk of the model's reasoning (see below) |
 | `tool_call` | `name`, `args` | The agent called a tool (`search_knowledge_base`, `web_search`, `calculator`) |
 | `tool_result` | `name`, `text` | What that tool returned |
@@ -517,7 +542,8 @@ stored. A new kind is one entry of
 An Arena panel shows them the same way: `POST /erudi/arena/{llm_id}/query` streams NDJSON
 (`application/x-ndjson`) limited to `answer` events and, for a failed turn, one `error` event
 shaped like a conversation's (`curated_error` included); the panel translates a curated turn and a
-generic failure's headline, in red, below what streamed.
+generic failure's headline, in red, below what streamed, and the notices opening the answer (their
+`answer` events carry `notice`).
 
 ### Parsing the stream
 
@@ -579,14 +605,15 @@ The user message is persisted immediately, so it shows up before generation star
 ends, the accumulated `answer` text becomes the assistant message's `content`, and the non-answer
 events (`thinking`, `tool_call`, `tool_result`, and `compaction` with `phase: "done"`) are stored in
 order as that message's `trace`, so the reasoning and tool panel and the compaction markers can be
-replayed on reload. The serialized trace is capped at 32 KB, drop-oldest, with a
+replayed on reload; so are the `notice` events of the notices opening the answer. The serialized trace is capped at 32 KB, drop-oldest, with a
 `{"t": "truncated"}` marker prepended when events were dropped; compaction events are never dropped
 (they lead the capped trace, ahead of the marker, which follows them only when a reasoning or tool
 step was dropped). Error turns persist their compaction events (a compaction is checkpointed even
 when the model call after it fails) and, for an unexpected failure, an `error_detail` event, or, for
-a curated one, its `curated_error` event — and no other trace. `error_detail` and `curated_error`
-are pinned like a compaction (a curated empty-answer line keeps its `curated_error` beside its
-reasoning). `compaction` with `phase: "start"`, `memory_warning` and `memory_reload` reach the wire but
+a curated one, its `curated_error` event, and their `notice` events — and no other trace.
+`error_detail`, `curated_error` and `notice` are pinned like a compaction (a curated empty-answer
+line keeps its `curated_error` beside its reasoning, an answer its notices whatever reasoning
+follows them). `compaction` with `phase: "start"`, `memory_warning` and `memory_reload` reach the wire but
 are **never** persisted: the first describes the turn in flight, and the memory events describe the
 machine's memory at that moment — an old conversation reopened on a bigger machine must not replay
 them.
@@ -950,7 +977,9 @@ it left open is closed, and its headings move two levels down (below the role he
 `######`). A **compaction** is a separator (`---`, a line saying how many earlier
 messages were summarized, `---`) where it took over: before the answer of the turn that ran it, after
 the answer a `/compact` run was saved on. The summary itself is not written. **Left out**: the
-model's reasoning and tool activity, and the failed turns. **Named, not embedded**: an image is
+model's reasoning and tool activity, and the failed turns. **In the interface language**: the
+notices opening an answer and a curated empty-answer line, as the conversation shows them
+(`labels.answer`, from the kinds their trace carries). **Named, not embedded**: an image is
 `> Image: <file name>` (`> Image` for a pasted one that has no file), an attached document is
 `> Attachment: <file name>`; no file path is written.
 
@@ -1085,7 +1114,8 @@ brake's turn-end sample, also after a failure (a model that could not load inclu
 
 Each failure has one record in `backend.log`:
 
-- A summary that fails, is rejected (too short for what it replaces, or a copy of the last message:
+- A summary that fails, is rejected (too short for what it replaces, a copy of the last message,
+  or stale — a repeat of the previous summary:
   the automatic compaction's rule, see [How conversation state is kept](#how-conversation-state-is-kept))
   or runs past its bound, or a thread state that cannot be written, changes
   nothing — the model still sees the whole history — and is a 503 (`COMPACTION_FAILED`). Its one
@@ -1340,7 +1370,17 @@ the prompt names it
    `max(256, min(max(4000, T − cap), W − 2 × cap − 256, (allocated − 2 × cap − 512) / 2))`
    tokens of the history being summarized — sized from the working window, and kept inside the
    allocated window with a factor 2 for the error left in the ratio (it is a whole-request average:
-   an English system prompt around a Chinese history under-counts the history). Past
+   an English system prompt around a Chinese history under-counts the history). A history over that
+   budget is bounded by **fair share** (`_bound_for_summary` in `runner.py`, water-filling): the
+   largest per-message cap whose capped history fits the budget, so short messages — the user's
+   facts — stay whole however large the document pasted after them, and only the messages above the
+   cap are cut, each keeping its head and its tail (about two thirds and one third: attachments come
+   before the question in a pasted message, so a head-only cut would erase the question) around an
+   ASCII `[... N characters omitted ...]` marker (a tool-calling message's args are replaced by the
+   marker in that copy: they can be its whole cost). A history that fits the budget is passed
+   **whole** — nothing is dropped from its head, whatever message it starts on. Only when even a
+   64-token cap does not fit — too many messages for the budget — are the oldest dropped, with one
+   warning saying how many. Past
    knowledge-base and web results reach the summarizer as their markers, exactly as the model last
    saw them. The **previous summary is always part of what the summarizer reads**, prepended on top
    of that budget, so the facts it carries survive every compaction.
@@ -1355,9 +1395,8 @@ the prompt names it
    408/409/429/5xx) fails the turn with the history intact: no summary is written and the next turn
    retries. A deterministic failure — a context overflow, another 4xx, a timeout while the model was
    still reading the input (deterministic for that input size), an **empty summary** or a
-   **rejected** one — and a history where no user turn fits the summarizer's budget because one
-   answer alone exceeds it are retried once with oversized messages truncated (and the budget halved
-   after a failed attempt). A summary is rejected (`summary_rejection` in `runner.py`) when it
+   **rejected** one — is retried once at half the budget, the history bounded the same way. A
+   summary is rejected (`summary_rejection` in `runner.py`) when it
    cannot stand for what the summarizer read:
 
    - **too short**: fewer tokens than `max(4, min(0.05 × read, 24))`, the summary and what was
@@ -1368,13 +1407,21 @@ the prompt names it
      were provided."), 0.001 to 0.038 of what they read. The floor lets the short summary of a one-
      or two-message history through; the ceiling (about 80 Latin characters, twice the longest
      degenerate one) keeps a long history from asking more than a short summary can carry;
+   - **stale**: the new summary adds almost nothing to the previous summary it read — fewer than
+     `max(40, 5 % of the previous summary)` characters outside their matching blocks, case and
+     spacing ignored — while the new turns it read weigh at least 4 tokens and half the previous
+     summary's size: the model copied its old summary over real new content. An incremental
+     summary (the previous one carried forward plus a sentence about the new turns) is highly
+     similar to the previous one but *adds* something, so it is accepted; and with little new
+     content the plain copy is accepted — it *is* the right summary of a history that added
+     nothing;
    - **a copy**: with more than one message read and the summary under 0.2 of what it read, the
-     summary is the last question or the last answer it read — case, spacing and the punctuation
-     at its ends ignored, or 90 % similar. A long recap that is also the last answer (the user
-     asked to recap everything) is kept.
+     summary is a question or an answer it read — **any** of them, not only the last ones — case,
+     spacing and the punctuation at its ends ignored, or 90 % similar. A long recap that is also
+     the last answer (the user asked to recap everything) is kept.
 
    `backend.log` carries one warning per failed attempt, a rejection as `Compaction summary
-   rejected (<attempt> attempt): too_short|copy, summary_chars=..., read_chars=...,
+   rejected (<attempt> attempt): too_short|stale|copy, summary_chars=..., read_chars=...,
    read_messages=...`. When the retry fails too, nothing is rewritten — no summary, no separator —
    and automatic compaction **pauses for the next 4 user messages** (one `Automatic compaction
    paused ...` info line): a failing summary is not retried on every turn, each attempt being a

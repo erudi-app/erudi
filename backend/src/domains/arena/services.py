@@ -31,14 +31,14 @@ from src.core.logging import logger
 from src.core.logutils import truncate_for_log
 from src.utils.prompt_utils import get_prompting_strategy
 from src.utils.attachment_utils import (
-    build_attachment_notice,
     prepend_attachment_block,
     resolve_attachments,
 )
 from src.utils.kb_utils import KbExcerpt, retrieve_kb_excerpts
 from src.agents.kb_mode import plan_turn
 from src.agents.reasoning_effort import plan_reasoning_effort
-from src.agents.runner import AgentRunner, ERROR_SENTINEL, GenParams, IMAGES_IGNORED_NOTICE
+from src.agents.answer_notices import attachment_notice_answers, images_ignored_answer
+from src.agents.runner import AgentRunner, ERROR_SENTINEL, GenParams
 from src.database.generation_hints import resolve_sampling_defaults
 from src.domains.arena.repository import ArenaRepository
 from src.domains.llms.conversation_defaults import read_conversation_defaults
@@ -214,14 +214,15 @@ class ArenaService:
         # conversation uses, so both paths read files exactly once, the same way.
         attachments = await run_in_threadpool(resolve_attachments, payload.attachments)
 
+        # The notices open the answer, each with the kind the panel
+        # translates it from (#764), as a conversation's do.
         response = ""
+        notices = attachment_notice_answers(attachments)
         if payload.images and supports_vision is not True:
-            response += IMAGES_IGNORED_NOTICE
-            yield _line({"t": "answer", "text": IMAGES_IGNORED_NOTICE})
-        attachment_notice = build_attachment_notice(attachments)
-        if attachment_notice:
-            response += attachment_notice
-            yield _line({"t": "answer", "text": attachment_notice})
+            notices.insert(0, images_ignored_answer())
+        for notice in notices:
+            response += notice["text"]
+            yield _line(notice)
         # ``aclosing``: whenever THIS generator is closed, the runner is closed
         # with it, inside the guard. Starlette never closes a body iterator
         # itself: a disconnect noticed while ``send()`` is in progress leaves

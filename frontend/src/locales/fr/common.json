@@ -96,6 +96,11 @@
   "fileReasons": {
     "unreadable": "endommagé, protégé par un mot de passe, ou d'un autre format que celui qu'indique son extension",
     "empty": "aucun texte",
-    "pending_vision": "aucun texte extractible (un scan ou une image), et la reconnaissance de texte n'est pas encore incluse"
+    "pending_vision": "aucun texte extractible (un scan ou une image), et la reconnaissance de texte n'est pas encore incluse",
+    "missing": "introuvable à cet emplacement",
+    "unsupported": "type de fichier non pris en charge",
+    "failed": "l'application n'a pas pu en extraire le texte",
+    "empty_folder": "aucun document pris en charge dans ce dossier",
+    "too_many": "seuls les {{limit}} premiers fichiers ont été joints"
   }
 }

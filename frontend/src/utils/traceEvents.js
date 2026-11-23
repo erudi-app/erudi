@@ -10,7 +10,10 @@
 // A failed turn also holds {"t":"error_detail","text","request_id"} (#615): the
 // cleaned cause, shown under the red headline. A curated turn holds
 // {"t":"curated_error","kind","params"} (#690): what its sentence is
-// translated from (utils/curatedTurns.js).
+// translated from (utils/curatedTurns.js). The notes that open an answer (an
+// image or an attachment the model did not get in full) each hold
+// {"t":"notice","kind","params","text"} (#764), what they are translated from
+// (utils/answerNotices.js).
 
 const STRIP_KINDS = new Set(["thinking", "tool_call", "tool_result"]);
 
@@ -55,13 +58,23 @@ export function curatedErrorOf(trace) {
   );
 }
 
+const isNotice = (e) => isEvent(e) && e.t === "notice" && typeof e.kind === "string";
+
+/** The notes that open an answer (#764), in order:
+ * {"t":"notice","kind","params","text"} each. */
+export function answerNoticesOf(trace) {
+  return Array.isArray(trace) ? trace.filter(isNotice) : [];
+}
+
 /** What an error turn keeps of its trace: its compactions (checkpointed before
- * the model call failed), the cause of its failure and the kind of a curated
- * one, or nothing. */
+ * the model call failed), the cause of its failure, the kind of a curated
+ * one and its notices, or nothing. */
 export function errorTurnTrace(trace) {
   if (!Array.isArray(trace)) {
     return null;
   }
-  const kept = trace.filter((e) => isCompactionDone(e) || isErrorDetail(e) || isCuratedError(e));
+  const kept = trace.filter(
+    (e) => isCompactionDone(e) || isErrorDetail(e) || isCuratedError(e) || isNotice(e)
+  );
   return kept.length > 0 ? kept : null;
 }

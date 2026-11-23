@@ -9,6 +9,9 @@ A thin transverse layer (consumed by ``domains/conversations`` and
     structured events the services frame as NDJSON.
   - ``curated_turns`` — the app's own sentences for a turn it could not answer
     normally, each with the kind and numbers the interface translates it from.
+  - ``answer_notices`` — the notes that open an answer (an image or an attached
+    file the model did not get in full), each with the kind the interface
+    translates it from.
   - ``middleware`` — per-turn request-time middleware (KB merge, image/tool-result
     hygiene), imported lazily by the runner so LangChain stays out of boot (#160).
   - ``prompts`` — size-adaptive system prompt construction.

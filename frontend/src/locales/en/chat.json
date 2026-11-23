@@ -327,6 +327,12 @@
     "empty_answer_length": "Generation stopped during reasoning, before an answer was written. Send a follow-up asking for the final answer directly, or lower the reasoning effort.",
     "empty_answer_stop": "The model finished its turn without writing an answer. Send a follow-up asking it to continue."
   },
+  "notices": {
+    "images_ignored": "This model doesn't support images — your image was ignored.",
+    "attachments_unreadable": "Some attachments could not be read: {{files}}.",
+    "attachments_truncated": "Attached content was shortened to fit this model's context: {{files}}."
+  },
+  "noticeFile": "{{name}} ({{reason}})",
   "memoryWarning": {
     "bound": "Your computer's memory limits this conversation: the model and this conversation together take about {{size}}, nearly all the room memory allows. Start a new conversation, send less at once, or switch to a smaller model.",
     "pressure": "Your computer's memory is under pressure: this conversation will be summarized sooner to keep things fluid.",
