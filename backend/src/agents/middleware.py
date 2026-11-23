@@ -268,8 +268,8 @@ def past_tool_result_ids(messages) -> frozenset:
     (mlx_vlm's kimi_k2 parser emits ``functions.<name>:0``) reuses the same
     call id every turn, while message ids are unique once
     ``_ensure_message_ids`` ran. The compaction counter designates past
-    results through this set, so it counts any list LangChain hands it --
-    suffixes, the reversed pool of ``trim_messages``, partial copies -- as
+    results through this set, so it counts any list it is handed --
+    suffixes, the summarizer's bounded pool, partial copies -- as
     sent, without knowing where the list came from.
     """
     messages = list(messages)
