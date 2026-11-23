@@ -579,7 +579,7 @@ One database, three tenants:
 - **Message** — individual messages (conversation_id, sender, content, starred)
 - **KnowledgeBase** — KB metadata and status
 - **KnowledgeDocument** — one row per ingested file, with its SHA-256 for dedup and a
-  status (`ingested`, `empty`, `pending_vision`, …)
+  status (`active`, `empty`, `pending_vision`, `unreadable`, …)
 - **KBJob** — ingestion jobs
 - **DownloadJob** — download jobs (status, progress, total bytes)
 - **HardwareProfile** — detected hardware and its performance scores

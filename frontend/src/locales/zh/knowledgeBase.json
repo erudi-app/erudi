@@ -22,8 +22,8 @@
       "partialCreated_other": "助手已创建，但有 {{count}} 个文件无法建立索引：{{files}}。原因请见“诊断信息”页面。",
       "partialUpdated_one": "知识库已更新，但有 {{count}} 个文件无法建立索引：{{files}}。原因请见“诊断信息”页面。",
       "partialUpdated_other": "知识库已更新，但有 {{count}} 个文件无法建立索引：{{files}}。原因请见“诊断信息”页面。",
-      "moreFiles_one": "等另外 {{count}} 个",
-      "moreFiles_other": "等另外 {{count}} 个",
+      "moreFiles_one": "另外 {{count}} 个",
+      "moreFiles_other": "另外 {{count}} 个",
       "create": "创建助手",
       "creating": "正在创建助手..."
     },
@@ -32,6 +32,11 @@
       "duplicateName": "已存在名为“{{name}}”的模型。请为助手选择另一个名称。",
       "failedFiles_one": "有 {{count}} 个文件无法建立索引：{{files}}。原因请见“诊断信息”页面。",
       "failedFiles_other": "有 {{count}} 个文件无法建立索引：{{files}}。原因请见“诊断信息”页面。"
+    },
+    "files": {
+      "group": "{{files}}（{{reason}}）",
+      "notIndexed_one": "有 {{count}} 个文件未建立索引：{{files}}。",
+      "notIndexed_other": "有 {{count}} 个文件未建立索引：{{files}}。"
     }
   },
   "confirm": {
@@ -48,7 +53,9 @@
       "startFailedGeneric": "无法开始创建助手",
       "unknownDetail": "未知错误",
       "failedUnexpectedly": "助手创建意外失败",
-      "statusCheckFailed": "创建助手时发生错误。请重试或联系 Erudi 团队。"
+      "statusCheckFailed": "创建助手时发生错误。请重试或联系 Erudi 团队。",
+      "nothingIndexed_one": "无法从您添加的文件中索引任何内容。",
+      "nothingIndexed_other": "无法从您添加的 {{count}} 个文件中索引任何内容。"
     }
   },
   "upload": {

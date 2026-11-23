@@ -333,3 +333,133 @@ class TestRouting:
         path = tmp_path / "NOTES.TXT"
         path.write_text("contenu", encoding="utf-8")
         assert DocumentReader().read(path).status == "active"
+
+
+# ---------------------------------------------------------------------------
+# A file that is not what its extension says (#752): the user's file, not a bug.
+# ---------------------------------------------------------------------------
+
+
+def _write_encrypted_pdf(path):
+    """A PDF locked by a user password (RC4: no extra dependency to write it)."""
+    from pypdf import PdfWriter
+
+    writer = PdfWriter()
+    writer.add_blank_page(width=100, height=100)
+    writer.encrypt("secret", algorithm="RC4-128")
+    with path.open("wb") as handle:
+        writer.write(handle)
+
+
+def _write_zip_without_package_parts(path):
+    """A real zip renamed to .docx/.xlsx: no [Content_Types].xml inside."""
+    import zipfile
+
+    with zipfile.ZipFile(path, "w") as archive:
+        archive.writestr("notes.txt", "not an Office package")
+
+
+def _write_renamed_text(path):
+    path.write_text("a text file renamed", encoding="utf-8")
+
+
+def _write_workbook(path):
+    """A real Excel workbook, saved under whatever name the test gives it."""
+    import openpyxl
+
+    workbook = openpyxl.Workbook()
+    workbook.active["A1"] = "Budget"
+    workbook.save(str(path))
+
+
+def _write_word_document(path):
+    """A real Word document, saved under whatever name the test gives it."""
+    import docx
+
+    document = docx.Document()
+    document.add_paragraph("Compte rendu.")
+    document.save(str(path))
+
+
+def _write_macro_enabled_document(path):
+    """A .docm (macro-enabled Word document) renamed .docx: its main part is
+    declared with the macro-enabled content type, which python-docx refuses."""
+    import io
+    import zipfile
+
+    import docx
+
+    buffer = io.BytesIO()
+    docx.Document().save(buffer)
+    with zipfile.ZipFile(buffer) as zin, zipfile.ZipFile(path, "w") as zout:
+        for item in zin.infolist():
+            data = zin.read(item.filename)
+            if item.filename == "[Content_Types].xml":
+                data = data.replace(
+                    b"wordprocessingml.document.main+xml",
+                    b"wordprocessingml.document.macroEnabled.main+xml",
+                )
+            zout.writestr(item, data)
+
+
+# (file name, builder, library exception the extractor converts). Shared with
+# the KB pipeline and attachment tests.
+INVALID_DOCUMENTS = [
+    pytest.param("broken.docx", _write_renamed_text, "PackageNotFoundError", id="docx-text"),
+    pytest.param("archive.docx", _write_zip_without_package_parts, "KeyError", id="docx-zip"),
+    pytest.param("broken.xlsx", _write_renamed_text, "BadZipFile", id="xlsx-text"),
+    pytest.param("budget.docx", _write_workbook, "ValueError", id="xlsx-renamed-docx"),
+    pytest.param(
+        "macros.docx", _write_macro_enabled_document, "ValueError", id="docm-renamed-docx"
+    ),
+    pytest.param("archive.xlsx", _write_zip_without_package_parts, "KeyError", id="xlsx-zip"),
+    pytest.param("report.xlsx", _write_word_document, "OSError", id="docx-renamed-xlsx"),
+    pytest.param("broken.pdf", _write_renamed_text, "PdfStreamError", id="pdf-text"),
+    pytest.param("blank.pdf", lambda p: p.write_bytes(b""), "EmptyFileError", id="pdf-empty"),
+    pytest.param("locked.pdf", _write_encrypted_pdf, "FileNotDecryptedError", id="pdf-encrypted"),
+]
+
+
+class TestUnreadableDocuments:
+    @pytest.mark.parametrize("name, build, library_error", INVALID_DOCUMENTS)
+    def test_an_invalid_file_raises_unreadable_document_error(
+        self, tmp_path, name, build, library_error
+    ):
+        from src.core.exceptions import UnreadableDocumentException
+
+        path = tmp_path / name
+        build(path)
+
+        with pytest.raises(UnreadableDocumentException) as caught:
+            DocumentReader().read(path)
+
+        # The reason names the format and the library's verdict, for the log.
+        assert library_error in caught.value.reason
+        assert type(caught.value.__cause__).__name__ == library_error
+
+    @pytest.mark.parametrize(
+        "name, target, error",
+        [
+            ("notes.docx", "docx.Document", ValueError("invalid literal for int()")),
+            ("budget.xlsx", "openpyxl.load_workbook", OSError("Permission denied")),
+        ],
+        ids=["docx-other-valueerror", "xlsx-other-oserror"],
+    )
+    def test_any_other_value_or_os_error_at_the_opening_is_not_hidden(
+        self, tmp_path, monkeypatch, name, target, error
+    ):
+        """Only the parser's own wording for "another Office file" is the file's
+        fault: any other ValueError or OSError stays what it is."""
+        import importlib
+
+        module_name, attribute = target.split(".")
+
+        def raise_it(*args, **kwargs):
+            raise error
+
+        monkeypatch.setattr(importlib.import_module(module_name), attribute, raise_it)
+        path = tmp_path / name
+        path.write_bytes(b"irrelevant")
+
+        with pytest.raises(type(error)):
+            DocumentReader().read(path)

@@ -50,21 +50,40 @@ export function KnowledgeBaseProvider({ children }) {
           clearInterval(intervalRef.current);
           setIsCreating(false);
           setShowSpinner(false);
+          // The files the job could not index: failed for an internal cause,
+          // or kept out by the user's own files (by reason).
+          const files = {
+            failedFiles: data.failed_files ?? [],
+            filesByReason: data.files_by_reason ?? {},
+          };
           if (data.status === "completed") {
-            // A job can complete with some files failed: name them to the page.
-            callbacksRef.current.onComplete?.({ failedFiles: data.failed_files ?? [] });
+            // A job can complete with some files not indexed: name them to the page.
+            callbacksRef.current.onComplete?.(files);
           } else {
-            // The backend logged the traceback under this job; this side
-            // records that the assistant the user asked for was not built.
-            log.error(`Knowledge base job failed for assistant ${assistantId}`, {
+            // Nothing indexed because of the user's files (a scan, an empty or
+            // an invalid file) is not a defect: a warning, off the bug badge.
+            // A file that failed for an internal cause has its own ERROR in
+            // backend.log. Any other failure: the backend logged the traceback
+            // under this job; this side records that the assistant the user
+            // asked for was not built.
+            const nothingIndexed = data.error_code === "nothing_indexed";
+            const record = nothingIndexed ? log.warn : log.error;
+            record(`Knowledge base job failed for assistant ${assistantId}`, {
               error: data.error_message || null,
+              code: data.error_code || null,
             });
-            const errorMsg =
-              data.error_message || t("knowledgeBase:creation.errors.failedUnexpectedly");
+            // The backend's text is English and stays in the record; the
+            // screen gets the interface language's.
+            const fileCount =
+              files.failedFiles.length +
+              Object.values(files.filesByReason).reduce((sum, names) => sum + names.length, 0);
+            const errorMsg = nothingIndexed
+              ? t("knowledgeBase:creation.errors.nothingIndexed", { count: fileCount })
+              : data.error_message || t("knowledgeBase:creation.errors.failedUnexpectedly");
             setErrorMessage(errorMsg);
             // The names ride along: when every file failed, they are the part
             // of the story the message alone does not tell.
-            callbacksRef.current.onError?.(errorMsg, { failedFiles: data.failed_files ?? [] });
+            callbacksRef.current.onError?.(errorMsg, files);
           }
         }
       } catch (err) {

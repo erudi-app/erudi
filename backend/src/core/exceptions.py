@@ -17,6 +17,9 @@ Exception Hierarchy:
     ├── GenerationTimeoutException (504, GENERATION_TIMEOUT)
     ├── KnowledgeBaseNotFoundException (404, KB_NOT_FOUND)
     ├── KnowledgeBaseCorruptedException (500, KB_CORRUPTED)
+    ├── EmbeddingModelMissingException (409, EMBEDDING_MODEL_MISSING)
+    ├── NothingIndexedException (422, NOTHING_INDEXED)
+    ├── UnreadableDocumentException (422, DOCUMENT_UNREADABLE)
     ├── ConversationNotFoundException (404, CONVERSATION_NOT_FOUND)
     ├── MessageNotFoundException (404, MESSAGE_NOT_FOUND)
     ├── InsufficientMemoryException (507, INSUFFICIENT_MEMORY)
@@ -598,6 +601,97 @@ class EmbeddingModelMissingException(AppBaseException):
             status_code=status.HTTP_409_CONFLICT,
             erudi_code="EMBEDDING_MODEL_MISSING",
             trace=trace,
+        )
+
+
+# The per-file outcomes that are the user's files, not the app: a scan or an
+# image without a text layer, a file with no text, a file that is not what its
+# extension says. Shared with the job status route, which names each file
+# under its reason.
+USER_FILE_REASONS = ("pending_vision", "empty", "unreadable")
+
+
+class NothingIndexedException(AppBaseException):
+    """Exception raised when a Knowledge Base job added nothing searchable.
+
+    Every file of the job was skipped or failed, and none was a duplicate of
+    content already in the KB. The job fails, so the user sees it; whether
+    it is a defect depends on why. ``counts`` holds the per-outcome counts
+    (``failed`` plus every key of ``USER_FILE_REASONS``): when no file
+    ``failed`` the user's files are the whole cause, and the task boundary
+    records the outcome at INFO instead of ERROR. It never ends a request
+    (see ``UnreadableDocumentException`` for its status).
+
+    Examples:
+        from src.core.exceptions import NothingIndexedException
+        raise NothingIndexedException({"failed": 0, "empty": 1, "pending_vision": 0,
+                                       "unreadable": 0})
+
+    """
+
+    def __init__(self, counts: dict[str, int]):
+        """Initialize exception for a job that indexed nothing.
+
+        Args:
+            counts: Files per outcome (``failed``, ``empty``,
+                ``pending_vision``, ``unreadable``); a missing key is 0.
+
+        """
+        self.counts = {key: counts.get(key, 0) for key in ("failed", *USER_FILE_REASONS)}
+        super().__init__(
+            message=(
+                f"No searchable content could be indexed "
+                f"({self.counts['failed']} failed, {self.counts['empty']} empty, "
+                f"{self.counts['pending_vision']} pending vision, "
+                f"{self.counts['unreadable']} unreadable)."
+            ),
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            erudi_code="NOTHING_INDEXED",
+        )
+
+    @property
+    def has_internal_failures(self) -> bool:
+        """True when a file failed for a cause that is not the user's file."""
+        return self.counts["failed"] > 0
+
+
+class UnreadableDocumentException(AppBaseException):
+    """Exception raised when a file is not a valid document of its type.
+
+    Raised by an extractor in place of the parser's own exception when that
+    exception means the user's file is the cause (a text renamed ``.docx``, a
+    workbook renamed ``.docx``, a damaged archive, a PDF locked by a
+    password), never for a failure of the app's own code. The Knowledge Base
+    job and the attachment reader catch it and record a skipped file, at
+    WARNING and without a traceback (docs/logging.md, "Logging rules").
+
+    Like ``NothingIndexedException``, it never ends a request: both are
+    caught inside the backend. The base class always carries a status and a
+    code (its defaults, 500 / INTERNAL_SERVER_ERROR, would misname a user's
+    file), so both declare the 422 of what they are, should one ever escape.
+
+    Attributes:
+        reason: What is wrong with the file, ASCII, for the log line, e.g.
+            ``not a valid Word file (PackageNotFoundError)``.
+
+    Examples:
+        from src.core.exceptions import UnreadableDocumentException
+        raise UnreadableDocumentException("not a valid PDF (PdfStreamError)")
+
+    """
+
+    def __init__(self, reason: str):
+        """Initialize exception for an invalid document.
+
+        Args:
+            reason: What is wrong with the file, for the log line.
+
+        """
+        self.reason = reason
+        super().__init__(
+            message=reason,
+            status_code=status.HTTP_422_UNPROCESSABLE_CONTENT,
+            erudi_code="DOCUMENT_UNREADABLE",
         )
 
 

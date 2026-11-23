@@ -92,5 +92,10 @@
     "downloadBody": "Changer de moteur d'inférence redémarre le moteur d'Erudi, ce qui annule le téléchargement du modèle en cours. Il faudra le relancer depuis le début.",
     "cancelAndSwitch": "Annuler le téléchargement et changer",
     "keepDownloading": "Continuer le téléchargement"
+  },
+  "fileReasons": {
+    "unreadable": "endommagé, protégé par un mot de passe, ou d'un autre format que celui qu'indique son extension",
+    "empty": "aucun texte",
+    "pending_vision": "aucun texte extractible (un scan ou une image), et la reconnaissance de texte n'est pas encore incluse"
   }
 }

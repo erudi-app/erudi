@@ -10,9 +10,11 @@ Fixtures are built at test time in ``tmp_path`` -- the convention already used
 by ``test_ingestion_reader`` -- so no binary blobs are checked into the tree.
 """
 
+import logging
+
 import pytest
 
-from tests.test_ingestion_reader import _minimal_pdf
+from tests.test_ingestion_reader import INVALID_DOCUMENTS, _minimal_pdf
 
 from src.utils.attachment_utils import (
     ATTACHMENT_TOKEN_BUDGET,
@@ -263,7 +265,7 @@ class TestPerFileFailures:
 
         assert [issue.reason for issue in resolved.issues] == ["empty"]
 
-    def test_an_extraction_error_is_reported_not_raised(self, tmp_path, monkeypatch):
+    def test_an_extraction_error_is_reported_not_raised(self, tmp_path, monkeypatch, caplog):
         path = _write_txt(tmp_path)
 
         def _boom(self, _path):
@@ -271,10 +273,36 @@ class TestPerFileFailures:
 
         monkeypatch.setattr("src.ingestion.reader.DocumentReader.read", _boom)
 
-        resolved = resolve_attachments([str(path)])
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            resolved = resolve_attachments([str(path)])
+
+        assert [issue.reason for issue in resolved.issues] == ["failed"]
+        assert "could not be read" in resolved.block
+        # Our own extractor failing is a defect: ERROR, with the traceback.
+        (error,) = [r for r in caplog.records if r.levelno >= logging.ERROR]
+        assert error.exc_info
+
+    @pytest.mark.parametrize("name, build, library_error", INVALID_DOCUMENTS)
+    def test_an_invalid_document_attachment_is_a_warning(
+        self, tmp_path, caplog, name, build, library_error
+    ):
+        """The user's file is not what its extension says (#752): reported as
+        unreadable, one WARNING without a traceback, nothing at ERROR."""
+        path = tmp_path / name
+        build(path)
+
+        with caplog.at_level(logging.INFO, logger="erudi"):
+            resolved = resolve_attachments([str(path)])
 
         assert [issue.reason for issue in resolved.issues] == ["unreadable"]
-        assert "could not be read" in resolved.block
+        assert [r.getMessage() for r in caplog.records if r.levelno >= logging.ERROR] == []
+        (warning,) = [
+            r
+            for r in caplog.records
+            if r.levelno == logging.WARNING and name in r.getMessage() and r.name == "erudi"
+        ]
+        assert library_error in warning.getMessage()
+        assert not warning.exc_info
 
     def test_one_bad_file_does_not_stop_the_good_one(self, tmp_path):
         good = _write_txt(tmp_path, "good.txt", "Readable body here.")

@@ -1,6 +1,13 @@
 import { describe, it, expect, beforeEach } from "vitest";
 import i18n from "./index";
-import { formatNumber, formatFileSize, formatDate, formatPercent, currentLocale } from "./format";
+import {
+  formatNumber,
+  formatFileSize,
+  formatDate,
+  formatPercent,
+  formatList,
+  currentLocale,
+} from "./format";
 
 describe("format helpers follow the active language", () => {
   beforeEach(async () => {
@@ -49,5 +56,15 @@ describe("format helpers follow the active language", () => {
     expect(formatNumber(undefined)).toBe("");
     expect(formatFileSize(null)).toBe("");
     expect(formatDate("not a date")).toBe("");
+  });
+
+  it("joins a list with the active language's separators", async () => {
+    const files = ["a.pdf", "b.txt", "c.docx"];
+    expect(formatList(files)).toBe("a.pdf, b.txt, and c.docx");
+    await i18n.changeLanguage("fr");
+    expect(formatList(files)).toBe("a.pdf, b.txt et c.docx");
+    await i18n.changeLanguage("zh");
+    expect(formatList(files)).toBe("a.pdf、b.txt和c.docx");
+    expect(formatList(["a.pdf"])).toBe("a.pdf");
   });
 });

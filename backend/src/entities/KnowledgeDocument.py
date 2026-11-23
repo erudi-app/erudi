@@ -17,6 +17,9 @@ Statuses:
     - ``failed``: ingestion raised; error surfaced via the KB job.
     - ``pending_vision``: image or scanned PDF accepted but not yet readable
       (OCR/VLM tiers land in a later release); zero chunks indexed.
+    - ``unreadable``: the file is not a valid document of its type (a text
+      renamed ``.docx``, a damaged archive, a PDF locked by a password); the
+      user's file is the cause, zero chunks indexed.
 """
 
 from sqlalchemy import BigInteger, Column, DateTime, ForeignKey, Integer, String, UniqueConstraint
@@ -25,7 +28,7 @@ from sqlalchemy.sql import func
 
 from src.database.core import Base
 
-ALLOWED_STATUSES = ("indexing", "active", "empty", "failed", "pending_vision")
+ALLOWED_STATUSES = ("indexing", "active", "empty", "failed", "pending_vision", "unreadable")
 
 
 class KnowledgeDocument(Base):

@@ -133,12 +133,12 @@ class KB_Repository:
         db.commit()
         logger.info(f"Deleted KnowledgeDocument {document.id} ({document.name})")
 
-    def list_failed_documents_since(
+    def list_documents_since(
         self, db: Session, kb_id: int, since: datetime
     ) -> list[KnowledgeDocument]:
-        """Documents of one KB whose ingestion failed, created at or after ``since``.
+        """Documents of one KB created at or after ``since``, whatever their status.
 
-        A KBJob has no column for its failures: the documents it created are
+        A KBJob has no column for its files: the documents it created are
         the ones stamped from the job's start on, so ``since`` is the job's
         ``created_at``. Oldest first, the order the files were ingested.
         """
@@ -146,7 +146,6 @@ class KB_Repository:
             db.query(KnowledgeDocument)
             .filter(
                 KnowledgeDocument.kb_id == kb_id,
-                KnowledgeDocument.status == "failed",
                 KnowledgeDocument.created_at >= since,
             )
             .order_by(KnowledgeDocument.id)
@@ -186,7 +185,7 @@ class KB_Repository:
         document: KnowledgeDocument,
         status: str,
     ) -> KnowledgeDocument:
-        """Update a document's ingestion status (active/failed/pending_vision)."""
+        """Update a document's ingestion status (see ``KnowledgeDocument``)."""
         document.status = status
         db.commit()
         db.refresh(document)

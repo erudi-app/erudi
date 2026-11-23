@@ -69,7 +69,8 @@ export default function ErrorModal({ errorMessage, onClose }) {
                 {/* Error message */}
                 <div className="mb-6">
                   <div className="bg-red-500/10 border border-red-400/20 rounded-2xl p-4">
-                    <p className="text-sm text-red-200">{errorMessage}</p>
+                    {/* pre-line: a message made of several parts keeps its line breaks. */}
+                    <p className="text-sm text-red-200 whitespace-pre-line">{errorMessage}</p>
                   </div>
                 </div>
 

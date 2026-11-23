@@ -29,7 +29,7 @@ from pathlib import Path
 from typing import Iterable, Optional, Sequence
 
 from src.agents.token_accounting import counter_head, counter_text_tokens
-from src.core.exceptions import InvalidInputException
+from src.core.exceptions import InvalidInputException, UnreadableDocumentException
 from src.core.logging import logger
 from src.ingestion.reader import IMAGE_EXTENSIONS, DocumentReader
 
@@ -82,7 +82,8 @@ _REASON_TEXT = {
         "is not bundled yet"
     ),
     "empty": "it holds no text",
-    "unreadable": "the extractor failed on it",
+    "unreadable": "it is damaged, protected by a password, or not the format its extension says",
+    "failed": "the app could not extract its text",
 }
 
 
@@ -92,7 +93,7 @@ class AttachmentIssue:
 
     name: str
     path: str
-    # One of: missing, unsupported, pending_vision, empty, unreadable,
+    # One of: missing, unsupported, pending_vision, empty, unreadable, failed,
     # too_many, empty_folder.
     reason: str
     message: str
@@ -215,9 +216,15 @@ def _read_one(reader: DocumentReader, path: Path) -> tuple[str, Optional[str]]:
         # own and tells the user, so a WARNING with no traceback is the record.
         logger.warning(f"Attachment {path.name}: unsupported document type, skipped")
         return "", "unsupported"
-    except Exception:
-        logger.exception(f"Attachment {path.name}: extraction failed")
+    except UnreadableDocumentException as e:
+        # The user's file is not what its extension says (a text renamed
+        # .docx, a PDF locked by a password): the same WARNING, no traceback.
+        logger.warning(f"Attachment {path.name}: skipped: {e.reason}")
         return "", "unreadable"
+    except Exception:
+        # Anything else is the extractor's own failure: a defect.
+        logger.exception(f"Attachment {path.name}: extraction failed")
+        return "", "failed"
 
     if document.status == "pending_vision":
         logger.info(f"Attachment {path.name}: no text layer (pending_vision), skipped")

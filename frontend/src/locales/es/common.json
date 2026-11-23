@@ -92,5 +92,10 @@
     "downloadBody": "Cambiar el motor de inferencia reinicia el motor de Erudi, lo que cancela la descarga del modelo en curso. Tendrás que empezarla de nuevo desde el principio.",
     "cancelAndSwitch": "Cancelar la descarga y cambiar",
     "keepDownloading": "Seguir descargando"
+  },
+  "fileReasons": {
+    "unreadable": "dañado, protegido con contraseña o con un formato distinto del que indica su extensión",
+    "empty": "sin texto",
+    "pending_vision": "sin texto extraíble (un escaneo o una imagen), y el reconocimiento de texto aún no está incluido"
   }
 }
