@@ -1151,6 +1151,16 @@ class BaseEngine(ABC, metaclass=EngineMeta):
                 )
 
     @classmethod
+    def serves_artifact_under(cls, link: Path) -> bool:
+        """True when the loaded model runs on weights at or under ``link``.
+
+        False by default: an engine that does not load from a folder on disk
+        holds nothing a delete could pull out from under it. The child-server
+        engines override it.
+        """
+        return False
+
+    @classmethod
     def cleanup(cls) -> None:
         """Free model and tokenizer from memory, reset state.
 

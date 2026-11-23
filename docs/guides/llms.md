@@ -302,6 +302,13 @@ The base is deleted, the assistants **remain** with a dangling link (`weights_av
 `false`), and every conversation bound to the base has its `llm_id` nulled server-side rather than
 being deleted.
 
+A delete that goes through first unloads the resident model it would strand. For a base model
+that is the loaded model whether it was loaded under the base's own id or under a dependent
+assistant's, since the engine matches the weights folder the child runs on
+(`BaseEngine.serves_artifact_under`). Deleting an assistant unloads it only when it is the
+loaded model: the files stay, so a loaded base stays loaded. A refused delete (409) unloads
+nothing.
+
 ### Rebinding an orphaned assistant
 
 ```bash
