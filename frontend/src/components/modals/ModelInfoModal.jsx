@@ -5,6 +5,7 @@ import { motion, AnimatePresence } from "framer-motion";
 import { X, Download, Users, Heart, Calendar, Tag, ChevronDown, BadgeCheck } from "lucide-react";
 import { hasNoPublisherRecommendation } from "../../utils/samplingDefaults";
 import { displayModelSize } from "../../utils/modelSize";
+import { formatNumber } from "../../i18n/format";
 
 /**
  * Props:
@@ -152,7 +153,7 @@ export default function ModelInfoModal({
                             </span>
                             <span className="text-gray-200 ml-2">
                               {t("models:info.contextWindowTokens", {
-                                tokens: modelInfo.context_window,
+                                tokens: formatNumber(modelInfo.context_window),
                               })}
                             </span>
                           </div>
@@ -164,7 +165,7 @@ export default function ModelInfoModal({
                             </span>
                             <span className="text-gray-200 ml-2">
                               {t("models:info.contextWindowTokens", {
-                                tokens: modelInfo.allocated_context_window,
+                                tokens: formatNumber(modelInfo.allocated_context_window),
                               })}
                             </span>
                           </div>

@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import i18n from "../i18n";
+import { formatNumber } from "../i18n/format";
 import { formatBytes } from "./formatBytes";
 
 // Human-readable size for the memory warning (1.1.2): binary units, one
@@ -24,5 +26,22 @@ describe("formatBytes", () => {
     expect(formatBytes(undefined)).toBeNull();
     expect(formatBytes(-5)).toBeNull();
     expect(formatBytes(NaN)).toBeNull();
+  });
+
+  it("writes the number and the unit in the interface language", async () => {
+    await i18n.changeLanguage("fr");
+    try {
+      expect(formatBytes(4 * 1024 ** 3)).toBe(
+        `${formatNumber(4, { minimumFractionDigits: 1 })} Go`
+      );
+      expect(formatBytes(4.75 * 1024 ** 3)).toBe(
+        `${formatNumber(4.7, { minimumFractionDigits: 1 })} Go`
+      );
+      expect(formatBytes(12 * 1024 ** 2)).toBe(`${formatNumber(12)} Mo`);
+      expect(formatBytes(2048)).toBe(`${formatNumber(2)} Ko`);
+      expect(formatBytes(4 * 1024 ** 3)).toContain("4,0");
+    } finally {
+      await i18n.changeLanguage("en");
+    }
   });
 });

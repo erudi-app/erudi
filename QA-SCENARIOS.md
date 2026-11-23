@@ -554,6 +554,7 @@ the card only appears where the setting does something.*
 - [ ] When I open Settings, then an **Application language** card offers English, Français, Español and 中文, each named in its own language.
 - [ ] When I pick another language, then the **whole interface** switches immediately — every screen, the live download widget included — with no English left behind and no reload.
 - [ ] When a language is active, then numbers, percentages, sizes and dates follow it (French shows `10,8 %` and `31 Go`, not `10.8 %` and `31GB`).
+- [ ] When I download a model, then the progress widget's total (and the transferred amount) uses the same decimal size the model card shows (a card at `2,3 Go` gives `… sur 2,3 Go` in the widget), in the interface language. In the model sheet, the context window and the allocated window use the language's thousands separator (`40 960 tokens` in French, not `40960`). The delete dialog's "frees" size is in the interface language (`0,7 Go`, never `0.7 GB` in French).
 - [ ] When I relaunch the app, then it comes back in the language I chose (the backend value wins over the local mirror).
 - [ ] When it is my **first** launch, then the language is derived from my system locale.
 - [ ] When I change the language, then the **native application menu** (Help → Clear All Data…) is rebuilt in that language.
