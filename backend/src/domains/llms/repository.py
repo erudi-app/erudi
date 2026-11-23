@@ -232,6 +232,29 @@ class Llm_Repository:
             .all()
         )
 
+    def get_weight_siblings(self, llm: Llm) -> List[Llm]:
+        """The other local rows that share this model's weights folder
+        (COPIED ``link``, #209), the base model first.
+
+        The rows a shared inference child can be re-keyed to when ``llm`` is
+        deleted while the weights survive (#755). Empty when the model has no
+        link, or when nothing else points at it (an orphaned assistant).
+
+        Args:
+            llm: The model whose weight siblings to find.
+
+        Returns:
+            List[Llm]: Siblings ordered base first, then by id (possibly empty).
+        """
+        if not llm.link:
+            return []
+        return (
+            self.db.query(Llm)
+            .filter(Llm.id != llm.id, Llm.local == 1, Llm.link == llm.link)
+            .order_by(Llm.is_attached_to_kb.asc(), Llm.id)
+            .all()
+        )
+
     def count_conversations(self, llm_id: int) -> int:
         """Number of conversations currently bound to this model, the
         ephemeral ones (#428) left out: the user never finds them again.

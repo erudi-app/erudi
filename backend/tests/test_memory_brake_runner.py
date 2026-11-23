@@ -100,9 +100,9 @@ class _BrakeEngine(BaseEngine):
         return llm_id in cls.pending
 
     @classmethod
-    def take_idle_reload(cls, llm_id):
+    def take_idle_reload(cls, llm_id, link=None):
         cls.calls.append(("take", llm_id))
-        return super().take_idle_reload(llm_id)
+        return super().take_idle_reload(llm_id, link)
 
     @classmethod
     def begin_memory_window(cls):

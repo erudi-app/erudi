@@ -194,7 +194,7 @@ class CUDA_Engine(BaseLlamaCppEngine):
         * ``ERUDI_CTX`` pinned: ``-c`` verbatim, ``-ngl -1``, never resized;
         * a load: ``-c`` sized for a full offload against the GPU's memory
           now (``cuda_memory.window_for_vram``), folded with ``brake_cap`` or
-          the cap remembered for ``alias``, ``-ngl -1``;
+          the cap remembered for the artifact, ``-ngl -1``;
         * the floor does not fit, the GGUF cannot be modelled (MLA) or read,
           or NVML is unreadable: no ``-c``, ``-ngl -1`` -- fit sizes the
           window and places the layers -- and the brake off

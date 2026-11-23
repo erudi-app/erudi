@@ -39,6 +39,7 @@ class _FakeEngine:
         self._model_path = model_path
         self.cleanup_calls = 0
         self.cleaned_before_rmtree = None
+        self.adoptions = []
 
     @contextlib.asynccontextmanager
     async def generation_guard(self):
@@ -49,6 +50,16 @@ class _FakeEngine:
         if self._model_path is None:
             return False
         return Path(self._model_path).resolve().is_relative_to(Path(link).resolve())
+
+    def adopt_loaded_model(self, llm_id, link):
+        """Same contract as ``BaseChatServerEngine.adopt_loaded_model``."""
+        if str(self._model_id) == str(llm_id) or link is None:
+            return False
+        if not self.serves_artifact_under(link):
+            return False
+        self._model_id = llm_id
+        self.adoptions.append(llm_id)
+        return True
 
     def cleanup(self):
         self.cleanup_calls += 1
@@ -872,6 +883,44 @@ class TestLLM_Endpoints:
 
         assert response.status_code == status.HTTP_200_OK
         assert engine.cleanup_calls == 0
+
+    def test_delete_assistant_rekeys_the_shared_child_to_its_base(
+        self, client, test_db_session, tmp_path
+    ):
+        """The child answered the assistant last, so it is keyed to the id
+        being deleted -- but the weights are the base's and survive (#755):
+        the child stays loaded, re-keyed to the base, instead of being
+        stopped under the one row that still owns it."""
+        from src.entities.KnowledgeBase import KnowledgeBase
+
+        model_dir = tmp_path / "models" / "384"
+        model_dir.mkdir(parents=True)
+        base = Llm(name="Base", local=1, type="qwen", link=str(model_dir), param_size=4.0)
+        test_db_session.add(base)
+        kb = KnowledgeBase()
+        test_db_session.add(kb)
+        test_db_session.flush()
+        assistant = Llm(
+            name="Assistant",
+            local=1,
+            type="qwen",
+            link=str(model_dir),
+            is_attached_to_kb=True,
+            kb_id=kb.id,
+            param_size=4.0,
+        )
+        test_db_session.add(assistant)
+        test_db_session.commit()
+        base_id, assistant_id = base.id, assistant.id
+
+        engine = _FakeEngine(model_id=str(assistant_id), model_path=str(model_dir / "model.gguf"))
+        with patch("src.core.config.LLM_Engine", engine):
+            response = client.delete(f"/erudi/llms/{assistant_id}")
+
+        assert response.status_code == status.HTTP_200_OK
+        assert engine.cleanup_calls == 0
+        assert engine.adoptions == [base_id]
+        assert str(engine._model_id) == str(base_id)
 
     def test_delete_assistant_keeps_a_resident_base_loaded(self, client, test_db_session, tmp_path):
         """Deleting an assistant keeps the files, so the loaded base stays."""

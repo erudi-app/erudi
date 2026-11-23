@@ -55,8 +55,15 @@ class _Engine(BaseEngine):
     def loaded_child_for(cls, llm_id):
         return isinstance(cls._model, dict) and cls._model_id == llm_id
 
+    @classmethod
+    def loaded_child_serves(cls, llm_id, link=None):
+        # The child-server shape (#755): the id, or weights under the link.
+        return cls.loaded_child_for(llm_id) or (
+            isinstance(cls._model, dict) and link is not None and cls._model.get("weights") == link
+        )
 
-def _load(llm_id=7, window=8192, bound=None, estimate=False, static=None):
+
+def _load(llm_id=7, window=8192, bound=None, estimate=False, static=None, weights=None):
     _Engine._model = {
         "context_tokens": window,
         "memory_bound_tokens": bound,
@@ -65,6 +72,8 @@ def _load(llm_id=7, window=8192, bound=None, estimate=False, static=None):
     if static is not None:
         # The window Erudi sized at spawn, without the brake's cap.
         _Engine._model["static_window_tokens"] = static
+    if weights is not None:
+        _Engine._model["weights"] = weights
     _Engine._model_id = llm_id
 
 
@@ -218,6 +227,19 @@ async def test_another_loaded_model_is_not_this_conversations():
     usage = await _usage(_alternating(4, 100))
     assert usage["window"]["model_loaded"] is False
     assert usage["window"]["working"] == _TRAINED
+
+
+async def test_the_siblings_child_on_the_same_weights_is_this_conversations():
+    """The child was loaded under the base's id; this conversation's model is
+    its KB assistant on the same weights (#755). The window belongs to the
+    artifact, so the allocated window is the denominator -- no re-keying from
+    here (the gauge runs outside the generation lock)."""
+    _load(llm_id=99, window=4096, weights="/models/384")
+    usage = await _usage(_alternating(4, 100), llm=_llm(id=7, link="/models/384"))
+    assert usage["window"]["model_loaded"] is True
+    assert usage["window"]["allocated"] == 4096
+    assert usage["window"]["working"] == 4096
+    assert _Engine._model_id == 99
 
 
 async def test_loaded_the_allocated_window_is_the_denominator():

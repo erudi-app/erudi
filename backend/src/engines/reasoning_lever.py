@@ -177,7 +177,10 @@ def model_reasoning_lever(local_path: Union[str, Path, None], llm_id: Any = None
 
     ``llm_id`` identifies which model the caller is planning for, so the handle
     caps are only trusted when the child currently up is serving THAT model --
-    a turn planned for another one must not inherit its capabilities.
+    a turn planned for another one must not inherit its capabilities. The
+    capabilities belong to the artifact, so ``local_path`` is handed to the
+    engine too: a child keyed to a sibling id on the same weights (a KB
+    assistant and its base, #755) answers for both rows.
 
     Cached per (engine, path): the probe reads only template files, and the
     answer is stable for a given artifact, so a turn pays it at most once per
@@ -195,7 +198,7 @@ def model_reasoning_lever(local_path: Union[str, Path, None], llm_id: Any = None
     caps_probe = getattr(engine, "chat_template_caps", None) if engine else None
     if callable(caps_probe):
         try:
-            caps = caps_probe(llm_id)
+            caps = caps_probe(llm_id, link=local_path)
         except Exception:
             # A capability read must never sink a turn: fall through to the
             # probe, which answers from the artifact on disk.

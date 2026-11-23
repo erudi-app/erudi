@@ -866,7 +866,11 @@ async def test_a_manual_unload_keeps_the_window_memory_like_an_idle_reap(world):
     try:
         assert await CPU_Engine.unload(7) == 7
         assert CPU_Engine._model is None
-        assert CPU_Engine._idle_unload == {"model_id": 7, "reason": "manual"}
+        assert CPU_Engine._idle_unload == {
+            "model_id": 7,
+            "model_path": "/models/q.gguf",
+            "reason": "manual",
+        }
         assert "/models/q.gguf" in CPU_Engine._window_memory
         handle = _load(world)
         assert handle["context_tokens"] == 20_480

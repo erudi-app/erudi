@@ -127,6 +127,7 @@ def _reset_test_engine_state() -> None:
     _TestEngine._model_id = None
     _TestEngine._last_used = None
     _TestEngine._atexit_handler = None
+    _TestEngine._idle_unload = None
 
 
 @pytest.fixture(autouse=True)
@@ -830,3 +831,39 @@ class TestSharedWeightsChild:
         from src.engines.base_engine import BaseEngine
 
         assert BaseEngine.adopt_loaded_model("386", "/m") is False
+
+    def test_loaded_child_serves_answers_by_id_or_by_weights(self):
+        assert _TestEngine.loaded_child_serves("385", "/m") is False
+        self._load("385")
+        assert _TestEngine.loaded_child_serves("385") is True
+        assert _TestEngine.loaded_child_serves("386", "/m") is True
+        assert _TestEngine.loaded_child_serves("386", "/other") is False
+        assert _TestEngine.loaded_child_serves("386") is False
+        with patch.object(_TestEngine, "_proc_is_alive", return_value=False):
+            assert _TestEngine.loaded_child_serves("386", "/m") is False
+        # No re-keying: a read-only probe for callers outside the lock.
+        assert _TestEngine._model_id == "385"
+
+    def test_template_caps_follow_the_weights(self):
+        self._load("385")
+        _TestEngine._model["chat_template_caps"] = {"supports_reasoning_effort": True}
+        assert _TestEngine.chat_template_caps("385") == {"supports_reasoning_effort": True}
+        assert _TestEngine.chat_template_caps("386") == {}
+        assert _TestEngine.chat_template_caps("386", link="/m") == {
+            "supports_reasoning_effort": True
+        }
+        assert _TestEngine.chat_template_caps("386", link="/other") == {}
+
+    async def test_an_unload_record_answers_the_sibling_by_its_link(self):
+        self._load("385")
+        assert await _TestEngine.unload("385") == "385"
+        assert _TestEngine.take_idle_reload("999", link="/other") is None
+        assert _TestEngine.take_idle_reload("386", link="/m") == "manual"
+        # Consumed by the answer, like the id match.
+        assert _TestEngine.take_idle_reload("386", link="/m") is None
+
+    async def test_unload_accepts_the_sibling_id_through_its_link(self):
+        self._load("385")
+        assert await _TestEngine.unload("386", link="/m") == "386"
+        assert _TestEngine._model is None
+        assert _TestEngine.take_idle_reload("386", link="/m") == "manual"

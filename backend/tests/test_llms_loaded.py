@@ -129,7 +129,11 @@ def test_unload_frees_the_model_and_records_a_manual_reload(client, mock_llm):
     assert response.content == b""
     assert _Engine._model is None
     assert _Engine.cleanups == 1
-    assert _Engine._idle_unload == {"model_id": mock_llm.id, "reason": "manual"}
+    assert _Engine._idle_unload == {
+        "model_id": mock_llm.id,
+        "model_path": None,
+        "reason": "manual",
+    }
     assert client.get(LOADED).json() is None
 
 
@@ -171,7 +175,11 @@ def test_unload_accepts_a_sibling_id_on_the_same_weights(client, mock_llm, test_
     assert response.status_code == 204, response.text
     assert _Engine._model is None
     assert _Engine.cleanups == 1
-    assert _Engine._idle_unload == {"model_id": assistant.id, "reason": "manual"}
+    assert _Engine._idle_unload == {
+        "model_id": assistant.id,
+        "model_path": None,
+        "reason": "manual",
+    }
 
 
 def test_unload_of_another_model_on_other_weights_stays_a_409(client, mock_llm, test_db_session):

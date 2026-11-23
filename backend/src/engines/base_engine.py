@@ -373,7 +373,7 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         return None
 
     @classmethod
-    def chat_template_caps(cls, llm_id: Any = None) -> dict:
+    def chat_template_caps(cls, llm_id: Any = None, link: Any = None) -> dict:
         """What the CURRENTLY LOADED child reported about its chat template.
 
         llama.cpp engines stamp the server's ``chat_template_caps`` map on the
@@ -385,9 +385,15 @@ class BaseEngine(ABC, metaclass=EngineMeta):
 
         ``llm_id`` guards exactly that: capabilities belong to the artifact the
         child was spawned for, so a caller planning a turn for a DIFFERENT
-        model gets nothing rather than the loaded model's answers.
+        model gets nothing rather than the loaded model's answers -- unless
+        ``link`` says that model's weights ARE the loaded artifact (a KB
+        assistant and its base, #755): same artifact, same capabilities.
         """
-        if llm_id is not None and cls._model_id != llm_id:
+        if (
+            llm_id is not None
+            and cls._model_id != llm_id
+            and not (link is not None and cls.serves_artifact_under(Path(link)))
+        ):
             return {}
         model = cls._model
         if isinstance(model, dict):
@@ -1151,6 +1157,15 @@ class BaseEngine(ABC, metaclass=EngineMeta):
                     f"(model={cls._model_id}, held {held_ms:.0f}ms)"
                 )
 
+    @staticmethod
+    def _artifact_under(model_path: Any, link: Any) -> bool:
+        """Whether ``model_path`` (a resolved artifact) lies at or under
+        ``link``; False without both. Both sides are resolved; the comparison
+        is by path component, so ``/m/38`` does not claim ``/m/384``."""
+        if not model_path or not link:
+            return False
+        return Path(model_path).resolve().is_relative_to(Path(link).resolve())
+
     @classmethod
     def serves_artifact_under(cls, link: Path) -> bool:
         """True when the loaded model runs on weights at or under ``link``.
@@ -1160,6 +1175,17 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         engines override it.
         """
         return False
+
+    @classmethod
+    def loaded_child_serves(cls, llm_id: Any, link: Any = None) -> bool:
+        """Whether the loaded, live child serves ``llm_id``: by its id here
+        (``loaded_child_for`` on the engines that have one; nothing
+        otherwise). The child-server engines also answer True for a sibling
+        id whose ``link`` holds the child's weights (#755) -- the read-only
+        counterpart of ``adopt_loaded_model`` for callers outside the
+        generation lock (the context gauge), which must not re-key."""
+        probe = getattr(cls, "loaded_child_for", None)
+        return callable(probe) and bool(probe(llm_id))
 
     @classmethod
     def adopt_loaded_model(cls, llm_id: Any, link: Any) -> bool:
@@ -1232,11 +1258,19 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         failed cleanup's exception too.
         """
         unloaded_id = cls._model_id
+        # The handle's artifact path, read before cleanup() clears it: the
+        # record must answer a sibling row on the same weights too (#755).
+        handle = cls._model
+        unloaded_path = handle.get("model_path") if isinstance(handle, dict) else None
         task = asyncio.get_running_loop().create_task(asyncio.to_thread(cls.cleanup))
         cancelled = await wait_shielded(task)
         failure = None if task.cancelled() else task.exception()
         if not task.cancelled() and failure is None:
-            cls._idle_unload = {"model_id": unloaded_id, "reason": reason}
+            cls._idle_unload = {
+                "model_id": unloaded_id,
+                "model_path": str(unloaded_path) if unloaded_path else None,
+                "reason": reason,
+            }
         if cancelled:
             raise asyncio.CancelledError()
         if failure is not None:
@@ -1277,15 +1311,17 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         return unloaded_id
 
     @classmethod
-    def take_idle_reload(cls, llm_id: Any) -> Optional[str]:
+    def take_idle_reload(cls, llm_id: Any, link: Any = None) -> Optional[str]:
         """Why this turn reloads ``llm_id``, when an idle reap or a manual
         unload unloaded it: ``"idle"`` or ``"manual"``, else None.
 
         Returned once (the record is consumed) when the unload took
         ``llm_id`` and nothing is loaded. A record found while a model is
         loaded is stale (the title request of a new conversation reloaded it
-        first) and is dropped. Identity is ``llm.id``, as in
-        ``_should_not_reload_model``.
+        first) and is dropped. Identity is ``llm.id``, or -- like the
+        brake's record (#755) -- the unloaded artifact lying under ``link``:
+        a KB assistant reloads the weights the unload took from its base,
+        and says so too.
         """
         record = cls._idle_unload
         if not isinstance(record, dict):
@@ -1293,7 +1329,9 @@ class BaseEngine(ABC, metaclass=EngineMeta):
         if cls._model is not None:
             cls._idle_unload = None
             return None
-        if record.get("model_id") != llm_id:
+        if record.get("model_id") != llm_id and not cls._artifact_under(
+            record.get("model_path"), link
+        ):
             return None
         cls._idle_unload = None
         return record.get("reason")

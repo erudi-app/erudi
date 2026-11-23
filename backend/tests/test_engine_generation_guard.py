@@ -157,7 +157,11 @@ async def test_idle_reap_records_which_model_it_unloaded():
     try:
         await asyncio.wait_for(_GuardEngine._cleanup_tick(), timeout=5)
         assert _GuardEngine._model is None
-        assert _GuardEngine._idle_unload == {"model_id": "x", "reason": "idle"}
+        assert _GuardEngine._idle_unload == {
+            "model_id": "x",
+            "model_path": None,
+            "reason": "idle",
+        }
     finally:
         _reset()
 
@@ -197,10 +201,14 @@ def test_take_idle_reload_returns_the_reason_once_for_the_unloaded_model(reason)
 
 
 def test_take_idle_reload_is_none_for_another_model_and_keeps_the_record():
-    _GuardEngine._idle_unload = {"model_id": "x", "reason": "idle"}
+    _GuardEngine._idle_unload = {"model_id": "x", "model_path": None, "reason": "idle"}
     try:
         assert _GuardEngine.take_idle_reload("y") is None
-        assert _GuardEngine._idle_unload == {"model_id": "x", "reason": "idle"}
+        assert _GuardEngine._idle_unload == {
+            "model_id": "x",
+            "model_path": None,
+            "reason": "idle",
+        }
     finally:
         _reset()
 
@@ -231,7 +239,11 @@ async def test_a_manual_unload_reaps_the_model_and_records_why():
         assert await asyncio.wait_for(_GuardEngine.unload("x"), timeout=5) == "x"
         assert _GuardEngine._model is None
         assert _GuardEngine._last_used is None
-        assert _GuardEngine._idle_unload == {"model_id": "x", "reason": "manual"}
+        assert _GuardEngine._idle_unload == {
+            "model_id": "x",
+            "model_path": None,
+            "reason": "manual",
+        }
         assert BaseEngine._generation_lock.demand == 0
         assert not _GuardEngine._generation_lock_for_running_loop().locked()
     finally:
@@ -239,11 +251,15 @@ async def test_a_manual_unload_reaps_the_model_and_records_why():
 
 
 async def test_a_manual_unload_with_nothing_loaded_does_nothing():
-    _GuardEngine._idle_unload = {"model_id": "x", "reason": "idle"}
+    _GuardEngine._idle_unload = {"model_id": "x", "model_path": None, "reason": "idle"}
     try:
         assert await asyncio.wait_for(_GuardEngine.unload("x"), timeout=5) is None
         # An earlier idle record still says why that model reloads.
-        assert _GuardEngine._idle_unload == {"model_id": "x", "reason": "idle"}
+        assert _GuardEngine._idle_unload == {
+            "model_id": "x",
+            "model_path": None,
+            "reason": "idle",
+        }
     finally:
         _reset()
 
@@ -320,7 +336,11 @@ async def test_a_cancelled_manual_unload_finishes_the_cleanup_under_the_lock(mon
         with pytest.raises(asyncio.CancelledError):
             await asyncio.wait_for(request, timeout=5)
         assert _GuardEngine._model is None
-        assert _GuardEngine._idle_unload == {"model_id": "x", "reason": "manual"}
+        assert _GuardEngine._idle_unload == {
+            "model_id": "x",
+            "model_path": None,
+            "reason": "manual",
+        }
         assert not _GuardEngine._generation_lock_for_running_loop().locked()
         assert BaseEngine._generation_lock.demand == 0
     finally:

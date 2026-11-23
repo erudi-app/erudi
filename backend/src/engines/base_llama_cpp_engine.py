@@ -573,8 +573,8 @@ class BaseLlamaCppEngine(BaseChatServerEngine):
         then the ``-c`` passed, or ``None`` when llama-server's fit chose it.
 
         An engine with a memory brake (CPU) first seeds the child's brake --
-        the episode an unload of the same model carried, else the cap and
-        faulty window remembered for its alias, else a fresh state -- and
+        the episode an unload of the same artifact carried, else the cap and
+        faulty window remembered for that artifact, else a fresh state -- and
         its first paging reading, and after the read stamps its memory bound
         and checks its anonymous memory against the window budget
         (`_llama_check_footprint`).

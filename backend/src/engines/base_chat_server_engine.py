@@ -174,15 +174,6 @@ class BaseChatServerEngine(BaseEngine):
         cause = f"{cls._server_name} child is dead ({cls._describe_child(proc, port)})"
         return ChildDeath(cause=cause, report=f"{cause}. {cls._read_child_output(proc)}")
 
-    @staticmethod
-    def _artifact_under(model_path: Any, link: Any) -> bool:
-        """Whether ``model_path`` (a resolved artifact) lies at or under
-        ``link``; False without both. Both sides are resolved; the comparison
-        is by path component, so ``/m/38`` does not claim ``/m/384``."""
-        if not model_path or not link:
-            return False
-        return Path(model_path).resolve().is_relative_to(Path(link).resolve())
-
     @classmethod
     def serves_artifact_under(cls, link: Path) -> bool:
         """True when the loaded child runs on weights at or under ``link``.
@@ -657,9 +648,11 @@ class BaseChatServerEngine(BaseEngine):
         cls._assert_requests()
         # Pre-spawn integrity gate (#88): surface a precise "the files are
         # incomplete/corrupt" load error here, before the expensive spawn +
-        # probe would fail with an opaque child crash -- and, for a reuse,
-        # before a deleted or corrupt link could hand back the sibling's
-        # child.
+        # probe would fail with an opaque child crash. The in-call reuse
+        # below validates like a spawn; the same-id cache path above does
+        # not, and neither does an adoption taken earlier in the turn (the
+        # runner's, before the probes) -- like the cache, those reuse a
+        # child already running on weights validated at ITS load.
         cls.validate_local_artifact(llm_local_path)
         if cls.adopt_loaded_model(llm_id, llm_local_path):
             return cls._return_cached_model_and_tokenizer()
@@ -711,6 +704,20 @@ class BaseChatServerEngine(BaseEngine):
             cls._model_id == llm_id
             and isinstance(handle, dict)
             and cls._proc_is_alive(handle.get("proc"))
+        )
+
+    @classmethod
+    def loaded_child_serves(cls, llm_id: Any, link: Any = None) -> bool:
+        """``loaded_child_for``, or the sibling case (#755): a live child on
+        weights under ``link``. Read-only (see the base docstring)."""
+        if cls.loaded_child_for(llm_id):
+            return True
+        handle = cls._model
+        return (
+            isinstance(handle, dict)
+            and cls._proc_is_alive(handle.get("proc"))
+            and link is not None
+            and cls.serves_artifact_under(Path(link))
         )
 
     @classmethod
