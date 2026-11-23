@@ -101,9 +101,9 @@ describe("ModelInfoModal", () => {
   it("shows the trained and allocated context windows when known", () => {
     setup({ ...richModel, context_window: 40960, allocated_context_window: 8192 });
     expect(screen.getByText("Context window:")).toBeTruthy();
-    expect(screen.getByText("40960 tokens")).toBeTruthy();
+    expect(screen.getByText("40,960 tokens")).toBeTruthy();
     expect(screen.getByText("Currently allocated:")).toBeTruthy();
-    expect(screen.getByText("8192 tokens")).toBeTruthy();
+    expect(screen.getByText("8,192 tokens")).toBeTruthy();
   });
 
   it("hides the allocated row when null and both rows when unknown", () => {

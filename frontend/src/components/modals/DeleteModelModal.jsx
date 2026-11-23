@@ -3,12 +3,16 @@ import PropTypes from "prop-types";
 import { Trans, useTranslation } from "react-i18next";
 import { motion, AnimatePresence } from "framer-motion";
 import { X, Trash2 } from "lucide-react";
+import { displayModelSize } from "../../utils/modelSize";
 
 DeleteModelModal.propTypes = {
   isOpen: PropTypes.bool.isRequired,
   model: PropTypes.shape({
     name: PropTypes.string,
     size: PropTypes.string,
+    param_size: PropTypes.number,
+    quantized: PropTypes.bool,
+    artifact_size_bytes: PropTypes.number,
   }),
   onConfirm: PropTypes.func.isRequired,
   onCancel: PropTypes.func.isRequired,
@@ -33,7 +37,7 @@ export default function DeleteModelModal({ isOpen, model, onConfirm, onCancel, d
   const assistants = dependents?.assistants || [];
   const hasDependents = assistants.length > 0;
   const conversationCount = dependents?.total_conversation_count ?? 0;
-  const sizeKnown = Boolean(model?.size) && model.size !== "Unknown";
+  const sizeLabel = displayModelSize(model);
   return (
     <AnimatePresence>
       {isOpen && (
@@ -113,7 +117,7 @@ export default function DeleteModelModal({ isOpen, model, onConfirm, onCancel, d
                               strong: <span className="font-semibold" />,
                             }}
                           />
-                          {sizeKnown ? ` ${t("downloads:delete.frees", { size: model.size })}` : ""}
+                          {sizeLabel ? ` ${t("downloads:delete.frees", { size: sizeLabel })}` : ""}
                         </p>
                         <p className="text-gray-300/80 text-xs mt-2">
                           {t("downloads:delete.dependentsNote")}

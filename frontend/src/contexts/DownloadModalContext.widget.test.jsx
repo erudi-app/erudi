@@ -122,17 +122,22 @@ describe("Download widget progress readout", () => {
   });
 
   it("derives bytes and speed from the status reply's total_bytes and time_left", async () => {
-    const GIB = 1024 ** 3;
+    const GB_BYTES = 1_000_000_000; // decimal, like the model card (#753)
     statusResponder = () => ({
       ok: true,
-      // 25% of 8 GiB done, 6 GiB left in 600s -> 10 MiB/s
-      json: async () => ({ status: "running", progress: 25, time_left: 600, total_bytes: 8 * GIB }),
+      // 25% of 8 GB done, 6 GB left in 600s -> 10 MB/s
+      json: async () => ({
+        status: "running",
+        progress: 25,
+        time_left: 600,
+        total_bytes: 8 * GB_BYTES,
+      }),
     });
     renderProvider();
     await startPollAndExpand();
 
     expect(screen.getByText("2 GB of 8 GB")).toBeTruthy();
-    expect(screen.getByText("10.2 MB/s")).toBeTruthy();
+    expect(screen.getByText("10 MB/s")).toBeTruthy();
   });
 
   it("formats day-scale and minute-scale times and collapses back on demand", async () => {

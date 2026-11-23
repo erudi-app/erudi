@@ -8,9 +8,11 @@ import { render, screen, cleanup, fireEvent } from "@testing-library/react";
 // driving the poll. The state machine itself is covered by the context tests.
 
 import DownloadWidget from "./DownloadWidget";
+import { displayModelSize } from "../utils/modelSize";
 
-const GIB = 1024 ** 3;
-const MIB = 1024 ** 2;
+// Decimal, like the model card and Hugging Face (#753).
+const GB = 1_000_000_000;
+const MB = 1_000_000;
 
 const onToggleCollapse = vi.fn();
 const onCancel = vi.fn();
@@ -21,9 +23,9 @@ const base = {
   phase: "downloading",
   progress: 42.35,
   timeLeft: 3700,
-  totalBytes: 4 * GIB,
-  downloadedBytes: 1 * GIB,
-  speedBytesPerSec: 12 * MIB,
+  totalBytes: 4 * GB,
+  downloadedBytes: 1 * GB,
+  speedBytesPerSec: 12 * MB,
   message: "",
   collapsed: false,
   onToggleCollapse,
@@ -55,6 +57,20 @@ describe("DownloadWidget while downloading", () => {
     expect(screen.getByText("12 MB/s")).toBeTruthy();
     expect(screen.getByText("1h 1m left")).toBeTruthy(); // 3700s
   });
+
+  it("shows the total the model card shows (#753)", () => {
+    renderWidget({ totalBytes: 2_279_000_000, downloadedBytes: 1_000_000_000 });
+    expect(screen.getByText("1 GB of 2.3 GB")).toBeTruthy();
+  });
+
+  it.each([712_593_855, 999_999_999, 2_279_000_000])(
+    "reads %i bytes with the card's unit and figure (#753)",
+    (total) => {
+      renderWidget({ totalBytes: total, downloadedBytes: total });
+      const card = displayModelSize({ artifact_size_bytes: total });
+      expect(screen.getByText(`${card} of ${card}`)).toBeTruthy();
+    }
+  );
 
   it("exposes Cancel and Collapse as labelled buttons and wires them to the context", () => {
     renderWidget();

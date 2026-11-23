@@ -8,6 +8,7 @@ import {
   formatList,
   currentLocale,
 } from "./format";
+import { displayModelSize } from "../utils/modelSize";
 
 describe("format helpers follow the active language", () => {
   beforeEach(async () => {
@@ -32,12 +33,27 @@ describe("format helpers follow the active language", () => {
   });
 
   it("formats sizes in GB/MB with locale decimals and translated units", async () => {
-    expect(formatFileSize(1.5 * 1024 ** 3)).toBe("1.5 GB");
-    expect(formatFileSize(512 * 1024 ** 2)).toBe("512 MB");
+    expect(formatFileSize(1_500_000_000)).toBe("1.5 GB");
+    expect(formatFileSize(512_000_000)).toBe("512 MB");
     expect(formatFileSize(0)).toBe("0 B");
     await i18n.changeLanguage("fr");
-    expect(formatFileSize(1.5 * 1024 ** 3)).toBe("1,5 Go");
+    expect(formatFileSize(1_500_000_000)).toBe("1,5 Go");
   });
+
+  it("counts files and transfers in decimal units, like the model card (#753)", async () => {
+    expect(formatFileSize(2_279_000_000)).toBe("2.3 GB");
+    await i18n.changeLanguage("fr");
+    expect(formatFileSize(2_279_000_000)).toBe("2,3 Go");
+  });
+
+  it.each(["en", "fr", "es", "zh"])(
+    "gives the card's size for the same bytes in %s (#753)",
+    async (lang) => {
+      await i18n.changeLanguage(lang);
+      const bytes = 2_279_000_000;
+      expect(formatFileSize(bytes)).toBe(displayModelSize({ artifact_size_bytes: bytes }));
+    }
+  );
 
   it("formats percentages", async () => {
     expect(formatPercent(42.256)).toBe("42.3%");

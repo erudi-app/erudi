@@ -40,13 +40,17 @@ export function formatPercent(value, { maximumFractionDigits = 1 } = {}) {
 
 const SIZE_UNITS = ["b", "kb", "mb", "gb", "tb"];
 
-/** Bytes → "1.5 GB" (units translated, 1024-based like the rest of the app). */
+/**
+ * Bytes → "1.5 GB" (units translated). Decimal (1 GB = 1e9 bytes) for every
+ * file and transfer, like the model card, Hugging Face and Finder; memory
+ * (RAM/VRAM, KV cache) stays binary and is formatted elsewhere.
+ */
 export function formatFileSize(bytes, { maximumFractionDigits = 1 } = {}) {
   if (!isFiniteNumber(bytes) || bytes < 0) return "";
   let value = bytes;
   let unitIndex = 0;
-  while (value >= 1024 && unitIndex < SIZE_UNITS.length - 1) {
-    value /= 1024;
+  while (value >= 1000 && unitIndex < SIZE_UNITS.length - 1) {
+    value /= 1000;
     unitIndex += 1;
   }
   const number = formatNumber(value, { maximumFractionDigits });

@@ -3,7 +3,8 @@ import PropTypes from "prop-types";
 import { motion, useReducedMotion } from "framer-motion";
 import { AlertTriangle, Check, ChevronDown, ChevronUp, Download, Loader2, X } from "lucide-react";
 import { useTranslation } from "react-i18next";
-import { formatFileSize, formatPercent } from "../i18n/format";
+import { formatFileSize, formatGigabytes, formatPercent } from "../i18n/format";
+import { BYTES_PER_GB } from "../utils/hardwareFit";
 import { DOWNLOAD_PHASES } from "../utils/downloadStatus";
 
 /**
@@ -180,6 +181,10 @@ PhaseGlyph.propTypes = {
   chipClass: PropTypes.string.isRequired,
 };
 
+// Always in GB, like the model card (which never switches to MB): the same
+// artifact reads the same unit in the card and in the widget (#753).
+const formatTransferred = (bytes) => formatGigabytes(bytes / BYTES_PER_GB);
+
 export default function DownloadWidget({
   modelName,
   phase,
@@ -207,8 +212,8 @@ export default function DownloadWidget({
   const bytesLabel =
     active && totalBytes > 0 && downloadedBytes !== null && downloadedBytes !== undefined
       ? t("downloads:widget.bytes", {
-          done: formatFileSize(Math.min(downloadedBytes, totalBytes)),
-          total: formatFileSize(totalBytes),
+          done: formatTransferred(Math.min(downloadedBytes, totalBytes)),
+          total: formatTransferred(totalBytes),
         })
       : null;
   const speedLabel =
