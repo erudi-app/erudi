@@ -49,8 +49,13 @@ const {
   claimInstalledLogsFolder,
 } = require("./utils/clearAllDataSetup");
 const { setUpElectronPaths, openFirstWindow } = require("./utils/appStartup");
+const { buildMenuTemplate } = require("./utils/applicationMenu");
 const { readImageAsDataUrl } = require("./utils/imageReader");
 const { savePastedImage } = require("./utils/pastedImage");
+
+// The name the menus write. `app.name` is the package name ("erudi", lowercase),
+// which also keys the userData folder and the single-instance lock: not for display.
+const APP_DISPLAY_NAME = "Erudi";
 
 // Where Erudi keeps what it stores: the backend's data and log folders, as
 // backend/src/launcher/runtime_paths.py resolves them (utils/dataLocations.js
@@ -668,113 +673,22 @@ const startBackendSupervised = () => backendSupervisor.start();
 const createApplicationMenu = () => {
   const isMac = process.platform === "darwin";
 
-  const template = [
-    // App menu (macOS only)
-    ...(isMac
-      ? [
-          {
-            label: app.name,
-            submenu: [
-              { role: "about" },
-              { type: "separator" },
-              { role: "services" },
-              { type: "separator" },
-              { role: "hide" },
-              { role: "hideOthers" },
-              { role: "unhide" },
-              { type: "separator" },
-              { role: "quit" },
-            ],
-          },
-        ]
-      : []),
-
-    // File menu
-    {
-      label: t("menu.file"),
-      submenu: [isMac ? { role: "close" } : { role: "quit" }],
+  const template = buildMenuTemplate({
+    t,
+    isMac,
+    appName: APP_DISPLAY_NAME,
+    handlers: {
+      openDataFolder,
+      clearAllData: clearAllDataFromMenu,
+      // Hidden in a run from source (clearAllDataAvailable).
+      clearAllDataVisible: clearAllDataAvailable,
+      learnMore: async () => {
+        await shell
+          .openExternal("https://github.com/erudi-app/erudi")
+          .catch((error) => logWarn("Could not open the project page in the browser", error));
+      },
     },
-
-    // Edit menu
-    {
-      label: t("menu.edit"),
-      submenu: [
-        { role: "undo" },
-        { role: "redo" },
-        { type: "separator" },
-        { role: "cut" },
-        { role: "copy" },
-        { role: "paste" },
-        ...(isMac
-          ? [
-              { role: "pasteAndMatchStyle" },
-              { role: "delete" },
-              { role: "selectAll" },
-              { type: "separator" },
-              {
-                label: t("menu.speech"),
-                submenu: [{ role: "startSpeaking" }, { role: "stopSpeaking" }],
-              },
-            ]
-          : [{ role: "delete" }, { type: "separator" }, { role: "selectAll" }]),
-      ],
-    },
-
-    // View menu
-    {
-      label: t("menu.view"),
-      submenu: [
-        { role: "reload" },
-        { role: "forceReload" },
-        { role: "toggleDevTools" },
-        { type: "separator" },
-        { role: "resetZoom" },
-        { role: "zoomIn" },
-        { role: "zoomOut" },
-        { type: "separator" },
-        { role: "togglefullscreen" },
-      ],
-    },
-
-    // Window menu
-    {
-      label: t("menu.window"),
-      submenu: [
-        { role: "minimize" },
-        { role: "zoom" },
-        ...(isMac
-          ? [{ type: "separator" }, { role: "front" }, { type: "separator" }, { role: "window" }]
-          : [{ role: "close" }]),
-      ],
-    },
-
-    // Help menu
-    {
-      role: "help",
-      submenu: [
-        {
-          label: t("menu.help.openDataFolder"),
-          click: openDataFolder,
-        },
-        { type: "separator" },
-        {
-          label: t("menu.help.clearAllData"),
-          click: clearAllDataFromMenu,
-          // Hidden in a run from source (clearAllDataAvailable).
-          visible: clearAllDataAvailable,
-        },
-        { type: "separator" },
-        {
-          label: t("menu.help.learnMore"),
-          click: async () => {
-            await shell
-              .openExternal("https://github.com/erudi-app/erudi")
-              .catch((error) => logWarn("Could not open the project page in the browser", error));
-          },
-        },
-      ],
-    },
-  ];
+  });
 
   const menu = Menu.buildFromTemplate(template);
   Menu.setApplicationMenu(menu);

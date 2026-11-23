@@ -567,6 +567,7 @@ the card only appears where the setting does something.*
 - [ ] When I relaunch the app, then it comes back in the language I chose (the backend value wins over the local mirror).
 - [ ] When it is my **first** launch, then the language is derived from my system locale.
 - [ ] When I change the language, then the **native application menu** (Help → Clear All Data…) is rebuilt in that language.
+- [ ] When the interface is in French (or Spanish, or Chinese), then the **native menu bar** — application menu, File, Edit, View, Window, Help titles and every entry of them (About, Hide, Quit, Reload, Zoom, Full Screen…) — reads in that language, with no English entry left, and writes the app name **Erudi** ("Quitter Erudi", "À propos d'Erudi"), never "erudi". The entries macOS adds itself (Emoji & Symbols, Start Dictation, AutoFill, Enter Full Screen, the Help search field, the Services submenu content) follow the **system** language, not the interface language: check them only with the system in the same language.
 - [ ] When I use **Clear All Data**, then the next start is a **first** launch: the language is derived from my system locale again (settings and the local mirror deleted), whatever language I had chosen before.
 
 **Diagnostics page**

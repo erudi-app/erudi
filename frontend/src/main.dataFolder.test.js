@@ -47,7 +47,7 @@ describe("main.js delegates Erudi's folders", () => {
   });
 
   it("opens the backend's data folder", () => {
-    expect(source).toMatch(/label: t\("menu\.help\.openDataFolder"\),\s*click: openDataFolder/);
+    expect(source).toMatch(/handlers: \{\s*openDataFolder,/);
     expect(source).toMatch(/const dataDir = dataLocations\.dataDir;/);
   });
 });
@@ -56,7 +56,7 @@ describe("main.js delegates Clear All Data", () => {
   it("runs it through createClearAllDataFlow, from the Help menu only", () => {
     expect(source).toMatch(/const clearAllDataFlow = createClearAllDataFlow\(\{/);
     expect(source).toMatch(
-      /click: clearAllDataFromMenu,\s*(\/\/[^\n]*\n\s*)*visible: clearAllDataAvailable/
+      /clearAllData: clearAllDataFromMenu,\s*(\/\/[^\n]*\n\s*)*clearAllDataVisible: clearAllDataAvailable/
     );
     expect(source).not.toMatch(/"data:clearAll"/);
     expect(source).not.toMatch(/"data:openFolder"/);
