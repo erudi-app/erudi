@@ -233,7 +233,7 @@ def is_byte_split_gguf(filename: str) -> bool:
     return _BYTE_SPLIT_GGUF_RE.search(filename) is not None
 
 
-def pick_best_gguf(filenames: list[str]) -> str | None:
+def pick_best_gguf(filenames: list[str], log: bool = True) -> str | None:
     """From a list of filenames in a GGUF repo, return the best quantization.
 
     Uses the same priority order as CUDA_Engine._select_gguf so behavior is
@@ -241,6 +241,9 @@ def pick_best_gguf(filenames: list[str]) -> str | None:
 
     Args:
         filenames: All filenames returned by HfApi.list_repo_files().
+        log: Whether to log the pick. A size measurement (a search hit, a
+            catalog row) runs the selection without downloading anything, so
+            it passes False.
 
     Returns:
         Filename of the chosen GGUF, or None if no loadable .gguf file is listed.
@@ -260,11 +263,13 @@ def pick_best_gguf(filenames: list[str]) -> str | None:
     for quant in GGUF_QUANT_PRIORITY:
         for name in ggufs:
             if quant in name.lower():
-                logger.info(f"Selected GGUF: {name} (quant={quant})")
+                if log:
+                    logger.info(f"Selected GGUF: {name} (quant={quant})")
                 return name
     # Fall back to the first one alphabetically
     chosen = sorted(ggufs)[0]
-    logger.warning(f"No preferred quant found; falling back to {chosen}")
+    if log:
+        logger.warning(f"No preferred quant found; falling back to {chosen}")
     return chosen
 
 
@@ -360,6 +365,7 @@ def _select_download_files(
     all_repo_files: List[str],
     file_sizes: dict,
     uses_gguf: bool,
+    log: bool = True,
 ) -> _DownloadSelection:
     """Pick the exact files to download from a repo listing (pure, no I/O).
 
@@ -378,6 +384,8 @@ def _select_download_files(
         all_repo_files: All filenames returned by HfApi.list_repo_files().
         file_sizes: Filename → size in bytes, exclusions already removed.
         uses_gguf: Whether the active engine consumes GGUF repos.
+        log: Whether to log the picks (False for a size measurement, see
+            pick_best_gguf).
 
     Returns:
         _DownloadSelection with the files to download and the GGUF picks.
@@ -389,12 +397,12 @@ def _select_download_files(
             mmproj_files=[],
             small_aux=[],
         )
-    best_gguf = pick_best_gguf(all_repo_files)
+    best_gguf = pick_best_gguf(all_repo_files, log=log)
     if not best_gguf:
         return _DownloadSelection(files=[], best_gguf=None, mmproj_files=[], small_aux=[])
     gguf_parts = gguf_split_siblings(best_gguf, all_repo_files)
     _assert_split_is_complete(best_gguf, gguf_parts)
-    if len(gguf_parts) > 1:
+    if log and len(gguf_parts) > 1:
         logger.info(
             f"Split GGUF detected for {best_gguf!r}: downloading all {len(gguf_parts)} parts"
         )

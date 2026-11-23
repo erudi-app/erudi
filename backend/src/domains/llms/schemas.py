@@ -336,6 +336,14 @@ class HFSearchResult(BaseModel):
     published_at: Optional[str] = Field(
         default=None, description="ISO-8601 creation date of the repo; None when unknown (#561)"
     )
+    artifact_size_bytes: Optional[int] = Field(
+        default=None,
+        ge=0,
+        description=(
+            "Bytes of the files a download of this repo fetches, read from Hugging Face; "
+            "None when it could not be read in time (the card shows the estimate) (#761)"
+        ),
+    )
 
 
 class HFDownloadRequest(BaseModel):
