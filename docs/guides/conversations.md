@@ -1085,7 +1085,8 @@ brake's turn-end sample, also after a failure (a model that could not load inclu
 
 Each failure has one record in `backend.log`:
 
-- A summary that fails, is rejected (too short for what it replaces, or a copy of the last message:
+- A summary that fails, is rejected (too short for what it replaces, a copy of the last message,
+  or stale — a repeat of the previous summary:
   the automatic compaction's rule, see [How conversation state is kept](#how-conversation-state-is-kept))
   or runs past its bound, or a thread state that cannot be written, changes
   nothing — the model still sees the whole history — and is a 503 (`COMPACTION_FAILED`). Its one
@@ -1340,7 +1341,14 @@ the prompt names it
    `max(256, min(max(4000, T − cap), W − 2 × cap − 256, (allocated − 2 × cap − 512) / 2))`
    tokens of the history being summarized — sized from the working window, and kept inside the
    allocated window with a factor 2 for the error left in the ratio (it is a whole-request average:
-   an English system prompt around a Chinese history under-counts the history). Past
+   an English system prompt around a Chinese history under-counts the history). A history over that
+   budget is bounded by **fair share** (`_bound_for_summary` in `runner.py`, water-filling): the
+   largest per-message cap whose capped history fits the budget, so short messages — the user's
+   facts — stay whole however large the document pasted after them, and only the messages above the
+   cap are cut, each keeping its head and its tail (about two thirds and one third: attachments come
+   before the question in a pasted message, so a head-only cut would erase the question) around an
+   ASCII `[... N characters omitted ...]` marker. Only when even a 64-token cap does not fit — too
+   many messages for the budget — are the oldest dropped. Past
    knowledge-base and web results reach the summarizer as their markers, exactly as the model last
    saw them. The **previous summary is always part of what the summarizer reads**, prepended on top
    of that budget, so the facts it carries survive every compaction.
@@ -1355,9 +1363,8 @@ the prompt names it
    408/409/429/5xx) fails the turn with the history intact: no summary is written and the next turn
    retries. A deterministic failure — a context overflow, another 4xx, a timeout while the model was
    still reading the input (deterministic for that input size), an **empty summary** or a
-   **rejected** one — and a history where no user turn fits the summarizer's budget because one
-   answer alone exceeds it are retried once with oversized messages truncated (and the budget halved
-   after a failed attempt). A summary is rejected (`summary_rejection` in `runner.py`) when it
+   **rejected** one — is retried once at half the budget, the history bounded the same way. A
+   summary is rejected (`summary_rejection` in `runner.py`) when it
    cannot stand for what the summarizer read:
 
    - **too short**: fewer tokens than `max(4, min(0.05 × read, 24))`, the summary and what was
@@ -1368,13 +1375,18 @@ the prompt names it
      were provided."), 0.001 to 0.038 of what they read. The floor lets the short summary of a one-
      or two-message history through; the ceiling (about 80 Latin characters, twice the longest
      degenerate one) keeps a long history from asking more than a short summary can carry;
+   - **stale**: the new summary is the previous summary it read — case, spacing and the
+     punctuation at its ends ignored, or 90 % similar — while the new turns it read weigh at
+     least 4 tokens and half the previous summary's size: the model copied its old summary over
+     real new content. With little new content the copy is accepted — it *is* the right summary
+     of a history that added nothing;
    - **a copy**: with more than one message read and the summary under 0.2 of what it read, the
      summary is the last question or the last answer it read — case, spacing and the punctuation
      at its ends ignored, or 90 % similar. A long recap that is also the last answer (the user
      asked to recap everything) is kept.
 
    `backend.log` carries one warning per failed attempt, a rejection as `Compaction summary
-   rejected (<attempt> attempt): too_short|copy, summary_chars=..., read_chars=...,
+   rejected (<attempt> attempt): too_short|stale|copy, summary_chars=..., read_chars=...,
    read_messages=...`. When the retry fails too, nothing is rewritten — no summary, no separator —
    and automatic compaction **pauses for the next 4 user messages** (one `Automatic compaction
    paused ...` info line): a failing summary is not retried on every turn, each attempt being a

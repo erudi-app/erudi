@@ -40,6 +40,7 @@ from tests.test_compaction_keep import (
     _alternating,
     _middleware,
     _models,
+    _previous_summary_message,
     _seed,
     _state,
     _text,
@@ -470,6 +471,29 @@ def test_a_short_chinese_summary_is_counted_in_tokens_not_characters():
 
 def test_a_real_summary_of_a_long_pool_is_accepted():
     assert summary_rejection(_GOOD_SUMMARY, _pool(40)) is None
+
+
+def test_a_summary_equal_to_the_previous_summary_is_rejected_as_stale():
+    """#748: after a compaction the summarizer reads [S1, ...new turns...];
+    a model that copies S1 over real new content learned nothing."""
+    read = [_previous_summary_message(_GOOD_SUMMARY)] + _pool(10)
+    assert summary_rejection(_GOOD_SUMMARY, read) == "stale"
+
+
+def test_a_summary_similar_to_the_previous_summary_is_rejected_as_stale():
+    almost = _GOOD_SUMMARY.replace("the 8:04 train", "that same train")
+    read = [_previous_summary_message(_GOOD_SUMMARY)] + _pool(10)
+    assert summary_rejection(almost, read) == "stale"
+
+
+def test_a_summary_equal_to_the_previous_one_is_accepted_when_little_new_was_read():
+    """The right summary of ``[S1, "OK", "thanks"]`` IS S1."""
+    read = [
+        _previous_summary_message(_GOOD_SUMMARY),
+        AIMessage("OK."),
+        HumanMessage("thanks"),
+    ]
+    assert summary_rejection(_GOOD_SUMMARY, read) is None
 
 
 # ===================== 2. automatic: history kept, proceed or refuse, pause =====================
