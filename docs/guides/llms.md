@@ -158,6 +158,19 @@ byte pieces (`<name>-chunk-001-of-018.gguf`, `<name>.gguf.part1of2`, `<name>.ggu
 loads them until they are joined into one file, which Erudi does not do. A repo whose only GGUF
 weights are such pieces is refused with a message saying so.
 
+### On a flaky network
+
+The files of a download go through `HfFileSystem`, the `.safetensors` shards of an MLX model side
+by side in threads. huggingface_hub retries a request that meets a network error (connection,
+timeout, cut-off read) on a fresh HTTP client, up to 5 times. That client is one object shared by
+every thread, and the retry that meets a connection error closes it; Erudi's client
+(`src/core/hf_http.py`, installed by `src/core/config.py` before any Hub request) hands a request
+another thread had already started on the closed client to the live one, so one shard's retry never
+fails a sibling shard. The same client caps a server's `Retry-After` or `RateLimit` reset at 30
+seconds per retry. A download whose retries run out fails with "you appear to be offline - check
+your connection and retry": an environmental failure, which Diagnostics leaves out of its recent
+errors and its badge (see [logging](../logging.md)).
+
 ### What happens on completion
 
 1. The downloaded directory is validated by the active engine (`validate_local_artifact`). On

@@ -107,15 +107,28 @@ _OFFLINE_MESSAGE_MARKERS = (
 
 
 def _is_offline_download_error(exc: BaseException) -> bool:
-    """True if the exception chain looks like a no-network download failure (#109)."""
+    """True if the exception chain looks like a no-network download failure (#109).
+
+    That includes the network errors huggingface_hub's retry loop retries and
+    then raises once its retries are spent (httpx connect, timeout, read and
+    cut-off-body errors): the connection let the download down, not Erudi
+    (#747)."""
+    import httpx
     from huggingface_hub.errors import OfflineModeIsEnabled
     from requests.exceptions import ConnectionError as RequestsConnectionError
 
+    network_errors = (
+        OfflineModeIsEnabled,
+        RequestsConnectionError,
+        httpx.TimeoutException,
+        httpx.NetworkError,
+        httpx.RemoteProtocolError,
+    )
     seen: set = set()
     current: BaseException | None = exc
     while current is not None and id(current) not in seen:
         seen.add(id(current))
-        if isinstance(current, (OfflineModeIsEnabled, RequestsConnectionError)):
+        if isinstance(current, network_errors):
             return True
         message = str(current).lower()
         if any(marker in message for marker in _OFFLINE_MESSAGE_MARKERS):

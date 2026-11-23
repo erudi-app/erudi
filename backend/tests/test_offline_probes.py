@@ -5,6 +5,7 @@ instead of the raw hf_hub "Cannot reach https://..." string, mirroring the e5
 embedding-download offline path.
 """
 
+import httpx
 import pytest
 import requests
 
@@ -37,6 +38,27 @@ class TestOfflineDownloadErrorMapping:
         except RuntimeError as e:
             outer = e
         assert _is_offline_download_error(outer) is True
+
+    @pytest.mark.parametrize(
+        "exc",
+        [
+            httpx.ConnectError("All connection attempts failed"),
+            httpx.ReadTimeout("The read operation timed out"),
+            httpx.ReadError("[Errno 54] Connection reset by peer"),
+            httpx.RemoteProtocolError("peer closed connection without sending complete message"),
+        ],
+        ids=["connect", "read-timeout", "read-reset", "cut-mid-body"],
+    )
+    def test_network_failure_after_the_retries_is_offline(self, exc):
+        # huggingface_hub (httpx) retries these, then raises the last one: a
+        # download the network let down for good, not an Erudi defect (#747).
+        assert _is_offline_download_error(exc) is True
+
+    def test_closed_client_is_not_offline(self):
+        # src.core.hf_http hands a request on a closed shared client to the
+        # live one: if this error still reaches a download, it is a defect.
+        exc = RuntimeError("Cannot send a request, as the client has been closed.")
+        assert _is_offline_download_error(exc) is False
 
     def test_generic_errors_are_not_offline(self):
         assert _is_offline_download_error(ValueError("no space left on device")) is False

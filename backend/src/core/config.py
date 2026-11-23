@@ -78,6 +78,7 @@ from typing import Optional, Type
 from huggingface_hub import HfApi
 from huggingface_hub.errors import HfHubHTTPError
 
+from src.core import hf_http
 from src.engines.base_engine import BaseEngine
 from src.launcher import ensure_runtime_paths_initialized
 
@@ -149,6 +150,11 @@ CACHE_DIR.mkdir(parents=True, exist_ok=True)
 LOG_DIR.mkdir(parents=True, exist_ok=True)
 
 # ============ HuggingFace API Client ============
+
+# Every huggingface_hub request goes through Erudi's client (#747): a shared
+# client another thread's retry closed hands the request on, and a server's
+# wait is capped (src/core/hf_http.py).
+hf_http.install_client_factory()
 
 # Lazy-loaded HuggingFace API client singleton
 _HF_API: Optional[HfApi] = None
