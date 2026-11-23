@@ -12,11 +12,14 @@
  * name written in the labels that carry it.
  */
 
-/** A role entry whose label is `menu.roles.<role>`. */
-const roleItem = (t, appName, role) => ({ role, label: t(`menu.roles.${role}`, { appName }) });
+/** A role entry whose label is `menu.roles.<key>` (the role itself by default). */
+const roleItem = (t, appName, role, key = role) => ({
+  role,
+  label: t(`menu.roles.${key}`, { appName }),
+});
 
 export function buildMenuTemplate({ t, isMac, appName, handlers }) {
-  const role = (name) => roleItem(t, appName, name);
+  const role = (name, key) => roleItem(t, appName, name, key);
 
   return [
     // App menu (macOS only)
@@ -42,7 +45,8 @@ export function buildMenuTemplate({ t, isMac, appName, handlers }) {
     // File menu
     {
       label: t("menu.file"),
-      submenu: [isMac ? role("close") : role("quit")],
+      // Windows and Linux write "Exit", without the app name: "Quit Erudi" is the macOS app menu only.
+      submenu: [isMac ? role("close", "closeWindow") : role("quit", "exit")],
     },
 
     // Edit menu

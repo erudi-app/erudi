@@ -1,4 +1,6 @@
 import { describe, it, expect } from "vitest";
+import { readFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { createMainTranslator } from "../i18n/mainTranslator.js";
 import { buildMenuTemplate } from "./applicationMenu.js";
 
@@ -65,7 +67,24 @@ describe("buildMenuTemplate", () => {
     const quit = (template) => entriesWithRole(template).find((i) => i.role === "quit").label;
     expect(quit(build("en", true))).toBe("Quit Erudi");
     expect(quit(build("fr", true))).toBe("Quitter Erudi");
-    expect(quit(build("fr", false))).toBe("Quitter Erudi");
+  });
+
+  it("writes Exit, without the app name, in the non-mac File menu", () => {
+    const exit = (language) => {
+      const file = build(language, false).find((item) => item.submenu?.[0]?.role === "quit");
+      return file.submenu[0].label;
+    };
+    expect(exit("en")).toBe("Exit");
+    expect(exit("fr")).toBe("Quitter");
+    expect(exit("es")).toBe("Salir");
+    expect(exit("zh")).toBe("退出");
+    expect(entriesWithRole(build("en", false)).some((i) => /Quit/.test(i.label))).toBe(false);
+  });
+
+  it("writes Close Window on mac and a plain Close elsewhere", () => {
+    const close = (isMac) => entriesWithRole(build("en", isMac)).find((i) => i.role === "close");
+    expect(close(true).label).toBe("Close Window");
+    expect(close(false).label).toBe("Close");
   });
 
   it("reads the French app menu with the app name", () => {
@@ -138,11 +157,34 @@ describe("buildMenuTemplate", () => {
     ]);
   });
 
-  it("wires the Help actions to the handlers", () => {
+  it("wires each Help entry to its handler", () => {
     const help = build("en", false).find((item) => item.role === "help");
-    const clear = help.submenu.find((i) => i.click === handlers.clearAllData);
-    expect(clear.visible).toBe(true);
-    expect(help.submenu.some((i) => i.click === handlers.openDataFolder)).toBe(true);
-    expect(help.submenu.some((i) => i.click === handlers.learnMore)).toBe(true);
+    const entry = (label) => help.submenu.find((i) => i.label === label);
+    expect(entry("Open Data Folder").click).toBe(handlers.openDataFolder);
+    expect(entry("Clear All Data...").click).toBe(handlers.clearAllData);
+    expect(entry("Clear All Data...").visible).toBe(true);
+    expect(entry("Learn More").click).toBe(handlers.learnMore);
+  });
+
+  it("hides Clear All Data when the handlers say so", () => {
+    const i18n = createMainTranslator("en");
+    const template = buildMenuTemplate({
+      t: i18n.t,
+      isMac: false,
+      appName: "Erudi",
+      handlers: { ...handlers, clearAllDataVisible: false },
+    });
+    const help = template.find((item) => item.role === "help");
+    expect(help.submenu.find((i) => i.label === "Clear All Data...").visible).toBe(false);
+  });
+});
+
+describe("main.js menu wiring", () => {
+  const source = readFileSync(fileURLToPath(new URL("../main.js", import.meta.url)), "utf8");
+
+  it("passes the display name, never app.name, to the menu", () => {
+    expect(source).toMatch(/const APP_DISPLAY_NAME = "Erudi";/);
+    expect(source).toMatch(/buildMenuTemplate\(\{[^}]*appName: APP_DISPLAY_NAME,/s);
+    expect(source).not.toMatch(/appName: app\.name/);
   });
 });

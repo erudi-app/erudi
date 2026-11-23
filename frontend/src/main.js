@@ -50,12 +50,12 @@ const {
 } = require("./utils/clearAllDataSetup");
 const { setUpElectronPaths, openFirstWindow } = require("./utils/appStartup");
 const { buildMenuTemplate } = require("./utils/applicationMenu");
+const { readImageAsDataUrl } = require("./utils/imageReader");
+const { savePastedImage } = require("./utils/pastedImage");
 
 // The name the menus write. `app.name` is the package name ("erudi", lowercase),
 // which also keys the userData folder and the single-instance lock: not for display.
 const APP_DISPLAY_NAME = "Erudi";
-const { readImageAsDataUrl } = require("./utils/imageReader");
-const { savePastedImage } = require("./utils/pastedImage");
 
 // Where Erudi keeps what it stores: the backend's data and log folders, as
 // backend/src/launcher/runtime_paths.py resolves them (utils/dataLocations.js

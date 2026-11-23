@@ -18,13 +18,13 @@
       "hideOthers": "Masquer les autres",
       "unhide": "Tout afficher",
       "quit": "Quitter {{appName}}",
-      "close": "Fermer la fenêtre",
+      "close": "Fermer",
       "undo": "Annuler",
       "redo": "Rétablir",
       "cut": "Couper",
       "copy": "Copier",
       "paste": "Coller",
-      "pasteAndMatchStyle": "Coller en adaptant le style",
+      "pasteAndMatchStyle": "Coller et adapter le style",
       "delete": "Supprimer",
       "selectAll": "Tout sélectionner",
       "startSpeaking": "Commencer la lecture",
@@ -39,7 +39,9 @@
       "minimize": "Réduire",
       "zoom": "Zoom",
       "front": "Tout ramener au premier plan",
-      "window": "Fenêtre"
+      "window": "Fenêtre",
+      "exit": "Quitter",
+      "closeWindow": "Fermer la fenêtre"
     }
   },
   "dialogs": {

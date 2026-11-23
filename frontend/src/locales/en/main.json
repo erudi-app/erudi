@@ -18,7 +18,7 @@
       "hideOthers": "Hide Others",
       "unhide": "Show All",
       "quit": "Quit {{appName}}",
-      "close": "Close Window",
+      "close": "Close",
       "undo": "Undo",
       "redo": "Redo",
       "cut": "Cut",
@@ -39,7 +39,9 @@
       "minimize": "Minimize",
       "zoom": "Zoom",
       "front": "Bring All to Front",
-      "window": "Window"
+      "window": "Window",
+      "exit": "Exit",
+      "closeWindow": "Close Window"
     }
   },
   "dialogs": {

@@ -18,17 +18,17 @@
       "hideOthers": "Ocultar otros",
       "unhide": "Mostrar todo",
       "quit": "Salir de {{appName}}",
-      "close": "Cerrar ventana",
+      "close": "Cerrar",
       "undo": "Deshacer",
       "redo": "Rehacer",
       "cut": "Cortar",
       "copy": "Copiar",
       "paste": "Pegar",
-      "pasteAndMatchStyle": "Pegar y adaptar estilo",
+      "pasteAndMatchStyle": "Pegar con el mismo estilo",
       "delete": "Eliminar",
       "selectAll": "Seleccionar todo",
-      "startSpeaking": "Empezar a hablar",
-      "stopSpeaking": "Dejar de hablar",
+      "startSpeaking": "Iniciar locución",
+      "stopSpeaking": "Detener locución",
       "reload": "Recargar",
       "forceReload": "Forzar recarga",
       "toggleDevTools": "Alternar herramientas de desarrollo",
@@ -39,7 +39,9 @@
       "minimize": "Minimizar",
       "zoom": "Zoom",
       "front": "Traer todo al frente",
-      "window": "Ventana"
+      "window": "Ventana",
+      "exit": "Salir",
+      "closeWindow": "Cerrar ventana"
     }
   },
   "dialogs": {
