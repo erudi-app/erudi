@@ -410,7 +410,15 @@ def _adopt_loaded_model(engine: Any, llm: Any) -> None:
     read defensively like the other engine probes. Runs under the generation
     lock, before every id-keyed probe: at the start of a turn and of a
     manual compaction, the reload announcements, the ``turn_start`` brake
-    sample and the contention check all compare the loaded id."""
+    sample and the contention check all compare the loaded id.
+
+    ``llm`` is the row the service fetched before queuing on the lock; the
+    row is not re-checked here (no session on this path). A turn whose
+    assistant was deleted while it waited can therefore re-key the child to
+    the deleted id -- harmless and self-healing: an assistant delete keeps
+    the weights, the turn answers on them, ``GET /llms/loaded`` reads an id
+    without a row as null meanwhile, and the next turn, unload or delete
+    re-keys or clears the id again."""
     probe = getattr(engine, "adopt_loaded_model", None)
     if callable(probe):
         probe(getattr(llm, "id", None), getattr(llm, "link", None))

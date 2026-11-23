@@ -844,6 +844,20 @@ class TestSharedWeightsChild:
         # No re-keying: a read-only probe for callers outside the lock.
         assert _TestEngine._model_id == "385"
 
+    def test_a_path_the_filesystem_cannot_resolve_reads_as_not_served(self):
+        """``Path.resolve`` walks the filesystem and can raise (a symlink
+        loop, a refused lookup); the identity probes run outside the
+        generation lock (the /context gauge) and must answer False, never
+        raise (a raise would 500 ``GET /context``)."""
+        self._load("385")
+        for failure in (OSError("loop"), RuntimeError("Symlink loop")):
+            with patch("src.engines.base_engine.Path.resolve", side_effect=failure):
+                assert _TestEngine.loaded_child_serves("386", "/m") is False
+                assert _TestEngine.serves_artifact_under(Path("/m")) is False
+                assert _TestEngine.adopt_loaded_model("386", "/m") is False
+        assert _TestEngine._model_id == "385"
+        assert _TestEngine.loaded_child_serves("386", "/m") is True
+
     def test_template_caps_follow_the_weights(self):
         self._load("385")
         _TestEngine._model["chat_template_caps"] = {"supports_reasoning_effort": True}

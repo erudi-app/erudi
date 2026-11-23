@@ -1160,11 +1160,21 @@ class BaseEngine(ABC, metaclass=EngineMeta):
     @staticmethod
     def _artifact_under(model_path: Any, link: Any) -> bool:
         """Whether ``model_path`` (a resolved artifact) lies at or under
-        ``link``; False without both. Both sides are resolved; the comparison
-        is by path component, so ``/m/38`` does not claim ``/m/384``."""
+        ``link``; False without both, and False when the filesystem refuses
+        to resolve a side. Both sides are resolved; the comparison is by
+        path component, so ``/m/38`` does not claim ``/m/384``."""
         if not model_path or not link:
             return False
-        return Path(model_path).resolve().is_relative_to(Path(link).resolve())
+        try:
+            return Path(model_path).resolve().is_relative_to(Path(link).resolve())
+        except (OSError, RuntimeError, ValueError):
+            # Path.resolve walks the filesystem: a symlink loop (OSError
+            # ELOOP or RuntimeError, platform-dependent), a refused lookup
+            # or an unparsable path (ValueError) must read as "not this
+            # artifact" -- callers run outside the generation lock (the
+            # /context gauge through loaded_child_serves) and a raise there
+            # would turn a read-only probe into a 500.
+            return False
 
     @classmethod
     def serves_artifact_under(cls, link: Path) -> bool:
